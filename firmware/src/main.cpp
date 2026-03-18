@@ -40,6 +40,13 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include "gps/gps.h"
 #include "selftest/selftest.h"
 #include "powersave/powersave.h"
+#include "async_queues.h"
+#include "async_tasks.h"
+#include "duty_cycle/duty_cycle.h"
+
+#define BUTTON_PIN         0    // Heltec USER_SW
+#define MIN_PRESS_MS       80
+#define LONG_PRESS_MS      500
 
 #define HELLO_INTERVAL_MS  10000
 #define HELLO_JITTER_MS    2000   // ±2s — чтобы два устройства не передавали одновременно
@@ -52,23 +59,80 @@ static uint32_t lastHello = 0;
 static uint32_t lastTelemetry = 0;
 static uint32_t lastGpsLoc = 0;
 static uint32_t lastSfAdapt = 0;
+static uint32_t s_helloCounter = 0;   // для SF12 HELLO: каждый N-й на SF12
+static uint32_t s_rxCycleCounter = 0; // для SF12 RX: каждый N-й цикл слушать SF12
+static uint32_t s_bootTime = 0;       // millis() при старте — агрессивный discovery первые 2 мин
+static bool s_nextRxSf12 = false;     // слушать SF12 после drain HELLO на SF12
+static uint8_t s_sf12BurstCount = 0;  // 2 цикла SF12 подряд каждые 30с
+static uint32_t s_lastSf12Burst = 0;
+static uint32_t s_lastKeyRetry = 0;   // retry KEY_EXCHANGE каждые 30с для соседей без ключа
 static uint8_t rxBuf[protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
 
-// Статические буферы — не на стеке, иначе handlePacket переполняет loopTask
-static uint8_t s_decBuf[256];
-static uint8_t s_tmpBuf[256];
-static char s_msgStrBuf[256];
+// Буферы для handlePacket (packetTask) — s_fragOutBuf/s_voiceOutBuf слишком велики для стека
 static uint8_t s_fragOutBuf[frag::MAX_MSG_PLAIN];
 static uint8_t s_voiceOutBuf[voice_frag::MAX_VOICE_PLAIN + 1024];
-static uint8_t s_fwdBuf[protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+
+static bool s_lastButton = false;
+static uint32_t s_pressStart = 0;
+
+static void pollButtonAndQueue() {
+  if (!displayQueue) return;
+  bool btn = (digitalRead(BUTTON_PIN) == LOW);  // active low
+  if (btn) {
+    if (!s_lastButton) { s_lastButton = true; s_pressStart = millis(); }
+  } else if (s_lastButton) {
+    uint32_t hold = millis() - s_pressStart;
+    s_lastButton = false;
+    if (hold < MIN_PRESS_MS) return;
+    if (displayIsSleeping()) {
+      queueDisplayWake();
+      return;
+    }
+    int cur = displayGetCurrentScreen();
+    if (hold >= LONG_PRESS_MS) {
+      queueDisplayLongPress((uint8_t)cur);
+    } else {
+      uint8_t next = (cur + 1) % 7;
+      queueDisplayRedraw(next);
+    }
+#if defined(LED_PIN)
+    digitalWrite(LED_PIN, HIGH);
+    delay(20);
+    digitalWrite(LED_PIN, LOW);
+#endif
+  }
+}
 
 void sendHello() {
   uint8_t pkt[protocol::HEADER_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID,
       31, protocol::OP_HELLO, nullptr, 0);
-  if (len > 0 && radio::send(pkt, len)) {
-    Serial.println("[RiftLink] HELLO sent");
+  if (len > 0) {
+    int n = neighbors::getCount();
+    uint8_t txSf = 0;
+    if (n > 0) {
+      // Per-neighbor: HELLO на SF худшего соседа — A-B-C цепочка работает
+      int minRssi = neighbors::getMinRssi();
+      txSf = neighbors::rssiToSf(minRssi);
+    } else {
+      // Discovery: чередование SF7 и SF12 для дальних узлов
+      bool aggressiveHello = (millis() - s_bootTime) < 120000;
+      int mod = aggressiveHello ? 2 : 3;
+      txSf = (s_helloCounter % mod) == 0 ? 12 : 7;
+      s_helloCounter++;
+    }
+    if (txSf >= 10) {
+      uint8_t prev = radio::getSpreadingFactor();
+      radio::setSpreadingFactor(txSf);
+      uint32_t toa = radio::getTimeOnAir(len);
+      radio::setSpreadingFactor(prev);
+      if (!duty_cycle::canSend(toa)) txSf = (n > 0) ? neighbors::rssiToSf(-85) : 7;  // fallback
+    }
+    Serial.printf("[RiftLink] HELLO TX buf[0]=%02X len=%u SF%u\n", pkt[0], (unsigned)len, txSf ? txSf : 7);
+    if (radio::send(pkt, len, txSf)) {
+      Serial.println("[RiftLink] HELLO sent");
+    }
   }
 }
 
@@ -103,30 +167,62 @@ void sendLocation(float lat, float lon, int16_t alt) {
       node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_LOCATION,
       encBuf, encLen, true, false, false);
   if (len > 0) {
-    radio::send(pkt, len);
+    radio::send(pkt, len, neighbors::rssiToSf(neighbors::getMinRssi()));
     Serial.printf("[RiftLink] LOCATION sent %.5f,%.5f\n", lat, lon);
   }
 }
 
-void handlePacket(const uint8_t* buf, size_t len) {
-  int rssi = radio::getLastRssi();
+void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
+  uint8_t decBuf[256];
+  uint8_t tmpBuf[256];
+  char msgStrBuf[256];
+  uint8_t fwdBuf[protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+
   protocol::PacketHeader hdr;
   const uint8_t* payload;
   size_t payloadLen;
-  if (!protocol::parsePacket(buf, len, &hdr, &payload, &payloadLen)) return;
+  if (!protocol::parsePacket(buf, len, &hdr, &payload, &payloadLen)) {
+    if (len == 20 && buf[18] == protocol::OP_HELLO)
+      Serial.printf("[RiftLink] HELLO parse FAIL buf[0]=%02X (version?)\n", buf[0]);
+    return;
+  }
+
+  // from=broadcast — некорректно, отбрасываем
+  if (node::isBroadcast(hdr.from) || node::isInvalidNodeId(hdr.from)) {
+    if (hdr.opcode == protocol::OP_HELLO)
+      Serial.printf("[RiftLink] HELLO DROP from=%02X%02X (bc/inv)\n", hdr.from[0], hdr.from[1]);
+    return;
+  }
+
+  // DEBUG: HELLO — от кого пришло (self=эхо, other=сосед)
+  if (hdr.opcode == protocol::OP_HELLO) {
+    Serial.printf("[RiftLink] HELLO from=%02X%02X me=%d\n",
+        hdr.from[0], hdr.from[1], node::isForMe(hdr.from) ? 1 : 0);
+  }
 
   // Relay: unicast не для нас, или GROUP_MSG (broadcast) с TTL>0
+  // HELLO — всегда broadcast, не ретранслируем (защита от парсинга с перепутанным to)
   // ROUTE_REQ/REPLY обрабатываются модулем routing
   bool needRelay = (hdr.ttl > 0) && (hdr.opcode != protocol::OP_ROUTE_REQ) &&
-      (hdr.opcode != protocol::OP_ROUTE_REPLY) && (
+      (hdr.opcode != protocol::OP_ROUTE_REPLY) && (hdr.opcode != protocol::OP_HELLO) && (
       (!node::isForMe(hdr.to) && !node::isBroadcast(hdr.to)) ||
       (hdr.opcode == protocol::OP_GROUP_MSG) ||
       (hdr.opcode == protocol::OP_VOICE_MSG));
   if (needRelay) {
-    memcpy(s_fwdBuf, buf, len);
-    s_fwdBuf[1 + protocol::NODE_ID_LEN * 2]--;
-    radio::send(s_fwdBuf, len);
-    Serial.printf("[RiftLink] Relay from %02X%02X\n", hdr.from[0], hdr.from[1]);
+    memcpy(fwdBuf, buf, len);
+    fwdBuf[1 + protocol::NODE_ID_LEN * 2]--;
+    uint8_t txSf = 0;
+    if (node::isBroadcast(hdr.to)) {
+      int minRssi = neighbors::getMinRssi();
+      txSf = neighbors::rssiToSf(minRssi);
+    } else {
+      uint8_t nextHop[protocol::NODE_ID_LEN];
+      if (routing::getNextHop(hdr.to, nextHop)) {
+        int r = neighbors::getRssiFor(nextHop);
+        txSf = neighbors::rssiToSf(r);
+      }
+    }
+    radio::send(fwdBuf, len, txSf);
   }
 
   if (!node::isForMe(hdr.to) && !node::isBroadcast(hdr.to)) {
@@ -135,7 +231,16 @@ void handlePacket(const uint8_t* buf, size_t len) {
     } else if (hdr.opcode == protocol::OP_ROUTE_REPLY) {
       routing::onRouteReply(hdr.from, hdr.to, payload, payloadLen);
     } else if (hdr.opcode == protocol::OP_KEY_EXCHANGE && payloadLen >= 32) {
+      neighbors::onHello(hdr.from, rssi);
       x25519_keys::onKeyExchange(hdr.from, payload);
+      { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
+    } else if (hdr.opcode == protocol::OP_HELLO) {
+      // HELLO всегда broadcast; если to парсится неправильно — всё равно обрабатываем
+      offline_queue::onNodeOnline(hdr.from);
+      if (neighbors::onHello(hdr.from, rssi)) ble::requestNeighborsNotify();
+      if (!x25519_keys::hasKeyFor(hdr.from)) { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
+      if (!node::isForMe(hdr.from))
+        Serial.printf("[RiftLink] HELLO from %02X%02X (neighbor)\n", hdr.from[0], hdr.from[1]);
     }
     return;
   }
@@ -145,34 +250,36 @@ void handlePacket(const uint8_t* buf, size_t len) {
   switch (hdr.opcode) {
     case protocol::OP_KEY_EXCHANGE:
       if (payloadLen >= 32) {
+        neighbors::onHello(hdr.from, rssi);  // KEY_EXCHANGE = живой узел, добавляем в соседи
         x25519_keys::onKeyExchange(hdr.from, payload);
-        x25519_keys::sendKeyExchange(hdr.from);
+        { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
       }
       break;
 
     case protocol::OP_HELLO:
       offline_queue::onNodeOnline(hdr.from);
       if (neighbors::onHello(hdr.from, rssi)) ble::requestNeighborsNotify();
-      if (!x25519_keys::hasKeyFor(hdr.from)) x25519_keys::sendKeyExchange(hdr.from);
-      Serial.printf("[RiftLink] HELLO from %02X%02X%02X%02X\n",
-          hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
+      if (!x25519_keys::hasKeyFor(hdr.from)) { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
+      if (!node::isForMe(hdr.from))
+        Serial.printf("[RiftLink] HELLO from %02X%02X (neighbor)\n", hdr.from[0], hdr.from[1]);
       break;
 
     case protocol::OP_MSG:
       if (payloadLen > 0) {
         if (protocol::isEncrypted(hdr)) {
           size_t decLen = 0;
-          if (!crypto::decryptFrom(hdr.from, payload, payloadLen, s_decBuf, &decLen) || decLen >= 256) {
-            Serial.println("[RiftLink] Decrypt FAILED");
+          if (!crypto::decryptFrom(hdr.from, payload, payloadLen, decBuf, &decLen) || decLen >= 256) {
+            Serial.printf("[RiftLink] Decrypt FAILED (from %02X%02X — no key?)\n", hdr.from[0], hdr.from[1]);
+            if (!x25519_keys::hasKeyFor(hdr.from)) { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
             break;
           }
           if (protocol::isCompressed(hdr)) {
-            size_t d = compress::decompress(s_decBuf, decLen, s_tmpBuf, sizeof(s_tmpBuf));
+            size_t d = compress::decompress(decBuf, decLen, tmpBuf, sizeof(tmpBuf));
             if (d == 0 || d >= 256) {
               Serial.println("[RiftLink] Decompress FAILED");
               break;
             }
-            memcpy(s_decBuf, s_tmpBuf, d);
+            memcpy(decBuf, tmpBuf, d);
             decLen = d;
           }
           const char* msg;
@@ -180,43 +287,43 @@ void handlePacket(const uint8_t* buf, size_t len) {
           uint32_t msgId = 0;
           uint8_t ttlMinutes = 0;
           size_t off = 0;
-          if (decLen >= 6 && s_decBuf[0] >= 1 && s_decBuf[0] <= 60) {
-            ttlMinutes = s_decBuf[0];
+          if (decLen >= 6 && decBuf[0] >= 1 && decBuf[0] <= 60) {
+            ttlMinutes = decBuf[0];
             off = 1;
           }
           if (protocol::isAckReq(hdr) && decLen >= off + msg_queue::MSG_ID_LEN && node::isForMe(hdr.to)) {
-            memcpy(&msgId, s_decBuf + off, msg_queue::MSG_ID_LEN);
+            memcpy(&msgId, decBuf + off, msg_queue::MSG_ID_LEN);
             uint8_t ackPayload[msg_queue::MSG_ID_LEN];
-            memcpy(ackPayload, s_decBuf + off, msg_queue::MSG_ID_LEN);
+            memcpy(ackPayload, decBuf + off, msg_queue::MSG_ID_LEN);
             uint8_t ackPkt[protocol::HEADER_LEN + msg_queue::MSG_ID_LEN];
             size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
                 node::getId(), hdr.from, 31, protocol::OP_ACK,
                 ackPayload, msg_queue::MSG_ID_LEN, false, false);
-            if (ackLen > 0) radio::send(ackPkt, ackLen);
-            msg = (const char*)(s_decBuf + off + msg_queue::MSG_ID_LEN);
+            if (ackLen > 0) radio::send(ackPkt, ackLen, neighbors::rssiToSf(neighbors::getRssiFor(hdr.from)));
+            msg = (const char*)(decBuf + off + msg_queue::MSG_ID_LEN);
             msgLen = decLen - off - msg_queue::MSG_ID_LEN;
           } else {
-            msg = (const char*)(s_decBuf + off);
+            msg = (const char*)(decBuf + off);
             msgLen = decLen - off;
           }
           if (msgLen < 256 && msgLen > 0) {
-            memcpy(s_msgStrBuf, msg, msgLen);
-            s_msgStrBuf[msgLen] = '\0';
-            Serial.printf("[RiftLink] MSG from %02X%02X: %s\n", hdr.from[0], hdr.from[1], s_msgStrBuf);
-            ble::requestMsgNotify(hdr.from, s_msgStrBuf, msgId, rssi, ttlMinutes);
+            memcpy(msgStrBuf, msg, msgLen);
+            msgStrBuf[msgLen] = '\0';
+            Serial.printf("[RiftLink] MSG from %02X%02X: %s\n", hdr.from[0], hdr.from[1], msgStrBuf);
+            ble::requestMsgNotify(hdr.from, msgStrBuf, msgId, rssi, ttlMinutes);
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
-            displaySetLastMsg(fromHex, s_msgStrBuf);
+            queueDisplayLastMsg(fromHex, msgStrBuf);
           }
         } else {
           if (payloadLen < 256) {
-            memcpy(s_msgStrBuf, payload, payloadLen);
-            s_msgStrBuf[payloadLen] = '\0';
-            Serial.printf("[RiftLink] MSG from %02X%02X: %s (plain)\n", hdr.from[0], hdr.from[1], s_msgStrBuf);
-            ble::requestMsgNotify(hdr.from, s_msgStrBuf, 0, rssi);
+            memcpy(msgStrBuf, payload, payloadLen);
+            msgStrBuf[payloadLen] = '\0';
+            Serial.printf("[RiftLink] MSG from %02X%02X: %s (plain)\n", hdr.from[0], hdr.from[1], msgStrBuf);
+            ble::requestMsgNotify(hdr.from, msgStrBuf, 0, rssi);
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
-            displaySetLastMsg(fromHex, s_msgStrBuf);
+            queueDisplayLastMsg(fromHex, msgStrBuf);
           }
         }
       }
@@ -278,7 +385,7 @@ void handlePacket(const uint8_t* buf, size_t len) {
         uint8_t pongPkt[protocol::HEADER_LEN];
         size_t pongLen = protocol::buildPacket(pongPkt, sizeof(pongPkt),
             node::getId(), hdr.from, 31, protocol::OP_PONG, nullptr, 0);
-        if (pongLen > 0) radio::send(pongPkt, pongLen);
+        if (pongLen > 0) radio::send(pongPkt, pongLen, neighbors::rssiToSf(neighbors::getRssiFor(hdr.from)));
         Serial.printf("[RiftLink] PING from %02X%02X -> PONG sent\n", hdr.from[0], hdr.from[1]);
       }
       break;
@@ -301,27 +408,28 @@ void handlePacket(const uint8_t* buf, size_t len) {
 
     case protocol::OP_GROUP_MSG:
       if (payloadLen > 0 && protocol::isEncrypted(hdr)) {
+        if (node::isForMe(hdr.from)) break;  // своё сообщение (relay echo) — пропуск
         size_t decLen = 0;
-        if (!crypto::decrypt(payload, payloadLen, s_decBuf, &decLen) || decLen < GROUP_ID_LEN) break;
+        if (!crypto::decrypt(payload, payloadLen, decBuf, &decLen) || decLen < GROUP_ID_LEN) break;
         if (protocol::isCompressed(hdr)) {
-          size_t d = compress::decompress(s_decBuf, decLen, s_tmpBuf, sizeof(s_tmpBuf));
+          size_t d = compress::decompress(decBuf, decLen, tmpBuf, sizeof(tmpBuf));
           if (d == 0 || d < GROUP_ID_LEN) break;
-          memcpy(s_decBuf, s_tmpBuf, d);
+          memcpy(decBuf, tmpBuf, d);
           decLen = d;
         }
         uint32_t groupId;
-        memcpy(&groupId, s_decBuf, GROUP_ID_LEN);
+        memcpy(&groupId, decBuf, GROUP_ID_LEN);
         if (!groups::isInGroup(groupId)) break;
-        const char* msg = (const char*)(s_decBuf + GROUP_ID_LEN);
+        const char* msg = (const char*)(decBuf + GROUP_ID_LEN);
         size_t msgLen = decLen - GROUP_ID_LEN;
         if (msgLen < 256) {
-          memcpy(s_msgStrBuf, msg, msgLen);
-          s_msgStrBuf[msgLen] = '\0';
-          Serial.printf("[RiftLink] GROUP_MSG grp%u from %02X%02X: %s\n", (unsigned)groupId, hdr.from[0], hdr.from[1], s_msgStrBuf);
-          ble::requestMsgNotify(hdr.from, s_msgStrBuf, 0, rssi);
+          memcpy(msgStrBuf, msg, msgLen);
+          msgStrBuf[msgLen] = '\0';
+          Serial.printf("[RiftLink] GROUP_MSG grp%u from %02X%02X: %s\n", (unsigned)groupId, hdr.from[0], hdr.from[1], msgStrBuf);
+          ble::requestMsgNotify(hdr.from, msgStrBuf, 0, rssi);
           char fromHex[17];
           snprintf(fromHex, sizeof(fromHex), "grp%u %02X%02X", (unsigned)groupId, hdr.from[0], hdr.from[1]);
-          displaySetLastMsg(fromHex, s_msgStrBuf);
+          queueDisplayLastMsg(fromHex, msgStrBuf);
         }
       }
       break;
@@ -338,7 +446,7 @@ void handlePacket(const uint8_t* buf, size_t len) {
             ble::requestMsgNotify(hdr.from, msgStr, 0, rssi);
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
-            displaySetLastMsg(fromHex, msgStr);
+            queueDisplayLastMsg(fromHex, msgStr);
           }
         }
       }
@@ -375,6 +483,7 @@ void setup() {
   digitalWrite(VEXT_PIN, VEXT_ON_LEVEL);
   delay(300);  // стабилизация питания E-Ink перед инициализацией
 #endif
+  pinMode(BUTTON_PIN, INPUT_PULLUP);  // USER_SW — до displayInit, чтобы кнопка работала на Paper
   pinMode(LED_PIN, OUTPUT);
   for (int i = 0; i < 3; i++) {
     digitalWrite(LED_PIN, HIGH);
@@ -459,6 +568,19 @@ void setup() {
   gps::init();
   if (wifi::hasCredentials()) wifi::connect();
 
+  if (!asyncQueuesInit()) {
+    Serial.println("[RiftLink] Async queues init FAILED");
+  } else {
+    radio::setAsyncMode(true);
+    displaySetButtonPolledExternally(true);
+    asyncTasksStart();
+    Serial.println("[RiftLink] Async tasks started (packet + display)");
+  }
+
+  s_bootTime = millis();
+  s_lastSf12Burst = millis();
+  s_lastKeyRetry = millis();
+
   Serial.println("[RiftLink] Phase 5 - Ready (BLE + E2E + ACK + LZ4 + FRAG + LOC + TELEM + OTA + Region + ROUTE + VOICE + WiFi + GPS)");
   Serial.println("Serial: send | region | channel | nickname | ping | route | lang | gps | powersave | selftest");
 
@@ -466,16 +588,20 @@ void setup() {
 }
 
 void loop() {
+  bool aggressive = (millis() - s_bootTime) < 120000;  // первые 2 мин — агрессивный discovery
+
   if (ota::isActive()) {
     ota::update();
+    pollButtonAndQueue();
     displayUpdate();
     delay(10);
     return;
   }
 
-  // HELLO с джиттером — устройства не синхронизируются и не блокируют друг друга при TX
+  // HELLO с джиттером. Aggressive discovery: первые 2 мин — 2с; 0 соседей — 3с; иначе 10с
+  uint32_t helloInterval = aggressive ? 2000 : ((neighbors::getCount() == 0) ? 3000 : HELLO_INTERVAL_MS);
   uint32_t jitter = (esp_random() % (HELLO_JITTER_MS * 2)) - HELLO_JITTER_MS;
-  if (millis() - lastHello > (HELLO_INTERVAL_MS + (int32_t)jitter)) {
+  if (millis() - lastHello > (helloInterval + (int32_t)jitter)) {
     sendHello();
     lastHello = millis();
   }
@@ -485,11 +611,14 @@ void loop() {
   }
 
   // Адаптивный SF: по среднему RSSI соседей — SF7 (хорошая связь), SF9 (средняя), SF12 (слабая)
+  // При 0 соседях всегда SF7 — иначе getAverageRssi=-90 даёт SF9 и discovery ломается (V4 на SF7 не слышит Paper)
   if (millis() - lastSfAdapt > SF_ADAPT_INTERVAL_MS) {
     int avgRssi = neighbors::getAverageRssi();
     uint8_t sf = 7;
-    if (avgRssi < -110) sf = 12;
-    else if (avgRssi < -80) sf = 9;
+    if (neighbors::getCount() > 0) {
+      if (avgRssi < -110) sf = 12;
+      else if (avgRssi < -80) sf = 9;
+    }
     radio::setSpreadingFactor(sf);
     lastSfAdapt = millis();
   }
@@ -643,38 +772,137 @@ void loop() {
     }
   }
 
+  // Burst SF12: каждые 30с — 2 цикла подряд на SF12
+  if (s_sf12BurstCount == 0 && (millis() - s_lastSf12Burst) >= 30000) {
+    s_sf12BurstCount = 2;
+  }
+
+  // Базовый SF для RX (для restore после TX с txSf)
+  uint8_t baseSf = 7;
+  if (neighbors::getCount() > 0) {
+    int avgRssi = neighbors::getAverageRssi();
+    if (avgRssi < -110) baseSf = 12;
+    else if (avgRssi < -80) baseSf = 9;
+  }
+  int minRssi = neighbors::getMinRssi();
+  bool needSf10 = (neighbors::getCount() > 0 && minRssi != 0 && minRssi < -90);  // A-B-C: B слушает SF10 для C
+  int rxMod = aggressive ? 2 : ((neighbors::getCount() == 0) ? 3 : 10);
+  uint8_t thisRxSf;
+  if (s_sf12BurstCount > 0) {
+    thisRxSf = 12;
+    s_sf12BurstCount--;
+    if (s_sf12BurstCount == 0) s_lastSf12Burst = millis();
+  } else if (s_nextRxSf12) {
+    thisRxSf = 12;
+    s_nextRxSf12 = false;
+  } else {
+    int mod = s_rxCycleCounter % rxMod;
+    if (mod == 0) thisRxSf = 12;
+    else if (needSf10 && mod == 1) thisRxSf = 10;  // SF10 для слабых соседей (B–C)
+    else thisRxSf = baseSf;
+  }
+  s_rxCycleCounter++;
+  radio::setSpreadingFactor(thisRxSf);
+
+  pollButtonAndQueue();  // опрос до drain — не пропустить нажатие во время долгого TX
+  // Drain sendQueue — TX только из loopTask. Max 2 до RX.
+  // txSf>=10: ToA ~1s — max 1 за итерацию, иначе RX окно съедается.
+  if (sendQueue) {
+    SendQueueItem item;
+    int highSfDrained = 0;
+    for (int i = 0; i < 2 && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
+      if (item.txSf >= 10 && highSfDrained >= 1) {
+        xQueueSendToFront(sendQueue, &item, 0);  // вернуть, drain в след. итерации
+        break;
+      }
+      if (item.txSf >= 7 && item.txSf <= 12) {
+        radio::setSpreadingFactor(item.txSf);
+        if (item.txSf >= 10) {
+          highSfDrained++;
+          s_nextRxSf12 = true;  // слушать SF12 после drain HELLO/KEY_EXCHANGE на SF12
+        }
+      }
+      radio::sendDirect(item.buf, item.len);
+      if (item.txSf != 0) radio::setSpreadingFactor(thisRxSf);
+    }
+  }
+
+  // Retry KEY_EXCHANGE: каждые 30с — для каждого соседа без ключа отправить на SF12
+  if ((millis() - s_lastKeyRetry) >= 30000) {
+    s_lastKeyRetry = millis();
+    int n = neighbors::getCount();
+    for (int i = 0; i < n; i++) {
+      uint8_t peerId[protocol::NODE_ID_LEN];
+      if (neighbors::getId(i, peerId) && !x25519_keys::hasKeyFor(peerId)) {
+        x25519_keys::sendKeyExchange(peerId, true);
+      }
+    }
+  }
+
   int n;
   if (powersave::canSleep()) {
     radio::startReceiveWithTimeout(1000);
     n = powersave::sleepUntilPacketOrTimeout(rxBuf, sizeof(rxBuf));
   } else {
-    // Окно приёма: при 0 соседей — 400ms (максимум для первого контакта), иначе 80ms (BLE) / 150ms (без BLE)
+    // Окно приёма: при 0 соседей — 600ms (Paper e-ink блокирует), иначе 80ms (BLE) / 150ms (без BLE)
     uint32_t rxMs = 150;
     if (ble::isConnected()) rxMs = 80;
-    if (neighbors::getCount() == 0) rxMs = 400;
+    if (neighbors::getCount() == 1 && ble::isConnected()) rxMs = 150;  // больше RX для KEY_EXCHANGE
+    if (neighbors::getCount() == 0) rxMs = 600;
     radio::startReceiveWithTimeout(rxMs);
-    // Чанкованное ожидание — опрос кнопки каждые ~50ms, иначе кнопка не реагирует при длинном RX
+    // Чанкованное ожидание — drain sendQueue, опрос кнопки
     uint32_t t0 = millis();
     while (millis() - t0 < rxMs) {
       yield();
-      displayUpdate();
+      pollButtonAndQueue();
+      if (sendQueue) {
+        SendQueueItem item;
+        if (xQueueReceive(sendQueue, &item, 0) == pdTRUE) {
+          // txSf>=10 (HELLO/KEY_EXCHANGE): ToA ~1s — не drain во время RX
+          if (item.txSf >= 10) {
+            xQueueSendToFront(sendQueue, &item, 0);
+          } else {
+            if (item.txSf >= 7 && item.txSf <= 12) radio::setSpreadingFactor(item.txSf);
+            radio::sendDirect(item.buf, item.len);
+            if (item.txSf != 0) radio::setSpreadingFactor(thisRxSf);
+          }
+        }
+        uint32_t remain = rxMs - (millis() - t0);
+        if (remain > 0) radio::startReceiveWithTimeout(remain);
+      }
       uint32_t elapsed = millis() - t0;
       if (elapsed >= rxMs) break;
-      uint32_t chunk = (rxMs - elapsed) > 50 ? 50 : (rxMs - elapsed);
+      uint32_t chunk = (rxMs - elapsed) > 30 ? 30 : (rxMs - elapsed);  // 30ms — чаще опрос кнопки на Paper
       delay(chunk);
     }
     n = radio::receiveAsync(rxBuf, sizeof(rxBuf));
   }
   if (n > 0) {
     int rssi = radio::getLastRssi();
-    Serial.printf("[RiftLink] RX %d bytes, RSSI=%d\n", n, rssi);
-    handlePacket(rxBuf, (size_t)n);
+    // opcode = buf[18] при len>=19 (header)
+    uint8_t op = (n >= 19) ? rxBuf[18] : 0;
+    Serial.printf("[RiftLink] RX %d bytes, RSSI=%d, op=%02X\n", n, rssi, op);
+    if (packetQueue) {
+      PacketQueueItem item;
+      if ((size_t)n <= sizeof(item.buf)) {
+        memcpy(item.buf, rxBuf, (size_t)n);
+        item.len = (uint16_t)n;
+        item.rssi = (int8_t)rssi;
+        item.sf = thisRxSf;
+        if (xQueueSend(packetQueue, &item, 0) != pdTRUE) {
+          Serial.println("[RiftLink] packetQueue full, drop");
+        }
+      }
+    } else {
+      handlePacket(rxBuf, (size_t)n, rssi, thisRxSf);
+    }
   }
 
   ble::update();
   msg_queue::update();
   routing::update();
-  displayUpdate();
+  pollButtonAndQueue();
+  if (!displayQueue) displayUpdate();
   if (!powersave::canSleep()) {
     delay(10);
   }

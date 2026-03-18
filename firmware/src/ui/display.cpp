@@ -72,6 +72,7 @@ static char s_lastMsgText[64] = {0};
 static bool s_displaySleeping = false;
 static bool s_wakeRequested = false;
 static uint32_t s_lastActivityTime = 0;
+static bool s_buttonPolledExternally = false;
 
 /** Печать CP1251: конвертация в кодировку glcdfont AdafruitGFXRusFonts */
 static void drawTruncRaw(int x, int y, const char* s, int maxLen) {
@@ -474,6 +475,30 @@ void displayShowScreen(int screen) {
   drawScreen(s_currentScreen);
 }
 
+int displayGetCurrentScreen() {
+  return s_currentScreen;
+}
+
+void displayOnLongPress(int screen) {
+  s_lastActivityTime = millis();
+  if (screen == 0) {
+    displayShowRegionPicker();
+    drawScreen(s_currentScreen);
+  } else if (screen == 5) {
+    displayShowLanguagePicker();
+    drawScreen(s_currentScreen);
+  } else if (screen == 6 && gps::isPresent()) {
+    gps::toggle();
+    drawScreen(s_currentScreen);
+  } else if (screen == 3) {
+    selftest::run(nullptr);
+  }
+}
+
+void displaySetButtonPolledExternally(bool on) {
+  s_buttonPolledExternally = on;
+}
+
 void displayRequestInfoRedraw() {
   displayWakeRequest();
   s_needRedrawInfo = true;
@@ -492,22 +517,16 @@ bool displayUpdate() {
   }
 
   if (s_displaySleeping) {
-    // В слипе — только опрос кнопки
-    bool btn = BTN_PRESSED;
-    if (btn) {
-      if (!s_lastButton) {
-        s_lastButton = true;
-        s_pressStart = now;
-      }
-    } else if (s_lastButton) {
-      uint32_t hold = now - s_pressStart;
-      if (hold >= MIN_PRESS_MS) {
+    if (!s_buttonPolledExternally) {
+      bool btn = BTN_PRESSED;
+      if (btn) {
+        if (!s_lastButton) { s_lastButton = true; s_pressStart = now; }
+      } else if (s_lastButton && (now - s_pressStart) >= MIN_PRESS_MS) {
         s_lastButton = false;
         displayWake();
         drawScreen(s_currentScreen);
         return true;
-      }
-      s_lastButton = false;
+      } else if (s_lastButton) s_lastButton = false;
     }
     return false;
   }
@@ -523,37 +542,19 @@ bool displayUpdate() {
     drawScreen(4);
   }
 
-  bool btn = BTN_PRESSED;
-  if (btn) {
-    if (!s_lastButton) {
-      s_lastButton = true;
-      s_pressStart = millis();
-    }
-  } else {
-    if (s_lastButton) {
-      uint32_t hold = millis() - s_pressStart;
+  if (!s_buttonPolledExternally) {
+    bool btn = BTN_PRESSED;
+    if (btn) {
+      if (!s_lastButton) { s_lastButton = true; s_pressStart = now; }
+    } else if (s_lastButton) {
+      uint32_t hold = now - s_pressStart;
       bool isLong = (hold >= LONG_PRESS_MS);
       bool isShort = (hold >= MIN_PRESS_MS && hold < SHORT_PRESS_MS);
-
-      s_lastActivityTime = now;  // нажатие кнопки — активность
+      s_lastActivityTime = now;
       if (isShort) {
         s_currentScreen = (s_currentScreen + 1) % N_TABS;
         drawScreen(s_currentScreen);
-      } else if (isLong) {
-        if (s_currentScreen == 0) {
-          displayShowRegionPicker();
-          drawScreen(s_currentScreen);
-        } else if (s_currentScreen == 5) {
-          displayShowLanguagePicker();
-          drawScreen(s_currentScreen);
-        } else if (s_currentScreen == 6 && gps::isPresent()) {
-          gps::toggle();
-          drawScreen(s_currentScreen);
-        } else if (s_currentScreen == 3) {
-          selftest::run(nullptr);
-          /* результаты остаются на экране, короткое нажатие переключит вкладку */
-        }
-      }
+      } else if (isLong) displayOnLongPress(s_currentScreen);
       s_lastButton = false;
       return true;
     }

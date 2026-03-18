@@ -7,6 +7,8 @@
 #include "radio/radio.h"
 #include <Arduino.h>
 #include <string.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 // Payload: target[8], req_id[4], hops[1], sender[8] — sender = кто переслал этот REQ
 #define ROUTE_PAYLOAD_LEN 21
@@ -41,11 +43,13 @@ static ReverseEntry s_reverse[ROUTING_MAX_REVERSE];
 static SeenEntry s_seen[ROUTING_MAX_SEEN];
 static uint32_t s_reqIdCounter = 0;
 static bool s_inited = false;
+static SemaphoreHandle_t s_mutex = nullptr;
 
 namespace routing {
 
 void init() {
   if (s_inited) return;
+  s_mutex = xSemaphoreCreateMutex();
   memset(s_routes, 0, sizeof(s_routes));
   memset(s_reverse, 0, sizeof(s_reverse));
   memset(s_seen, 0, sizeof(s_seen));
@@ -86,33 +90,42 @@ static int findFreeRouteSlot() {
 
 bool getNextHop(const uint8_t* dest, uint8_t* nextHopOut) {
   if (!dest || !nextHopOut) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
   int idx = findRoute(dest);
-  if (idx < 0) return false;
-  memcpy(nextHopOut, s_routes[idx].nextHop, protocol::NODE_ID_LEN);
-  return true;
+  bool ok = (idx >= 0);
+  if (ok) memcpy(nextHopOut, s_routes[idx].nextHop, protocol::NODE_ID_LEN);
+  xSemaphoreGive(s_mutex);
+  return ok;
 }
 
 bool getRoute(const uint8_t* dest, uint8_t* nextHopOut, uint8_t* hopsOut, int8_t* rssiOut) {
   if (!dest || !nextHopOut) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
   int idx = findRoute(dest);
-  if (idx < 0) return false;
-  memcpy(nextHopOut, s_routes[idx].nextHop, protocol::NODE_ID_LEN);
-  if (hopsOut) *hopsOut = s_routes[idx].hops;
-  if (rssiOut) *rssiOut = s_routes[idx].rssi;
-  return true;
+  bool ok = (idx >= 0);
+  if (ok) {
+    memcpy(nextHopOut, s_routes[idx].nextHop, protocol::NODE_ID_LEN);
+    if (hopsOut) *hopsOut = s_routes[idx].hops;
+    if (rssiOut) *rssiOut = s_routes[idx].rssi;
+  }
+  xSemaphoreGive(s_mutex);
+  return ok;
 }
 
 int getRouteCount() {
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return 0;
   uint32_t now = millis();
   int n = 0;
   for (int i = 0; i < ROUTING_MAX_ROUTES; i++) {
     if (s_routes[i].used && (now - s_routes[i].timestamp) < ROUTING_ROUTE_TTL_MS) n++;
   }
+  xSemaphoreGive(s_mutex);
   return n;
 }
 
 bool getRouteAt(int i, uint8_t* destOut, uint8_t* nextHopOut, uint8_t* hopsOut, int8_t* rssiOut) {
   if (i < 0 || !destOut || !nextHopOut) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
   uint32_t now = millis();
   int idx = 0;
   for (int j = 0; j < ROUTING_MAX_ROUTES; j++) {
@@ -122,10 +135,12 @@ bool getRouteAt(int i, uint8_t* destOut, uint8_t* nextHopOut, uint8_t* hopsOut, 
       memcpy(nextHopOut, s_routes[j].nextHop, protocol::NODE_ID_LEN);
       if (hopsOut) *hopsOut = s_routes[j].hops;
       if (rssiOut) *rssiOut = s_routes[j].rssi;
+      xSemaphoreGive(s_mutex);
       return true;
     }
     idx++;
   }
+  xSemaphoreGive(s_mutex);
   return false;
 }
 
@@ -217,6 +232,7 @@ static void addSeen(const uint8_t* originator, uint32_t reqId, const uint8_t* ta
 
 void requestRoute(const uint8_t* target) {
   if (!target || node::isForMe(target)) return;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
 
   uint8_t payload[ROUTE_PAYLOAD_LEN];
   memcpy(payload, target, protocol::NODE_ID_LEN);
@@ -233,10 +249,12 @@ void requestRoute(const uint8_t* target) {
     radio::send(pkt, len);
     Serial.printf("[RiftLink] ROUTE_REQ to %02X%02X reqId=%u\n", target[0], target[1], (unsigned)reqId);
   }
+  xSemaphoreGive(s_mutex);
 }
 
 bool onRouteReq(const uint8_t* from, const uint8_t* payload, size_t payloadLen) {
   if (payloadLen < ROUTE_PAYLOAD_LEN) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
 
   const uint8_t* target = payload;
   uint32_t reqId;
@@ -244,7 +262,10 @@ bool onRouteReq(const uint8_t* from, const uint8_t* payload, size_t payloadLen) 
   uint8_t hops = payload[12];
   const uint8_t* sender = payload + 13;
 
-  if (wasSeen(from, reqId, target)) return true;
+  if (wasSeen(from, reqId, target)) {
+    xSemaphoreGive(s_mutex);
+    return true;
+  }
 
   addSeen(from, reqId, target);
 
@@ -263,6 +284,7 @@ bool onRouteReq(const uint8_t* from, const uint8_t* payload, size_t payloadLen) 
       radio::send(pkt, len);
       Serial.printf("[RiftLink] ROUTE_REPLY to %02X%02X (target=me)\n", sender[0], sender[1]);
     }
+    xSemaphoreGive(s_mutex);
     return true;
   }
 
@@ -281,11 +303,13 @@ bool onRouteReq(const uint8_t* from, const uint8_t* payload, size_t payloadLen) 
     radio::send(pkt, len);
     Serial.printf("[RiftLink] ROUTE_REQ relay hops=%u\n", (unsigned)(hops + 1));
   }
+  xSemaphoreGive(s_mutex);
   return true;
 }
 
 bool onRouteReply(const uint8_t* from, const uint8_t* to, const uint8_t* payload, size_t payloadLen) {
   if (payloadLen < ROUTE_PAYLOAD_LEN) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
 
   const uint8_t* target = payload;
   uint32_t reqId;
@@ -299,11 +323,15 @@ bool onRouteReply(const uint8_t* from, const uint8_t* to, const uint8_t* payload
     addRoute(target, from, hops, rssi8);
     Serial.printf("[RiftLink] ROUTE_REPLY: route to %02X%02X via %02X%02X (%u hops, rssi=%d)\n",
         target[0], target[1], from[0], from[1], (unsigned)hops, rssi);
+    xSemaphoreGive(s_mutex);
     return true;
   }
 
   int revIdx = findReverse(originator, reqId);
-  if (revIdx < 0) return true;
+  if (revIdx < 0) {
+    xSemaphoreGive(s_mutex);
+    return true;
+  }
 
   uint8_t pkt[protocol::HEADER_LEN + ROUTE_PAYLOAD_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
@@ -314,10 +342,12 @@ bool onRouteReply(const uint8_t* from, const uint8_t* to, const uint8_t* payload
     Serial.printf("[RiftLink] ROUTE_REPLY relay to %02X%02X\n", s_reverse[revIdx].prevHop[0], s_reverse[revIdx].prevHop[1]);
   }
   s_reverse[revIdx].used = false;
+  xSemaphoreGive(s_mutex);
   return true;
 }
 
 void update() {
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
   uint32_t now = millis();
   for (int i = 0; i < ROUTING_MAX_ROUTES; i++) {
     if (s_routes[i].used && (now - s_routes[i].timestamp) >= ROUTING_ROUTE_TTL_MS) {
@@ -329,6 +359,7 @@ void update() {
       s_reverse[i].used = false;
     }
   }
+  xSemaphoreGive(s_mutex);
 }
 
 }  // namespace routing

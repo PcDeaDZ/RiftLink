@@ -44,3 +44,6 @@ Thumbs.db
 .env
 .env.local
 secrets/
+
+# Планы и анализы из разговоров (не для репозитория)
+docs/plans/

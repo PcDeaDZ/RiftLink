@@ -25,7 +25,7 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
 
   uint8_t* p = buf;
   *p++ = 0x10 | (encrypted ? FLAG_ENCRYPTED : 0) | (ackReq ? FLAG_ACK_REQ : 0) | (compressed ? FLAG_COMPRESSED : 0);
-  memcpy(p, from, NODE_ID_LEN); p += NODE_ID_LEN;
+  memcpy(p, from, NODE_ID_LEN); p += NODE_ID_LEN;  // from first (CUSTOM_PROTOCOL_PLAN §4.2)
   memcpy(p, to, NODE_ID_LEN);   p += NODE_ID_LEN;
   *p++ = ttl;
   *p++ = opcode;
@@ -40,10 +40,27 @@ constexpr size_t HEADER_LEN_V0 = 19;  // Без channel (обратная сов
 
 bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr, const uint8_t** payload, size_t* payloadLen) {
   if (len < HEADER_LEN_V0) return false;
-
-  hdr->version_flags = buf[0];
-  memcpy(hdr->from, buf + 1, NODE_ID_LEN);
-  memcpy(hdr->to, buf + 1 + NODE_ID_LEN, NODE_ID_LEN);
+  // Версия: старшие 4 бита = 0x1, 0x2 или 0x3. Отсекаем чужие (0xFF, Meshtastic).
+  // buf[0]=0x39 — Paper/старая прошивка; buf[0]=0x00 — Paper: порча при SPI-конфликте с e-ink.
+  uint8_t v = buf[0] & 0xF0;
+  if (v != 0x10 && v != 0x20 && v != 0x30) {
+    if (buf[0] == 0x00 && len >= HEADER_LEN_V0 && buf[1 + NODE_ID_LEN * 2 + 1] == OP_HELLO) {
+      hdr->version_flags = 0x10;  // предполагаем version 1
+    } else {
+      return false;
+    }
+  } else {
+    hdr->version_flags = buf[0];
+  }
+  memcpy(hdr->from, buf + 1, NODE_ID_LEN);          // bytes 1-8
+  memcpy(hdr->to, buf + 1 + NODE_ID_LEN, NODE_ID_LEN);    // bytes 9-16
+  // Совместимость: если from=broadcast и to≠broadcast — пакет в формате "to first"
+  if (hdr->from[0] == 0xFF && hdr->from[1] == 0xFF && (hdr->to[0] != 0xFF || hdr->to[1] != 0xFF)) {
+    uint8_t tmp[NODE_ID_LEN];
+    memcpy(tmp, hdr->from, NODE_ID_LEN);
+    memcpy(hdr->from, hdr->to, NODE_ID_LEN);
+    memcpy(hdr->to, tmp, NODE_ID_LEN);
+  }
   hdr->ttl = buf[1 + NODE_ID_LEN * 2];
   hdr->opcode = buf[1 + NODE_ID_LEN * 2 + 1];
   hdr->channel = (len >= HEADER_LEN) ? buf[1 + NODE_ID_LEN * 2 + 2] : CHANNEL_DEFAULT;

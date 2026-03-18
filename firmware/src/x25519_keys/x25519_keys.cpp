@@ -10,6 +10,8 @@
 #include <nvs.h>
 #include <Arduino.h>
 #include <string.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #define NVS_NAMESPACE "riftlink"
 #define NVS_KEY_X25519_PUB "x25519_pub"
@@ -26,11 +28,13 @@ static uint8_t s_pubKey[X25519_PUBKEY_LEN];
 static uint8_t s_secKey[crypto_box_SECRETKEYBYTES];
 static PeerKey s_peers[X25519_MAX_PEERS];
 static bool s_inited = false;
+static SemaphoreHandle_t s_mutex = nullptr;
 
 namespace x25519_keys {
 
 void init() {
   if (s_inited) return;
+  s_mutex = xSemaphoreCreateMutex();
 
   nvs_handle_t h;
   if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
@@ -60,7 +64,9 @@ void init() {
 
 bool getOurPublicKey(uint8_t* out) {
   if (!s_inited || !out) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
   memcpy(out, s_pubKey, X25519_PUBKEY_LEN);
+  xSemaphoreGive(s_mutex);
   return true;
 }
 
@@ -88,7 +94,8 @@ static int findFreeSlot() {
 }
 
 void onKeyExchange(const uint8_t* peerId, const uint8_t* theirPubKey) {
-  if (!s_inited || !peerId || !theirPubKey || node::isForMe(peerId)) return;
+  if (!s_inited || !peerId || !theirPubKey || node::isForMe(peerId) || node::isInvalidNodeId(peerId)) return;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
 
   int idx = findPeer(peerId);
   if (idx < 0) idx = findFreeSlot();
@@ -98,32 +105,39 @@ void onKeyExchange(const uint8_t* peerId, const uint8_t* theirPubKey) {
   memcpy(s_peers[idx].peerId, peerId, protocol::NODE_ID_LEN);
   s_peers[idx].timestamp = millis();
   s_peers[idx].used = true;
-
+  xSemaphoreGive(s_mutex);
   Serial.printf("[RiftLink] X25519 key with %02X%02X\n", peerId[0], peerId[1]);
 }
 
 bool hasKeyFor(const uint8_t* peerId) {
-  return findPeer(peerId) >= 0;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
+  bool ok = findPeer(peerId) >= 0;
+  xSemaphoreGive(s_mutex);
+  return ok;
 }
 
 bool getKeyFor(const uint8_t* peerId, uint8_t* keyOut) {
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
   int idx = findPeer(peerId);
-  if (idx < 0 || !keyOut) return false;
-  memcpy(keyOut, s_peers[idx].sharedKey, 32);
-  return true;
+  bool ok = (idx >= 0 && keyOut);
+  if (ok) memcpy(keyOut, s_peers[idx].sharedKey, 32);
+  xSemaphoreGive(s_mutex);
+  return ok;
 }
 
-void sendKeyExchange(const uint8_t* peerId) {
-  if (!s_inited || !peerId || node::isForMe(peerId) || node::isBroadcast(peerId)) return;
+void sendKeyExchange(const uint8_t* peerId, bool useSf12) {
+  if (!s_inited || !peerId || node::isForMe(peerId) || node::isBroadcast(peerId) || node::isInvalidNodeId(peerId)) return;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
 
   uint8_t pkt[protocol::HEADER_LEN + X25519_PUBKEY_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), peerId, 31, protocol::OP_KEY_EXCHANGE,
       s_pubKey, X25519_PUBKEY_LEN);
-  if (len > 0) {
-    radio::send(pkt, len);
-    Serial.printf("[RiftLink] KEY_EXCHANGE sent to %02X%02X\n", peerId[0], peerId[1]);
+  uint8_t txSf = useSf12 ? 12 : 0;
+  if (len > 0 && radio::send(pkt, len, txSf, useSf12)) {
+    Serial.printf("[RiftLink] KEY_EXCHANGE sent to %02X%02X%s\n", peerId[0], peerId[1], useSf12 ? " SF12" : "");
   }
+  xSemaphoreGive(s_mutex);
 }
 
 }  // namespace x25519_keys

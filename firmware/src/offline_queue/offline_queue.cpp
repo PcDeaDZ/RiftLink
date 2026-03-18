@@ -10,6 +10,8 @@
 #include <nvs.h>
 #include <esp_err.h>
 #include <string.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #define NVS_NAMESPACE "riftlink"
 #define NVS_KEY_OFFLINE "offline_q"
@@ -36,6 +38,7 @@ struct StoredMsg {
 
 static StoredMsg s_msgs[OFFLINE_MAX_MSGS];
 static bool s_inited = false;
+static SemaphoreHandle_t s_mutex = nullptr;
 static StoredMsgNvs s_nvsBuf[OFFLINE_MAX_MSGS];  // статика — saveToNvs/loadFromNvs вызываются из handlePacket (stack overflow)
 
 static void saveToNvs() {
@@ -89,6 +92,7 @@ static void loadFromNvs() {
 namespace offline_queue {
 
 void init() {
+  s_mutex = xSemaphoreCreateMutex();
   memset(s_msgs, 0, sizeof(s_msgs));
   loadFromNvs();
   s_inited = true;
@@ -103,9 +107,13 @@ static StoredMsg* findFree() {
 
 bool enqueue(const uint8_t* to, const uint8_t* encPayload, size_t encLen, uint8_t opcode, uint8_t flags) {
   if (!s_inited || !to || encLen > OFFLINE_MAX_LEN) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
 
   StoredMsg* slot = findFree();
-  if (!slot) return false;
+  if (!slot) {
+    xSemaphoreGive(s_mutex);
+    return false;
+  }
 
   memcpy(slot->to, to, protocol::NODE_ID_LEN);
   memcpy(slot->payload, encPayload, encLen);
@@ -114,6 +122,7 @@ bool enqueue(const uint8_t* to, const uint8_t* encPayload, size_t encLen, uint8_
   slot->flags = flags;
   slot->inUse = true;
   saveToNvs();
+  xSemaphoreGive(s_mutex);
   return true;
 }
 
@@ -121,6 +130,7 @@ static uint8_t s_onlinePktBuf[protocol::HEADER_LEN + OFFLINE_MAX_LEN];  // ст�
 
 void onNodeOnline(const uint8_t* nodeId) {
   if (!s_inited || !nodeId) return;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
 
   for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
     StoredMsg* m = &s_msgs[i];
@@ -139,13 +149,16 @@ void onNodeOnline(const uint8_t* nodeId) {
     m->inUse = false;
   }
   saveToNvs();
+  xSemaphoreGive(s_mutex);
 }
 
 int getPendingCount() {
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return 0;
   int n = 0;
   for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
     if (s_msgs[i].inUse) n++;
   }
+  xSemaphoreGive(s_mutex);
   return n;
 }
 

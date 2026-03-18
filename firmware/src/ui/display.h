@@ -22,6 +22,10 @@ bool displayShowRegionPicker();
 
 /** Меню: 0=Main, 1=Info, 2=WiFi, 3=Sys, 4=Msg, 5=Lang, 6=GPS. Вызывать после init. */
 void displayShowScreen(int screen);
+/** Текущая вкладка (для опроса кнопки в loopTask) */
+int displayGetCurrentScreen();
+/** Обработка long press на вкладке (picker, selftest, gps toggle) */
+void displayOnLongPress(int screen);
 /** Показать последнее сообщение (экран 3). */
 void displaySetLastMsg(const char* fromHex, const char* text);
 /** Обновить экран (периодически в loop). Возвращает true если кнопка нажата */
@@ -37,3 +41,5 @@ void displayWake();
 void displayWakeRequest();
 /** Дисплей в слипе? */
 bool displayIsSleeping();
+/** Вызвать при asyncTasksStart — кнопка опрашивается в loopTask */
+void displaySetButtonPolledExternally(bool on);

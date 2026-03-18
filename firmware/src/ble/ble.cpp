@@ -25,6 +25,7 @@
 #include "gps/gps.h"
 #include "selftest/selftest.h"
 #include "ui/display.h"
+#include "async_tasks.h"
 #include "version.h"
 #include <mbedtls/base64.h>
 #include <freertos/FreeRTOS.h>
@@ -218,7 +219,7 @@ class CharCallbacks : public NimBLECharacteristicCallbacks {
         __sync_synchronize();
         s_pendingNickname = true;
         s_pendingInfo = true;
-        displayRequestInfoRedraw();
+        queueDisplayRequestInfoRedraw();
       }
       return;
     }

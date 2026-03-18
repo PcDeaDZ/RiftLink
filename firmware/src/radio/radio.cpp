@@ -7,8 +7,12 @@
 #include "radio.h"
 #include "region/region.h"
 #include "duty_cycle/duty_cycle.h"
+#include "async_queues.h"
+#include "async_tasks.h"
 #include <RadioLib.h>
 #include <SPI.h>
+
+static bool s_asyncMode = false;
 
 // Heltec WiFi LoRa 32 V3/V4 pins (Meshtastic variant.h)
 #define LORA_NSS   8
@@ -77,7 +81,9 @@ uint32_t getTimeOnAir(size_t len) {
   return (uint32_t)lora->getTimeOnAir(len);
 }
 
-bool send(const uint8_t* data, size_t len) {
+void setAsyncMode(bool on) { s_asyncMode = on; }
+
+bool sendDirect(const uint8_t* data, size_t len) {
   if (!lora || len > RADIOLIB_SX126X_MAX_PACKET_LENGTH) return false;
 
   uint32_t toa = getTimeOnAir(len);
@@ -101,6 +107,20 @@ bool send(const uint8_t* data, size_t len) {
   }
   duty_cycle::recordSend(toa);
   return true;
+}
+
+bool send(const uint8_t* data, size_t len, uint8_t txSf, bool priority) {
+  if (s_asyncMode && sendQueue) {
+    return queueSend(data, len, txSf, priority);
+  }
+  if (txSf >= 7 && txSf <= 12) {
+    uint8_t prev = getSpreadingFactor();
+    setSpreadingFactor(txSf);
+    bool ok = sendDirect(data, len);
+    setSpreadingFactor(prev);
+    return ok;
+  }
+  return sendDirect(data, len);
 }
 
 int receive(uint8_t* buf, size_t maxLen) {

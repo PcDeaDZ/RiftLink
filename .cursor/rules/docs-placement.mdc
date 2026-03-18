@@ -1,0 +1,16 @@
+---
+description: Куда класть документы — планы в docs/plans/, не в docs/
+alwaysApply: true
+---
+
+# Размещение документов
+
+**Планы, анализы, заметки из разговоров** — только в `docs/plans/` (папка в .gitignore, не заливается в репозиторий).
+
+| Тип документа | Папка | Примеры |
+|---------------|-------|---------|
+| Планы, анализ, troubleshooting, сравнения | `docs/plans/` | SF12_DISCOVERY_ANALYSIS.md, CUSTOM_PROTOCOL_PLAN.md, ASYNC_ARCHITECTURE_PLAN.md, EINK_INIT_COMPARISON.md, FREEZE_ANALYSIS.md |
+| Спецификации, API, инструкции | `docs/` | PROTOCOL.md, API.md, RECOVERY.md |
+
+- **Создавая новый план/анализ** — всегда `docs/plans/` (не `docs/`).
+- **Ссылаясь на docs/** — не перепутать: PROTOCOL.md, API.md, RECOVERY.md — в `docs/`, остальное — в `docs/plans/`.

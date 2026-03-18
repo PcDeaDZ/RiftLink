@@ -1,6 +1,7 @@
 /**
  * RiftLink Neighbors — список узлов, видимых по HELLO
  * Онлайн-статус: до 8 соседей
+ * Thread-safe: mutex защищает доступ из packetTask, loopTask, displayTask
  */
 
 #pragma once
@@ -10,7 +11,7 @@
 #include "protocol/packet.h"
 
 #define NEIGHBORS_MAX 8
-#define NEIGHBOR_TIMEOUT_MS 60000  // 1 мин — узел считается офлайн
+#define NEIGHBOR_TIMEOUT_MS 120000  // 2 мин — узел считается офлайн (HELLO каждые 10с)
 
 namespace neighbors {
 
@@ -23,11 +24,25 @@ void updateRssi(const uint8_t* nodeId, int rssi);
 int getCount();
 /** RSSI последнего пакета от соседа i (dBm), 0 если неизвестно */
 int getRssi(int i);
+/** RSSI для конкретного узла (dBm). -128 если не найден */
+int getRssiFor(const uint8_t* nodeId);
+/** Минимальный RSSI среди активных соседей (dBm). 0 если нет данных */
+int getMinRssi();
 /** Средний RSSI активных соседей (dBm). -90 если нет данных */
 int getAverageRssi();
 /** Записать ID соседа i (0..getCount()-1) в out. Возвращает false если i неверный */
 bool getId(int i, uint8_t* out);
 /** Записать ID в hex-строку (17 байт с \0) */
 void getIdHex(int i, char* out);
+
+/** RSSI → SF 7–12 для per-neighbor TX. -128/0 → 0 (default) */
+inline uint8_t rssiToSf(int rssi) {
+  if (rssi <= -128 || rssi > 0) return 0;
+  if (rssi >= -75) return 7;
+  if (rssi >= -85) return 9;
+  if (rssi >= -95) return 10;
+  if (rssi >= -105) return 11;
+  return 12;
+}
 
 }  // namespace neighbors

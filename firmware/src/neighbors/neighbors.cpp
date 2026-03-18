@@ -6,6 +6,10 @@
 #include "node/node.h"
 #include <Arduino.h>
 #include <string.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+
+static SemaphoreHandle_t s_mutex = nullptr;
 
 struct Entry {
   uint8_t id[protocol::NODE_ID_LEN];
@@ -21,6 +25,7 @@ namespace neighbors {
 
 void init() {
   if (s_inited) return;
+  s_mutex = xSemaphoreCreateMutex();
   memset(s_entries, 0, sizeof(s_entries));
   s_inited = true;
 }
@@ -51,7 +56,8 @@ static int findFreeSlot() {
 }
 
 bool onHello(const uint8_t* nodeId, int rssi) {
-  if (!nodeId || node::isForMe(nodeId)) return false;
+  if (!nodeId || node::isForMe(nodeId) || node::isInvalidNodeId(nodeId)) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
 
   int idx = findSlot(nodeId);
   bool wasNew = (idx < 0);
@@ -61,28 +67,72 @@ bool onHello(const uint8_t* nodeId, int rssi) {
   s_entries[idx].lastSeenMs = millis();
   s_entries[idx].lastRssi = (rssi >= -128 && rssi <= 0) ? (int8_t)rssi : 0;
   s_entries[idx].used = true;
+  xSemaphoreGive(s_mutex);
   return wasNew;
 }
 
 void updateRssi(const uint8_t* nodeId, int rssi) {
   if (!nodeId || (rssi < -128 || rssi > 0)) return;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
   int idx = findSlot(nodeId);
   if (idx >= 0) s_entries[idx].lastRssi = (int8_t)rssi;
+  xSemaphoreGive(s_mutex);
 }
 
 int getRssi(int i) {
   if (i < 0) return 0;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return 0;
   uint32_t now = millis();
   int idx = 0;
   for (int j = 0; j < NEIGHBORS_MAX; j++) {
     if (!s_entries[j].used || (now - s_entries[j].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
-    if (idx == i) return s_entries[j].lastRssi;
+    if (idx == i) {
+      int r = s_entries[j].lastRssi;
+      xSemaphoreGive(s_mutex);
+      return r;
+    }
     idx++;
   }
+  xSemaphoreGive(s_mutex);
   return 0;
 }
 
+int getRssiFor(const uint8_t* nodeId) {
+  if (!nodeId) return -128;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return -128;
+  uint32_t now = millis();
+  int r = -128;
+  for (int i = 0; i < NEIGHBORS_MAX; i++) {
+    if (!s_entries[i].used || (now - s_entries[i].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
+    if (memcmp(s_entries[i].id, nodeId, protocol::NODE_ID_LEN) == 0) {
+      r = s_entries[i].lastRssi;
+      break;
+    }
+  }
+  xSemaphoreGive(s_mutex);
+  return r;
+}
+
+int getMinRssi() {
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return 0;
+  uint32_t now = millis();
+  int minRssi = 0;
+  bool hasAny = false;
+  for (int i = 0; i < NEIGHBORS_MAX; i++) {
+    if (!s_entries[i].used || (now - s_entries[i].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
+    if (s_entries[i].lastRssi != 0) {
+      if (!hasAny || s_entries[i].lastRssi < minRssi) {
+        minRssi = s_entries[i].lastRssi;
+        hasAny = true;
+      }
+    }
+  }
+  xSemaphoreGive(s_mutex);
+  return hasAny ? minRssi : 0;
+}
+
 int getAverageRssi() {
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return -90;
   uint32_t now = millis();
   int sum = 0;
   int n = 0;
@@ -93,11 +143,13 @@ int getAverageRssi() {
       n++;
     }
   }
-  if (n == 0) return -90;  // нет данных — нейтральное значение
-  return sum / n;
+  int r = (n == 0) ? -90 : (sum / n);
+  xSemaphoreGive(s_mutex);
+  return r;
 }
 
 int getCount() {
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return 0;
   uint32_t now = millis();
   int n = 0;
   for (int i = 0; i < NEIGHBORS_MAX; i++) {
@@ -105,21 +157,25 @@ int getCount() {
       n++;
     }
   }
+  xSemaphoreGive(s_mutex);
   return n;
 }
 
 bool getId(int i, uint8_t* out) {
   if (!out || i < 0) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
   uint32_t now = millis();
   int idx = 0;
   for (int j = 0; j < NEIGHBORS_MAX; j++) {
     if (!s_entries[j].used || (now - s_entries[j].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
     if (idx == i) {
       memcpy(out, s_entries[j].id, protocol::NODE_ID_LEN);
+      xSemaphoreGive(s_mutex);
       return true;
     }
     idx++;
   }
+  xSemaphoreGive(s_mutex);
   return false;
 }
 

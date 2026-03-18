@@ -15,6 +15,8 @@ const uint8_t* getId();
 void getIdCopy(uint8_t* out);
 bool isForMe(const uint8_t* to);
 bool isBroadcast(const uint8_t* to);
+/** ID некорректен (0xFF 0xFF в начале = broadcast/сброс NVS) — не добавлять в соседи, не слать KEY_EXCHANGE */
+bool isInvalidNodeId(const uint8_t* id);
 
 /** Никнейм (до 16 символов), пустая строка = не задан */
 void getNickname(char* out, size_t maxLen);

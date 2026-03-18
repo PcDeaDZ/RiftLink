@@ -78,6 +78,7 @@ static uint32_t s_previousImageHash = 0;  // хеш последнего ото�
 // volatile — s_needRedrawInfo пишется из BLE task (displayRequestInfoRedraw), читается в main loop
 static volatile bool s_needRedrawMsg = false;
 static volatile bool s_needRedrawInfo = false;
+static bool s_buttonPolledExternally = false;
 static char s_lastMsgFrom[17] = {0};
 static char s_lastMsgText[64] = {0};
 
@@ -636,12 +637,16 @@ static void drawScreenContent(int tab) {
 }
 
 /** Meshtastic-style: rate limit, hash skip, partial/full. forceUpdate=true — пропуск rate limit (действие пользователя). */
+/** При 0 соседях — реже обновляем e-ink, чтобы не блокировать SPI и не мешать приёму HELLO. */
 static bool performDisplayUpdate(int tab, bool isResponsive, bool forceUpdate = false) {
   uint32_t now = millis();
   if ((now - s_lastDisplayEnd) < EINK_COOLDOWN_HW_MS) return false;
   if (!forceUpdate && s_previousRunMs <= now) {
+    uint32_t bgLimit = EINK_RATE_LIMIT_BACKGROUND_MS;
+    if (!isResponsive && neighbors::getCount() == 0)
+      bgLimit = 60000;  // 60s при поиске соседей — меньше блокировок SPI
     if (isResponsive && (now - s_previousRunMs) < EINK_RATE_LIMIT_RESPONSIVE_MS) return false;
-    if (!isResponsive && (now - s_previousRunMs) < EINK_RATE_LIMIT_BACKGROUND_MS) return false;
+    if (!isResponsive && (now - s_previousRunMs) < bgLimit) return false;
   }
 
   drawScreenContent(tab);
@@ -674,6 +679,10 @@ static void drawScreen(int tab) {
   s_fastRefreshCount = 0;
 }
 
+void displaySetButtonPolledExternally(bool on) {
+  s_buttonPolledExternally = on;
+}
+
 void displayRequestInfoRedraw() {
   displayWakeRequest();
   s_needRedrawInfo = true;
@@ -694,52 +703,57 @@ void displayShowScreen(int screen) {
   drawScreen(s_currentScreen);
 }
 
+int displayGetCurrentScreen() {
+  return s_currentScreen;
+}
+
+void displayOnLongPress(int screen) {
+  s_lastActivityTime = millis();
+  ensureCooldownBeforeDisplay();
+  if (screen == 0) {
+    displayShowRegionPicker();
+    s_previousImageHash = 0;
+    drawScreen(s_currentScreen);
+  } else if (screen == 5) {
+    displayShowLanguagePicker();
+    s_previousImageHash = 0;
+    drawScreen(s_currentScreen);
+  } else if (screen == 6 && gps::isPresent()) {
+    gps::toggle();
+    s_previousImageHash = 0;
+    drawScreen(s_currentScreen);
+  } else if (screen == 3) {
+    selftest::run(nullptr);
+    s_previousImageHash = 0;
+    drawScreen(s_currentScreen);
+  }
+}
+
 bool displayUpdate() {
   if (!disp) return false;
   uint32_t now = millis();
 
-  // Сначала кнопка — иначе pending redraw блокирует реакцию на нажатие до 600ms
-  bool btn = BTN_PRESSED;
-  if (btn) {
-    if (!s_lastButton) { s_lastButton = true; s_pressStart = now; }
-  } else {
-    if (s_lastButton) {
+  if (!s_buttonPolledExternally) {
+    bool btn = BTN_PRESSED;
+    if (btn) {
+      if (!s_lastButton) { s_lastButton = true; s_pressStart = now; }
+    } else if (s_lastButton) {
       uint32_t hold = now - s_pressStart;
       bool isLong = (hold >= LONG_PRESS_MS);
-      bool isShort = (hold >= MIN_PRESS_MS && hold < LONG_PRESS_MS);  // 80–500ms = tab, 500ms+ = menu (без dead zone 350–500)
-      // LED feedback — устройство реагирует (против ощущения зависания)
-      pinMode(LED_PIN, OUTPUT);
-      digitalWrite(LED_PIN, HIGH);
-      delay(20);
-      digitalWrite(LED_PIN, LOW);
-      if (isShort) {
-        ensureCooldownBeforeDisplay();  // ждём cooldown, иначе performDisplayUpdate вернёт false
-        s_currentScreen = (s_currentScreen + 1) % N_TABS;
-        if (!performDisplayUpdate(s_currentScreen, true, true)) {
-          drawScreen(s_currentScreen);  // fallback — при сбое принудительный redraw
-        }
-      } else if (isLong) {
-        ensureCooldownBeforeDisplay();  // перед picker/selftest — гарантировать готовность дисплея
-        if (s_currentScreen == 0) {
-          displayShowRegionPicker();
-          s_previousImageHash = 0;  // сброс — принудительный redraw
-          drawScreen(s_currentScreen);
-        } else if (s_currentScreen == 5) {
-          displayShowLanguagePicker();
-          s_previousImageHash = 0;
-          drawScreen(s_currentScreen);
-        } else if (s_currentScreen == 6 && gps::isPresent()) {
-          gps::toggle();
-          s_previousImageHash = 0;
-          drawScreen(s_currentScreen);
-        } else if (s_currentScreen == 3) {
-          selftest::run(nullptr);
-          s_previousImageHash = 0;
-          drawScreen(s_currentScreen);
-        }
+      bool isShort = (hold >= MIN_PRESS_MS && hold < LONG_PRESS_MS);
+      if (isShort || isLong) {
+        pinMode(LED_PIN, OUTPUT);
+        digitalWrite(LED_PIN, HIGH);
+        delay(20);
+        digitalWrite(LED_PIN, LOW);
       }
+      if (isShort) {
+        ensureCooldownBeforeDisplay();
+        s_currentScreen = (s_currentScreen + 1) % N_TABS;
+        if (!performDisplayUpdate(s_currentScreen, true, true)) drawScreen(s_currentScreen);
+      } else if (isLong) displayOnLongPress(s_currentScreen);
       s_lastButton = false;
-      for (int i = 0; i < 4; i++) { delay(50); yield(); }  // 200ms чанками — BLE/radio не теряют связь
+      for (int i = 0; i < 4; i++) { delay(50); yield(); }
       return true;
     }
   }

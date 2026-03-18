@@ -5,6 +5,7 @@
 #include "node.h"
 #include <Arduino.h>
 #include <nvs_flash.h>
+#include <stdio.h>
 #include <nvs.h>
 #include <esp_random.h>
 #include <string.h>
@@ -27,13 +28,20 @@ void init() {
   if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
     size_t len = protocol::NODE_ID_LEN;
     if (nvs_get_blob(h, NVS_KEY_NODEID, s_nodeId, &len) == ESP_OK) {
-      len = sizeof(s_nickname);
-      if (nvs_get_str(h, NVS_KEY_NICKNAME, s_nickname, &len) != ESP_OK) {
-        s_nickname[0] = '\0';
+      // Отвергаем некорректный ID (0xFF 0xFF в начале = broadcast/сброс NVS)
+      if (s_nodeId[0] == 0xFF && s_nodeId[1] == 0xFF) {
+        Serial.println("[RiftLink] Node ID invalid (0xFF..), regenerating");
+        nvs_close(h);
+        // Генерируем новый — см. ниже
+      } else {
+        len = sizeof(s_nickname);
+        if (nvs_get_str(h, NVS_KEY_NICKNAME, s_nickname, &len) != ESP_OK) {
+          s_nickname[0] = '\0';
+        }
+        s_inited = true;
+        nvs_close(h);
+        return;
       }
-      s_inited = true;
-      nvs_close(h);
-      return;
     }
     nvs_close(h);
   }
@@ -42,6 +50,8 @@ void init() {
   for (size_t i = 0; i < protocol::NODE_ID_LEN; i++) {
     s_nodeId[i] = (uint8_t)(esp_random() & 0xFF);
   }
+  Serial.printf("[RiftLink] Node ID: %02X%02X%02X%02X... (new)\n",
+      s_nodeId[0], s_nodeId[1], s_nodeId[2], s_nodeId[3]);
 
   nvs_handle_t hw;
   if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &hw) == ESP_OK) {
@@ -69,6 +79,10 @@ bool isBroadcast(const uint8_t* to) {
     if (to[i] != 0xFF) return false;
   }
   return true;
+}
+
+bool isInvalidNodeId(const uint8_t* id) {
+  return id && id[0] == 0xFF && id[1] == 0xFF;
 }
 
 void getNickname(char* out, size_t maxLen) {
