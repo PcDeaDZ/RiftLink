@@ -50,6 +50,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   int? _batteryMv;
   List<String> _neighbors = [];
   List<int> _neighborsRssi = [];
+  List<bool> _neighborsHasKey = [];  // true = можно отправить
   List<Map<String, dynamic>> _routes = [];
   List<int> _groups = [];
   Map<String, String> _contactNicknames = {};
@@ -65,6 +66,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   final Set<String> _readSent = {};
   final Set<String> _pendingPings = {};
   Timer? _ttlTimer;
+  Timer? _neighborsPollTimer;
   bool _meshAnimationEnabled = true;
   AnimationController? _meshAnimController;
   StreamSubscription? _connStateSub;
@@ -102,6 +104,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     });
     _ttlTimer = Timer.periodic(const Duration(minutes: 1), (_) {
       if (mounted && _messages.any((m) => m.deleteAt != null && DateTime.now().isAfter(m.deleteAt!))) setState(() {});
+    });
+    // Периодический getInfo при пустых соседях — V4 и др. могут обнаружить их после подключения
+    _neighborsPollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!mounted || !widget.ble.isConnected || _neighbors.isNotEmpty) return;
+      widget.ble.getInfo();
     });
   }
 
@@ -146,6 +153,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     _controller.removeListener(_onTextChanged);
     localeNotifier.removeListener(_onLocaleChanged);
     _ttlTimer?.cancel();
+    _neighborsPollTimer?.cancel();
     _voiceRecordTicker?.dispose();
     _meshAnimController?.dispose();
     _sub?.cancel();
@@ -437,7 +445,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           _region = evt.region; _channel = evt.channel; _version = evt.version; _sf = evt.sf;
           _offlinePending = evt.offlinePending; _gpsPresent = evt.gpsPresent; _gpsEnabled = evt.gpsEnabled;
           _gpsFix = evt.gpsFix; _powersave = evt.powersave; _neighbors = evt.neighbors;
-          _neighborsRssi = evt.neighborsRssi; _routes = evt.routes; _groups = evt.groups;
+          _neighborsRssi = evt.neighborsRssi; _neighborsHasKey = evt.neighborsHasKey; _routes = evt.routes; _groups = evt.groups;
         });
         if (bleDev != null && evt.id.isNotEmpty) {
           RecentDevicesService.addOrUpdate(
@@ -459,7 +467,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         _scrollToBottom();
       } else if (evt is RiftLinkOtaEvent) { _showOtaDialog(evt.ip, evt.ssid, evt.password); }
       else if (evt is RiftLinkRegionEvent) { setState(() { _region = evt.region; _channel = evt.channel; }); }
-      else if (evt is RiftLinkNeighborsEvent) { setState(() { _neighbors = evt.neighbors; _neighborsRssi = evt.rssi; }); }
+      else if (evt is RiftLinkNeighborsEvent) { setState(() { _neighbors = evt.neighbors; _neighborsRssi = evt.rssi; _neighborsHasKey = evt.hasKey; }); }
       else if (evt is RiftLinkPongEvent) {
         final fromNorm = evt.from.length >= 8 ? evt.from.substring(0, 8).toUpperCase() : evt.from.toUpperCase();
         _pendingPings.remove(fromNorm);
@@ -504,11 +512,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
   // ── Actions ──
 
+  static const _broadcastTo = 'FFFFFFFFFFFFFFFF';  // совпадает с evt.to в "sent" для broadcast
+
   Future<void> _send({int ttlMinutes = 0}) async {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
     _controller.clear();
-    setState(() { _messages.add(_Msg(from: _nodeId, text: text, isIncoming: false, to: _unicastTo)); });
+    // Broadcast: to = FFFF... чтобы RiftLinkSentEvent нашёл сообщение; group = null
+    final toForMsg = _group > 0 ? null : (_unicastTo ?? _broadcastTo);
+    setState(() { _messages.add(_Msg(from: _nodeId, text: text, isIncoming: false, to: toForMsg)); });
     _scrollToBottom();
     await widget.ble.send(text: text, to: _unicastTo, group: _group > 0 ? _group : null, ttlMinutes: ttlMinutes);
   }
@@ -974,7 +986,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
             const Divider(height: 1, color: AppColors.divider),
-            if (_nodeId.isNotEmpty && _neighbors.isNotEmpty) _buildRecipientBar(l),
+            if (_nodeId.isNotEmpty) _buildRecipientBar(l),
             Expanded(
               child: Stack(
                 children: [
@@ -1181,10 +1193,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           ..._groups.map((gid) => _rcpChip('${l.tr('group')} $gid', _group == gid && _unicastTo == null, () => setState(() { _unicastTo = null; _group = _group == gid ? 0 : gid; }))),
           ..._neighbors.asMap().entries.map((e) {
             final id = e.value; final rssi = e.key < _neighborsRssi.length ? _neighborsRssi[e.key] : 0;
-            final label = _contactNicknames[id]?.isNotEmpty == true ? _contactNicknames[id]! : (rssi != 0 ? '$id ($rssi)' : id);
+            final hasKey = e.key < _neighborsHasKey.length ? _neighborsHasKey[e.key] : true;
+            final baseLabel = _contactNicknames[id]?.isNotEmpty == true ? _contactNicknames[id]! : (rssi != 0 ? '$id ($rssi)' : id);
+            final label = hasKey ? baseLabel : '$baseLabel — ${l.tr('waiting_key')}';
             return GestureDetector(
               onLongPress: () => _showAddContactDialog(id),
-              child: _rcpChip(label, _unicastTo == id, () => setState(() { _unicastTo = _unicastTo == id ? null : id; _group = 0; })),
+              child: _rcpChip(label, _unicastTo == id, hasKey ? () => setState(() { _unicastTo = _unicastTo == id ? null : id; _group = 0; }) : () {
+                if (!hasKey) _showSnack(l.tr('waiting_key'));
+              }, dimmed: !hasKey),
             );
           }),
         ]),
@@ -1192,17 +1208,18 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     );
   }
 
-  Widget _rcpChip(String label, bool selected, VoidCallback onTap) {
+  Widget _rcpChip(String label, bool selected, VoidCallback onTap, {bool dimmed = false}) {
+    final color = dimmed ? AppColors.onSurfaceVariant.withOpacity(0.6) : (selected ? AppColors.primary : AppColors.onSurface);
     return GestureDetector(
       onTap: onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
         decoration: BoxDecoration(
-          color: selected ? AppColors.primary.withOpacity(0.2) : AppColors.card,
+          color: selected ? AppColors.primary.withOpacity(0.2) : (dimmed ? AppColors.card.withOpacity(0.7) : AppColors.card),
           borderRadius: BorderRadius.circular(16),
           border: Border.all(color: selected ? AppColors.primary : AppColors.divider),
         ),
-        child: Text(label, style: TextStyle(fontSize: 12, color: selected ? AppColors.primary : AppColors.onSurface, fontWeight: selected ? FontWeight.w600 : FontWeight.normal)),
+        child: Text(label, style: TextStyle(fontSize: 12, color: color, fontWeight: selected ? FontWeight.w600 : FontWeight.normal)),
       ),
     );
   }

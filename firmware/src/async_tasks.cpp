@@ -1,5 +1,5 @@
 /**
- * Async Tasks — packetTask, displayTask
+ * Async Tasks — packetTask, displayTask, rxTask
  */
 
 #include "async_tasks.h"
@@ -7,6 +7,9 @@
 #include "async_queues.h"
 #include "ui/display.h"
 #include "radio/radio.h"
+#include "protocol/packet.h"
+#include "crypto/crypto.h"
+#include "powersave/powersave.h"
 #include <Arduino.h>
 #include <ESP.h>
 #include <freertos/FreeRTOS.h>
@@ -14,11 +17,15 @@
 #include <esp_heap_caps.h>
 #include <string.h>
 
+extern void getNextRxSlotParams(uint8_t* sfOut, uint32_t* slotMsOut);
+
 #define DISPLAY_HEARTBEAT_MS 10000  // лог раз в 10 с — проверить, что displayTask жив
 
 #define PACKET_TASK_STACK 32768
+#define RX_TASK_STACK 4096
 #define DISPLAY_TASK_STACK 8192   // 12KB — create FAIL (heap), 8KB — минимум для создания
 #define PACKET_TASK_PRIO 2
+#define RX_TASK_PRIO 4   // выше packetTask — приём важнее обработки
 #define DISPLAY_TASK_PRIO 1
 #if defined(USE_EINK)
 #define PACKET_TASK_PRIO_EINK 3   // Paper: выше displayTask — e-ink блокирует, packetTask важнее
@@ -117,6 +124,56 @@ static void packetTask(void* arg) {
   }
 }
 
+static void rxTask(void* arg) {
+  static uint8_t rxBuf[protocol::SYNC_LEN + protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+  vTaskDelay(pdMS_TO_TICKS(500));  // дать setup завершиться
+  for (;;) {
+    if (powersave::canSleep()) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+    uint8_t sf;
+    uint32_t slotMs;
+    getNextRxSlotParams(&sf, &slotMs);
+    if (!radio::takeMutex(pdMS_TO_TICKS(10))) {
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+    radio::setSpreadingFactor(sf);
+    radio::startReceiveWithTimeout(slotMs);
+    radio::releaseMutex();
+    vTaskDelay(pdMS_TO_TICKS(slotMs));
+    if (!radio::takeMutex(pdMS_TO_TICKS(50))) continue;
+    int n = radio::receiveAsync(rxBuf, sizeof(rxBuf));
+    radio::releaseMutex();
+    if (n > 0) {
+      int rssi = radio::getLastRssi();
+      if (packetQueue) {
+#if defined(USE_EINK)
+        // При почти полной очереди дропаем HELLO (дубликаты) — оставляем место для KEY_EXCHANGE
+        UBaseType_t qLen = uxQueueMessagesWaiting(packetQueue);
+        bool isHello = (n == 13 && rxBuf[0] == protocol::SYNC_BYTE && rxBuf[2] == protocol::OP_HELLO);
+        if (!(isHello && qLen >= 48))  // 75% от 64 — дроп HELLO, сохраняем KEY_EXCHANGE
+#endif
+        {
+          PacketQueueItem pitem;
+          if ((size_t)n <= sizeof(pitem.buf)) {
+            memcpy(pitem.buf, rxBuf, (size_t)n);
+            pitem.len = (uint16_t)n;
+            pitem.rssi = (int8_t)rssi;
+            pitem.sf = sf;
+            if (xQueueSend(packetQueue, &pitem, pdMS_TO_TICKS(30)) != pdTRUE) {
+              RIFTLINK_LOG_ERR("[RiftLink] packetQueue full, drop\n");
+            }
+          }
+        }
+      } else {
+        handlePacket(rxBuf, (size_t)n, rssi, sf);
+      }
+    }
+  }
+}
+
 static void displayTask(void* arg) {
   vTaskDelay(pdMS_TO_TICKS(100));  // дать setup завершиться
   DisplayQueueItem item;
@@ -157,9 +214,27 @@ static void displayTask(void* arg) {
 }
 
 void asyncTasksStart() {
+#if defined(USE_EINK)
+  // Paper: displayTask на ядре 0 — e-ink display() блокирует ~600ms
+  // packetTask и rxTask на ядре 1 — не блокируются e-ink, обрабатывают пакеты без задержек
+  BaseType_t okDisplay = xTaskCreatePinnedToCore(displayTask, "display", DISPLAY_TASK_STACK, nullptr, DISPLAY_TASK_PRIO, nullptr, 0);
+#else
   BaseType_t okDisplay = xTaskCreate(displayTask, "display", DISPLAY_TASK_STACK, nullptr, DISPLAY_TASK_PRIO, nullptr);
+#endif
   if (okDisplay == pdFAIL) {
     RIFTLINK_LOG_ERR("[RiftLink] displayTask create FAIL (need %u)\n", (unsigned)DISPLAY_TASK_STACK);
   }
+#if defined(USE_EINK)
+  BaseType_t okPacket = xTaskCreatePinnedToCore(packetTask, "packet", PACKET_TASK_STACK, nullptr, PACKET_TASK_PRIO_EINK, nullptr, 1);
+  if (okPacket == pdFAIL) {
+    RIFTLINK_LOG_ERR("[RiftLink] packetTask create FAIL — loop будет обрабатывать packetQueue\n");
+  }
+  BaseType_t okRx = xTaskCreatePinnedToCore(rxTask, "rx", RX_TASK_STACK, nullptr, RX_TASK_PRIO, nullptr, 1);
+#else
   xTaskCreate(packetTask, "packet", PACKET_TASK_STACK, nullptr, PACKET_TASK_PRIO_EINK, nullptr);
+  BaseType_t okRx = xTaskCreate(rxTask, "rx", RX_TASK_STACK, nullptr, RX_TASK_PRIO, nullptr);
+#endif
+  if (okRx == pdFAIL) {
+    RIFTLINK_LOG_ERR("[RiftLink] rxTask create FAIL\n");
+  }
 }

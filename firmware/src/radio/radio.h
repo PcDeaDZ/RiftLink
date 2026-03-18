@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <freertos/FreeRTOS.h>
 
 namespace radio {
 
@@ -13,8 +14,11 @@ bool init();
 void setAsyncMode(bool on);
 /** txSf: 0 = текущий baseSf, 7–12 = принудительный SF (per-neighbor) */
 bool send(const uint8_t* data, size_t len, uint8_t txSf = 0, bool priority = false);
-/** Реальная отправка на радио (вызывать только из loopTask при drain sendQueue) */
+/** Отправка на радио (с mutex). Для drain — takeMutex, sendDirectInternal, releaseMutex */
 bool sendDirect(const uint8_t* data, size_t len);
+bool sendDirectInternal(const uint8_t* data, size_t len);  // без mutex — вызывать между take/release
+bool takeMutex(TickType_t timeout);
+void releaseMutex();
 int receive(uint8_t* buf, size_t maxLen);
 /** Асинхронный приём: startReceiveWithTimeout + readData. Для power save с light sleep. */
 bool startReceiveWithTimeout(uint32_t timeoutMs);

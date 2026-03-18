@@ -55,8 +55,10 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #define POST_PRESS_DEBOUNCE_MS 400  // игнор дребезга после обработки — против двойного long press
 #define PENDING_REDRAW_RETRY_MS 2500  // retry смены вкладки, если дисплей не принял за 2.5с
 
-#define HELLO_INTERVAL_MS  10000
-#define HELLO_JITTER_MS    2000   // ±2s — чтобы два устройства не передавали одновременно
+#define HELLO_INTERVAL_MS  30000  // 30с — спокойный режим (Meshtastic: position 15мин, telemetry 30мин)
+#define HELLO_INTERVAL_AGGRESSIVE_MS 15000  // 15с — discovery при 0 соседях
+#define HELLO_JITTER_MS    3000   // ±3с — при 1+ соседях
+#define HELLO_JITTER_ZERO_MS 2000 // ±2с при 0 соседях
 #define TELEM_INTERVAL_MS  60000
 #define GPS_LOC_INTERVAL_MS 60000  // интервал отправки локации с GPS
 #define SF_ADAPT_INTERVAL_MS 30000 // адаптивный SF по качеству связи
@@ -73,6 +75,50 @@ static uint8_t s_sf12BurstCount = 0;  // 2 цикла SF12 подряд кажд
 static uint32_t s_lastSf12Burst = 0;
 static uint32_t s_lastKeyRetry = 0;   // retry KEY_EXCHANGE каждые 30с для соседей без ключа
 static uint8_t rxBuf[protocol::SYNC_LEN + protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+
+/** Параметры следующего RX-слота для rxTask. Вызывать из rxTask. */
+void getNextRxSlotParams(uint8_t* sfOut, uint32_t* slotMsOut) {
+  bool aggressive = (millis() - s_bootTime) < 120000;
+  int nNeigh = neighbors::getCount();
+  uint8_t baseSf = 7;
+#if !defined(SF_FORCE_7)
+  if (s_sf12BurstCount == 0 && (millis() - s_lastSf12Burst) >= 30000) {
+    s_sf12BurstCount = 2;
+  }
+  if (nNeigh > 0) {
+    int avgRssi = neighbors::getAverageRssi();
+    if (avgRssi < -110) baseSf = 12;
+    else if (avgRssi < -80) baseSf = 9;
+  }
+  int minRssi = neighbors::getMinRssi();
+  bool needSf10 = (nNeigh > 0 && minRssi != 0 && minRssi < -90);
+  int rxMod = aggressive ? 2 : ((nNeigh == 0) ? 3 : (nNeigh >= 6 ? 4 : (nNeigh >= 3 ? 6 : 8)));
+  uint8_t sf = 7;
+  if (s_sf12BurstCount > 0) {
+    sf = 12;
+    s_sf12BurstCount--;
+    if (s_sf12BurstCount == 0) s_lastSf12Burst = millis();
+  } else if (s_nextRxSf12) {
+    sf = 12;
+    s_nextRxSf12 = false;
+  } else {
+    int mod = s_rxCycleCounter % rxMod;
+    if (mod == 0) sf = 12;
+    else if (needSf10 && mod == 1) sf = 10;
+    else sf = baseSf;
+  }
+  s_rxCycleCounter++;
+  if (sfOut) *sfOut = sf;
+  // slotMs: SF12 ~1.1s для 54B, SF10 ~300ms, SF7 ~50ms. При 0 соседях — 1200ms.
+  uint32_t slot = (nNeigh == 0) ? 1200 : ((sf >= 12) ? 1200 : ((sf >= 10) ? 400 : 100));
+  if (slotMsOut) *slotMsOut = slot;
+#else
+  (void)aggressive;
+  (void)nNeigh;
+  if (sfOut) *sfOut = 7;
+  if (slotMsOut) *slotMsOut = 200;  // 200ms — MSG ~80B на SF7 ~50ms, запас на коллизии
+#endif
+}
 
 // Буферы для handlePacket (packetTask) — s_fragOutBuf/s_voiceOutBuf слишком велики для стека
 static uint8_t s_fragOutBuf[frag::MAX_MSG_PLAIN];
@@ -181,10 +227,15 @@ void sendHello() {
 }
 
 void sendMsg(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
+  if (text == nullptr || strlen(text) == 0) {
+    ble::notifyError("send_empty", "Пустое сообщение не отправляется");
+    return;
+  }
   if (!msg_queue::enqueue(to, text, ttlMinutes)) {
     RIFTLINK_LOG_ERR("[RiftLink] Queue full or encrypt FAILED\n");
     ble::notifyError("send_failed", "Очередь полна или нет ключа шифрования");
-  } else {
+  } else if (node::isBroadcast(to)) {
+    ble::notifySent(protocol::BROADCAST_ID, 0);  // broadcast — без msgId, чтобы вкладка сообщений показывала отправку
   }
 }
 
@@ -215,22 +266,68 @@ void sendLocation(float lat, float lon, int16_t alt) {
 }
 
 void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
+  uint8_t decBuf[256];
+  uint8_t tmpBuf[256];
+  char msgStrBuf[256];
+  uint8_t fwdBuf[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+
+  // Self-reception: свой KEY_EXCHANGE (обрезанный до 13B) — отбросить без лога
+  if (len == 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 &&
+      buf[2] == protocol::OP_KEY_EXCHANGE && !(buf[1] & 0x01) &&  // unicast
+      memcmp(buf + 3, node::getId(), protocol::NODE_ID_LEN) == 0) {
+    return;  // наш исходящий KEY_EXCHANGE, принятый по эху/отражению
+  }
+
+  protocol::PacketHeader hdr;
+  const uint8_t* payload;
+  size_t payloadLen;
+  if (!protocol::parsePacket(buf, len, &hdr, &payload, &payloadLen)) {
+    // Fallback: коллизия/перегрузка — HELLO (13B) + мусор. Пробуем распарсить только первые 13 байт
+    if (len >= 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 &&
+        buf[2] == protocol::OP_HELLO && (buf[1] & 0x01)) {  // broadcast
+      if (protocol::parsePacket(buf, 13, &hdr, &payload, &payloadLen)) {
+        payloadLen = 0;
+        payload = nullptr;
+        // продолжаем обработку ниже
+      } else {
+#if defined(DEBUG_PACKET_DUMP)
+        Serial.printf("[RiftLink] Parse FAIL len=%u rssi=%d hex=", (unsigned)len, rssi);
+        for (size_t i = 0; i < len && i < 32; i++) Serial.printf("%02X", buf[i]);
+        Serial.println();
+#endif
+        return;
+      }
+    } else if (len == 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 &&
+               buf[2] == protocol::OP_KEY_EXCHANGE && !(buf[1] & 0x01)) {
+      // Обрезанный KEY_EXCHANGE (коллизия/half-duplex) — извлечь from, добавить в соседи
+      uint8_t from[protocol::NODE_ID_LEN];
+      memcpy(from, buf + 3, protocol::NODE_ID_LEN);
+      if (!node::isBroadcast(from) && !node::isInvalidNodeId(from)) {
+        neighbors::onHello(from, rssi);
+      }
+      return;
+    } else {
+      // len==13 и opcode MSG/TELEMETRY/GROUP_MSG/KEY_EXCHANGE — обрезанный пакет (коллизия/SF), не спамить
+      bool truncated = (len == 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 &&
+          (buf[2] == protocol::OP_MSG || buf[2] == protocol::OP_TELEMETRY || buf[2] == protocol::OP_GROUP_MSG ||
+           buf[2] == protocol::OP_KEY_EXCHANGE));
+#if defined(DEBUG_PACKET_DUMP)
+      if (!truncated) {
+        Serial.printf("[RiftLink] Parse FAIL len=%u rssi=%d hex=", (unsigned)len, rssi);
+        for (size_t i = 0; i < len && i < 32; i++) Serial.printf("%02X", buf[i]);
+        Serial.println();
+      }
+#endif
+      return;
+    }
+  }
+
 #if defined(DEBUG_PACKET_DUMP)
   Serial.printf("[PKT] len=%u rssi=%d sf=%u hex=", (unsigned)len, rssi, sf);
   for (size_t i = 0; i < len && i < 64; i++) Serial.printf("%02X", buf[i]);
   if (len > 64) Serial.print("...");
   Serial.println();
 #endif
-
-  uint8_t decBuf[256];
-  uint8_t tmpBuf[256];
-  char msgStrBuf[256];
-  uint8_t fwdBuf[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
-
-  protocol::PacketHeader hdr;
-  const uint8_t* payload;
-  size_t payloadLen;
-  if (!protocol::parsePacket(buf, len, &hdr, &payload, &payloadLen)) return;
 
   // from=broadcast — некорректно, отбрасываем
   if (node::isBroadcast(hdr.from) || node::isInvalidNodeId(hdr.from)) return;
@@ -248,7 +345,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       (hdr.opcode == protocol::OP_VOICE_MSG));
   if (needRelay) {
     memcpy(fwdBuf, buf, len);
-    size_t ttlOff = (buf[0] == protocol::SYNC_BYTE) ? (protocol::SYNC_LEN + 1 + protocol::NODE_ID_LEN * 2) : (1 + protocol::NODE_ID_LEN * 2);
+    size_t ttlOff;
+    if (buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20) {
+      ttlOff = (buf[1] & 0x01) ? 11 : 19;  // v2: broadcast=11, unicast=19
+    } else {
+      ttlOff = (buf[0] == protocol::SYNC_BYTE) ? (protocol::SYNC_LEN + 1 + protocol::NODE_ID_LEN * 2) : (1 + protocol::NODE_ID_LEN * 2);
+    }
     if (ttlOff < len) fwdBuf[ttlOff]--;
     uint8_t txSf = 0;
     if (node::isBroadcast(hdr.to)) {
@@ -354,9 +456,14 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             msg = (const char*)(decBuf + off);
             msgLen = decLen - off;
           }
-          if (msgLen < 256 && msgLen > 0) {
-            memcpy(msgStrBuf, msg, msgLen);
-            msgStrBuf[msgLen] = '\0';
+          if (msgLen < 256) {
+            if (msgLen > 0) {
+              memcpy(msgStrBuf, msg, msgLen);
+              msgStrBuf[msgLen] = '\0';
+            } else {
+              strncpy(msgStrBuf, "(пустое)", sizeof(msgStrBuf) - 1);
+              msgStrBuf[sizeof(msgStrBuf) - 1] = '\0';
+            }
             ble::requestMsgNotify(hdr.from, msgStrBuf, msgId, rssi, ttlMinutes);
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
@@ -364,8 +471,13 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           }
         } else {
           if (payloadLen < 256) {
-            memcpy(msgStrBuf, payload, payloadLen);
-            msgStrBuf[payloadLen] = '\0';
+            if (payloadLen > 0) {
+              memcpy(msgStrBuf, payload, payloadLen);
+              msgStrBuf[payloadLen] = '\0';
+            } else {
+              strncpy(msgStrBuf, "(пустое)", sizeof(msgStrBuf) - 1);
+              msgStrBuf[sizeof(msgStrBuf) - 1] = '\0';
+            }
             ble::requestMsgNotify(hdr.from, msgStrBuf, 0, rssi);
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
@@ -393,16 +505,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       break;
 
     case protocol::OP_TELEMETRY:
-      if (payloadLen > 0 && protocol::isEncrypted(hdr)) {
-        uint8_t decBuf[16];
-        size_t decLen = 0;
-        if (crypto::decrypt(payload, payloadLen, decBuf, &decLen) && decLen >= 4) {
-          uint16_t batMv, heapKb;
-          memcpy(&batMv, decBuf, 2);
-          memcpy(&heapKb, decBuf + 2, 2);
-          ble::notifyTelemetry(hdr.from, batMv, heapKb, rssi);
-        }
-      }
+      // Системная инфо (батарея, heap) — не отправляем в приложение, не для чатов
       break;
 
     case protocol::OP_LOCATION:
@@ -514,22 +617,24 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 #endif
 
 void setup() {
+  Serial.begin(115200);
+  delay(300);  // дать USB CDC / UART стабилизироваться
+  Serial.println("[RiftLink] boot...");
+  pinMode(BUTTON_PIN, INPUT_PULLUP);  // USER_SW — до displayInit, чтобы кнопка работала на Paper
+  pinMode(LED_PIN, OUTPUT);
 #if defined(USE_EINK)
   // VEXT — питание E-Ink (как Meshtastic: variant.h VEXT_ENABLE, main.cpp)
   pinMode(VEXT_PIN, OUTPUT);
   digitalWrite(VEXT_PIN, VEXT_ON_LEVEL);
   delay(300);  // стабилизация питания E-Ink перед инициализацией
 #endif
-  pinMode(BUTTON_PIN, INPUT_PULLUP);  // USER_SW — до displayInit, чтобы кнопка работала на Paper
-  pinMode(LED_PIN, OUTPUT);
   for (int i = 0; i < 3; i++) {
     digitalWrite(LED_PIN, HIGH);
     delay(100);
     digitalWrite(LED_PIN, LOW);
     delay(100);
   }
-  Serial.begin(115200);
-  delay(500);
+  delay(200);
 
   esp_err_t nvs = nvs_flash_init();
   if (nvs == ESP_ERR_NVS_NO_FREE_PAGES || nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -602,7 +707,8 @@ void setup() {
 
   s_bootTime = millis();
   s_lastSf12Burst = millis();
-  s_lastKeyRetry = millis();
+  // Фаза по nodeId — разные узлы не стартуют KEY_EXCHANGE retry одновременно
+  s_lastKeyRetry = millis() + (node::getId()[0] % 16) * 500;
 }
 
 void loop() {
@@ -616,10 +722,12 @@ void loop() {
     return;
   }
 
-  // HELLO: 0 сосед. 3с; 6+ сосед. 8с (гибрид); иначе 10с
+  // HELLO: 0 сосед — 15с (aggressive discovery); 1+ сосед — 30с; 6+ — 24с (меньше спама)
   int nNeigh = neighbors::getCount();
-  uint32_t helloInterval = aggressive ? 2000 : ((nNeigh == 0) ? 3000 : (nNeigh >= 6 ? 8000 : HELLO_INTERVAL_MS));
-  uint32_t jitter = (esp_random() % (HELLO_JITTER_MS * 2)) - HELLO_JITTER_MS;
+  uint32_t helloInterval = (nNeigh == 0 && aggressive) ? HELLO_INTERVAL_AGGRESSIVE_MS
+      : ((nNeigh == 0) ? HELLO_INTERVAL_AGGRESSIVE_MS : (nNeigh >= 6 ? 24000 : HELLO_INTERVAL_MS));
+  uint32_t jitterMs = (nNeigh == 0) ? HELLO_JITTER_ZERO_MS : HELLO_JITTER_MS;
+  uint32_t jitter = (esp_random() % (jitterMs * 2)) - (int32_t)jitterMs;
   if (millis() - lastHello > (helloInterval + (int32_t)jitter)) {
     sendHello();
     lastHello = millis();
@@ -798,206 +906,98 @@ void loop() {
     }
   }
 
-  // Базовый SF для RX
-  uint8_t baseSf;
-  uint8_t thisRxSf;
-#if defined(SF_FORCE_7)
-  baseSf = 7;
-  thisRxSf = 7;
-  radio::setSpreadingFactor(7);
-#else
-  // Burst SF12: каждые 30с — 2 цикла подряд на SF12
-  if (s_sf12BurstCount == 0 && (millis() - s_lastSf12Burst) >= 30000) {
-    s_sf12BurstCount = 2;
-  }
-  baseSf = 7;
-  if (neighbors::getCount() > 0) {
-    int avgRssi = neighbors::getAverageRssi();
-    if (avgRssi < -110) baseSf = 12;
-    else if (avgRssi < -80) baseSf = 9;
-  }
-  int minRssi = neighbors::getMinRssi();
-  bool needSf10 = (neighbors::getCount() > 0 && minRssi != 0 && minRssi < -90);  // A-B-C: B слушает SF10 для C
-  int rxMod = aggressive ? 2 : ((nNeigh == 0) ? 3 : (nNeigh >= 6 ? 4 : (nNeigh >= 3 ? 6 : 8)));
-  if (s_sf12BurstCount > 0) {
-    thisRxSf = 12;
-    s_sf12BurstCount--;
-    if (s_sf12BurstCount == 0) s_lastSf12Burst = millis();
-  } else if (s_nextRxSf12) {
-    thisRxSf = 12;
-    s_nextRxSf12 = false;
-  } else {
-    int mod = s_rxCycleCounter % rxMod;
-    if (mod == 0) thisRxSf = 12;
-    else if (needSf10 && mod == 1) thisRxSf = 10;
-    else thisRxSf = baseSf;
-  }
-  s_rxCycleCounter++;
-  radio::setSpreadingFactor(thisRxSf);
-#endif
+  // SF для RX — rxTask вызывает getNextRxSlotParams; loop только drain sendQueue
 
   pollButtonAndQueue();  // опрос до drain — не пропустить нажатие во время долгого TX
-  // Drain sendQueue — TX только из loopTask. Max 2 до RX.
-  if (sendQueue) {
+  // Drain sendQueue — TX с mutex (rxTask держит радио, мы ждём до 200ms)
+  if (sendQueue && radio::takeMutex(pdMS_TO_TICKS(200))) {
+    if (uxQueueMessagesWaiting(sendQueue) > 0) {
+      delay(50 + (esp_random() % 51));  // jitter 50–100 ms — снижает одновременный старт (COLLISION_AVOIDANCE)
+    }
     SendQueueItem item;
 #if defined(SF_FORCE_7)
     for (int i = 0; i < 2 && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
-      radio::sendDirect(item.buf, item.len);
+      if (item.len >= 54 && item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_KEY_EXCHANGE) {
+        delay(500 + (esp_random() % 1501));
+      }
+      radio::sendDirectInternal(item.buf, item.len);
     }
 #else
     int highSfDrained = 0;
     for (int i = 0; i < 2 && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
       if (item.txSf >= 10 && highSfDrained >= 1) {
-        xQueueSendToFront(sendQueue, &item, 0);  // вернуть, drain в след. итерации
+        xQueueSendToFront(sendQueue, &item, 0);
         break;
+      }
+      // KEY_EXCHANGE: jitter 500–2000 ms — half-duplex: при одновременном TX оба не получают ответ
+      if (item.len >= 54 && item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_KEY_EXCHANGE) {
+        delay(500 + (esp_random() % 1501));
       }
       if (item.txSf >= 7 && item.txSf <= 12) {
         radio::setSpreadingFactor(item.txSf);
         if (item.txSf >= 10) {
           highSfDrained++;
-          s_nextRxSf12 = true;  // слушать SF12 после drain HELLO/KEY_EXCHANGE на SF12
+          s_nextRxSf12 = true;
         }
       }
-      radio::sendDirect(item.buf, item.len);
-      if (item.txSf != 0) radio::setSpreadingFactor(thisRxSf);
+      radio::sendDirectInternal(item.buf, item.len);
+      // rxTask установит SF при следующем слоте — restore не нужен
     }
 #endif
+    radio::releaseMutex();
   }
 
-  // Retry KEY_EXCHANGE: каждые 30с — для каждого соседа без ключа отправить на SF12
-  if ((millis() - s_lastKeyRetry) >= 30000) {
-    s_lastKeyRetry = millis();
+#if defined(USE_EINK)
+  // Paper: loop также обрабатывает packetQueue — fallback если packetTask не успевает/заблокирован
+  if (packetQueue) {
+    PacketQueueItem pitem;
+    for (int i = 0; i < 8 && xQueueReceive(packetQueue, &pitem, 0) == pdTRUE; i++) {
+      handlePacket(pitem.buf, pitem.len, (int)pitem.rssi, pitem.sf);
+    }
+  }
+#endif
+
+  // Retry KEY_EXCHANGE: каждые 25–35с (jitter!) — иначе оба узла синхронно → коллизии → deadlock
+  // Фаза по nodeId[0]: разные узлы смещены — меньше шанс одновременного TX
+  #define KEY_RETRY_BASE_MS  25000
+  #define KEY_RETRY_JITTER_MS 10000
+  if (millis() >= s_lastKeyRetry) {  // s_lastKeyRetry = время следующего retry (0 = сразу при старте)
+    uint32_t phase = (node::getId()[0] % 16) * 500;  // 0–8 с смещение по ID
+    s_lastKeyRetry = millis() + KEY_RETRY_BASE_MS + (esp_random() % KEY_RETRY_JITTER_MS) + phase;
     int n = neighbors::getCount();
     for (int i = 0; i < n; i++) {
       uint8_t peerId[protocol::NODE_ID_LEN];
       if (neighbors::getId(i, peerId) && !x25519_keys::hasKeyFor(peerId)) {
         x25519_keys::sendKeyExchange(peerId, true);
+        delay(800 + (esp_random() % 400));  // 0.8–1.2 с между KEY_EXCHANGE — не коллидировать с собой
+        break;  // один за цикл — остальные в следующий раз
       }
     }
   }
 
-  int n;
+  // RX: powersave — loop (держим mutex, rxTask при canSleep не трогает радио); иначе — rxTask
+  int n = 0;
   if (powersave::canSleep()) {
-    radio::startReceiveWithTimeout(1000);
-    n = powersave::sleepUntilPacketOrTimeout(rxBuf, sizeof(rxBuf));
-  } else {
-    uint32_t rxMs = 150;
-    if (neighbors::getCount() == 0) rxMs = 600;
-    else if (neighbors::getCount() >= 6) rxMs = 150;  // 6+ — не урезать при BLE
-    else if (ble::isConnected() && neighbors::getCount() > 1) rxMs = 80;
-
-#if defined(SF_FORCE_7)
-    (void)baseSf;
-    radio::setSpreadingFactor(7);
-    radio::startReceiveWithTimeout(rxMs);
-    uint32_t t0 = millis();
-    while (millis() - t0 < rxMs) {
-      yield();
-      pollButtonAndQueue();
-      if (sendQueue) {
-        SendQueueItem item;
-        if (xQueueReceive(sendQueue, &item, 0) == pdTRUE) {
-          radio::sendDirect(item.buf, item.len);
-        }
-        uint32_t remain = rxMs - (millis() - t0);
-        if (remain > 0) radio::startReceiveWithTimeout(remain);
-      }
-      uint32_t elapsed = millis() - t0;
-      if (elapsed >= rxMs) break;
-      uint32_t chunk = (rxMs - elapsed) > 30 ? 30 : (rxMs - elapsed);
-      delay(chunk);
+    if (radio::takeMutex(pdMS_TO_TICKS(100))) {
+      radio::setSpreadingFactor(7);
+      radio::startReceiveWithTimeout(1000);
+      n = powersave::sleepUntilPacketOrTimeout(rxBuf, sizeof(rxBuf));  // sleep + receiveAsync внутри
+      radio::releaseMutex();
     }
-    n = radio::receiveAsync(rxBuf, sizeof(rxBuf));
-#else
-    if (neighbors::getCount() > 0) {
-      // Multi-SF RX: 50ms SF12 + 50ms SF10 + 50ms baseSf — гибрид для 10+ узлов
-      const uint8_t slotSf[3] = {12, 10, baseSf};
-      n = 0;
-      for (int s = 0; s < 3; s++) {
-        radio::setSpreadingFactor(slotSf[s]);
-        radio::startReceiveWithTimeout(50);
-        uint32_t t0 = millis();
-        while (millis() - t0 < 50) {
-          yield();
-          pollButtonAndQueue();
-          if (sendQueue) {
-            SendQueueItem item;
-            if (xQueueReceive(sendQueue, &item, 0) == pdTRUE) {
-              if (item.txSf >= 10) xQueueSendToFront(sendQueue, &item, 0);
-              else {
-                if (item.txSf >= 7 && item.txSf <= 12) radio::setSpreadingFactor(item.txSf);
-                radio::sendDirect(item.buf, item.len);
-                if (item.txSf != 0) radio::setSpreadingFactor(slotSf[s]);
-              }
-            }
-            uint32_t remain = 50 - (millis() - t0);
-            if (remain > 0) radio::startReceiveWithTimeout(remain);
-          }
-          uint32_t el = millis() - t0;
-          if (el >= 50) break;
-          delay((50 - el) > 30 ? 30 : (50 - el));
+    if (n > 0) {
+      int rssi = radio::getLastRssi();
+      if (packetQueue) {
+        PacketQueueItem item;
+        if ((size_t)n <= sizeof(item.buf)) {
+          memcpy(item.buf, rxBuf, (size_t)n);
+          item.len = (uint16_t)n;
+          item.rssi = (int8_t)rssi;
+          item.sf = 7;
+          xQueueSend(packetQueue, &item, pdMS_TO_TICKS(30));
         }
-        int nr = radio::receiveAsync(rxBuf, sizeof(rxBuf));
-        if (nr > 0) {
-          if (packetQueue) {
-            PacketQueueItem pitem;
-            if ((size_t)nr <= sizeof(pitem.buf)) {
-              memcpy(pitem.buf, rxBuf, nr);
-              pitem.len = (uint16_t)nr;
-              pitem.rssi = (int8_t)radio::getLastRssi();
-              pitem.sf = slotSf[s];
-              xQueueSend(packetQueue, &pitem, 0);
-            }
-          } else {
-            handlePacket(rxBuf, nr, radio::getLastRssi(), slotSf[s]);
-        }
+      } else {
+        handlePacket(rxBuf, (size_t)n, rssi, 7);
       }
-    } else {
-      radio::startReceiveWithTimeout(rxMs);
-      uint32_t t0 = millis();
-      while (millis() - t0 < rxMs) {
-        yield();
-        pollButtonAndQueue();
-        if (sendQueue) {
-          SendQueueItem item;
-          if (xQueueReceive(sendQueue, &item, 0) == pdTRUE) {
-            if (item.txSf >= 10) xQueueSendToFront(sendQueue, &item, 0);
-            else {
-              if (item.txSf >= 7 && item.txSf <= 12) radio::setSpreadingFactor(item.txSf);
-              radio::sendDirect(item.buf, item.len);
-              if (item.txSf != 0) radio::setSpreadingFactor(thisRxSf);
-            }
-          }
-          uint32_t remain = rxMs - (millis() - t0);
-          if (remain > 0) radio::startReceiveWithTimeout(remain);
-        }
-        uint32_t elapsed = millis() - t0;
-        if (elapsed >= rxMs) break;
-        uint32_t chunk = (rxMs - elapsed) > 30 ? 30 : (rxMs - elapsed);
-        delay(chunk);
-      }
-      n = radio::receiveAsync(rxBuf, sizeof(rxBuf));
-    }
-  }
-#endif
-  }
-  if (n > 0) {
-    int rssi = radio::getLastRssi();
-    // opcode = buf[18] при len>=19 (header)
-    uint8_t op = (n >= 19) ? rxBuf[18] : 0;
-    if (packetQueue) {
-      PacketQueueItem item;
-      if ((size_t)n <= sizeof(item.buf)) {
-        memcpy(item.buf, rxBuf, (size_t)n);
-        item.len = (uint16_t)n;
-        item.rssi = (int8_t)rssi;
-        item.sf = thisRxSf;
-        if (xQueueSend(packetQueue, &item, pdMS_TO_TICKS(30)) != pdTRUE) {
-          RIFTLINK_LOG_ERR("[RiftLink] packetQueue full, drop\n");
-        }
-      }
-    } else {
-      handlePacket(rxBuf, (size_t)n, rssi, thisRxSf);
     }
   }
 

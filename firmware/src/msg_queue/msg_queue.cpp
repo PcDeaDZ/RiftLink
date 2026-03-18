@@ -72,6 +72,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
 
   const bool isUnicast = !node::isBroadcast(to);
   size_t textLen = strlen(text);
+  if (textLen == 0) { xSemaphoreGive(s_mutex); return false; }  // пустые — не отправлять
 
   // Длинные сообщения — фрагментация (без ACK для MVP)
   size_t ttlOverhead = (ttlMinutes > 0) ? MSG_TTL_LEN : 0;
@@ -182,6 +183,7 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
   if (!s_inited) return false;
 
   size_t textLen = strlen(text);
+  if (textLen == 0) return false;  // пустые — не отправлять
   constexpr size_t maxPlain = MAX_SINGLE_PLAIN - GROUP_ID_LEN;
   if (textLen > maxPlain) return false;
 

@@ -59,6 +59,7 @@ final Map<String, Map<String, String>> _strings = {
   'ota_started': {'en': 'OTA started. Connect to WiFi RiftLink-OTA...', 'ru': 'OTA запущен. Подключитесь к WiFi RiftLink-OTA...'},
   'ota_failed': {'en': 'Failed to send OTA command', 'ru': 'Не удалось отправить команду OTA'},
   'no_neighbors_voice': {'en': 'No neighbors for voice message', 'ru': 'Нет соседей для голосового сообщения'},
+  'waiting_key': {'en': 'Waiting for key', 'ru': 'Ожидание ключа'},
   'send_voice': {'en': 'Send voice', 'ru': 'Отправить голос'},
   'voice_recording': {'en': 'Recording... Press stop to send', 'ru': 'Запись... Нажмите стоп для отправки'},
   'voice_mic_error': {'en': 'Microphone access error', 'ru': 'Ошибка доступа к микрофону'},

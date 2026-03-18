@@ -6,7 +6,7 @@
 **Дата:** 2026  
 **Платформа:** Heltec WiFi LoRa 32 V3/V4 (ESP32-S3, SX1262, OLED/BLE), Heltec V3 Paper (E-Ink 2.13")
 
-### Текущее состояние (прошивка 1.2.0)
+### Текущее состояние (прошивка 1.2.5)
 
 Основной функционал реализован: MSG, X25519 E2E, GROUP_MSG, офлайн-очередь, ROUTE_REQ/REPLY, VOICE_MSG, ACK/READ, LZ4, MSG_FRAG, LOCATION, TELEMETRY, OTA, регионы, invite/acceptInvite (QR). Валидация пакетов при RF-помехах. Поддержка V3 (OLED), V4 (OLED), V3 Paper (E-Ink).
 
@@ -162,19 +162,31 @@
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 Формат пакета (черновик)
+### 4.2 Формат пакета
 
+**v2 (version 0x20, с 1.2.6):** opcode первым, компактный broadcast (экономия 8 байт).
+
+**Broadcast** (HELLO, PING, ROUTE_REQ и т.д., флаг broadcast=1):
 ```
-┌────────┬────────┬────────┬────────┬────────┬────────┬─────────────┐
-│ Header │ From   │ To     │ TTL    │ Opcode │ Payload│ MAC/Sign    │
-│ 1 byte │ 8 byte │ 8 byte │ 1 byte │ 1 byte │ N byte │ 16 byte     │
-└────────┴────────┴────────┴────────┴────────┴────────┴─────────────┘
+┌──────┬────────┬────────┬────────┬──────┬────────┬────────┐
+│ Sync │ Ver    │ Opcode │ From   │ TTL  │ Channel│Payload │
+│ 1 B  │ 1 B    │ 1 B    │ 8 B    │ 1 B  │ 1 B    │ N B    │
+└──────┴────────┴────────┴────────┴──────┴────────┴────────┘
+```
+Заголовок: **13 байт** (без 8 байт to=0xFF..FF).
 
-Header: версия (4 bit) + флаги (encrypted, compressed, ack, etc.)
+**Unicast** (MSG, ACK, KEY_EXCHANGE и т.д.):
+```
+┌──────┬────────┬────────┬────────┬────────┬──────┬────────┬────────┐
+│ Sync │ Ver    │ Opcode │ From   │ To     │ TTL  │ Channel│Payload │
+│ 1 B  │ 1 B    │ 1 B    │ 8 B    │ 8 B   │ 1 B  │ 1 B    │ N B    │
+└──────┴────────┴────────┴────────┴────────┴──────┴────────┴────────┘
+```
+Заголовок: **21 байт**.
+
+Ver: версия (4 bit) + флаги (encrypted, compressed, ack_req, broadcast)
 From/To: Node ID (8 байт, первые 4 = short ID для роутинга)
-TTL: Time To Live — макс. число хопов (0–255). При ретрансляции: TTL--
 Opcodes: 0x01 MSG, 0x02 ACK, 0x03 HELLO, 0x04 ROUTE_REQ, 0x05 ROUTE_REPLY, 0x06 KEY_EXCHANGE, ...
-```
 
 ### 4.2.1 Максимальное число хопов
 

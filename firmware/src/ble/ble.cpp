@@ -135,9 +135,10 @@ class CharCallbacks : public NimBLECharacteristicCallbacks {
 
     if (strcmp(cmd, "send") == 0) {
       const char* text = doc["text"];
-      if (!text) return;
+      if (!text || strlen(text) == 0) return;  // пустые — не отправлять
       uint32_t groupId = doc["group"] | 0;
       if (groupId > 0) {
+        if (strlen(text) == 0) return;  // пустые в группу — не отправлять
         strncpy(s_pendingGroupText, text, sizeof(s_pendingGroupText) - 1);
         s_pendingGroupText[sizeof(s_pendingGroupText) - 1] = '\0';
         s_pendingGroupId = groupId;
@@ -502,21 +503,8 @@ void notifyLocation(const uint8_t* from, float lat, float lon, int16_t alt, int 
 }
 
 void notifyTelemetry(const uint8_t* from, uint16_t batteryMv, uint16_t heapKb, int rssi) {
-  if (!pRxChar || !s_connected) return;
-
-  JsonDocument doc;
-  doc["evt"] = "telemetry";
-  char fromHex[17] = {0};
-  for (int i = 0; i < 8; i++) snprintf(fromHex + i*2, 3, "%02X", from[i]);
-  doc["from"] = fromHex;
-  doc["battery"] = batteryMv;
-  doc["heapKb"] = heapKb;
-  if (rssi != 0) doc["rssi"] = rssi;
-
-  char buf[150];
-  size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  (void)from; (void)batteryMv; (void)heapKb; (void)rssi;
+  // Телеметрия не отправляется в приложение — системная инфо, не для чатов
 }
 
 void notifyInfo() {
@@ -554,13 +542,16 @@ void notifyInfo() {
 
   JsonArray arr = doc["neighbors"].to<JsonArray>();
   JsonArray rssiArr = doc["neighborsRssi"].to<JsonArray>();
+  JsonArray hasKeyArr = doc["neighborsHasKey"].to<JsonArray>();
   int n = neighbors::getCount();
   char hex[17];
+  uint8_t peerId[protocol::NODE_ID_LEN];
   for (int i = 0; i < n; i++) {
     neighbors::getIdHex(i, hex);
     arr.add(hex);
-    int r = neighbors::getRssi(i);
-    rssiArr.add(r);
+    rssiArr.add(neighbors::getRssi(i));
+    if (neighbors::getId(i, peerId)) hasKeyArr.add(x25519_keys::hasKeyFor(peerId));
+    else hasKeyArr.add(false);
   }
 
   JsonArray routesArr = doc["routes"].to<JsonArray>();
@@ -667,16 +658,19 @@ void notifyNeighbors() {
   doc["evt"] = "neighbors";
   JsonArray arr = doc["neighbors"].to<JsonArray>();
   JsonArray rssiArr = doc["rssi"].to<JsonArray>();
+  JsonArray hasKeyArr = doc["hasKey"].to<JsonArray>();
   int n = neighbors::getCount();
   char hex[17];
+  uint8_t peerId[protocol::NODE_ID_LEN];
   for (int i = 0; i < n; i++) {
     neighbors::getIdHex(i, hex);
     arr.add(hex);
-    int r = neighbors::getRssi(i);
-    rssiArr.add(r != 0 ? r : (int)0);
+    rssiArr.add(neighbors::getRssi(i) != 0 ? neighbors::getRssi(i) : (int)0);
+    if (neighbors::getId(i, peerId)) hasKeyArr.add(x25519_keys::hasKeyFor(peerId));
+    else hasKeyArr.add(false);
   }
 
-  char buf[256];
+  char buf[320];
   size_t len = serializeJson(doc, buf);
   pRxChar->setValue((uint8_t*)buf, len);
   pRxChar->notify();

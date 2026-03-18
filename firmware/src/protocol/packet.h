@@ -29,7 +29,8 @@ constexpr uint8_t OP_PING = 0xFF;
 // Размеры
 constexpr size_t NODE_ID_LEN = 8;
 constexpr uint8_t SYNC_BYTE = 0x5A;  // маркер начала пакета — искать при сдвиге (SX1262 corruption)
-constexpr size_t HEADER_LEN = 1 + NODE_ID_LEN * 2 + 1 + 1 + 1;  // version + From + To + TTL + Opcode + Channel
+constexpr size_t HEADER_LEN = 1 + NODE_ID_LEN * 2 + 1 + 1 + 1;  // version + From + To + TTL + Opcode + Channel (unicast)
+constexpr size_t HEADER_LEN_BROADCAST = 1 + 1 + 1 + NODE_ID_LEN + 1 + 1;  // v2: sync+ver+opcode+from+ttl+channel (13 B)
 constexpr size_t SYNC_LEN = 1;
 constexpr size_t PAYLOAD_OFFSET = SYNC_LEN + HEADER_LEN;  // смещение payload в пакете с sync
 constexpr uint8_t CHANNEL_DEFAULT = 0;  // Публичный канал
@@ -58,8 +59,8 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
 bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr,
                 const uint8_t** payload, size_t* payloadLen);
 
-/** Ожидаемая длина пакета (sync) для opcode. 0 = неизвестно/переменная. */
-size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen);
+/** Ожидаемая длина пакета (pLen) для opcode. 0 = неизвестно/переменная. */
+size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadcast);
 
 /** Min/max payload для opcode. true если opcode известен. */
 bool getExpectedPayloadRange(uint8_t opcode, size_t* minOut, size_t* maxOut);

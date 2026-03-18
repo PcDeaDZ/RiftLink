@@ -11,8 +11,12 @@
 #include "async_tasks.h"
 #include <RadioLib.h>
 #include <SPI.h>
+#include <esp_random.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 static bool s_asyncMode = false;
+static SemaphoreHandle_t s_radioMutex = nullptr;
 
 // Heltec WiFi LoRa 32 V3/V4 pins (Meshtastic variant.h)
 #define LORA_NSS   8
@@ -33,6 +37,11 @@ static bool s_asyncMode = false;
 #define LORA_SF    7
 #define LORA_CR    5
 #define TCXO_VOLTAGE 1.8f   // SX1262 TCXO 1.8V (V3/V4)
+
+// CSMA/CA (как Meshtastic): CAD перед TX, random backoff при занятом канале
+#define CAD_SLOT_TIME_MS  4
+#define CAD_CW_MAX        8
+#define CAD_MAX_RETRIES   5
 
 static Module* mod = nullptr;
 static SX1262* lora = nullptr;
@@ -61,7 +70,8 @@ bool init() {
   float freq = region::getFreq();
   int power = region::getPower();
 
-  int16_t st = lora->begin(freq, LORA_BW, LORA_SF, LORA_CR, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, power, 8, TCXO_VOLTAGE, false);
+  // Preamble 16 (как Meshtastic) — больше времени на синхронизацию RX, меньше потерь при «просыпании»
+  int16_t st = lora->begin(freq, LORA_BW, LORA_SF, LORA_CR, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, power, 16, TCXO_VOLTAGE, false);
   if (st != RADIOLIB_ERR_NONE) {
     Serial.printf("[RiftLink] Radio init failed: code=%d (проверьте антенну и питание)\n", st);
     return false;
@@ -73,7 +83,18 @@ bool init() {
 
   lora->setCRC(2);  // CRC 2 bytes
   lora->setSyncWord(0x12);  // Private network
+  s_radioMutex = xSemaphoreCreateMutex();
+  if (!s_radioMutex) return false;
   return true;
+}
+
+bool takeMutex(TickType_t timeout) {
+  if (!s_radioMutex) return true;
+  return xSemaphoreTake(s_radioMutex, timeout) == pdTRUE;
+}
+
+void releaseMutex() {
+  if (s_radioMutex) xSemaphoreGive(s_radioMutex);
 }
 
 uint32_t getTimeOnAir(size_t len) {
@@ -83,13 +104,27 @@ uint32_t getTimeOnAir(size_t len) {
 
 void setAsyncMode(bool on) { s_asyncMode = on; }
 
-bool sendDirect(const uint8_t* data, size_t len) {
+bool sendDirectInternal(const uint8_t* data, size_t len) {
   if (!lora || len > RADIOLIB_SX126X_MAX_PACKET_LENGTH) return false;
 
   uint32_t toa = getTimeOnAir(len);
   if (!duty_cycle::canSend(toa)) {
     Serial.println("[RiftLink] Duty cycle limit (EU 1%) — TX skipped, попробуйте позже");
     return false;
+  }
+
+  // CSMA/CA: CAD перед TX, random backoff при занятом канале (как Meshtastic)
+  lora->standby();
+  for (int attempt = 0; attempt < CAD_MAX_RETRIES; attempt++) {
+    int16_t cad = lora->scanChannel();
+    if (cad == RADIOLIB_CHANNEL_FREE) break;
+    if (attempt < CAD_MAX_RETRIES - 1) {
+      uint32_t backoff = (esp_random() % CAD_CW_MAX) * CAD_SLOT_TIME_MS;
+      if (backoff > 0) {
+        delay(backoff);
+        yield();
+      }
+    }
   }
 
   int16_t st = lora->transmit(const_cast<uint8_t*>(data), len);
@@ -107,6 +142,13 @@ bool sendDirect(const uint8_t* data, size_t len) {
   }
   duty_cycle::recordSend(toa);
   return true;
+}
+
+bool sendDirect(const uint8_t* data, size_t len) {
+  if (!takeMutex(pdMS_TO_TICKS(500))) return false;
+  bool ok = sendDirectInternal(data, len);
+  releaseMutex();
+  return ok;
 }
 
 bool send(const uint8_t* data, size_t len, uint8_t txSf, bool priority) {

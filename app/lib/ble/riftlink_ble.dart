@@ -230,6 +230,8 @@ class RiftLinkBle {
           final neighbors = nb is List ? (nb as List).map((e) => e.toString()).toList() : <String>[];
           final rssiList = json['neighborsRssi'];
           final neighborsRssi = rssiList is List ? (rssiList as List).map((e) => (e as num).toInt()).toList() : <int>[];
+          final hasKeyList = json['neighborsHasKey'];
+          final neighborsHasKey = hasKeyList is List ? (hasKeyList as List).map((e) => e == true).toList() : <bool>[];
           final grpList = json['groups'];
           final groups = grpList is List ? (grpList as List).map((e) => (e as num).toInt()).toList() : <int>[];
           final routesList = json['routes'];
@@ -256,6 +258,7 @@ class RiftLinkBle {
             version: json['version'] as String?,
             neighbors: neighbors,
             neighborsRssi: neighborsRssi,
+            neighborsHasKey: neighborsHasKey,
             groups: groups,
             routes: routes,
             sf: (json['sf'] as num?)?.toInt(),
@@ -321,9 +324,12 @@ class RiftLinkBle {
           final list = json['neighbors'];
           final rssiList = json['rssi'];
           final rssi = rssiList is List ? (rssiList as List).map((e) => (e as num).toInt()).toList() : <int>[];
+          final hasKeyList = json['hasKey'];
+          final hasKey = hasKeyList is List ? (hasKeyList as List).map((e) => e == true).toList() : <bool>[];
           yield RiftLinkNeighborsEvent(
             neighbors: list is List ? (list as List).map((e) => e.toString()).toList() : [],
             rssi: rssi,
+            hasKey: hasKey,
           );
         } else if (evt == 'pong') {
           yield RiftLinkPongEvent(from: json['from'] as String? ?? '');
@@ -408,6 +414,7 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
   final String? version;
   final List<String> neighbors;
   final List<int> neighborsRssi;
+  final List<bool> neighborsHasKey;  // true = можно отправить (ключ есть)
   final List<int> groups;
   final List<Map<String, dynamic>> routes;
   final int? sf;
@@ -426,6 +433,7 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
     this.version,
     this.neighbors = const [],
     this.neighborsRssi = const [],
+    this.neighborsHasKey = const [],
     this.groups = const [],
     this.routes = const [],
     this.sf,
@@ -483,7 +491,8 @@ class RiftLinkGroupsEvent extends RiftLinkEvent {
 class RiftLinkNeighborsEvent extends RiftLinkEvent {
   final List<String> neighbors;
   final List<int> rssi;
-  RiftLinkNeighborsEvent({required this.neighbors, this.rssi = const []});
+  final List<bool> hasKey;  // true = можно отправить
+  RiftLinkNeighborsEvent({required this.neighbors, this.rssi = const [], this.hasKey = const []});
 }
 
 class RiftLinkRegionEvent extends RiftLinkEvent {

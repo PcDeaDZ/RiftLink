@@ -81,6 +81,13 @@ bool isBroadcast(const uint8_t* to) {
   return true;
 }
 
+// 4 байта: при коррупции 1 байта в from (A653..5801→A653..5802) isForMe не сработает,
+// но short ID совпадёт — отсекаем ghost «себя». LoRa CRC (2B) уже проверяет целостность.
+bool isSameShortId(const uint8_t* id) {
+  if (!id) return false;
+  return memcmp(id, s_nodeId, 4) == 0;
+}
+
 bool isInvalidNodeId(const uint8_t* id) {
   if (!id) return true;
   if (id[0] == 0xFF && id[1] == 0xFF) return true;  // broadcast-like

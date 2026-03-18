@@ -2,7 +2,7 @@
 
 Собственный mesh-протокол для Heltec WiFi LoRa 32 (V3/V4). Независимое решение с E2E-шифрованием, Flutter-приложением и PWA.
 
-**Версия:** прошивка 1.2.0, приложение 1.0.0
+**Версия:** прошивка 1.2.5, приложение 1.0.0
 
 **Кратко:** LoRa mesh-сеть с текстовыми и голосовыми сообщениями, X25519 E2E, маршрутизацией, группами и офлайн-очередью. Прошивка на ESP32, приложение на Flutter (Android/iOS/Web).
 
@@ -21,22 +21,16 @@ dual_boot/
 ├── firmware/       # Прошивка ESP32 (PlatformIO)
 ├── app/            # Flutter-приложение (Android, iOS, Web/PWA)
 ├── docs/           # Документация и спецификации
-├── docs/plans/     # Планы, анализ, troubleshooting
 ├── scripts/        # Вспомогательные скрипты (Serial API тест)
 └── build_and_flash.ps1
 ```
 
 ## 📚 Документация
 
-- **[docs/CUSTOM_PROTOCOL_PLAN.md](docs/CUSTOM_PROTOCOL_PLAN.md)** — ТЗ, архитектура, этапы, текущее состояние
-- **[docs/PROTOCOL.md](docs/PROTOCOL.md)** — спецификация протокола (формат пакетов, BLE, Serial)
+- **[docs/CUSTOM_PROTOCOL_PLAN.md](docs/CUSTOM_PROTOCOL_PLAN.md)** — архитектура, спецификация, текущее состояние
+- **[docs/PROTOCOL.md](docs/PROTOCOL.md)** — формат пакетов, BLE, Serial
 - **[docs/API.md](docs/API.md)** — BLE/Serial API с примерами
 - **[docs/RECOVERY.md](docs/RECOVERY.md)** — восстановление при «не включается»
-
-**Планы и анализ** (docs/plans/):
-- [ADDITIONAL_FEATURES_PLAN.md](docs/plans/ADDITIONAL_FEATURES_PLAN.md) — дополнительные фичи (poweroff, RSSI, автоотключение при низком заряде и др.)
-- [PACKET_READ_ANALYSIS.md](docs/plans/PACKET_READ_ANALYSIS.md) — анализ коррупции пакетов при RF-помехах
-- [PACKET_VALIDATION_PLAN.md](docs/plans/PACKET_VALIDATION_PLAN.md) — валидация и синхронизация пакетов
 
 ## 🚀 Быстрый старт
 
@@ -122,20 +116,9 @@ flutter build web
 | Валидация пакетов | Толерантность к RF-помехам, sync byte 0x5A, opcode-at-offset |
 | Индикатор батареи | Bat N% на экране (Main) |
 
-## 📋 Планы на будущее
+## 📋 Доработки
 
-| Приоритет | Фича | Описание |
-|-----------|------|----------|
-| Высокий | Скрытие вкладки GPS | Не показывать GPS, если модуль не обнаружен |
-| Высокий | Автоотключение при низком заряде | Пороги 5/15/30%, защита батареи |
-| Средний | Отображение RSSI | Сила сигнала соседей на экране |
-| Средний | Часы / sleep | «sleep» вместо времени в спячке, не будить OLED от времени |
-| Средний | Функция выключения | BLE cmd poweroff, long-press, VEXT |
-| Низкий | Тест антенны | Проверка при включении |
-| Низкий | Тест сигнала и трассировка | TX/RX тест, traceroute по mesh |
-| Низкий | BLE: ключи сообщений | Локализация ошибок на клиенте (queue_full и др.) |
-
-Подробнее: [docs/plans/ADDITIONAL_FEATURES_PLAN.md](docs/plans/ADDITIONAL_FEATURES_PLAN.md)
+Планируются улучшения по UX, энергосбережению и диагностике.
 
 ## 📄 Лицензия
 

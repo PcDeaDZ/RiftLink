@@ -130,6 +130,8 @@ void sendKeyExchange(const uint8_t* peerId, bool useSf12) {
   if (!s_inited || !peerId || node::isForMe(peerId) || node::isBroadcast(peerId) || node::isInvalidNodeId(peerId)) return;
   if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
 
+  RIFTLINK_LOG_EVENT("[RiftLink] Sending KEY_EXCHANGE to %02X%02X\n", peerId[0], peerId[1]);
+
   uint8_t pkt[protocol::PAYLOAD_OFFSET + X25519_PUBKEY_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), peerId, 31, protocol::OP_KEY_EXCHANGE,
