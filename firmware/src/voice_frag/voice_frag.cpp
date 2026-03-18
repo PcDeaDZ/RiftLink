@@ -3,6 +3,7 @@
  */
 
 #include "voice_frag.h"
+#include "neighbors/neighbors.h"
 #include "node/node.h"
 #include "radio/radio.h"
 #include "crypto/crypto.h"
@@ -91,7 +92,7 @@ bool send(const uint8_t* to, const uint8_t* data, size_t dataLen) {
     size_t pktLen = protocol::buildPacket(pkt, sizeof(pkt),
         node::getId(), to, 31, protocol::OP_VOICE_MSG,
         fragPayload, FRAG_HEADER_LEN + chunkLen, true, false, false);
-    if (pktLen > 0) radio::send(pkt, pktLen);
+    if (pktLen > 0) radio::send(pkt, pktLen, neighbors::rssiToSf(neighbors::getRssiFor(to)));
   }
   Serial.printf("[RiftLink] VOICE_MSG sent %u bytes, %u frags\n", (unsigned)dataLen, (unsigned)nFrags);
   return true;

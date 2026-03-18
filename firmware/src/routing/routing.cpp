@@ -5,6 +5,7 @@
 #include "routing.h"
 #include "node/node.h"
 #include "radio/radio.h"
+#include "neighbors/neighbors.h"
 #include <Arduino.h>
 #include <string.h>
 #include <freertos/FreeRTOS.h>
@@ -246,7 +247,7 @@ void requestRoute(const uint8_t* target) {
       node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_ROUTE_REQ,
       payload, ROUTE_PAYLOAD_LEN);
   if (len > 0) {
-    radio::send(pkt, len);
+    radio::send(pkt, len, neighbors::rssiToSf(neighbors::getMinRssi()));
     Serial.printf("[RiftLink] ROUTE_REQ to %02X%02X reqId=%u\n", target[0], target[1], (unsigned)reqId);
   }
   xSemaphoreGive(s_mutex);
@@ -281,7 +282,7 @@ bool onRouteReq(const uint8_t* from, const uint8_t* payload, size_t payloadLen) 
         node::getId(), sender, 31, protocol::OP_ROUTE_REPLY,
         replyPayload, ROUTE_PAYLOAD_LEN);
     if (len > 0) {
-      radio::send(pkt, len);
+      radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(sender)));
       Serial.printf("[RiftLink] ROUTE_REPLY to %02X%02X (target=me)\n", sender[0], sender[1]);
     }
     xSemaphoreGive(s_mutex);
@@ -300,7 +301,7 @@ bool onRouteReq(const uint8_t* from, const uint8_t* payload, size_t payloadLen) 
       node::getId(), protocol::BROADCAST_ID, 31 - (hops + 1), protocol::OP_ROUTE_REQ,
       fwdPayload, ROUTE_PAYLOAD_LEN);
   if (len > 0) {
-    radio::send(pkt, len);
+    radio::send(pkt, len, neighbors::rssiToSf(neighbors::getMinRssi()));
     Serial.printf("[RiftLink] ROUTE_REQ relay hops=%u\n", (unsigned)(hops + 1));
   }
   xSemaphoreGive(s_mutex);
@@ -338,7 +339,7 @@ bool onRouteReply(const uint8_t* from, const uint8_t* to, const uint8_t* payload
       node::getId(), s_reverse[revIdx].prevHop, 31, protocol::OP_ROUTE_REPLY,
       payload, payloadLen);
   if (len > 0) {
-    radio::send(pkt, len);
+    radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(s_reverse[revIdx].prevHop)));
     Serial.printf("[RiftLink] ROUTE_REPLY relay to %02X%02X\n", s_reverse[revIdx].prevHop[0], s_reverse[revIdx].prevHop[1]);
   }
   s_reverse[revIdx].used = false;

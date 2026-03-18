@@ -10,7 +10,7 @@
 #include <cstddef>
 #include "protocol/packet.h"
 
-#define NEIGHBORS_MAX 8
+#define NEIGHBORS_MAX 16  // 10+ узлов — без вытеснения
 #define NEIGHBOR_TIMEOUT_MS 120000  // 2 мин — узел считается офлайн (HELLO каждые 10с)
 
 namespace neighbors {

@@ -4,6 +4,7 @@
  */
 
 #include "telemetry.h"
+#include "neighbors/neighbors.h"
 #include "node/node.h"
 #include "radio/radio.h"
 #include "crypto/crypto.h"
@@ -54,7 +55,7 @@ void send() {
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_TELEMETRY,
       encBuf, encLen, true, false, false);
-  if (len > 0) radio::send(pkt, len);
+  if (len > 0) radio::send(pkt, len, neighbors::rssiToSf(neighbors::getMinRssi()));
 }
 
 }  // namespace telemetry

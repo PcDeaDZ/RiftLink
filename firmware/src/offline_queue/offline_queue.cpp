@@ -4,6 +4,7 @@
  */
 
 #include "offline_queue.h"
+#include "neighbors/neighbors.h"
 #include "node/node.h"
 #include "radio/radio.h"
 #include <Arduino.h>
@@ -143,7 +144,7 @@ void onNodeOnline(const uint8_t* nodeId) {
         node::getId(), m->to, 31, m->opcode,
         m->payload, m->payloadLen, true, true, compressed);
     if (len > 0) {
-      radio::send(pkt, len);
+      radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(nodeId)));
       Serial.printf("[RiftLink] Offline delivery to %02X%02X\n", nodeId[0], nodeId[1]);
     }
     m->inUse = false;

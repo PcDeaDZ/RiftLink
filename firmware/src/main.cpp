@@ -53,7 +53,6 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #define TELEM_INTERVAL_MS  60000
 #define GPS_LOC_INTERVAL_MS 60000  // интервал отправки локации с GPS
 #define SF_ADAPT_INTERVAL_MS 30000 // адаптивный SF по качеству связи
-#define MAX_NEIGHBORS      8
 
 static uint32_t lastHello = 0;
 static uint32_t lastTelemetry = 0;
@@ -108,31 +107,48 @@ void sendHello() {
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID,
       31, protocol::OP_HELLO, nullptr, 0);
-  if (len > 0) {
-    int n = neighbors::getCount();
-    uint8_t txSf = 0;
-    if (n > 0) {
-      // Per-neighbor: HELLO на SF худшего соседа — A-B-C цепочка работает
-      int minRssi = neighbors::getMinRssi();
-      txSf = neighbors::rssiToSf(minRssi);
-    } else {
-      // Discovery: чередование SF7 и SF12 для дальних узлов
-      bool aggressiveHello = (millis() - s_bootTime) < 120000;
-      int mod = aggressiveHello ? 2 : 3;
-      txSf = (s_helloCounter % mod) == 0 ? 12 : 7;
-      s_helloCounter++;
-    }
+  if (len == 0) return;
+
+  int n = neighbors::getCount();
+  bool manyNeighbors = (n >= 6);
+  bool priority = manyNeighbors;  // HELLO в начало очереди при 6+ соседях
+
+  if (n > 0) {
+    int minRssi = neighbors::getMinRssi();
+    uint8_t txSf = neighbors::rssiToSf(minRssi);
     if (txSf >= 10) {
       uint8_t prev = radio::getSpreadingFactor();
       radio::setSpreadingFactor(txSf);
       uint32_t toa = radio::getTimeOnAir(len);
       radio::setSpreadingFactor(prev);
-      if (!duty_cycle::canSend(toa)) txSf = (n > 0) ? neighbors::rssiToSf(-85) : 7;  // fallback
+      if (!duty_cycle::canSend(toa)) txSf = neighbors::rssiToSf(-85);
     }
     Serial.printf("[RiftLink] HELLO TX buf[0]=%02X len=%u SF%u\n", pkt[0], (unsigned)len, txSf ? txSf : 7);
-    if (radio::send(pkt, len, txSf)) {
+    if (radio::send(pkt, len, txSf, priority)) {
       Serial.println("[RiftLink] HELLO sent");
     }
+    // Двойной HELLO при 6+ соседях: SF12 + SF7 — дальние и близкие слышат
+    if (manyNeighbors && txSf != 7) {
+      uint8_t prev = radio::getSpreadingFactor();
+      radio::setSpreadingFactor(7);
+      uint32_t toa7 = radio::getTimeOnAir(len);
+      radio::setSpreadingFactor(prev);
+      if (duty_cycle::canSend(toa7)) radio::send(pkt, len, 7, priority);
+    }
+  } else {
+    bool aggressiveHello = (millis() - s_bootTime) < 120000;
+    int mod = aggressiveHello ? 2 : 3;
+    uint8_t txSf = (s_helloCounter % mod) == 0 ? 12 : 7;
+    s_helloCounter++;
+    if (txSf == 12) {
+      uint8_t prev = radio::getSpreadingFactor();
+      radio::setSpreadingFactor(12);
+      uint32_t toa = radio::getTimeOnAir(len);
+      radio::setSpreadingFactor(prev);
+      if (!duty_cycle::canSend(toa)) txSf = 7;
+    }
+    Serial.printf("[RiftLink] HELLO TX buf[0]=%02X len=%u SF%u\n", pkt[0], (unsigned)len, txSf);
+    radio::send(pkt, len, txSf, false);
   }
 }
 
@@ -598,8 +614,9 @@ void loop() {
     return;
   }
 
-  // HELLO с джиттером. Aggressive discovery: первые 2 мин — 2с; 0 соседей — 3с; иначе 10с
-  uint32_t helloInterval = aggressive ? 2000 : ((neighbors::getCount() == 0) ? 3000 : HELLO_INTERVAL_MS);
+  // HELLO: 0 сосед. 3с; 6+ сосед. 8с (гибрид); иначе 10с
+  int nNeigh = neighbors::getCount();
+  uint32_t helloInterval = aggressive ? 2000 : ((nNeigh == 0) ? 3000 : (nNeigh >= 6 ? 8000 : HELLO_INTERVAL_MS));
   uint32_t jitter = (esp_random() % (HELLO_JITTER_MS * 2)) - HELLO_JITTER_MS;
   if (millis() - lastHello > (helloInterval + (int32_t)jitter)) {
     sendHello();
@@ -668,7 +685,7 @@ void loop() {
         uint8_t pkt[protocol::HEADER_LEN];
         size_t len = protocol::buildPacket(pkt, sizeof(pkt),
             node::getId(), to, 31, protocol::OP_PING, nullptr, 0);
-        if (len > 0 && radio::send(pkt, len)) {
+        if (len > 0 && radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(to)))) {
           Serial.printf("[RiftLink] PING sent to %s\n", hex8.c_str());
         } else {
           Serial.println("[RiftLink] PING failed");
@@ -786,7 +803,8 @@ void loop() {
   }
   int minRssi = neighbors::getMinRssi();
   bool needSf10 = (neighbors::getCount() > 0 && minRssi != 0 && minRssi < -90);  // A-B-C: B слушает SF10 для C
-  int rxMod = aggressive ? 2 : ((neighbors::getCount() == 0) ? 3 : 10);
+  // Адаптивный rxMod: 0→3, 1–2→8, 3–5→6, 6+→4 (больше SF12 при многих соседях)
+  int rxMod = aggressive ? 2 : ((nNeigh == 0) ? 3 : (nNeigh >= 6 ? 4 : (nNeigh >= 3 ? 6 : 8)));
   uint8_t thisRxSf;
   if (s_sf12BurstCount > 0) {
     thisRxSf = 12;
@@ -844,38 +862,81 @@ void loop() {
     radio::startReceiveWithTimeout(1000);
     n = powersave::sleepUntilPacketOrTimeout(rxBuf, sizeof(rxBuf));
   } else {
-    // Окно приёма: при 0 соседей — 600ms (Paper e-ink блокирует), иначе 80ms (BLE) / 150ms (без BLE)
     uint32_t rxMs = 150;
-    if (ble::isConnected()) rxMs = 80;
-    if (neighbors::getCount() == 1 && ble::isConnected()) rxMs = 150;  // больше RX для KEY_EXCHANGE
     if (neighbors::getCount() == 0) rxMs = 600;
-    radio::startReceiveWithTimeout(rxMs);
-    // Чанкованное ожидание — drain sendQueue, опрос кнопки
-    uint32_t t0 = millis();
-    while (millis() - t0 < rxMs) {
-      yield();
-      pollButtonAndQueue();
-      if (sendQueue) {
-        SendQueueItem item;
-        if (xQueueReceive(sendQueue, &item, 0) == pdTRUE) {
-          // txSf>=10 (HELLO/KEY_EXCHANGE): ToA ~1s — не drain во время RX
-          if (item.txSf >= 10) {
-            xQueueSendToFront(sendQueue, &item, 0);
+    else if (neighbors::getCount() >= 6) rxMs = 150;  // 6+ — не урезать при BLE
+    else if (ble::isConnected() && neighbors::getCount() > 1) rxMs = 80;
+
+    if (neighbors::getCount() > 0) {
+      // Multi-SF RX: 50ms SF12 + 50ms SF10 + 50ms baseSf — гибрид для 10+ узлов
+      const uint8_t slotSf[3] = {12, 10, baseSf};
+      n = 0;
+      for (int s = 0; s < 3; s++) {
+        radio::setSpreadingFactor(slotSf[s]);
+        radio::startReceiveWithTimeout(50);
+        uint32_t t0 = millis();
+        while (millis() - t0 < 50) {
+          yield();
+          pollButtonAndQueue();
+          if (sendQueue) {
+            SendQueueItem item;
+            if (xQueueReceive(sendQueue, &item, 0) == pdTRUE) {
+              if (item.txSf >= 10) xQueueSendToFront(sendQueue, &item, 0);
+              else {
+                if (item.txSf >= 7 && item.txSf <= 12) radio::setSpreadingFactor(item.txSf);
+                radio::sendDirect(item.buf, item.len);
+                if (item.txSf != 0) radio::setSpreadingFactor(slotSf[s]);
+              }
+            }
+            uint32_t remain = 50 - (millis() - t0);
+            if (remain > 0) radio::startReceiveWithTimeout(remain);
+          }
+          uint32_t el = millis() - t0;
+          if (el >= 50) break;
+          delay((50 - el) > 30 ? 30 : (50 - el));
+        }
+        int nr = radio::receiveAsync(rxBuf, sizeof(rxBuf));
+        if (nr > 0) {
+          if (packetQueue) {
+            PacketQueueItem pitem;
+            if ((size_t)nr <= sizeof(pitem.buf)) {
+              memcpy(pitem.buf, rxBuf, nr);
+              pitem.len = (uint16_t)nr;
+              pitem.rssi = (int8_t)radio::getLastRssi();
+              pitem.sf = slotSf[s];
+              xQueueSend(packetQueue, &pitem, 0);
+            }
           } else {
-            if (item.txSf >= 7 && item.txSf <= 12) radio::setSpreadingFactor(item.txSf);
-            radio::sendDirect(item.buf, item.len);
-            if (item.txSf != 0) radio::setSpreadingFactor(thisRxSf);
+            handlePacket(rxBuf, nr, radio::getLastRssi(), slotSf[s]);
           }
         }
-        uint32_t remain = rxMs - (millis() - t0);
-        if (remain > 0) radio::startReceiveWithTimeout(remain);
       }
-      uint32_t elapsed = millis() - t0;
-      if (elapsed >= rxMs) break;
-      uint32_t chunk = (rxMs - elapsed) > 30 ? 30 : (rxMs - elapsed);  // 30ms — чаще опрос кнопки на Paper
-      delay(chunk);
+    } else {
+      radio::startReceiveWithTimeout(rxMs);
+      uint32_t t0 = millis();
+      while (millis() - t0 < rxMs) {
+        yield();
+        pollButtonAndQueue();
+        if (sendQueue) {
+          SendQueueItem item;
+          if (xQueueReceive(sendQueue, &item, 0) == pdTRUE) {
+            if (item.txSf >= 10) xQueueSendToFront(sendQueue, &item, 0);
+            else {
+              if (item.txSf >= 7 && item.txSf <= 12) radio::setSpreadingFactor(item.txSf);
+              radio::sendDirect(item.buf, item.len);
+              if (item.txSf != 0) radio::setSpreadingFactor(thisRxSf);
+            }
+          }
+          uint32_t remain = rxMs - (millis() - t0);
+          if (remain > 0) radio::startReceiveWithTimeout(remain);
+        }
+        uint32_t elapsed = millis() - t0;
+        if (elapsed >= rxMs) break;
+        uint32_t chunk = (rxMs - elapsed) > 30 ? 30 : (rxMs - elapsed);
+        delay(chunk);
+      }
+      n = radio::receiveAsync(rxBuf, sizeof(rxBuf));
     }
-    n = radio::receiveAsync(rxBuf, sizeof(rxBuf));
   }
   if (n > 0) {
     int rssi = radio::getLastRssi();

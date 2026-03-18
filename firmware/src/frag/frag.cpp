@@ -3,6 +3,7 @@
  */
 
 #include "frag.h"
+#include "neighbors/neighbors.h"
 #include "node/node.h"
 #include "radio/radio.h"
 #include "crypto/crypto.h"
@@ -108,7 +109,7 @@ bool send(const uint8_t* to, const uint8_t* plain, size_t plainLen, bool compres
     size_t pktLen = protocol::buildPacket(pkt, sizeof(pkt),
         node::getId(), to, 31, protocol::OP_MSG_FRAG,
         fragPayload, FRAG_HEADER_LEN + chunkLen, false, false, useCompressed);
-    if (pktLen > 0) radio::send(pkt, pktLen);
+    if (pktLen > 0) radio::send(pkt, pktLen, neighbors::rssiToSf(neighbors::getRssiFor(to)));
   }
   return true;
 }

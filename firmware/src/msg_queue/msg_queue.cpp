@@ -172,7 +172,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     size_t len = protocol::buildPacket(pkt, sizeof(pkt),
         node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_GROUP_MSG,
         encBuf, encLen, true, false, useCompressed);
-    if (len > 0) radio::send(pkt, len);
+    if (len > 0) radio::send(pkt, len, neighbors::rssiToSf(neighbors::getMinRssi()));
     xSemaphoreGive(s_mutex);
     return len > 0;
   }
@@ -212,7 +212,7 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_GROUP_MSG,
       encBuf, encLen, true, false, useCompressed);
-  if (len > 0) radio::send(pkt, len);
+  if (len > 0) radio::send(pkt, len, neighbors::rssiToSf(neighbors::getMinRssi()));
   return len > 0;
 }
 
