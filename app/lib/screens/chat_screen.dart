@@ -476,6 +476,35 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
 
   // ── Build ──
 
+  Future<void> _showAppMenu(BuildContext context, AppLocalizations l) async {
+    FocusScope.of(context).unfocus();
+    final value = await showModalBottomSheet<String>(
+      context: context,
+      useRootNavigator: true,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => Container(
+        decoration: const BoxDecoration(
+          color: AppColors.card,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+        ),
+        child: SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(leading: const Icon(Icons.people), title: Text(l.tr('contacts')), onTap: () => Navigator.pop(ctx, 'contacts')),
+              ListTile(leading: const Icon(Icons.group), title: Text(l.tr('groups')), onTap: () => Navigator.pop(ctx, 'groups')),
+              ListTile(leading: const Icon(Icons.radar), title: Text(l.tr('ping')), onTap: () => Navigator.pop(ctx, 'ping')),
+              ListTile(leading: const Icon(Icons.update), title: const Text('OTA'), onTap: () => Navigator.pop(ctx, 'ota')),
+              ListTile(leading: const Icon(Icons.settings), title: Text(l.tr('settings')), onTap: () => Navigator.pop(ctx, 'settings')),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (value != null && mounted) _onMenuSelected(value);
+  }
+
   void _onMenuSelected(String? value) {
     if (value == null || !mounted) return;
     FocusScope.of(context).unfocus();
@@ -533,17 +562,10 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
             onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => MeshScreen(ble: widget.ble, nodeId: _nodeId, neighbors: _neighbors, neighborsRssi: _neighborsRssi, routes: _routes))),
             tooltip: l.tr('mesh_topology'),
           ),
-          PopupMenuButton<String>(
+          IconButton(
             icon: const Icon(Icons.more_vert),
             tooltip: l.tr('settings'),
-            onSelected: _onMenuSelected,
-            itemBuilder: (ctx) => [
-              PopupMenuItem(value: 'contacts', child: Row(children: [const Icon(Icons.people, size: 22), const SizedBox(width: 12), Text(l.tr('contacts'))])),
-              PopupMenuItem(value: 'groups', child: Row(children: [const Icon(Icons.group, size: 22), const SizedBox(width: 12), Text(l.tr('groups'))])),
-              PopupMenuItem(value: 'ping', child: Row(children: [const Icon(Icons.radar, size: 22), const SizedBox(width: 12), Text(l.tr('ping'))])),
-              PopupMenuItem(value: 'ota', child: Row(children: [const Icon(Icons.update, size: 22), const SizedBox(width: 12), const Text('OTA')])),
-              PopupMenuItem(value: 'settings', child: Row(children: [const Icon(Icons.settings, size: 22), const SizedBox(width: 12), Text(l.tr('settings'))])),
-            ],
+            onPressed: () => _showAppMenu(context, l),
           ),
         ],
       ),
