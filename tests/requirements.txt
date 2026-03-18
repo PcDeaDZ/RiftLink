@@ -1,0 +1,3 @@
+# RiftLink tests
+pytest>=7.0.0
+pyserial>=3.5

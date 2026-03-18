@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1a1a2e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="description" content="RiftLink Test — подключение к устройству по Bluetooth">
+  <link rel="manifest" href="manifest.json">
+  <title>RiftLink Test</title>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch(() => {});
+    }
+  </script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <div id="bleNotice" class="ble-notice" style="display:none"></div>
+    <header>
+      <h1>RiftLink Test</h1>
+      <p class="subtitle">PWA · Web Bluetooth</p>
+      <button id="btnTheme" class="btn small" data-i18n-title="theme">🌓</button>
+      <button id="btnLang" class="btn small" data-i18n-title="lang">🌐</button>
+      <div class="status" id="status" data-i18n="status_disconnected">Отключено</div>
+      <button id="btnConnect" class="btn primary" data-i18n="connect">Подключиться</button>
+      <button id="btnDisconnect" class="btn secondary" disabled data-i18n="disconnect">Отключиться</button>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2 data-i18n="voice">Голос</h2>
+        <div class="row wrap">
+          <button id="btnVoiceRecord" class="btn small" disabled data-i18n="record">🎤 Записать</button>
+          <span id="voiceStatus" class="voice-status"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 data-i18n="send_msg">Отправить сообщение</h2>
+        <div class="row">
+          <input type="text" id="msgText" data-i18n-placeholder="msg_placeholder" placeholder="Текст сообщения..." maxlength="200">
+          <button id="btnSend" class="btn" disabled data-i18n="send">Отправить</button>
+        </div>
+        <div class="row">
+          <label class="chip">
+            <input type="radio" name="target" value="broadcast" checked> Broadcast
+          </label>
+          <select id="msgGroupSelect" class="short" title="Группа">
+            <option value="0">— группа —</option>
+          </select>
+          <select id="msgToSelect" class="short" title="Контакт">
+            <option value="">— контакт —</option>
+          </select>
+          <input type="text" id="msgTo" placeholder="Node ID (hex8)" maxlength="8" class="short">
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 data-i18n="groups">Группы</h2>
+        <div id="groupsList" class="contacts-list"></div>
+        <div class="row">
+          <input type="number" id="groupId" placeholder="ID группы" min="1" max="4294967295" class="short">
+          <button id="btnAddGroup" class="btn small">+</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 data-i18n="contacts">Контакты</h2>
+        <div id="contactsList" class="contacts-list"></div>
+        <div class="row">
+          <input type="text" id="contactId" placeholder="ID (hex8)" maxlength="8" class="short">
+          <input type="text" id="contactNick" data-i18n-placeholder="nickname_hint" placeholder="Никнейм" maxlength="16" class="short">
+          <button id="btnAddContact" class="btn small" data-i18n="add_to_contacts">Добавить</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 data-i18n="nickname">Никнейм</h2>
+        <div class="row">
+          <input type="text" id="nickname" data-i18n-placeholder="nickname_hint2" placeholder="До 16 символов" maxlength="16">
+          <button id="btnNickname" class="btn small" disabled data-i18n="set_nickname">Установить</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Mesh топология</h2>
+        <div id="meshGraph" class="mesh-graph"></div>
+        <div class="row">
+          <button id="btnRoutes" class="btn small" disabled>Маршруты</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 data-i18n="commands">Команды</h2>
+        <div class="row wrap">
+          <button id="btnInfo" class="btn small" disabled data-i18n="info">Info</button>
+          <button id="btnPing" class="btn small" disabled data-i18n="ping">Ping</button>
+          <button id="btnSelftest" class="btn small" disabled data-i18n="selftest">Selftest</button>
+          <button id="btnLocation" class="btn small" disabled data-i18n="location">📍 Локация</button>
+          <button id="btnOta" class="btn small" disabled data-i18n="ota">OTA</button>
+        </div>
+        <div class="row">
+          <select id="region">
+            <option value="EU">EU</option>
+            <option value="UK">UK</option>
+            <option value="RU">RU</option>
+            <option value="US">US</option>
+            <option value="AU">AU</option>
+          </select>
+          <button id="btnRegion" class="btn small" disabled>Регион</button>
+        </div>
+        <div class="row" id="channelRow">
+          <label>Канал (EU/UK):</label>
+          <select id="channel">
+            <option value="0">0 (868.1 MHz)</option>
+            <option value="1">1 (868.3 MHz)</option>
+            <option value="2">2 (868.5 MHz)</option>
+          </select>
+          <button id="btnChannel" class="btn small" disabled>Канал</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 data-i18n="qr">QR-код и приглашение</h2>
+        <div class="row wrap">
+          <button id="btnShowQr" class="btn small" disabled data-i18n="node_id_btn">Node ID</button>
+          <button id="btnInviteQr" class="btn small" disabled data-i18n="invite_btn">Приглашение</button>
+          <button id="btnScanQr" class="btn small" data-i18n="scan_qr">Сканировать QR</button>
+          <input type="file" id="qrFile" accept="image/*" capture="environment" style="display:none">
+        </div>
+        <div id="qrContainer" class="qr-container" style="display:none">
+          <canvas id="qrCanvas"></canvas>
+          <p id="qrNodeId" class="qr-nodeid"></p>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 data-i18n="messages">Сообщения</h2>
+        <div id="messages" class="messages"></div>
+      </section>
+
+      <section class="card">
+        <h2 data-i18n="history">История команд</h2>
+        <div id="history" class="history"></div>
+      </section>
+
+      <section class="card">
+        <h2 data-i18n="events">События (raw)</h2>
+        <div id="events" class="events"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+  <script src="locale.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

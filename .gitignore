@@ -1,0 +1,46 @@
+# PlatformIO / firmware
+firmware/.pio/
+firmware/.pioenvs/
+firmware/.piocore/
+firmware/out/*.bin
+firmware/out/*.elf
+firmware/out/*.map
+!firmware/out/.gitignore
+!firmware/out/README.md
+
+# Flutter / Dart
+app/.dart_tool/
+app/.packages
+app/build/
+app/android/.gradle/
+app/android/local.properties
+app/*.iml
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+.eggs/
+venv/
+.env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (не коммитить пароли, ключи)
+*.pem
+*.key
+.env
+.env.local
+secrets/

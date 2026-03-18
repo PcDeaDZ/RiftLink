@@ -1,0 +1,11 @@
+{
+  "name": "RiftLink Test",
+  "short_name": "RL Test",
+  "description": "Тестовое PWA для подключения к RiftLink по Bluetooth",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#1a1a2e",
+  "orientation": "portrait-primary", 
+  "scope": "./"
+}

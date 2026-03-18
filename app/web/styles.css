@@ -1,0 +1,14 @@
+/* RiftLink (RL) — PWA */
+html, body {
+  margin: 0;
+  padding: 0;
+  background-color: #121212;
+}
+.flutter-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  color: #fff;
+  font-family: sans-serif;
+}

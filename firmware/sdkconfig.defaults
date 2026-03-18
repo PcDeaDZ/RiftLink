@@ -1,0 +1,5 @@
+# Увеличен таймаут watchdog для E-Ink (display refresh ~2-5 сек)
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+
+# NimBLE: увеличен стек — Heltec V3/V4 перезагружается при BLE connect (Stack canary nimble_host)
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=20480

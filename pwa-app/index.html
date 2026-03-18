@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#0d1117">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="description" content="RiftLink — mesh-мессенджер">
+  <link rel="manifest" href="manifest.json">
+  <title>RiftLink</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="bleNotice" class="ble-notice" style="display:none"></div>
+
+  <div id="scanView" class="view active">
+    <div class="scan-card">
+      <div class="logo">RiftLink</div>
+      <p class="scan-desc">Подключитесь к устройству по Bluetooth</p>
+      <button id="btnConnect" class="btn primary">Подключиться</button>
+    </div>
+  </div>
+
+  <div id="appView" class="view">
+    <header class="app-header">
+      <span class="node-info" id="nodeInfo">—</span>
+      <div class="header-actions">
+        <button id="btnMap" class="icon-btn" title="Карта">📍</button>
+        <button id="btnMesh" class="icon-btn" title="Mesh">🔗</button>
+        <button id="btnSettings" class="icon-btn" title="Настройки">⚙</button>
+      </div>
+    </header>
+
+    <main class="app-main">
+      <div class="chat-panel">
+        <div class="recipient-bar">
+          <select id="recipient">
+            <option value="">Broadcast</option>
+          </select>
+        </div>
+        <div id="messages" class="messages"></div>
+        <div class="input-row">
+          <button id="btnVoice" class="btn-voice" title="Голосовое сообщение">🎤</button>
+          <input type="text" id="msgInput" placeholder="Сообщение..." maxlength="200" autocomplete="off" title="Группа: до 160 символов">
+          <button id="btnSend" class="btn-send">→</button>
+        </div>
+      </div>
+    </main>
+
+    <nav class="bottom-nav">
+      <button class="nav-btn active" data-view="chat">Чат</button>
+      <button class="nav-btn" data-view="network">Сеть</button>
+      <button class="nav-btn" data-view="settings">Настройки</button>
+    </nav>
+  </div>
+
+  <div id="networkView" class="panel-view">
+    <div class="panel-header">
+      <button class="back-btn" data-back>←</button>
+      <h2>Сеть</h2>
+    </div>
+    <div class="panel-content">
+      <section>
+        <h3>Соседи</h3>
+        <div id="neighborsList" class="chip-list chip-list-neighbors"></div>
+      </section>
+      <section>
+        <h3>Группы</h3>
+        <div id="groupsList" class="chip-list"></div>
+        <div class="row">
+          <input type="number" id="groupId" placeholder="ID группы" min="1" class="short">
+          <button id="btnAddGroup" class="btn small">+</button>
+        </div>
+      </section>
+      <section>
+        <h3>Маршруты</h3>
+        <div id="routesList" class="routes-list"></div>
+      </section>
+    </div>
+  </div>
+
+  <div id="mapView" class="panel-view">
+    <div class="panel-header">
+      <button class="back-btn" data-back>←</button>
+      <h2>Карта</h2>
+    </div>
+    <div class="panel-content">
+      <div id="mapContainer" class="map-placeholder"></div>
+    </div>
+  </div>
+
+  <div id="settingsView" class="panel-view">
+    <div class="panel-header">
+      <button class="back-btn" data-back>←</button>
+      <h2>Настройки</h2>
+    </div>
+    <div class="panel-content">
+      <section>
+        <h3>Соединение</h3>
+        <button id="btnDisconnect" class="btn secondary">Отключиться</button>
+      </section>
+      <section>
+        <h3>Никнейм</h3>
+        <div class="row">
+          <input type="text" id="nickname" placeholder="До 16 символов" maxlength="16">
+          <button id="btnNickname" class="btn small">OK</button>
+        </div>
+      </section>
+      <section>
+        <h3>Регион</h3>
+        <div class="row wrap">
+          <button class="region-btn" data-region="EU">EU</button>
+          <button class="region-btn" data-region="RU">RU</button>
+          <button class="region-btn" data-region="UK">UK</button>
+          <button class="region-btn" data-region="US">US</button>
+          <button class="region-btn" data-region="AU">AU</button>
+        </div>
+        <div id="channelSection" class="channel-section" style="display:none">
+          <label>Канал (EU):</label>
+          <div class="row wrap">
+            <button class="channel-btn" data-channel="0">0</button>
+            <button class="channel-btn" data-channel="1">1</button>
+            <button class="channel-btn" data-channel="2">2</button>
+          </div>
+        </div>
+      </section>
+      <section id="wifiSection">
+        <h3>WiFi</h3>
+        <div class="row wrap">
+          <input type="text" id="wifiSsid" placeholder="SSID" maxlength="32">
+          <input type="password" id="wifiPass" placeholder="Пароль" maxlength="64">
+        </div>
+        <button id="btnWifi" class="btn small primary" style="margin-top:8px">Подключить</button>
+      </section>
+      <section id="gpsSection" style="display:none">
+        <h3>GPS</h3>
+        <label class="toggle-row">
+          <span>Включить GPS</span>
+          <input type="checkbox" id="gpsToggle">
+        </label>
+        <span id="gpsStatus" class="text-dim" style="font-size:0.85rem;display:block;margin-top:4px">—</span>
+      </section>
+      <section>
+        <h3>Язык</h3>
+        <div class="row wrap">
+          <button class="lang-btn" data-lang="ru">RU</button>
+          <button class="lang-btn" data-lang="en">EN</button>
+        </div>
+      </section>
+      <section>
+        <h3>Энергосбережение</h3>
+        <label class="toggle-row">
+          <span>Powersave</span>
+          <input type="checkbox" id="powersaveToggle">
+        </label>
+      </section>
+      <section>
+        <h3>E2E Invite</h3>
+        <button id="btnInvite" class="btn small primary">Создать приглашение</button>
+        <div id="inviteResult" class="invite-result" style="display:none"></div>
+        <div class="row" style="margin-top:12px">
+          <input type="text" id="acceptId" placeholder="ID пригласившего" maxlength="16" class="short">
+          <input type="text" id="acceptPubKey" placeholder="PubKey base64" style="flex:1;min-width:0">
+          <button id="btnAcceptInvite" class="btn small primary">Принять</button>
+        </div>
+      </section>
+      <section>
+        <h3>Контакты</h3>
+        <div class="row">
+          <input type="text" id="contactId" placeholder="ID (8 hex)" maxlength="16" class="short">
+          <input type="text" id="contactNick" placeholder="Никнейм" maxlength="16" class="short">
+          <button id="btnAddContact" class="btn small">+</button>
+        </div>
+        <div id="contactsList" class="contacts-list"></div>
+      </section>
+      <section>
+        <h3>Прочее</h3>
+        <button id="btnLocation" class="btn small">📍 Отправить локацию</button>
+        <button id="btnSelftest" class="btn small">Selftest</button>
+        <button id="btnOta" class="btn small">OTA</button>
+      </section>
+    </div>
+  </div>
+
+  <script>
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {});
+  </script>
+  <script src="app.js"></script>
+</body>
+</html>

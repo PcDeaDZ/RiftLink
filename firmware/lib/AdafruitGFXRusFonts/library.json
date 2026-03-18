@@ -1,0 +1,13 @@
+{
+  "name": "AdafruitGFXRusFonts",
+  "version": "1.0.0",
+  "description": "Cyrillic fonts for Adafruit GFX",
+  "keywords": "display, gfx, cyrillic, russian, font",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/immortalserg/AdafruitGFXRusFonts"
+  },
+  "build": {
+    "srcFilter": ["+<*.cpp>"]
+  }
+}
