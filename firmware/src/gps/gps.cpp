@@ -74,22 +74,52 @@ static void setDefaults() {
 #endif
 }
 
+/** При буте — пробуем пины, слушаем NMEA ~1.5 с. Не сохраняем в NVS. */
+static bool probeGps() {
+  s_serial = new HardwareSerial(1);
+  s_serial->begin(9600, SERIAL_8N1, s_pinRx, s_pinTx);
+  applyPower(true);
+  uint32_t start = millis();
+  bool gotData = false;
+  while (millis() - start < 1500) {
+    if (s_serial->available() > 0) {
+      gotData = true;
+      break;
+    }
+    delay(10);
+    yield();
+  }
+  if (!gotData) {
+    s_serial->end();
+    delete s_serial;
+    s_serial = nullptr;
+    applyPower(false);
+    s_pinRx = s_pinTx = s_pinEn = -1;
+    return false;
+  }
+  s_enabled = true;
+  return true;
+}
+
 namespace gps {
 
 void init() {
   if (s_inited) return;
   s_pinRx = s_pinTx = s_pinEn = -1;
   s_enabled = false;
-  if (!loadConfig()) setDefaults();
 
-  if (s_pinRx < 0 || s_pinTx < 0) {
-    s_inited = true;
-    return;  // GPS не настроен
+  if (loadConfig()) {
+    // Пользователь настроил через BLE (gps rx,tx,en)
+    s_serial = new HardwareSerial(1);
+    s_serial->begin(9600, SERIAL_8N1, s_pinRx, s_pinTx);
+    applyPower(s_enabled);
+  } else {
+    setDefaults();
+    if (!probeGps()) {
+      s_inited = true;
+      return;  // нет GPS — вкладку не рисуем
+    }
   }
-
-  s_serial = new HardwareSerial(1);
-  s_serial->begin(9600, SERIAL_8N1, s_pinRx, s_pinTx);
-  applyPower(s_enabled);
   s_inited = true;
 }
 

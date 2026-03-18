@@ -14,6 +14,8 @@
 #include "neighbors/neighbors.h"
 #include "wifi/wifi.h"
 #include "ota/ota.h"
+#include "powersave/powersave.h"
+#include "telemetry/telemetry.h"
 #include "version.h"
 #include <cstring>
 #include <cstdio>
@@ -75,6 +77,10 @@ static uint32_t s_previousRunMs = 0;      // Meshtastic: для rate limiting (�
 static uint32_t s_lastActivityTime = 0;   // активность (сообщения, смена экрана)
 static uint32_t s_fastRefreshCount = 0;   // подряд partial — после EINK_LIMIT_FASTREFRESH делаем full
 static uint32_t s_previousImageHash = 0;  // хеш последнего отображённого контента (пропуск дубликатов)
+static uint32_t s_fullRefreshCount = 0;   // счётчик full refresh — периодический reinit
+static bool s_lastWasFullRefresh = false; // после full+hibernate первый REDRAW — двойной partial
+static bool s_panelHibernating = false;  // панель в hibernate — не вызывать повторно
+static bool s_hibernateFromIdle = false; // hibernate из 30с idle (без full) — при wake нужен full
 // volatile — s_needRedrawInfo пишется из BLE task (displayRequestInfoRedraw), читается в main loop
 static volatile bool s_needRedrawMsg = false;
 static volatile bool s_needRedrawInfo = false;
@@ -87,6 +93,9 @@ static char s_lastMsgText[64] = {0};
 #define EINK_RATE_LIMIT_RESPONSIVE_MS  1000   // RESPONSIVE (кнопка, сообщение): min 1s
 #define EINK_LIMIT_FASTREFRESH         5      // после N partial — принудительный full (против ghosting)
 #define EINK_COOLDOWN_HW_MS            600    // аппаратный минимум между display() — иначе зависает
+#define EINK_IDLE_HIBERNATE_MS         30000  // 30 с неактивности → hibernate (панель не потребляет)
+#define EINK_REINIT_AFTER_N            3      // только FC1: каждые N full refresh — RST+init. BN/B73: hibernate() уже даёт reinit при wake
+#define PICKER_CONFIRM_MS              6000   // авто-принятие в пикерах (lang, region): e-ink медленный, 2.5s мало
 
 #define BTN_ACTIVE_LOW 1
 #define BTN_PRESSED (digitalRead(BUTTON_PIN) == (BTN_ACTIVE_LOW ? LOW : HIGH))
@@ -183,7 +192,46 @@ static uint32_t computeContentHash(int tab) {
   return h;
 }
 
+static void ensureCooldownBeforeDisplay();
+
+/** Периодический reinit — только для FC1 (LCMEN2R13EFC1). BN/B73: hibernate() уже даёт _reset() при wake. */
+static void maybeDisplayReinit() {
+  if (!dispFC1) return;  // BN и B73: hibernate = reinit при каждом full refresh
+  s_fullRefreshCount++;
+  if (s_fullRefreshCount < EINK_REINIT_AFTER_N) return;
+  s_fullRefreshCount = 0;
+  Serial.println("[RiftLink] E-Ink reinit (periodic, FC1)");
+  ensureCooldownBeforeDisplay();
+  digitalWrite(EINK_RST, LOW);
+  delay(20);
+  digitalWrite(EINK_RST, HIGH);
+  delay(200);
+  dispFC1->init(0, true, 20, false);
+  s_lastDisplayEnd = millis();
+}
+
+/** Meshtastic: после full refresh вызывать hibernate() — powerOff + deep sleep. Следующий display() сделает wake.
+ *  powersave OFF: не хибанируем, s_lastWasFullRefresh=false — иначе всегда full вместо partial. */
+static void doDisplayHibernate(bool wasFull) {
+  if (!wasFull) {
+    s_lastWasFullRefresh = false;
+    return;
+  }
+  if (!powersave::isEnabled()) {
+    s_lastWasFullRefresh = false;  // без powersave — следующий partial ок
+    return;
+  }
+  if (s_panelHibernating) return;  // уже в hibernate — не вызывать повторно
+  s_lastWasFullRefresh = true;
+  s_panelHibernating = true;
+  if (dispBN) dispBN->epd2.hibernate();
+  else if (dispFC1) dispFC1->epd2.hibernate();
+  else if (dispB73) dispB73->epd2.hibernate();
+}
+
 static void doDisplay(bool partial) {
+  s_panelHibernating = false;  // display() разбудит панель если была в hibernate
+  if (!partial) maybeDisplayReinit();
   if (dispBN) {
     if (partial) dispBN->setPartialWindow(0, 0, dispBN->width(), dispBN->height());
     else dispBN->setFullWindow();
@@ -197,6 +245,21 @@ static void doDisplay(bool partial) {
     else dispB73->setFullWindow();
     dispB73->display(partial);
   }
+  doDisplayHibernate(!partial);
+}
+
+/** 30 с неактивности → hibernate (панель не потребляет). Проверяем s_panelHibernating — не вызывать повторно. */
+static void hibernateIfIdle() {
+  uint32_t now = millis();
+  if ((now - s_lastActivityTime) < EINK_IDLE_HIBERNATE_MS) return;
+  if (s_panelHibernating) return;
+  if ((now - s_lastDisplayEnd) < EINK_COOLDOWN_HW_MS) return;  // не прерывать cooldown
+  s_panelHibernating = true;
+  s_lastWasFullRefresh = true;
+  s_hibernateFromIdle = true;  // wake без full перед этим — нужен full при выходе
+  if (dispBN) dispBN->epd2.hibernate();
+  else if (dispFC1) dispFC1->epd2.hibernate();
+  else if (dispB73) dispB73->epd2.hibernate();
 }
 
 /** Аппаратный cooldown — E-Ink требует паузу между display(), иначе зависает. */
@@ -343,6 +406,7 @@ void displayText(int x, int y, const char* text) {
 void displayShow() {
   ensureCooldownBeforeDisplay();
   doDisplay(false);
+  s_fastRefreshCount = 0;
   s_lastDisplayEnd = millis();
 }
 
@@ -363,6 +427,7 @@ void displayShowBootScreen() {
   disp->setCursor(4, SCREEN_HEIGHT - 18);
   disp->print(ver);
   doDisplay(false);
+  s_fastRefreshCount = 0;
   s_lastDisplayEnd = millis();
 }
 
@@ -392,10 +457,10 @@ static int waitButtonPressWithType(uint32_t timeoutMs) {
 bool displayShowLanguagePicker() {
   if (!disp) return false;
   delay(200);
-  s_fastRefreshCount = 0;  // сброс — picker всегда full refresh
+  s_fastRefreshCount = 0;
   int pickLang = locale::getLang();
   uint32_t lastPress = millis();
-  const uint32_t CONFIRM_MS = 2500;
+  const uint32_t CONFIRM_MS = PICKER_CONFIRM_MS;
   while (1) {
     yield();
     ensureCooldownBeforeDisplay();
@@ -408,7 +473,16 @@ bool displayShowLanguagePicker() {
     disp->print(" ");
     disp->print(pickLang == LANG_RU ? "[RU]" : " RU ");
     drawTruncRaw(4, 60, locale::getForLang("short_long_hint", pickLang), 28);
-    doDisplay(false);  // всегда full — против ghosting
+    bool usePartial = (s_fastRefreshCount < EINK_LIMIT_FASTREFRESH);
+    if (s_lastWasFullRefresh) {
+      s_hibernateFromIdle = false;
+      s_lastWasFullRefresh = false;
+      doDisplay(false);
+      s_fastRefreshCount = 0;
+    } else {
+      doDisplay(usePartial);
+      if (usePartial) s_fastRefreshCount++; else s_fastRefreshCount = 0;
+    }
     s_lastDisplayEnd = millis();
     while (millis() - lastPress < CONFIRM_MS) {
       yield();
@@ -448,18 +522,39 @@ bool displayShowRegionPicker() {
     }
   }
   uint32_t lastPress = millis();
-  const uint32_t CONFIRM_MS = 2500;
+  const uint32_t CONFIRM_MS = PICKER_CONFIRM_MS;
   while (1) {
     yield();
     ensureCooldownBeforeDisplay();
     disp->fillScreen(GxEPD_WHITE);
     disp->setTextColor(GxEPD_BLACK);
     disp->setTextSize(1);
-    drawTruncRaw(4, 4, locale::getForDisplay("select_country"), 24);
-    drawTruncRaw(4, 18, locale::getForDisplay("country_rules"), 24);
-    disp->setCursor(80, 50);
-    disp->print(region::getPresetCode(pickIdx));
-    doDisplay(false);  // всегда full
+    drawTruncRaw(4, 8, locale::getForDisplay("select_country"), 24);
+    // Варианты как в language picker: [EU] UK RU US AU — выбран в скобках
+    disp->setCursor(4, 36);
+    for (int i = 0; i < nPresets; i++) {
+      const char* code = region::getPresetCode(i);
+      if (i == pickIdx) {
+        disp->print("[");
+        disp->print(code);
+        disp->print("]");
+      } else {
+        disp->print(" ");
+        disp->print(code);
+        disp->print(" ");
+      }
+    }
+    drawTruncRaw(4, 56, locale::getForDisplay("short_long_hint"), 28);
+    bool usePartial = (s_fastRefreshCount < EINK_LIMIT_FASTREFRESH);
+    if (s_lastWasFullRefresh) {
+      s_hibernateFromIdle = false;
+      s_lastWasFullRefresh = false;
+      doDisplay(false);
+      s_fastRefreshCount = 0;
+    } else {
+      doDisplay(usePartial);
+      if (usePartial) s_fastRefreshCount++; else s_fastRefreshCount = 0;
+    }
     s_lastDisplayEnd = millis();
     while (millis() - lastPress < CONFIRM_MS) {
       yield();
@@ -501,9 +596,10 @@ static void drawFrame(int activeTab) {
   if (!disp) return;
   disp->fillScreen(GxEPD_WHITE);
   disp->setTextColor(GxEPD_BLACK);
-  int tabW = SCREEN_WIDTH / N_TABS;
+  int nTabs = gps::isPresent() ? 7 : 6;
+  int tabW = SCREEN_WIDTH / nTabs;
   int iconSize = ICON_W * ICON_SCALE;
-  for (int i = 0; i < N_TABS; i++) {
+  for (int i = 0; i < nTabs; i++) {
     int x = i * tabW;
     int iconX = x + (tabW - iconSize) / 2;
     int iconY = (TAB_H - iconSize) / 2;
@@ -513,12 +609,22 @@ static void drawFrame(int activeTab) {
     } else {
       drawIconScaled(iconX, iconY, TAB_ICONS[i], GxEPD_BLACK);
     }
-    if (i < N_TABS - 1) {
+    if (i < nTabs - 1) {
       disp->drawFastVLine(x + tabW, 2, TAB_H - 2, GxEPD_BLACK);
     }
   }
   disp->drawFastHLine(0, TAB_H, SCREEN_WIDTH, GxEPD_BLACK);
   disp->drawRect(0, CONTENT_Y, SCREEN_WIDTH, CONTENT_H, GxEPD_BLACK);
+}
+
+/** Li-ion: 3.0V=0%, 4.2V=100%, линейно. 0 mV → — (нет батареи).
+ *  Зарядка без батареи: VBAT ~3.9V (Heltec) → показываем 100%. */
+static int batteryPercent(uint16_t mv) {
+  if (mv < 3000) return -1;
+  if (mv >= 3850) return 100;  // 3.85V+ = полный заряд или зарядка без батареи
+  int pct = (int)((mv - 3000) / 12);  // 1200mV / 100
+  if (pct > 100) pct = 100;
+  return pct;
 }
 
 static void drawContentMain() {
@@ -537,6 +643,11 @@ static void drawContentMain() {
   int n = neighbors::getCount();
   snprintf(buf, sizeof(buf), "%s %d", locale::getForDisplay("neighbors"), n);
   drawTruncRaw(CONTENT_X, CONTENT_Y + 38, buf, MAX_LINE_CHARS);
+  int pct = batteryPercent(telemetry::readBatteryMv());
+  const char* batLabel = locale::getForDisplay("battery");
+  if (pct >= 0) snprintf(buf, sizeof(buf), "%s %d%%", batLabel, pct);
+  else snprintf(buf, sizeof(buf), "%s --", batLabel);
+  drawTruncRaw(CONTENT_X, CONTENT_Y + 50, buf, MAX_LINE_CHARS);
 }
 
 static void drawContentInfo() {
@@ -656,27 +767,61 @@ static bool performDisplayUpdate(int tab, bool isResponsive, bool forceUpdate = 
     return false;
   }
 
-  // Пickers и смена контекста — всегда full refresh (против ghosting)
-  bool usePartial = isResponsive && (s_fastRefreshCount < EINK_LIMIT_FASTREFRESH) && !forceUpdate;
-  ensureCooldownBeforeDisplay();
-  doDisplay(usePartial);
+  // Partial везде; каждые EINK_LIMIT_FASTREFRESH — full для очистки ghosting
+  bool usePartial = (s_fastRefreshCount < EINK_LIMIT_FASTREFRESH);
+  if (s_lastWasFullRefresh) {
+    // wake из сна: всегда full — иначе ghosting
+    s_hibernateFromIdle = false;
+    s_lastWasFullRefresh = false;
+    s_previousImageHash = 0;
+    ensureCooldownBeforeDisplay();
+    doDisplay(false);
+    s_fastRefreshCount = 0;
+  } else {
+    ensureCooldownBeforeDisplay();
+    doDisplay(usePartial);
+    if (usePartial) s_fastRefreshCount++;
+    else s_fastRefreshCount = 0;
+  }
 
   s_lastDisplayEnd = millis();
   s_previousRunMs = now;
   s_previousImageHash = hash;
-  if (usePartial) s_fastRefreshCount++;
-  else s_fastRefreshCount = 0;
+  s_lastActivityTime = now;  // обновление данных — активность (откладывает hibernate)
   return true;
 }
 
-static void drawScreen(int tab) {
+static void drawScreen(int tab, bool forceFull = false) {
   drawScreenContent(tab);
-  ensureCooldownBeforeDisplay();
-  doDisplay(false);
+  // powersave: всегда full, не зависеть от s_lastWasFullRefresh — иначе вторая смена вкладки перестаёт рисоваться
+  if (forceFull) {
+    s_hibernateFromIdle = false;
+    s_lastWasFullRefresh = false;
+    s_previousImageHash = 0;
+    ensureCooldownBeforeDisplay();
+    doDisplay(false);
+    s_fastRefreshCount = 0;
+  } else {
+    bool usePartial = (s_fastRefreshCount < EINK_LIMIT_FASTREFRESH);
+    if (s_lastWasFullRefresh) {
+      // wake из сна: всегда full — иначе ghosting
+      s_hibernateFromIdle = false;
+      s_lastWasFullRefresh = false;
+      s_previousImageHash = 0;
+      ensureCooldownBeforeDisplay();
+      doDisplay(false);
+      s_fastRefreshCount = 0;
+    } else {
+      ensureCooldownBeforeDisplay();
+      doDisplay(usePartial);
+      if (usePartial) s_fastRefreshCount++;
+      else s_fastRefreshCount = 0;
+    }
+  }
   s_lastDisplayEnd = millis();
   s_previousRunMs = millis();
   s_previousImageHash = computeContentHash(tab);
-  s_fastRefreshCount = 0;
+  s_lastActivityTime = millis();  // отрисовка — активность (откладывает hibernate)
 }
 
 void displaySetButtonPolledExternally(bool on) {
@@ -693,18 +838,31 @@ void displaySetLastMsg(const char* fromHex, const char* text) {
   s_lastActivityTime = millis();
   if (fromHex) { strncpy(s_lastMsgFrom, fromHex, 16); s_lastMsgFrom[16] = '\0'; }
   if (text) { strncpy(s_lastMsgText, text, 63); s_lastMsgText[63] = '\0'; }
-  if (s_currentScreen == 4) s_needRedrawMsg = true;  // отложить draw — не блокировать handlePacket
+  if (s_currentScreen == 4) s_needRedrawMsg = true;  // обновить только если на вкладке Msg
 }
 
 void displayShowScreen(int screen) {
+  s_lastActivityTime = millis();
+  if (screen == 6 && !gps::isPresent()) screen = 5;
   s_currentScreen = screen % N_TABS;
   s_previousRunMs = 0;
-  ensureCooldownBeforeDisplay();
-  drawScreen(s_currentScreen);
+  bool forceFull = powersave::isEnabled();  // режим экономии: full → hibernate после каждой вкладки
+  drawScreen(s_currentScreen, forceFull);
+}
+
+void displayShowScreenForceFull(int screen) {
+  s_currentScreen = screen % N_TABS;
+  s_previousRunMs = 0;
+  drawScreen(s_currentScreen, true);  // full refresh — против ghosting при смене вкладки
 }
 
 int displayGetCurrentScreen() {
   return s_currentScreen;
+}
+
+int displayGetNextScreen(int current) {
+  int nTabs = gps::isPresent() ? 7 : 6;
+  return (current + 1) % nTabs;
 }
 
 void displayOnLongPress(int screen) {
@@ -748,9 +906,12 @@ bool displayUpdate() {
         digitalWrite(LED_PIN, LOW);
       }
       if (isShort) {
+        s_lastActivityTime = millis();
         ensureCooldownBeforeDisplay();
-        s_currentScreen = (s_currentScreen + 1) % N_TABS;
-        if (!performDisplayUpdate(s_currentScreen, true, true)) drawScreen(s_currentScreen);
+        s_currentScreen = displayGetNextScreen(s_currentScreen);
+        bool forceFull = powersave::isEnabled();  // режим экономии: full → hibernate после каждой вкладки
+        if (forceFull) drawScreen(s_currentScreen, true);
+        else if (!performDisplayUpdate(s_currentScreen, true, true)) drawScreen(s_currentScreen, false);
       } else if (isLong) displayOnLongPress(s_currentScreen);
       s_lastButton = false;
       for (int i = 0; i < 4; i++) { delay(50); yield(); }
@@ -758,18 +919,32 @@ bool displayUpdate() {
     }
   }
 
+  // Обновляем только если пользователь на вкладке с этими данными — иначе смысла нет
   if (s_needRedrawInfo && s_currentScreen == 1) {
     if (performDisplayUpdate(1, true, true)) s_needRedrawInfo = false;
+    else {
+      drawScreen(1, powersave::isEnabled());  // fallback при cooldown — ждём и рисуем
+      s_needRedrawInfo = false;
+    }
     return false;
   }
   if (s_needRedrawMsg && s_currentScreen == 4) {
     if (performDisplayUpdate(4, true, true)) s_needRedrawMsg = false;
+    else {
+      drawScreen(4, powersave::isEnabled());  // fallback при cooldown — ждём и рисуем
+      s_needRedrawMsg = false;
+    }
     return false;
   }
   if ((now - s_lastDisplayEnd) < EINK_COOLDOWN_HW_MS) return false;
 
-  if (s_currentScreen == 0 || s_currentScreen == 1 || s_currentScreen == 2 || s_currentScreen == 6) {
-    performDisplayUpdate(s_currentScreen, false);
+  hibernateIfIdle();  // 30 с неактивности → панель в hibernate
+
+  // Периодика только для вкладок с живыми данными. Lang(5), Sys(3), Msg(4) — только по событию
+  const int tab = s_currentScreen;
+  const bool tabHasLiveData = (tab == 0 || tab == 1 || tab == 2 || tab == 6);
+  if (tabHasLiveData) {
+    performDisplayUpdate(tab, false);
   }
   return false;
 }

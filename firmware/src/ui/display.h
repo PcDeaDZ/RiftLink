@@ -22,8 +22,12 @@ bool displayShowRegionPicker();
 
 /** Меню: 0=Main, 1=Info, 2=WiFi, 3=Sys, 4=Msg, 5=Lang, 6=GPS. Вызывать после init. */
 void displayShowScreen(int screen);
+/** Смена вкладки с принудительным full refresh (против ghosting на e-ink). */
+void displayShowScreenForceFull(int screen);
 /** Текущая вкладка (для опроса кнопки в loopTask) */
 int displayGetCurrentScreen();
+/** Следующая вкладка при переключении (учитывает gps::isPresent — скрывает GPS если нет модуля) */
+int displayGetNextScreen(int current);
 /** Обработка long press на вкладке (picker, selftest, gps toggle) */
 void displayOnLongPress(int screen);
 /** Показать последнее сообщение (экран 3). */

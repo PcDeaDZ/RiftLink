@@ -11,8 +11,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-// Размер буфера пакета: header + payload + crypto overhead
-constexpr size_t PACKET_BUF_SIZE = protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD;
+// Размер буфера пакета: sync + header + payload + crypto overhead
+constexpr size_t PACKET_BUF_SIZE = protocol::SYNC_LEN + protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD;
 
 struct PacketQueueItem {
   uint8_t buf[PACKET_BUF_SIZE];

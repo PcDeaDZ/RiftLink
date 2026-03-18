@@ -5,6 +5,7 @@
 #include "x25519_keys.h"
 #include "node/node.h"
 #include "radio/radio.h"
+#include "log.h"
 #include <sodium.h>
 #include <nvs_flash.h>
 #include <nvs.h>
@@ -106,7 +107,7 @@ void onKeyExchange(const uint8_t* peerId, const uint8_t* theirPubKey) {
   s_peers[idx].timestamp = millis();
   s_peers[idx].used = true;
   xSemaphoreGive(s_mutex);
-  Serial.printf("[RiftLink] X25519 key with %02X%02X\n", peerId[0], peerId[1]);
+  RIFTLINK_LOG_EVENT("[RiftLink] X25519 key with %02X%02X\n", peerId[0], peerId[1]);
 }
 
 bool hasKeyFor(const uint8_t* peerId) {
@@ -129,14 +130,12 @@ void sendKeyExchange(const uint8_t* peerId, bool useSf12) {
   if (!s_inited || !peerId || node::isForMe(peerId) || node::isBroadcast(peerId) || node::isInvalidNodeId(peerId)) return;
   if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
 
-  uint8_t pkt[protocol::HEADER_LEN + X25519_PUBKEY_LEN];
+  uint8_t pkt[protocol::PAYLOAD_OFFSET + X25519_PUBKEY_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), peerId, 31, protocol::OP_KEY_EXCHANGE,
       s_pubKey, X25519_PUBKEY_LEN);
   uint8_t txSf = useSf12 ? 12 : 0;
-  if (len > 0 && radio::send(pkt, len, txSf, useSf12)) {
-    Serial.printf("[RiftLink] KEY_EXCHANGE sent to %02X%02X%s\n", peerId[0], peerId[1], useSf12 ? " SF12" : "");
-  }
+  if (len > 0) radio::send(pkt, len, txSf, useSf12);
   xSemaphoreGive(s_mutex);
 }
 

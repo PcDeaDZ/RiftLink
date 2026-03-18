@@ -3,17 +3,28 @@
  */
 
 #include "async_tasks.h"
+#include "log.h"
 #include "async_queues.h"
 #include "ui/display.h"
 #include "radio/radio.h"
+#include <Arduino.h>
+#include <ESP.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_heap_caps.h>
 #include <string.h>
 
+#define DISPLAY_HEARTBEAT_MS 10000  // лог раз в 10 с — проверить, что displayTask жив
+
 #define PACKET_TASK_STACK 32768
-#define DISPLAY_TASK_STACK 8192
+#define DISPLAY_TASK_STACK 8192   // 12KB — create FAIL (heap), 8KB — минимум для создания
 #define PACKET_TASK_PRIO 2
 #define DISPLAY_TASK_PRIO 1
+#if defined(USE_EINK)
+#define PACKET_TASK_PRIO_EINK 3   // Paper: выше displayTask — e-ink блокирует, packetTask важнее
+#else
+#define PACKET_TASK_PRIO_EINK PACKET_TASK_PRIO
+#endif
 
 // Forward — реализация в main.cpp (async)
 extern void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf);
@@ -41,7 +52,7 @@ void queueDisplayLastMsg(const char* fromHex, const char* text) {
   xQueueSend(displayQueue, &item, 0);
 }
 
-void queueDisplayRedraw(uint8_t screen) {
+void queueDisplayRedraw(uint8_t screen, bool priority) {
   if (!displayQueue) {
     displayShowScreen(screen);
     return;
@@ -49,7 +60,10 @@ void queueDisplayRedraw(uint8_t screen) {
   DisplayQueueItem item = {};
   item.cmd = CMD_REDRAW_SCREEN;
   item.screen = screen;
-  if (xQueueSend(displayQueue, &item, pdMS_TO_TICKS(200)) != pdTRUE) {
+  BaseType_t ok = priority ? xQueueSendToFront(displayQueue, &item, pdMS_TO_TICKS(200))
+                           : xQueueSend(displayQueue, &item, pdMS_TO_TICKS(200));
+  if (ok != pdTRUE) {
+    Serial.println("[RiftLink] displayQueue full, fallback draw");
     displayShowScreen(screen);  // fallback при переполнении очереди
   }
 }
@@ -74,6 +88,7 @@ void queueDisplayLongPress(uint8_t screen) {
   item.cmd = CMD_LONG_PRESS;
   item.screen = screen;
   if (xQueueSend(displayQueue, &item, pdMS_TO_TICKS(200)) != pdTRUE) {
+    Serial.println("[RiftLink] displayQueue full, fallback longPress");
     displayOnLongPress(screen);  // fallback при переполнении очереди
   }
 }
@@ -103,16 +118,24 @@ static void packetTask(void* arg) {
 }
 
 static void displayTask(void* arg) {
+  vTaskDelay(pdMS_TO_TICKS(100));  // дать setup завершиться
   DisplayQueueItem item;
+  uint32_t lastHeartbeat = millis();
   for (;;) {
     if (xQueueReceive(displayQueue, &item, pdMS_TO_TICKS(100)) == pdTRUE) {
       switch (item.cmd) {
         case CMD_SET_LAST_MSG:
           displaySetLastMsg(item.fromHex, item.text);
           break;
-        case CMD_REDRAW_SCREEN:
-          displayShowScreen(item.screen);
+        case CMD_REDRAW_SCREEN: {
+          uint8_t lastScreen = item.screen;
+          while (xQueuePeek(displayQueue, &item, 0) == pdTRUE && item.cmd == CMD_REDRAW_SCREEN) {
+            xQueueReceive(displayQueue, &item, 0);
+            lastScreen = item.screen;
+          }
+          displayShowScreen(lastScreen);
           break;
+        }
         case CMD_REQUEST_INFO_REDRAW:
           displayRequestInfoRedraw();
           break;
@@ -126,10 +149,17 @@ static void displayTask(void* arg) {
       }
     }
     displayUpdate();
+    uint32_t now = millis();
+    if (now - lastHeartbeat >= DISPLAY_HEARTBEAT_MS) {
+      lastHeartbeat = now;
+    }
   }
 }
 
 void asyncTasksStart() {
-  xTaskCreate(packetTask, "packet", PACKET_TASK_STACK, nullptr, PACKET_TASK_PRIO, nullptr);
-  xTaskCreate(displayTask, "display", DISPLAY_TASK_STACK, nullptr, DISPLAY_TASK_PRIO, nullptr);
+  BaseType_t okDisplay = xTaskCreate(displayTask, "display", DISPLAY_TASK_STACK, nullptr, DISPLAY_TASK_PRIO, nullptr);
+  if (okDisplay == pdFAIL) {
+    RIFTLINK_LOG_ERR("[RiftLink] displayTask create FAIL (need %u)\n", (unsigned)DISPLAY_TASK_STACK);
+  }
+  xTaskCreate(packetTask, "packet", PACKET_TASK_STACK, nullptr, PACKET_TASK_PRIO_EINK, nullptr);
 }

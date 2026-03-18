@@ -24,7 +24,7 @@
 struct PendingMsg {
   uint32_t msgId;
   uint8_t to[protocol::NODE_ID_LEN];
-  uint8_t pkt[protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+  uint8_t pkt[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
   size_t pktLen;
   uint32_t lastSendTime;
   uint8_t retries;
@@ -168,7 +168,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     size_t encLen = sizeof(encBuf);
     if (!crypto::encrypt(toEncrypt, toEncryptLen, encBuf, &encLen)) return false;
 
-    uint8_t pkt[protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+    uint8_t pkt[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
     size_t len = protocol::buildPacket(pkt, sizeof(pkt),
         node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_GROUP_MSG,
         encBuf, encLen, true, false, useCompressed);
@@ -208,7 +208,7 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
   size_t encLen = sizeof(encBuf);
   if (!crypto::encrypt(toEncrypt, toEncryptLen, encBuf, &encLen)) return false;
 
-  uint8_t pkt[protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+  uint8_t pkt[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_GROUP_MSG,
       encBuf, encLen, true, false, useCompressed);
@@ -241,9 +241,9 @@ void update() {
     if (now - p->lastSendTime < ACK_TIMEOUT_MS) continue;
 
     if (p->retries >= MAX_RETRIES) {
-      uint8_t flags = (p->pkt[0] & 0x04) ? 1 : 0;  // compressed
-      offline_queue::enqueue(p->to, p->pkt + protocol::HEADER_LEN,
-          p->pktLen - protocol::HEADER_LEN, protocol::OP_MSG, flags);
+      uint8_t flags = (p->pkt[protocol::SYNC_LEN] & 0x04) ? 1 : 0;  // compressed (version_flags)
+      offline_queue::enqueue(p->to, p->pkt + protocol::PAYLOAD_OFFSET,
+          p->pktLen - protocol::PAYLOAD_OFFSET, protocol::OP_MSG, flags);
       p->inUse = false;
       continue;
     }

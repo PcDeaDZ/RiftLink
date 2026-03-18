@@ -8,7 +8,12 @@ QueueHandle_t packetQueue = nullptr;
 QueueHandle_t sendQueue = nullptr;
 QueueHandle_t displayQueue = nullptr;
 
-static constexpr size_t PACKET_QUEUE_LEN = 8;
+static constexpr size_t PACKET_QUEUE_LEN =
+#if defined(USE_EINK)
+    96;  // Paper: e-ink + burst — 48 недостаточно при плотном трафике
+#else
+    8;
+#endif
 static constexpr size_t SEND_QUEUE_LEN = 8;
 static constexpr size_t DISPLAY_QUEUE_LEN = 8;  // E-Ink обновления долгие — буфер для кнопки
 

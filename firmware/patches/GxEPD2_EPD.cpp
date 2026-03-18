@@ -76,6 +76,7 @@ void GxEPD2_EPD::_reset()
 {
   if (_rst >= 0)
   {
+    bool wasHibernating = _hibernating;
     if (_pulldown_rst_mode)
     {
       digitalWrite(_rst, LOW);
@@ -94,6 +95,9 @@ void GxEPD2_EPD::_reset()
       digitalWrite(_rst, HIGH);
       delay(200);
     }
+    if (wasHibernating && _busy >= 0) {
+      _waitWhileBusy("_reset_wake", 800);  // ждём BUSY после wake — аппаратно обоснованно (800ms max)
+    }
     _hibernating = false;
   }
 }
@@ -110,7 +114,7 @@ void GxEPD2_EPD::_waitWhileBusy(const char* comment, uint16_t busy_time)
   {
     delay(1); // add some margin to become active
     unsigned long startMs = millis();  // millis() overflow 49 дней vs micros() 71 мин
-    unsigned long maxWaitMs = 4000;   // Cap 4s — FC1=6s, E0213A367=10s
+    unsigned long maxWaitMs = (busy_time >= 100 && busy_time <= 15000) ? (unsigned long)busy_time : 4000;
     while (1)
     {
       if (digitalRead(_busy) != _busy_level) break;

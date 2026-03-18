@@ -88,7 +88,7 @@ bool send(const uint8_t* to, const uint8_t* data, size_t dataLen) {
     fragPayload[5] = nFrags;
     memcpy(fragPayload + FRAG_HEADER_LEN, encBuf + offset, chunkLen);
 
-    uint8_t pkt[protocol::HEADER_LEN + protocol::MAX_PAYLOAD];
+    uint8_t pkt[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD];
     size_t pktLen = protocol::buildPacket(pkt, sizeof(pkt),
         node::getId(), to, 31, protocol::OP_VOICE_MSG,
         fragPayload, FRAG_HEADER_LEN + chunkLen, true, false, false);

@@ -82,7 +82,15 @@ bool isBroadcast(const uint8_t* to) {
 }
 
 bool isInvalidNodeId(const uint8_t* id) {
-  return id && id[0] == 0xFF && id[1] == 0xFF;
+  if (!id) return true;
+  if (id[0] == 0xFF && id[1] == 0xFF) return true;  // broadcast-like
+  if (id[0] == 0x00 && id[1] == 0x00) return true;  // ghost от шума/коррупции
+  // Сдвиг: opcode/TTL попали в from (03=HELLO, 06=KEY_EXCHANGE, 1F=TTL)
+  if (id[0] == 0x03 && id[1] == 0x00) return true;
+  if (id[0] == 0x06 && id[1] == 0x00) return true;
+  if (id[0] == 0x1F && id[1] == 0x03) return true;
+  if (id[0] == 0x1F && id[1] == 0x06) return true;
+  return false;
 }
 
 void getNickname(char* out, size_t maxLen) {

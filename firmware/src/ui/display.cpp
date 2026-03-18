@@ -14,6 +14,7 @@
 #include "neighbors/neighbors.h"
 #include "wifi/wifi.h"
 #include "ota/ota.h"
+#include "telemetry/telemetry.h"
 #include "version.h"
 #include <cstring>
 #include <cstdio>
@@ -261,8 +262,10 @@ bool displayShowRegionPicker() {
   if (!disp) return false;
 
   delay(200);
+  int nPresets = region::getPresetCount();
+  if (nPresets <= 0) return false;
   int pickIdx = 0;
-  for (int i = 0; i < region::getPresetCount(); i++) {
+  for (int i = 0; i < nPresets; i++) {
     if (strcasecmp(region::getPresetCode(i), region::getCode()) == 0) {
       pickIdx = i;
       break;
@@ -278,18 +281,30 @@ bool displayShowRegionPicker() {
     disp->setTextColor(SSD1306_WHITE);
 
     drawTruncRaw(4, 4, locale::getForDisplay("select_country"), 18);
-    drawTruncRaw(4, 14, locale::getForDisplay("country_rules"), 18);
-    disp->setCursor(48, 28);
-    disp->print(region::getPresetCode(pickIdx));
+    // Варианты как на Paper: [EU] UK RU US AU — выбран в скобках
+    disp->setCursor(4, 20);
+    for (int i = 0; i < nPresets; i++) {
+      const char* code = region::getPresetCode(i);
+      if (i == pickIdx) {
+        disp->print("[");
+        disp->print(code);
+        disp->print("]");
+      } else {
+        disp->print(" ");
+        disp->print(code);
+        disp->print(" ");
+      }
+    }
+    drawTruncRaw(4, 36, locale::getForDisplay("short_long_hint"), 18);
 
     disp->display();
 
     while (millis() - lastPress < CONFIRM_MS) {
       int pt = waitButtonPressWithType(CONFIRM_MS - (millis() - lastPress));
       if (pt == PRESS_SHORT) {
-        pickIdx = (pickIdx + 1) % region::getPresetCount();
+        pickIdx = (pickIdx + 1) % nPresets;
         lastPress = millis();
-        break;  // выйти из inner while → перерисовать экран с новым регионом
+        break;
       } else if (pt == PRESS_LONG || pt == PRESS_NONE) {
         goto region_done;
       }
@@ -305,10 +320,11 @@ static void drawFrame(int activeTab) {
   if (!disp) return;
   disp->clearDisplay();
 
-  int tabW = SCREEN_WIDTH / N_TABS;
+  int nTabs = gps::isPresent() ? 7 : 6;
+  int tabW = SCREEN_WIDTH / nTabs;
 
   // Вкладки с иконками
-  for (int i = 0; i < N_TABS; i++) {
+  for (int i = 0; i < nTabs; i++) {
     int x = i * tabW;
     int iconX = x + (tabW - ICON_W) / 2;
     int iconY = 2;
@@ -318,7 +334,7 @@ static void drawFrame(int activeTab) {
     } else {
       disp->drawBitmap(iconX, iconY, TAB_ICONS[i], ICON_W, ICON_H, SSD1306_WHITE);
     }
-    if (i < N_TABS - 1) {
+    if (i < nTabs - 1) {
       disp->drawLine(x + tabW, 2, x + tabW, TAB_H - 2, SSD1306_WHITE);
     }
   }
@@ -351,6 +367,14 @@ static void drawContentMain() {
   int n = neighbors::getCount();
   snprintf(buf, sizeof(buf), "%s %d", locale::getForDisplay("neighbors"), n);
   drawTruncRaw(CONTENT_X, CONTENT_Y + 26, buf, MAX_LINE_CHARS);
+
+  uint16_t batMv = telemetry::readBatteryMv();
+  int pct = (batMv >= 3000) ? (int)((batMv - 3000) / 12) : -1;
+  if (pct > 100) pct = 100;
+  const char* batLabel = locale::getForDisplay("battery");
+  if (pct >= 0) snprintf(buf, sizeof(buf), "%s %d%%", batLabel, pct);
+  else snprintf(buf, sizeof(buf), "%s --", batLabel);
+  drawTruncRaw(CONTENT_X, CONTENT_Y + 34, buf, MAX_LINE_CHARS);
 }
 
 static void drawContentInfo() {
@@ -470,13 +494,23 @@ void displaySetLastMsg(const char* fromHex, const char* text) {
 }
 
 void displayShowScreen(int screen) {
+  if (screen == 6 && !gps::isPresent()) screen = 5;
   s_currentScreen = screen % N_TABS;
   s_lastActivityTime = millis();  // смена экрана (пикеры) — активность
   drawScreen(s_currentScreen);
 }
 
+void displayShowScreenForceFull(int screen) {
+  displayShowScreen(screen);  // OLED — full/partial не различаются
+}
+
 int displayGetCurrentScreen() {
   return s_currentScreen;
+}
+
+int displayGetNextScreen(int current) {
+  int nTabs = gps::isPresent() ? 7 : 6;
+  return (current + 1) % nTabs;
 }
 
 void displayOnLongPress(int screen) {
@@ -552,7 +586,7 @@ bool displayUpdate() {
       bool isShort = (hold >= MIN_PRESS_MS && hold < SHORT_PRESS_MS);
       s_lastActivityTime = now;
       if (isShort) {
-        s_currentScreen = (s_currentScreen + 1) % N_TABS;
+        s_currentScreen = displayGetNextScreen(s_currentScreen);
         drawScreen(s_currentScreen);
       } else if (isLong) displayOnLongPress(s_currentScreen);
       s_lastButton = false;

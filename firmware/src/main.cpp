@@ -43,10 +43,17 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include "async_queues.h"
 #include "async_tasks.h"
 #include "duty_cycle/duty_cycle.h"
+#include "log.h"
 
 #define BUTTON_PIN         0    // Heltec USER_SW
 #define MIN_PRESS_MS       80
+#if defined(USE_EINK)
+#define LONG_PRESS_MS      900  // e-ink: 500ms мало — пользователь ждёт отрисовку, часто ложно long
+#else
 #define LONG_PRESS_MS      500
+#endif
+#define POST_PRESS_DEBOUNCE_MS 400  // игнор дребезга после обработки — против двойного long press
+#define PENDING_REDRAW_RETRY_MS 2500  // retry смены вкладки, если дисплей не принял за 2.5с
 
 #define HELLO_INTERVAL_MS  10000
 #define HELLO_JITTER_MS    2000   // ±2s — чтобы два устройства не передавали одновременно
@@ -65,7 +72,7 @@ static bool s_nextRxSf12 = false;     // слушать SF12 после drain HE
 static uint8_t s_sf12BurstCount = 0;  // 2 цикла SF12 подряд каждые 30с
 static uint32_t s_lastSf12Burst = 0;
 static uint32_t s_lastKeyRetry = 0;   // retry KEY_EXCHANGE каждые 30с для соседей без ключа
-static uint8_t rxBuf[protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+static uint8_t rxBuf[protocol::SYNC_LEN + protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
 
 // Буферы для handlePacket (packetTask) — s_fragOutBuf/s_voiceOutBuf слишком велики для стека
 static uint8_t s_fragOutBuf[frag::MAX_MSG_PLAIN];
@@ -73,26 +80,46 @@ static uint8_t s_voiceOutBuf[voice_frag::MAX_VOICE_PLAIN + 1024];
 
 static bool s_lastButton = false;
 static uint32_t s_pressStart = 0;
+static uint32_t s_lastProcessedMs = 0;
+static uint8_t s_pendingScreen = 0xFF;   // ожидаемая вкладка после REDRAW
+static uint32_t s_pendingScreenTime = 0;
 
 static void pollButtonAndQueue() {
   if (!displayQueue) return;
+  uint32_t now = millis();
+
+  // Retry: если дисплей не принял смену вкладки за 2.5с — отправить повторно
+  if (s_pendingScreen != 0xFF) {
+    if (displayGetCurrentScreen() == s_pendingScreen) {
+      s_pendingScreen = 0xFF;
+    } else if ((now - s_pendingScreenTime) >= PENDING_REDRAW_RETRY_MS) {
+      queueDisplayRedraw(s_pendingScreen, true);
+      s_pendingScreenTime = now;
+    }
+  }
+
   bool btn = (digitalRead(BUTTON_PIN) == LOW);  // active low
   if (btn) {
-    if (!s_lastButton) { s_lastButton = true; s_pressStart = millis(); }
+    if (!s_lastButton) { s_lastButton = true; s_pressStart = now; }
   } else if (s_lastButton) {
-    uint32_t hold = millis() - s_pressStart;
+    uint32_t hold = now - s_pressStart;
     s_lastButton = false;
     if (hold < MIN_PRESS_MS) return;
+    if (now - s_lastProcessedMs < POST_PRESS_DEBOUNCE_MS) return;  // дребезг — игнор
+    s_lastProcessedMs = now;
     if (displayIsSleeping()) {
       queueDisplayWake();
       return;
     }
     int cur = displayGetCurrentScreen();
     if (hold >= LONG_PRESS_MS) {
+      s_pendingScreen = 0xFF;  // long press — не смена вкладки
       queueDisplayLongPress((uint8_t)cur);
     } else {
-      uint8_t next = (cur + 1) % 7;
-      queueDisplayRedraw(next);
+      uint8_t next = (uint8_t)displayGetNextScreen(cur);
+      queueDisplayRedraw(next, true);  // priority — смена вкладки кнопкой в начало очереди
+      s_pendingScreen = next;
+      s_pendingScreenTime = now;
     }
 #if defined(LED_PIN)
     digitalWrite(LED_PIN, HIGH);
@@ -103,7 +130,7 @@ static void pollButtonAndQueue() {
 }
 
 void sendHello() {
-  uint8_t pkt[protocol::HEADER_LEN];
+  uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID,
       31, protocol::OP_HELLO, nullptr, 0);
@@ -113,6 +140,10 @@ void sendHello() {
   bool manyNeighbors = (n >= 6);
   bool priority = manyNeighbors;  // HELLO в начало очереди при 6+ соседях
 
+#if defined(SF_FORCE_7)
+  (void)manyNeighbors;
+  radio::send(pkt, len, 7, priority);
+#else
   if (n > 0) {
     int minRssi = neighbors::getMinRssi();
     uint8_t txSf = neighbors::rssiToSf(minRssi);
@@ -123,10 +154,7 @@ void sendHello() {
       radio::setSpreadingFactor(prev);
       if (!duty_cycle::canSend(toa)) txSf = neighbors::rssiToSf(-85);
     }
-    Serial.printf("[RiftLink] HELLO TX buf[0]=%02X len=%u SF%u\n", pkt[0], (unsigned)len, txSf ? txSf : 7);
-    if (radio::send(pkt, len, txSf, priority)) {
-      Serial.println("[RiftLink] HELLO sent");
-    }
+    if (radio::send(pkt, len, txSf, priority)) {}
     // Двойной HELLO при 6+ соседях: SF12 + SF7 — дальние и близкие слышат
     if (manyNeighbors && txSf != 7) {
       uint8_t prev = radio::getSpreadingFactor();
@@ -147,17 +175,16 @@ void sendHello() {
       radio::setSpreadingFactor(prev);
       if (!duty_cycle::canSend(toa)) txSf = 7;
     }
-    Serial.printf("[RiftLink] HELLO TX buf[0]=%02X len=%u SF%u\n", pkt[0], (unsigned)len, txSf);
     radio::send(pkt, len, txSf, false);
   }
+#endif
 }
 
 void sendMsg(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
   if (!msg_queue::enqueue(to, text, ttlMinutes)) {
-    Serial.println("[RiftLink] Queue full or encrypt FAILED");
+    RIFTLINK_LOG_ERR("[RiftLink] Queue full or encrypt FAILED\n");
     ble::notifyError("send_failed", "Очередь полна или нет ключа шифрования");
   } else {
-    Serial.printf("[RiftLink] MSG queued (%s)\n", node::isBroadcast(to) ? "broadcast" : "unicast");
   }
 }
 
@@ -173,48 +200,43 @@ void sendLocation(float lat, float lon, int16_t alt) {
   uint8_t encBuf[protocol::MAX_PAYLOAD + crypto::OVERHEAD];
   size_t encLen = sizeof(encBuf);
   if (!crypto::encrypt(plain, 10, encBuf, &encLen)) {
-    Serial.println("[RiftLink] Location encrypt FAILED");
+    RIFTLINK_LOG_ERR("[RiftLink] Location encrypt FAILED\n");
     ble::notifyError("location_encrypt", "Шифрование локации не удалось");
     return;
   }
 
-  uint8_t pkt[protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+  uint8_t pkt[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_LOCATION,
       encBuf, encLen, true, false, false);
   if (len > 0) {
     radio::send(pkt, len, neighbors::rssiToSf(neighbors::getMinRssi()));
-    Serial.printf("[RiftLink] LOCATION sent %.5f,%.5f\n", lat, lon);
   }
 }
 
 void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
+#if defined(DEBUG_PACKET_DUMP)
+  Serial.printf("[PKT] len=%u rssi=%d sf=%u hex=", (unsigned)len, rssi, sf);
+  for (size_t i = 0; i < len && i < 64; i++) Serial.printf("%02X", buf[i]);
+  if (len > 64) Serial.print("...");
+  Serial.println();
+#endif
+
   uint8_t decBuf[256];
   uint8_t tmpBuf[256];
   char msgStrBuf[256];
-  uint8_t fwdBuf[protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+  uint8_t fwdBuf[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
 
   protocol::PacketHeader hdr;
   const uint8_t* payload;
   size_t payloadLen;
-  if (!protocol::parsePacket(buf, len, &hdr, &payload, &payloadLen)) {
-    if (len == 20 && buf[18] == protocol::OP_HELLO)
-      Serial.printf("[RiftLink] HELLO parse FAIL buf[0]=%02X (version?)\n", buf[0]);
-    return;
-  }
+  if (!protocol::parsePacket(buf, len, &hdr, &payload, &payloadLen)) return;
 
   // from=broadcast — некорректно, отбрасываем
-  if (node::isBroadcast(hdr.from) || node::isInvalidNodeId(hdr.from)) {
-    if (hdr.opcode == protocol::OP_HELLO)
-      Serial.printf("[RiftLink] HELLO DROP from=%02X%02X (bc/inv)\n", hdr.from[0], hdr.from[1]);
-    return;
-  }
+  if (node::isBroadcast(hdr.from) || node::isInvalidNodeId(hdr.from)) return;
 
-  // DEBUG: HELLO — от кого пришло (self=эхо, other=сосед)
-  if (hdr.opcode == protocol::OP_HELLO) {
-    Serial.printf("[RiftLink] HELLO from=%02X%02X me=%d\n",
-        hdr.from[0], hdr.from[1], node::isForMe(hdr.from) ? 1 : 0);
-  }
+  // HELLO всегда broadcast — иначе сдвиг/коррупция (ghost-соседи)
+  if (hdr.opcode == protocol::OP_HELLO && !node::isBroadcast(hdr.to)) return;
 
   // Relay: unicast не для нас, или GROUP_MSG (broadcast) с TTL>0
   // HELLO — всегда broadcast, не ретранслируем (защита от парсинга с перепутанным to)
@@ -226,7 +248,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       (hdr.opcode == protocol::OP_VOICE_MSG));
   if (needRelay) {
     memcpy(fwdBuf, buf, len);
-    fwdBuf[1 + protocol::NODE_ID_LEN * 2]--;
+    size_t ttlOff = (buf[0] == protocol::SYNC_BYTE) ? (protocol::SYNC_LEN + 1 + protocol::NODE_ID_LEN * 2) : (1 + protocol::NODE_ID_LEN * 2);
+    if (ttlOff < len) fwdBuf[ttlOff]--;
     uint8_t txSf = 0;
     if (node::isBroadcast(hdr.to)) {
       int minRssi = neighbors::getMinRssi();
@@ -247,16 +270,20 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     } else if (hdr.opcode == protocol::OP_ROUTE_REPLY) {
       routing::onRouteReply(hdr.from, hdr.to, payload, payloadLen);
     } else if (hdr.opcode == protocol::OP_KEY_EXCHANGE && payloadLen >= 32) {
-      neighbors::onHello(hdr.from, rssi);
+      if (neighbors::onHello(hdr.from, rssi)) {
+        queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info
+        RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
+      }
       x25519_keys::onKeyExchange(hdr.from, payload);
       { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
     } else if (hdr.opcode == protocol::OP_HELLO) {
-      // HELLO всегда broadcast; если to парсится неправильно — всё равно обрабатываем
       offline_queue::onNodeOnline(hdr.from);
-      if (neighbors::onHello(hdr.from, rssi)) ble::requestNeighborsNotify();
+      if (neighbors::onHello(hdr.from, rssi)) {
+        ble::requestNeighborsNotify();
+        queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info при новом соседе
+        RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
+      }
       if (!x25519_keys::hasKeyFor(hdr.from)) { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
-      if (!node::isForMe(hdr.from))
-        Serial.printf("[RiftLink] HELLO from %02X%02X (neighbor)\n", hdr.from[0], hdr.from[1]);
     }
     return;
   }
@@ -266,7 +293,10 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
   switch (hdr.opcode) {
     case protocol::OP_KEY_EXCHANGE:
       if (payloadLen >= 32) {
-        neighbors::onHello(hdr.from, rssi);  // KEY_EXCHANGE = живой узел, добавляем в соседи
+        if (neighbors::onHello(hdr.from, rssi)) {
+          queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info
+          RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
+        }
         x25519_keys::onKeyExchange(hdr.from, payload);
         { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
       }
@@ -274,10 +304,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 
     case protocol::OP_HELLO:
       offline_queue::onNodeOnline(hdr.from);
-      if (neighbors::onHello(hdr.from, rssi)) ble::requestNeighborsNotify();
+      if (neighbors::onHello(hdr.from, rssi)) {
+        ble::requestNeighborsNotify();
+        queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info при новом соседе
+        RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
+      }
       if (!x25519_keys::hasKeyFor(hdr.from)) { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
-      if (!node::isForMe(hdr.from))
-        Serial.printf("[RiftLink] HELLO from %02X%02X (neighbor)\n", hdr.from[0], hdr.from[1]);
       break;
 
     case protocol::OP_MSG:
@@ -285,14 +317,14 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         if (protocol::isEncrypted(hdr)) {
           size_t decLen = 0;
           if (!crypto::decryptFrom(hdr.from, payload, payloadLen, decBuf, &decLen) || decLen >= 256) {
-            Serial.printf("[RiftLink] Decrypt FAILED (from %02X%02X — no key?)\n", hdr.from[0], hdr.from[1]);
+            RIFTLINK_LOG_ERR("[RiftLink] Decrypt FAILED (from %02X%02X — no key?)\n", hdr.from[0], hdr.from[1]);
             if (!x25519_keys::hasKeyFor(hdr.from)) { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
             break;
           }
           if (protocol::isCompressed(hdr)) {
             size_t d = compress::decompress(decBuf, decLen, tmpBuf, sizeof(tmpBuf));
             if (d == 0 || d >= 256) {
-              Serial.println("[RiftLink] Decompress FAILED");
+              RIFTLINK_LOG_ERR("[RiftLink] Decompress FAILED\n");
               break;
             }
             memcpy(decBuf, tmpBuf, d);
@@ -311,7 +343,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             memcpy(&msgId, decBuf + off, msg_queue::MSG_ID_LEN);
             uint8_t ackPayload[msg_queue::MSG_ID_LEN];
             memcpy(ackPayload, decBuf + off, msg_queue::MSG_ID_LEN);
-            uint8_t ackPkt[protocol::HEADER_LEN + msg_queue::MSG_ID_LEN];
+            uint8_t ackPkt[protocol::PAYLOAD_OFFSET + msg_queue::MSG_ID_LEN];
             size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
                 node::getId(), hdr.from, 31, protocol::OP_ACK,
                 ackPayload, msg_queue::MSG_ID_LEN, false, false);
@@ -325,7 +357,6 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           if (msgLen < 256 && msgLen > 0) {
             memcpy(msgStrBuf, msg, msgLen);
             msgStrBuf[msgLen] = '\0';
-            Serial.printf("[RiftLink] MSG from %02X%02X: %s\n", hdr.from[0], hdr.from[1], msgStrBuf);
             ble::requestMsgNotify(hdr.from, msgStrBuf, msgId, rssi, ttlMinutes);
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
@@ -335,7 +366,6 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           if (payloadLen < 256) {
             memcpy(msgStrBuf, payload, payloadLen);
             msgStrBuf[payloadLen] = '\0';
-            Serial.printf("[RiftLink] MSG from %02X%02X: %s (plain)\n", hdr.from[0], hdr.from[1], msgStrBuf);
             ble::requestMsgNotify(hdr.from, msgStrBuf, 0, rssi);
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
@@ -351,7 +381,6 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         memcpy(&msgId, payload, msg_queue::MSG_ID_LEN);
         msg_queue::onAckReceived(payload, payloadLen);
         ble::notifyDelivered(hdr.from, msgId, rssi);
-        Serial.println("[RiftLink] ACK received");
       }
       break;
 
@@ -360,7 +389,6 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         uint32_t msgId;
         memcpy(&msgId, payload, msg_queue::MSG_ID_LEN);
         ble::notifyRead(hdr.from, msgId, rssi);
-        Serial.printf("[RiftLink] READ from %02X%02X msgId=%u\n", hdr.from[0], hdr.from[1], (unsigned)msgId);
       }
       break;
 
@@ -372,7 +400,6 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           uint16_t batMv, heapKb;
           memcpy(&batMv, decBuf, 2);
           memcpy(&heapKb, decBuf + 2, 2);
-          Serial.printf("[RiftLink] TELEMETRY from %02X%02X: %u mV, %u KB\n", hdr.from[0], hdr.from[1], batMv, heapKb);
           ble::notifyTelemetry(hdr.from, batMv, heapKb, rssi);
         }
       }
@@ -390,7 +417,6 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           memcpy(&alt, decBuf + 8, 2);
           float lat = float(lat7) / 1e7f;
           float lon = float(lon7) / 1e7f;
-          Serial.printf("[RiftLink] LOCATION from %02X%02X: %.5f,%.5f\n", hdr.from[0], hdr.from[1], lat, lon);
           ble::notifyLocation(hdr.from, lat, lon, alt, rssi);
         }
       }
@@ -398,11 +424,10 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 
     case protocol::OP_PING:
       if (node::isForMe(hdr.to) || node::isBroadcast(hdr.to)) {
-        uint8_t pongPkt[protocol::HEADER_LEN];
+        uint8_t pongPkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
         size_t pongLen = protocol::buildPacket(pongPkt, sizeof(pongPkt),
             node::getId(), hdr.from, 31, protocol::OP_PONG, nullptr, 0);
         if (pongLen > 0) radio::send(pongPkt, pongLen, neighbors::rssiToSf(neighbors::getRssiFor(hdr.from)));
-        Serial.printf("[RiftLink] PING from %02X%02X -> PONG sent\n", hdr.from[0], hdr.from[1]);
       }
       break;
 
@@ -417,8 +442,6 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       break;
 
     case protocol::OP_PONG:
-      Serial.printf("[RiftLink] PONG from %02X%02X%02X%02X\n",
-          hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
       ble::notifyPong(hdr.from, rssi);
       break;
 
@@ -441,7 +464,6 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         if (msgLen < 256) {
           memcpy(msgStrBuf, msg, msgLen);
           msgStrBuf[msgLen] = '\0';
-          Serial.printf("[RiftLink] GROUP_MSG grp%u from %02X%02X: %s\n", (unsigned)groupId, hdr.from[0], hdr.from[1], msgStrBuf);
           ble::requestMsgNotify(hdr.from, msgStrBuf, 0, rssi);
           char fromHex[17];
           snprintf(fromHex, sizeof(fromHex), "grp%u %02X%02X", (unsigned)groupId, hdr.from[0], hdr.from[1]);
@@ -458,7 +480,6 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           if (outLen > 0 && outLen < sizeof(s_fragOutBuf)) {
             s_fragOutBuf[outLen] = '\0';
             const char* msgStr = (const char*)s_fragOutBuf;
-            Serial.printf("[RiftLink] MSG_FRAG from %02X%02X: %s\n", hdr.from[0], hdr.from[1], msgStr);
             ble::requestMsgNotify(hdr.from, msgStr, 0, rssi);
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
@@ -481,7 +502,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       break;
 
     default:
-      Serial.printf("[RiftLink] Unknown opcode 0x%02X\n", hdr.opcode);
+      break;
   }
 }
 
@@ -512,21 +533,17 @@ void setup() {
 
   esp_err_t nvs = nvs_flash_init();
   if (nvs == ESP_ERR_NVS_NO_FREE_PAGES || nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-    Serial.println("[RiftLink] NVS: перезапись раздела (no free pages / new version)");
     nvs_flash_erase();
     nvs = nvs_flash_init();
   }
   if (nvs != ESP_OK) {
-    Serial.printf("[RiftLink] NVS init FAILED: %s (0x%x) — настройки не сохранятся\n",
+    RIFTLINK_LOG_ERR("[RiftLink] NVS init FAILED: %s (0x%x) — настройки не сохранятся\n",
         esp_err_to_name(nvs), (unsigned)nvs);
   }
   locale::init();
 
   displayInit();
-  Serial.println("[RiftLink] displayInit done");
-  // Бутскрин — сразу после инициализации, до выбора языка
   displayShowBootScreen();
-  Serial.println("[RiftLink] boot screen done");
   for (int i = 0; i < 8; i++) { delay(500); yield(); }  // 4s с yield — против watchdog
   if (!locale::isSet()) {
     displayShowLanguagePicker();
@@ -535,38 +552,26 @@ void setup() {
   displayClear();
   displaySetTextSize(1);
   displayText(0, 0, locale::getForDisplay("init"));
-  Serial.println("[RiftLink] displayShow init...");
   displayShow();
-  Serial.println("[RiftLink] displayShow init done");
-
-  Serial.println("[RiftLink] node::init...");
   node::init();
   region::init();
   crypto::init();
   x25519_keys::init();
-  Serial.println("[RiftLink] radio::init...");
   if (!radio::init()) {
-    Serial.println("[RiftLink] Radio init FAILED");
+    RIFTLINK_LOG_ERR("[RiftLink] Radio init FAILED\n");
     displayText(0, 10, locale::getForDisplay("radio_fail"));
     displayShow();
   } else {
-    Serial.println("[RiftLink] radio ok, displayShow...");
     displayText(0, 10, locale::getForDisplay("radio_ok"));
     displayShow();
-    Serial.println("[RiftLink] radio displayShow done");
   }
 
   if (!region::isSet()) {
     displayShowRegionPicker();
   }
 
-  const uint8_t* id = node::getId();
-  Serial.printf("[RiftLink] Node ID: %02X%02X%02X%02X...\n", id[0], id[1], id[2], id[3]);
-  Serial.printf("[RiftLink] Region: %s (%.1f MHz, %d dBm)\n",
-      region::getCode(), region::getFreq(), region::getPower());
-
   if (!ble::init()) {
-    Serial.println("[RiftLink] BLE init FAILED — устройство не будет видно в скане");
+    RIFTLINK_LOG_ERR("[RiftLink] BLE init FAILED — устройство не будет видно в скане\n");
   }
   ble::setOnSend(sendMsg);
   ble::setOnLocation(sendLocation);
@@ -584,23 +589,20 @@ void setup() {
   gps::init();
   if (wifi::hasCredentials()) wifi::connect();
 
+  // Paper: первый кадр — full refresh (бут/язык/инит/регион → меню), до asyncTasksStart (гонка)
+  displayShowScreenForceFull(0);
+
   if (!asyncQueuesInit()) {
-    Serial.println("[RiftLink] Async queues init FAILED");
+    RIFTLINK_LOG_ERR("[RiftLink] Async queues init FAILED\n");
   } else {
     radio::setAsyncMode(true);
     displaySetButtonPolledExternally(true);
     asyncTasksStart();
-    Serial.println("[RiftLink] Async tasks started (packet + display)");
   }
 
   s_bootTime = millis();
   s_lastSf12Burst = millis();
   s_lastKeyRetry = millis();
-
-  Serial.println("[RiftLink] Phase 5 - Ready (BLE + E2E + ACK + LZ4 + FRAG + LOC + TELEM + OTA + Region + ROUTE + VOICE + WiFi + GPS)");
-  Serial.println("Serial: send | region | channel | nickname | ping | route | lang | gps | powersave | selftest");
-
-  displayShowScreen(0);
 }
 
 void loop() {
@@ -628,7 +630,7 @@ void loop() {
   }
 
   // Адаптивный SF: по среднему RSSI соседей — SF7 (хорошая связь), SF9 (средняя), SF12 (слабая)
-  // При 0 соседях всегда SF7 — иначе getAverageRssi=-90 даёт SF9 и discovery ломается (V4 на SF7 не слышит Paper)
+#if !defined(SF_FORCE_7)
   if (millis() - lastSfAdapt > SF_ADAPT_INTERVAL_MS) {
     int avgRssi = neighbors::getAverageRssi();
     uint8_t sf = 7;
@@ -639,6 +641,7 @@ void loop() {
     radio::setSpreadingFactor(sf);
     lastSfAdapt = millis();
   }
+#endif
 
   gps::update();
   if (gps::isPresent() && gps::isEnabled() && gps::hasFix() &&
@@ -682,7 +685,7 @@ void loop() {
         for (int i = 0; i < 4; i++) {
           to[i] = (uint8_t)strtoul(hex8.substring(i * 2, i * 2 + 2).c_str(), nullptr, 16);
         }
-        uint8_t pkt[protocol::HEADER_LEN];
+        uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
         size_t len = protocol::buildPacket(pkt, sizeof(pkt),
             node::getId(), to, 31, protocol::OP_PING, nullptr, 0);
         if (len > 0 && radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(to)))) {
@@ -698,6 +701,7 @@ void loop() {
       r.trim();
       if (region::setRegion(r.c_str())) {
         Serial.printf("[RiftLink] Region: %s (%.1f MHz)\n", region::getCode(), region::getFreq());
+        queueDisplayRedraw(displayGetCurrentScreen());
       } else {
         Serial.println("[RiftLink] Region: EU|UK|RU|US|AU");
       }
@@ -706,6 +710,7 @@ void loop() {
         int ch = cmd.substring(8).toInt();
         if (ch >= 0 && ch <= 2 && region::setChannel(ch)) {
           Serial.printf("[RiftLink] Channel: %d (%.1f MHz)\n", ch, region::getFreq());
+          queueDisplayRedraw(displayGetCurrentScreen());
         } else {
           Serial.println("[RiftLink] channel 0|1|2 (EU/UK only)");
         }
@@ -741,6 +746,7 @@ void loop() {
       if (l == "en" || l == "ru") {
         locale::setLang(lang);
         Serial.printf("[RiftLink] Language: %s\n", l.c_str());
+        queueDisplayRedraw(displayGetCurrentScreen());
       } else {
         Serial.println("[RiftLink] lang en|ru");
       }
@@ -756,9 +762,11 @@ void loop() {
     } else if (cmd == "gps on") {
       gps::setEnabled(true);
       Serial.println("[RiftLink] GPS on");
+      queueDisplayRedraw(displayGetCurrentScreen());
     } else if (cmd == "gps off") {
       gps::setEnabled(false);
       Serial.println("[RiftLink] GPS off");
+      queueDisplayRedraw(displayGetCurrentScreen());
     } else if (cmd.startsWith("gps pins ")) {
       int rx = -1, tx = -1, en = -1;
       if (sscanf(cmd.c_str() + 9, "%d %d %d", &rx, &tx, &en) >= 2) {
@@ -783,19 +791,26 @@ void loop() {
     } else if (cmd == "selftest" || cmd == "test") {
       selftest::Result r;
       selftest::run(&r);
+      queueDisplayRedraw(displayGetCurrentScreen());
     } else if (cmd == "sf" || cmd == "radio") {
       Serial.printf("[RiftLink] SF=%u, %.1f MHz, neighbors=%d\n",
           (unsigned)radio::getSpreadingFactor(), region::getFreq(), neighbors::getCount());
     }
   }
 
+  // Базовый SF для RX
+  uint8_t baseSf;
+  uint8_t thisRxSf;
+#if defined(SF_FORCE_7)
+  baseSf = 7;
+  thisRxSf = 7;
+  radio::setSpreadingFactor(7);
+#else
   // Burst SF12: каждые 30с — 2 цикла подряд на SF12
   if (s_sf12BurstCount == 0 && (millis() - s_lastSf12Burst) >= 30000) {
     s_sf12BurstCount = 2;
   }
-
-  // Базовый SF для RX (для restore после TX с txSf)
-  uint8_t baseSf = 7;
+  baseSf = 7;
   if (neighbors::getCount() > 0) {
     int avgRssi = neighbors::getAverageRssi();
     if (avgRssi < -110) baseSf = 12;
@@ -803,9 +818,7 @@ void loop() {
   }
   int minRssi = neighbors::getMinRssi();
   bool needSf10 = (neighbors::getCount() > 0 && minRssi != 0 && minRssi < -90);  // A-B-C: B слушает SF10 для C
-  // Адаптивный rxMod: 0→3, 1–2→8, 3–5→6, 6+→4 (больше SF12 при многих соседях)
   int rxMod = aggressive ? 2 : ((nNeigh == 0) ? 3 : (nNeigh >= 6 ? 4 : (nNeigh >= 3 ? 6 : 8)));
-  uint8_t thisRxSf;
   if (s_sf12BurstCount > 0) {
     thisRxSf = 12;
     s_sf12BurstCount--;
@@ -816,17 +829,22 @@ void loop() {
   } else {
     int mod = s_rxCycleCounter % rxMod;
     if (mod == 0) thisRxSf = 12;
-    else if (needSf10 && mod == 1) thisRxSf = 10;  // SF10 для слабых соседей (B–C)
+    else if (needSf10 && mod == 1) thisRxSf = 10;
     else thisRxSf = baseSf;
   }
   s_rxCycleCounter++;
   radio::setSpreadingFactor(thisRxSf);
+#endif
 
   pollButtonAndQueue();  // опрос до drain — не пропустить нажатие во время долгого TX
   // Drain sendQueue — TX только из loopTask. Max 2 до RX.
-  // txSf>=10: ToA ~1s — max 1 за итерацию, иначе RX окно съедается.
   if (sendQueue) {
     SendQueueItem item;
+#if defined(SF_FORCE_7)
+    for (int i = 0; i < 2 && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
+      radio::sendDirect(item.buf, item.len);
+    }
+#else
     int highSfDrained = 0;
     for (int i = 0; i < 2 && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
       if (item.txSf >= 10 && highSfDrained >= 1) {
@@ -843,6 +861,7 @@ void loop() {
       radio::sendDirect(item.buf, item.len);
       if (item.txSf != 0) radio::setSpreadingFactor(thisRxSf);
     }
+#endif
   }
 
   // Retry KEY_EXCHANGE: каждые 30с — для каждого соседа без ключа отправить на SF12
@@ -867,6 +886,29 @@ void loop() {
     else if (neighbors::getCount() >= 6) rxMs = 150;  // 6+ — не урезать при BLE
     else if (ble::isConnected() && neighbors::getCount() > 1) rxMs = 80;
 
+#if defined(SF_FORCE_7)
+    (void)baseSf;
+    radio::setSpreadingFactor(7);
+    radio::startReceiveWithTimeout(rxMs);
+    uint32_t t0 = millis();
+    while (millis() - t0 < rxMs) {
+      yield();
+      pollButtonAndQueue();
+      if (sendQueue) {
+        SendQueueItem item;
+        if (xQueueReceive(sendQueue, &item, 0) == pdTRUE) {
+          radio::sendDirect(item.buf, item.len);
+        }
+        uint32_t remain = rxMs - (millis() - t0);
+        if (remain > 0) radio::startReceiveWithTimeout(remain);
+      }
+      uint32_t elapsed = millis() - t0;
+      if (elapsed >= rxMs) break;
+      uint32_t chunk = (rxMs - elapsed) > 30 ? 30 : (rxMs - elapsed);
+      delay(chunk);
+    }
+    n = radio::receiveAsync(rxBuf, sizeof(rxBuf));
+#else
     if (neighbors::getCount() > 0) {
       // Multi-SF RX: 50ms SF12 + 50ms SF10 + 50ms baseSf — гибрид для 10+ узлов
       const uint8_t slotSf[3] = {12, 10, baseSf};
@@ -908,7 +950,6 @@ void loop() {
             }
           } else {
             handlePacket(rxBuf, nr, radio::getLastRssi(), slotSf[s]);
-          }
         }
       }
     } else {
@@ -938,11 +979,12 @@ void loop() {
       n = radio::receiveAsync(rxBuf, sizeof(rxBuf));
     }
   }
+#endif
+  }
   if (n > 0) {
     int rssi = radio::getLastRssi();
     // opcode = buf[18] при len>=19 (header)
     uint8_t op = (n >= 19) ? rxBuf[18] : 0;
-    Serial.printf("[RiftLink] RX %d bytes, RSSI=%d, op=%02X\n", n, rssi, op);
     if (packetQueue) {
       PacketQueueItem item;
       if ((size_t)n <= sizeof(item.buf)) {
@@ -950,8 +992,8 @@ void loop() {
         item.len = (uint16_t)n;
         item.rssi = (int8_t)rssi;
         item.sf = thisRxSf;
-        if (xQueueSend(packetQueue, &item, 0) != pdTRUE) {
-          Serial.println("[RiftLink] packetQueue full, drop");
+        if (xQueueSend(packetQueue, &item, pdMS_TO_TICKS(30)) != pdTRUE) {
+          RIFTLINK_LOG_ERR("[RiftLink] packetQueue full, drop\n");
         }
       }
     } else {
@@ -962,6 +1004,7 @@ void loop() {
   ble::update();
   msg_queue::update();
   routing::update();
+  offline_queue::update();
   pollButtonAndQueue();
   if (!displayQueue) displayUpdate();
   if (!powersave::canSleep()) {

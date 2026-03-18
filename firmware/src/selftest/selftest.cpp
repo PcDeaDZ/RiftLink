@@ -23,7 +23,7 @@ void run(Result* out) {
   // Сброс duty cycle для теста (EU 1% мог заблокировать TX)
   duty_cycle::reset();
 
-  uint8_t pkt[protocol::HEADER_LEN];
+  uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_PING, nullptr, 0);
   r.radioOk = (len > 0 && radio::send(pkt, len));

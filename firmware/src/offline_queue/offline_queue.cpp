@@ -39,6 +39,7 @@ struct StoredMsg {
 
 static StoredMsg s_msgs[OFFLINE_MAX_MSGS];
 static bool s_inited = false;
+static volatile bool s_dirty = false;  // отложенное сохранение в NVS — не блокировать handlePacket
 static SemaphoreHandle_t s_mutex = nullptr;
 static StoredMsgNvs s_nvsBuf[OFFLINE_MAX_MSGS];  // статика — saveToNvs/loadFromNvs вызываются из handlePacket (stack overflow)
 
@@ -122,17 +123,18 @@ bool enqueue(const uint8_t* to, const uint8_t* encPayload, size_t encLen, uint8_
   slot->opcode = opcode;
   slot->flags = flags;
   slot->inUse = true;
-  saveToNvs();
+  s_dirty = true;
   xSemaphoreGive(s_mutex);
   return true;
 }
 
-static uint8_t s_onlinePktBuf[protocol::HEADER_LEN + OFFLINE_MAX_LEN];  // статика — onNodeOnline вызывается из handlePacket
+static uint8_t s_onlinePktBuf[protocol::PAYLOAD_OFFSET + OFFLINE_MAX_LEN];  // статика — onNodeOnline вызывается из handlePacket
 
 void onNodeOnline(const uint8_t* nodeId) {
   if (!s_inited || !nodeId) return;
   if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
 
+  bool modified = false;
   for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
     StoredMsg* m = &s_msgs[i];
     if (!m->inUse) continue;
@@ -148,8 +150,9 @@ void onNodeOnline(const uint8_t* nodeId) {
       Serial.printf("[RiftLink] Offline delivery to %02X%02X\n", nodeId[0], nodeId[1]);
     }
     m->inUse = false;
+    modified = true;
   }
-  saveToNvs();
+  if (modified) s_dirty = true;
   xSemaphoreGive(s_mutex);
 }
 
@@ -164,6 +167,13 @@ int getPendingCount() {
 }
 
 void update() {
+  if (!s_dirty || !s_mutex) return;
+  if (xSemaphoreTake(s_mutex, 0) != pdTRUE) return;
+  if (s_dirty) {
+    saveToNvs();
+    s_dirty = false;
+  }
+  xSemaphoreGive(s_mutex);
 }
 
 }  // namespace offline_queue

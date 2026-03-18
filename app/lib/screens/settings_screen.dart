@@ -38,14 +38,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _inviteIdController;
   late final TextEditingController _inviteKeyController;
 
+  late String _region;
+  late int? _channel;
+  late bool _gpsEnabled;
+  late bool _powersave;
+  late bool _meshAnimationEnabled;
+
+  void _syncFromWidget() {
+    _region = widget.region;
+    _channel = widget.channel;
+    _gpsEnabled = widget.gpsEnabled;
+    _powersave = widget.powersave;
+    _meshAnimationEnabled = widget.meshAnimationEnabled;
+  }
+
   @override
   void initState() {
     super.initState();
+    _syncFromWidget();
     _nickController = TextEditingController(text: widget.nickname ?? '');
     _wifiSsidController = TextEditingController();
     _wifiPassController = TextEditingController();
     _inviteIdController = TextEditingController();
     _inviteKeyController = TextEditingController();
+  }
+
+  @override
+  void didUpdateWidget(covariant SettingsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncFromWidget();
   }
 
   @override
@@ -60,7 +81,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) {
     final l = context.l10n;
     final regions = ['EU', 'RU', 'UK', 'US', 'AU'];
-    final isEu = widget.region == 'EU' || widget.region == 'UK';
+    final isEu = _region == 'EU' || _region == 'UK';
 
     return Scaffold(
       backgroundColor: AppColors.surface,
@@ -94,12 +115,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
           Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Wrap(spacing: 8, runSpacing: 8, children: regions.map((r) => FilterChip(
               label: Text(r, style: const TextStyle(color: AppColors.onSurface)),
-              selected: widget.region == r,
+              selected: _region == r,
               selectedColor: AppColors.primary.withOpacity(0.2),
               backgroundColor: AppColors.surface,
               checkmarkColor: AppColors.primary,
-              side: BorderSide(color: widget.region == r ? AppColors.primary : const Color(0xFFBDBDBD)),
-              onSelected: (_) async { if (await widget.ble.setRegion(r)) { widget.onRegionChanged(r, widget.channel); setState(() {}); } },
+              side: BorderSide(color: _region == r ? AppColors.primary : const Color(0xFFBDBDBD)),
+              onSelected: (_) async { if (await widget.ble.setRegion(r)) { widget.onRegionChanged(r, _channel); setState(() => _region = r); } },
             )).toList()),
             if (isEu) ...[
               const SizedBox(height: 12),
@@ -107,12 +128,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
               const SizedBox(height: 6),
               Row(children: [0, 1, 2].map((ch) => Padding(padding: const EdgeInsets.only(right: 8), child: FilterChip(
                 label: Text('$ch', style: const TextStyle(color: AppColors.onSurface)),
-                selected: widget.channel == ch,
+                selected: _channel == ch,
                 selectedColor: AppColors.primary.withOpacity(0.2),
                 backgroundColor: AppColors.surface,
                 checkmarkColor: AppColors.primary,
-                side: BorderSide(color: widget.channel == ch ? AppColors.primary : const Color(0xFFBDBDBD)),
-                onSelected: (_) async { if (await widget.ble.setChannel(ch)) { widget.onRegionChanged(widget.region, ch); setState(() {}); } },
+                side: BorderSide(color: _channel == ch ? AppColors.primary : const Color(0xFFBDBDBD)),
+                onSelected: (_) async { if (await widget.ble.setChannel(ch)) { widget.onRegionChanged(_region, ch); setState(() => _channel = ch); } },
               ))).toList()),
             ],
           ])),
@@ -139,17 +160,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           SwitchListTile(
             title: Text(l.tr('gps_enable'), style: const TextStyle(color: AppColors.onSurface)),
             subtitle: Text(widget.gpsFix ? l.tr('gps_fix_yes') : l.tr('gps_fix_no'), style: const TextStyle(color: AppColors.onSurfaceVariant)),
-            value: widget.gpsEnabled,
+            value: _gpsEnabled,
             activeColor: AppColors.primary,
-            onChanged: widget.ble.isConnected ? (v) async { if (await widget.ble.setGps(v)) { widget.onGpsChanged(v); setState(() {}); } } : null,
+            onChanged: widget.ble.isConnected ? (v) async { if (await widget.ble.setGps(v)) { widget.onGpsChanged(v); setState(() => _gpsEnabled = v); } } : null,
           ),
         ]),
         _section(l.tr('powersave'), [
           SwitchListTile(
             title: const Text('Powersave', style: TextStyle(color: AppColors.onSurface)),
-            value: widget.powersave,
+            value: _powersave,
             activeColor: AppColors.primary,
-            onChanged: widget.ble.isConnected ? (v) async { if (await widget.ble.setPowersave(v)) { widget.onPowersaveChanged(v); setState(() {}); } } : null,
+            onChanged: widget.ble.isConnected ? (v) async { if (await widget.ble.setPowersave(v)) { widget.onPowersaveChanged(v); setState(() => _powersave = v); } } : null,
           ),
         ]),
         _section(l.tr('e2e_invite'), [
@@ -178,9 +199,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _section(l.tr('other'), [
           SwitchListTile(
             title: Text(l.tr('mesh_animation'), style: const TextStyle(color: AppColors.onSurface)),
-            value: widget.meshAnimationEnabled,
+            value: _meshAnimationEnabled,
             activeColor: AppColors.primary,
-            onChanged: (v) => widget.onMeshAnimationChanged(v),
+            onChanged: (v) { widget.onMeshAnimationChanged(v); setState(() => _meshAnimationEnabled = v); },
           ),
           if (widget.offlinePending != null && widget.offlinePending! > 0) ListTile(leading: const Icon(Icons.schedule, color: AppColors.onSurfaceVariant), title: Text('${l.tr('offline_pending')}: ${widget.offlinePending}', style: const TextStyle(color: AppColors.onSurface))),
           if (widget.batteryMv != null && widget.batteryMv! > 0) ListTile(leading: const Icon(Icons.battery_charging_full, color: AppColors.onSurfaceVariant), title: Text('${(widget.batteryMv! / 1000).toStringAsFixed(2)} V', style: const TextStyle(color: AppColors.onSurface))),

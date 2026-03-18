@@ -242,7 +242,7 @@ void requestRoute(const uint8_t* target) {
   payload[12] = 0;
   memcpy(payload + 13, node::getId(), protocol::NODE_ID_LEN);
 
-  uint8_t pkt[protocol::HEADER_LEN + ROUTE_PAYLOAD_LEN];
+  uint8_t pkt[protocol::PAYLOAD_OFFSET + ROUTE_PAYLOAD_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_ROUTE_REQ,
       payload, ROUTE_PAYLOAD_LEN);
@@ -277,7 +277,7 @@ bool onRouteReq(const uint8_t* from, const uint8_t* payload, size_t payloadLen) 
     replyPayload[12] = hops + 1;
     memcpy(replyPayload + 13, from, protocol::NODE_ID_LEN);  // originator для обратного пути
 
-    uint8_t pkt[protocol::HEADER_LEN + ROUTE_PAYLOAD_LEN];
+    uint8_t pkt[protocol::PAYLOAD_OFFSET + ROUTE_PAYLOAD_LEN];
     size_t len = protocol::buildPacket(pkt, sizeof(pkt),
         node::getId(), sender, 31, protocol::OP_ROUTE_REPLY,
         replyPayload, ROUTE_PAYLOAD_LEN);
@@ -296,7 +296,7 @@ bool onRouteReq(const uint8_t* from, const uint8_t* payload, size_t payloadLen) 
   fwdPayload[12] = hops + 1;
   memcpy(fwdPayload + 13, node::getId(), protocol::NODE_ID_LEN);
 
-  uint8_t pkt[protocol::HEADER_LEN + ROUTE_PAYLOAD_LEN];
+  uint8_t pkt[protocol::PAYLOAD_OFFSET + ROUTE_PAYLOAD_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID, 31 - (hops + 1), protocol::OP_ROUTE_REQ,
       fwdPayload, ROUTE_PAYLOAD_LEN);
@@ -334,7 +334,7 @@ bool onRouteReply(const uint8_t* from, const uint8_t* to, const uint8_t* payload
     return true;
   }
 
-  uint8_t pkt[protocol::HEADER_LEN + ROUTE_PAYLOAD_LEN];
+  uint8_t pkt[protocol::PAYLOAD_OFFSET + ROUTE_PAYLOAD_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), s_reverse[revIdx].prevHop, 31, protocol::OP_ROUTE_REPLY,
       payload, payloadLen);

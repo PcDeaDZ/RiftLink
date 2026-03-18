@@ -287,7 +287,7 @@ class CharCallbacks : public NimBLECharacteristicCallbacks {
         }
         uint8_t payload[4];
         memcpy(payload, &msgId, 4);
-        uint8_t pkt[protocol::HEADER_LEN + 4];
+        uint8_t pkt[protocol::PAYLOAD_OFFSET + 4];
         size_t pktLen = protocol::buildPacket(pkt, sizeof(pkt),
             node::getId(), to, 31, protocol::OP_READ, payload, 4, false, false);
         if (pktLen > 0) radio::send(pkt, pktLen, neighbors::rssiToSf(neighbors::getRssiFor(to)));
@@ -306,7 +306,7 @@ class CharCallbacks : public NimBLECharacteristicCallbacks {
           to[i] = (uint8_t)strtoul(hex, nullptr, 16);
         }
       }
-      uint8_t pkt[protocol::HEADER_LEN];
+      uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
       size_t len = protocol::buildPacket(pkt, sizeof(pkt),
           node::getId(), to, 31, protocol::OP_PING, nullptr, 0);
       if (len > 0) radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(to)));

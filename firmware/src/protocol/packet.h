@@ -28,7 +28,10 @@ constexpr uint8_t OP_PING = 0xFF;
 
 // Размеры
 constexpr size_t NODE_ID_LEN = 8;
-constexpr size_t HEADER_LEN = 1 + NODE_ID_LEN * 2 + 1 + 1 + 1;  // + From + To + TTL + Opcode + Channel
+constexpr uint8_t SYNC_BYTE = 0x5A;  // маркер начала пакета — искать при сдвиге (SX1262 corruption)
+constexpr size_t HEADER_LEN = 1 + NODE_ID_LEN * 2 + 1 + 1 + 1;  // version + From + To + TTL + Opcode + Channel
+constexpr size_t SYNC_LEN = 1;
+constexpr size_t PAYLOAD_OFFSET = SYNC_LEN + HEADER_LEN;  // смещение payload в пакете с sync
 constexpr uint8_t CHANNEL_DEFAULT = 0;  // Публичный канал
 constexpr size_t MAC_LEN = 16;
 constexpr size_t MAX_PAYLOAD = 200;
@@ -54,6 +57,12 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
 
 bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr,
                 const uint8_t** payload, size_t* payloadLen);
+
+/** Ожидаемая длина пакета (sync) для opcode. 0 = неизвестно/переменная. */
+size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen);
+
+/** Min/max payload для opcode. true если opcode известен. */
+bool getExpectedPayloadRange(uint8_t opcode, size_t* minOut, size_t* maxOut);
 
 bool isEncrypted(const PacketHeader& hdr);
 bool isAckReq(const PacketHeader& hdr);
