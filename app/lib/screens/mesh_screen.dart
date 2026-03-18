@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import '../widgets/mesh_background.dart';
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
 

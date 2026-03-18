@@ -4,10 +4,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:geolocator/geolocator.dart';
 import '../ble/riftlink_ble.dart';
 import '../voice/voice_service.dart';
 import '../contacts/contacts_service.dart';
+import '../recent_devices/recent_devices_service.dart';
+import '../prefs/mesh_prefs.dart';
+import '../app_navigator.dart';
 import '../l10n/app_localizations.dart';
 import 'map_screen.dart';
 import 'mesh_screen.dart';
@@ -18,6 +22,7 @@ import 'scan_screen.dart';
 import '../locale_notifier.dart';
 
 import '../theme/app_theme.dart';
+import '../widgets/mesh_background.dart';
 
 class ChatScreen extends StatefulWidget {
   final RiftLinkBle ble;
@@ -26,7 +31,7 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateMixin {
+class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
   final _messages = <_Msg>[];
@@ -58,7 +63,16 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
   bool _hasText = false;
   final Map<String, Map<int, String>> _voiceChunks = {};
   final Set<String> _readSent = {};
+  final Set<String> _pendingPings = {};
   Timer? _ttlTimer;
+  bool _meshAnimationEnabled = true;
+  AnimationController? _meshAnimController;
+  StreamSubscription? _connStateSub;
+  bool _reconnecting = false;
+  int _reconnectAttempt = 0;
+  bool _intentionalDisconnect = false;
+  String? _currentBleRemoteId;
+  List<RecentDevice> _recentDevices = [];
 
   List<_Msg> get _visibleMessages =>
       _messages.where((m) => m.deleteAt == null || DateTime.now().isBefore(m.deleteAt!)).toList();
@@ -71,11 +85,20 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
     _controller.addListener(_onTextChanged);
     _listenEvents();
     _loadContactNicknames();
+    _loadMeshPrefs();
     localeNotifier.addListener(_onLocaleChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _sendReadForUnread();
       _sendLangToFirmware();
       VoiceService.requestPermission();
+      if (widget.ble.isConnected) {
+        _currentBleRemoteId = widget.ble.device?.remoteId.toString();
+        _listenConnectionState();
+        _applyNodeIdFromDeviceName();
+        Future.delayed(const Duration(milliseconds: 200), () {
+          if (mounted && widget.ble.isConnected) widget.ble.getInfo();
+        });
+      }
     });
     _ttlTimer = Timer.periodic(const Duration(minutes: 1), (_) {
       if (mounted && _messages.any((m) => m.deleteAt != null && DateTime.now().isAfter(m.deleteAt!))) setState(() {});
@@ -87,19 +110,251 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
     if (hasText != _hasText && mounted) setState(() => _hasText = hasText);
   }
 
+  Future<void> _loadMeshPrefs() async {
+    final enabled = await MeshPrefs.getAnimationEnabled();
+    if (mounted) {
+      setState(() => _meshAnimationEnabled = enabled);
+      _updateMeshAnimation(enabled);
+    }
+  }
+
+  void _updateMeshAnimation(bool enabled) {
+    if (enabled) {
+      _meshAnimController ??= AnimationController(
+        vsync: this,
+        duration: const Duration(seconds: 4),
+      )..repeat();
+    } else {
+      _meshAnimController?.stop();
+      _meshAnimController?.dispose();
+      _meshAnimController = null;
+    }
+    if (mounted) setState(() {});
+  }
+
+  void _onMeshAnimationChanged(bool enabled) async {
+    await MeshPrefs.setAnimationEnabled(enabled);
+    if (mounted) {
+      setState(() => _meshAnimationEnabled = enabled);
+      _updateMeshAnimation(enabled);
+    }
+  }
+
   @override
   void dispose() {
+    _connStateSub?.cancel();
     _controller.removeListener(_onTextChanged);
     localeNotifier.removeListener(_onLocaleChanged);
     _ttlTimer?.cancel();
     _voiceRecordTicker?.dispose();
+    _meshAnimController?.dispose();
     _sub?.cancel();
     _controller.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
+  void _listenConnectionState() {
+    final dev = widget.ble.device;
+    if (dev == null) return;
+    _connStateSub?.cancel();
+    _connStateSub = dev.connectionState.listen((state) {
+      if (!mounted || _intentionalDisconnect) return;
+      if (state == BluetoothConnectionState.disconnected) {
+        _onConnectionLost();
+      }
+    });
+  }
+
+  Future<void> _onConnectionLost() async {
+    if (_reconnecting || !mounted) return;
+    final remoteId = _currentBleRemoteId ?? widget.ble.device?.remoteId.toString();
+    if (remoteId == null || remoteId.isEmpty) return;
+    setState(() { _reconnecting = true; _reconnectAttempt = 1; });
+    final l = context.l10n;
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      if (!mounted) return;
+      setState(() => _reconnectAttempt = attempt);
+      _showSnack(l.tr('reconnecting', {'n': '$attempt'}), duration: const Duration(seconds: 2));
+      try {
+        widget.ble.disconnect();
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        final device = BluetoothDevice.fromId(remoteId);
+        final ok = await widget.ble.connect(device);
+        if (mounted && ok) {
+          _currentBleRemoteId = remoteId;
+          _listenConnectionState();
+          widget.ble.getInfo();
+          setState(() => _reconnecting = false);
+          _showSnack(l.tr('reconnect_ok'), backgroundColor: AppColors.success);
+          return;
+        }
+      } catch (_) {}
+      if (attempt < 3) await Future<void>.delayed(const Duration(seconds: 2));
+    }
+    if (!mounted) return;
+    setState(() => _reconnecting = false);
+    await widget.ble.disconnect();
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => ScanScreen(initialMessage: l.tr('reconnect_failed'))),
+      (r) => false,
+    );
+  }
+
+  Future<void> _showConnectMenu() async {
+    if (!widget.ble.isConnected) return;
+    _recentDevices = await RecentDevicesService.load();
+    final currentRemoteId = widget.ble.device?.remoteId.toString();
+    final others = _recentDevices.where((d) => d.remoteId != currentRemoteId).toList();
+    final l = context.l10n;
+    FocusScope.of(context).unfocus();
+    final value = await showAppModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AppColors.card,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(l.tr('switch_node'), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
+            ),
+            ...others.map((d) => _buildSwitchItem(ctx, d)),
+            ListTile(
+              leading: const Icon(Icons.link_off, color: AppColors.error),
+              title: Text(l.tr('disconnect'), style: const TextStyle(color: AppColors.error, fontWeight: FontWeight.w500)),
+              onTap: () => Navigator.pop(ctx, 'disconnect'),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (value != null && mounted) _onConnectMenuSelected(value);
+  }
+
+  Widget _buildSwitchItem(BuildContext ctx, RecentDevice d) {
+    final l = context.l10n;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ListTile(
+          leading: const Icon(Icons.bluetooth, color: AppColors.primary),
+          title: Text(d.displayName, style: const TextStyle(color: AppColors.onSurface, fontWeight: FontWeight.w500)),
+          subtitle: d.displayName != d.nodeId ? Text(d.nodeId, style: const TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant, fontFamily: 'monospace')) : null,
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.delete_outline, size: 20, color: AppColors.onSurfaceVariant),
+                tooltip: l.tr('forget_device'),
+                onPressed: () => _confirmForgetAndPop(ctx, d),
+              ),
+              const Icon(Icons.chevron_right, color: AppColors.onSurfaceVariant),
+            ],
+          ),
+          onTap: () => Navigator.pop(ctx, 'switch:${d.remoteId}'),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _confirmForgetAndPop(BuildContext ctx, RecentDevice d) async {
+    final l = context.l10n;
+    final confirm = await showAppDialog<bool>(
+      context: ctx,
+      builder: (c) => AlertDialog(
+        title: Text(l.tr('forget_device'), style: const TextStyle(color: AppColors.onSurface)),
+        content: Text(l.tr('forget_device_confirm', {'name': d.displayName}), style: const TextStyle(color: AppColors.onSurface)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c, false), child: Text(l.tr('cancel'))),
+          TextButton(onPressed: () => Navigator.pop(c, true), child: Text(l.tr('delete'), style: const TextStyle(color: AppColors.error))),
+        ],
+      ),
+    );
+    if (confirm == true && mounted) {
+      await RecentDevicesService.remove(d.remoteId);
+      Navigator.pop(ctx, 'forget:${d.remoteId}');
+    }
+  }
+
+  void _onConnectMenuSelected(String value) async {
+    if (value.startsWith('forget:')) return;
+    if (value == 'disconnect') {
+      _intentionalDisconnect = true;
+      await widget.ble.disconnect();
+      if (!mounted) return;
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const ScanScreen()),
+        (r) => false,
+      );
+    } else if (value.startsWith('switch:')) {
+      final remoteId = value.substring(7);
+      _intentionalDisconnect = true;
+      await _switchToDevice(remoteId);
+    }
+  }
+
+  Future<void> _switchToDevice(String remoteId) async {
+    _intentionalDisconnect = true;
+    final l = context.l10n;
+    final dev = _recentDevices.where((d) => d.remoteId == remoteId).firstOrNull;
+    final name = dev?.displayName ?? remoteId;
+    _showSnack(l.tr('connecting_to', {'name': name}));
+    await widget.ble.disconnect();
+    await RiftLinkBle.stopScan();
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+    StreamSubscription? scanSub;
+    BluetoothDevice? found;
+    scanSub = FlutterBluePlus.scanResults.listen((results) {
+      final r = results.where(RiftLinkBle.isRiftLink).toList();
+      for (final r0 in r) {
+        if (r0.device.remoteId.toString() == remoteId) {
+          found = r0.device;
+          scanSub?.cancel();
+          RiftLinkBle.stopScan();
+          return;
+        }
+      }
+    });
+    const scanDuration = Duration(seconds: 12);
+    try {
+      await RiftLinkBle.startScan(timeout: scanDuration);
+      await Future<void>.delayed(scanDuration);
+    } catch (_) {}
+    await scanSub.cancel();
+    await RiftLinkBle.stopScan();
+    if (!mounted) return;
+    if (found != null) {
+      final ok = await widget.ble.connect(found!);
+      if (mounted && ok) {
+        _intentionalDisconnect = false;
+        _currentBleRemoteId = remoteId;
+        _listenConnectionState();
+        widget.ble.getInfo();
+        _showSnack(l.tr('reconnect_ok'), backgroundColor: AppColors.success);
+      } else {
+        _intentionalDisconnect = false;
+        _showSnack(l.tr('ble_no_service'), backgroundColor: AppColors.error);
+      }
+    } else {
+      _intentionalDisconnect = false;
+      _showSnack(l.tr('ble_timeout'), backgroundColor: AppColors.error);
+    }
+  }
+
   void _onLocaleChanged() { if (mounted) _sendLangToFirmware(); }
+
+  void _applyNodeIdFromDeviceName() {
+    final dev = widget.ble.device;
+    if (dev == null || _nodeId.isNotEmpty) return;
+    final name = dev.platformName.isNotEmpty ? dev.platformName : dev.advName;
+    final match = RegExp(r'RL-([0-9A-Fa-f]{8})').firstMatch(name);
+    if (match != null && mounted) {
+      setState(() => _nodeId = match.group(1)!.toUpperCase());
+    }
+  }
   void _sendLangToFirmware() { if (widget.ble.isConnected) widget.ble.setLang(AppLocalizations.currentLocale.languageCode); }
 
   Future<void> _loadContactNicknames() async {
@@ -148,13 +403,23 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
       } else if (evt is RiftLinkReadEvent) {
         setState(() { for (var i = 0; i < _messages.length; i++) { final m = _messages[i]; if (!m.isIncoming && m.to == evt.from && m.msgId == evt.msgId) { _messages[i] = m.copyWith(status: _St.read); break; } } });
       } else if (evt is RiftLinkInfoEvent) {
+        final bleDev = widget.ble.device;
+        if (bleDev != null) _currentBleRemoteId = bleDev.remoteId.toString();
         setState(() {
-          _nodeId = evt.id; _nickname = evt.nickname?.isNotEmpty == true ? evt.nickname : null;
+          if (evt.id.isNotEmpty) _nodeId = evt.id;
+          _nickname = evt.nickname?.isNotEmpty == true ? evt.nickname : null;
           _region = evt.region; _channel = evt.channel; _version = evt.version; _sf = evt.sf;
           _offlinePending = evt.offlinePending; _gpsPresent = evt.gpsPresent; _gpsEnabled = evt.gpsEnabled;
           _gpsFix = evt.gpsFix; _powersave = evt.powersave; _neighbors = evt.neighbors;
           _neighborsRssi = evt.neighborsRssi; _routes = evt.routes; _groups = evt.groups;
         });
+        if (bleDev != null && evt.id.isNotEmpty) {
+          RecentDevicesService.addOrUpdate(
+            remoteId: bleDev.remoteId.toString(),
+            nodeId: evt.id,
+            nickname: evt.nickname?.isNotEmpty == true ? evt.nickname : null,
+          );
+        }
       } else if (evt is RiftLinkRoutesEvent) { setState(() => _routes = evt.routes); }
       else if (evt is RiftLinkGroupsEvent) { setState(() => _groups = evt.groups); }
       else if (evt is RiftLinkTelemetryEvent) {
@@ -169,14 +434,18 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
       } else if (evt is RiftLinkOtaEvent) { _showOtaDialog(evt.ip, evt.ssid, evt.password); }
       else if (evt is RiftLinkRegionEvent) { setState(() { _region = evt.region; _channel = evt.channel; }); }
       else if (evt is RiftLinkNeighborsEvent) { setState(() { _neighbors = evt.neighbors; _neighborsRssi = evt.rssi; }); }
-      else if (evt is RiftLinkPongEvent) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.tr('link_ok', {'from': evt.from})))); }
-      else if (evt is RiftLinkErrorEvent) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${context.l10n.tr('error')}: ${evt.msg}'), backgroundColor: AppColors.error)); }
-      else if (evt is RiftLinkWifiEvent) { ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(evt.connected ? 'WiFi: ${evt.ssid} — ${evt.ip}' : 'WiFi: не подключено'))); }
+      else if (evt is RiftLinkPongEvent) {
+        final fromNorm = evt.from.length >= 8 ? evt.from.substring(0, 8).toUpperCase() : evt.from.toUpperCase();
+        _pendingPings.remove(fromNorm);
+        _showSnack('✓ ${context.l10n.tr('link_ok', {'from': evt.from})}', backgroundColor: AppColors.success, duration: const Duration(seconds: 4));
+      }
+      else if (evt is RiftLinkErrorEvent) { _showSnack('${context.l10n.tr('error')}: ${evt.msg}', backgroundColor: AppColors.error); }
+      else if (evt is RiftLinkWifiEvent) { _showSnack(evt.connected ? 'WiFi: ${evt.ssid} — ${evt.ip}' : 'WiFi: не подключено'); }
       else if (evt is RiftLinkGpsEvent) { setState(() { _gpsPresent = evt.present; _gpsEnabled = evt.enabled; _gpsFix = evt.hasFix; }); }
       else if (evt is RiftLinkInviteEvent) { _showInviteDialog(evt.id, evt.pubKey); }
       else if (evt is RiftLinkSelftestEvent) {
         final ok = evt.radioOk && evt.displayOk;
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Selftest: ${evt.radioOk ? "✓" : "✗"} радио, ${evt.displayOk ? "✓" : "✗"} дисплей. ${evt.batteryMv}mV'), backgroundColor: ok ? null : AppColors.error));
+        _showSnack('Selftest: ${evt.radioOk ? "✓" : "✗"} радио, ${evt.displayOk ? "✓" : "✗"} дисплей. ${evt.batteryMv}mV', backgroundColor: ok ? null : AppColors.error);
         if (evt.batteryMv > 0) setState(() => _batteryMv = evt.batteryMv);
       } else if (evt is RiftLinkVoiceEvent) {
         _voiceChunks[evt.from] ??= {};
@@ -331,7 +600,7 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
 
   Future<String?> _pickNeighborDialog() {
     FocusScope.of(context).unfocus();
-    return showModalBottomSheet<String>(
+    return showAppModalBottomSheet<String>(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
@@ -364,7 +633,7 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
   Future<int?> _pickVoiceTtlDialog() async {
     FocusScope.of(context).unfocus();
     HapticFeedback.mediumImpact();
-    return showDialog<int>(
+    return showAppDialog<int>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppColors.card,
@@ -390,7 +659,15 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
     );
   }
 
-  void _showSnack(String text) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+  void _showSnack(String text, {Color? backgroundColor, Duration duration = const Duration(seconds: 3)}) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(text),
+      backgroundColor: backgroundColor,
+      duration: duration,
+      behavior: SnackBarBehavior.floating,
+      margin: const EdgeInsets.only(bottom: 100, left: 16, right: 16),
+    ));
+  }
 
   Future<void> _startOta() async {
     if (!widget.ble.isConnected) return;
@@ -399,30 +676,32 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
   }
 
   void _showPingDialog({String? prefilledId}) {
-    final c = TextEditingController(text: prefilledId ?? '');
-    showDialog(context: context, builder: (ctx) => AlertDialog(
-      title: Text(context.l10n.tr('ping'), style: const TextStyle(color: AppColors.onSurface)),
-      content: TextField(controller: c, decoration: const InputDecoration(hintText: 'A1B2C3D4'), maxLength: 8, autofocus: true),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: Text(context.l10n.tr('cancel'))),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: Colors.white),
-          onPressed: () async {
-            final id = c.text.trim().toUpperCase();
-            if (id.length != 8) { _showSnack(context.l10n.tr('ping_invalid')); return; }
-            Navigator.pop(ctx);
-            final ok = await widget.ble.sendPing(id);
-            if (mounted) _showSnack(ok ? 'PING → $id' : context.l10n.tr('error'));
-          },
-          child: const Text('Ping'),
-        ),
-      ],
-    ));
+    Navigator.push(
+      context,
+      _PingDialogRoute(
+        l: context.l10n,
+        prefilledId: prefilledId,
+        onPing: (id) async {
+          final ok = await widget.ble.sendPing(id);
+          if (!mounted) return;
+          if (!ok) { _showSnack(context.l10n.tr('error')); return; }
+          final idNorm = id.length >= 8 ? id.substring(0, 8).toUpperCase() : id.toUpperCase();
+          _pendingPings.add(idNorm);
+          _showSnack(context.l10n.tr('ping_sent', {'id': id}));
+          Future.delayed(const Duration(seconds: 20), () {
+            if (!mounted) return;
+            if (_pendingPings.remove(idNorm)) {
+              _showSnack(context.l10n.tr('ping_timeout', {'id': id}), backgroundColor: AppColors.error, duration: const Duration(seconds: 4));
+            }
+          });
+        },
+      ),
+    );
   }
 
   void _showAddContactDialog(String id) {
     final nc = TextEditingController(text: _contactNicknames[id] ?? '');
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    showAppDialog(context: context, builder: (ctx) => AlertDialog(
       title: Text(context.l10n.tr('add_contact'), style: const TextStyle(color: AppColors.onSurface)),
       content: TextField(controller: nc, decoration: InputDecoration(labelText: context.l10n.tr('contact_nickname')), maxLength: 16, autofocus: true),
       actions: [
@@ -438,7 +717,7 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
 
   void _showInviteDialog(String id, String pubKey) {
     final data = '{"id":"$id","pubKey":"$pubKey"}';
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    showAppDialog(context: context, builder: (ctx) => AlertDialog(
       title: Text(context.l10n.tr('invite_created'), style: const TextStyle(color: AppColors.onSurface)),
       content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text('ID: $id', style: const TextStyle(fontFamily: 'monospace', fontSize: 12, color: AppColors.onSurface)),
@@ -456,7 +735,7 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
   }
 
   void _showOtaDialog(String ip, String ssid, String password) {
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    showAppDialog(context: context, builder: (ctx) => AlertDialog(
       title: const Text('OTA', style: TextStyle(color: AppColors.onSurface)),
       content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text(context.l10n.tr('ota_connect'), style: const TextStyle(color: AppColors.onSurface)),
@@ -478,28 +757,10 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
 
   Future<void> _showAppMenu(BuildContext context, AppLocalizations l) async {
     FocusScope.of(context).unfocus();
-    final value = await showModalBottomSheet<String>(
-      context: context,
-      useRootNavigator: true,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (ctx) => Container(
-        decoration: const BoxDecoration(
-          color: AppColors.card,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-        ),
-        child: SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(leading: const Icon(Icons.people), title: Text(l.tr('contacts')), onTap: () => Navigator.pop(ctx, 'contacts')),
-              ListTile(leading: const Icon(Icons.group), title: Text(l.tr('groups')), onTap: () => Navigator.pop(ctx, 'groups')),
-              ListTile(leading: const Icon(Icons.radar), title: Text(l.tr('ping')), onTap: () => Navigator.pop(ctx, 'ping')),
-              ListTile(leading: const Icon(Icons.update), title: const Text('OTA'), onTap: () => Navigator.pop(ctx, 'ota')),
-              ListTile(leading: const Icon(Icons.settings), title: Text(l.tr('settings')), onTap: () => Navigator.pop(ctx, 'settings')),
-            ],
-          ),
-        ),
+    final value = await Navigator.push<String>(
+      context,
+      _PopoverMenuRoute(
+        builder: (ctx) => _AppMenuPopover(l: l),
       ),
     );
     if (value != null && mounted) _onMenuSelected(value);
@@ -509,6 +770,12 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
     if (value == null || !mounted) return;
     FocusScope.of(context).unfocus();
     switch (value) {
+      case 'map':
+        Navigator.push(context, MaterialPageRoute(builder: (_) => MapScreen(ble: widget.ble)));
+        break;
+      case 'mesh':
+        Navigator.push(context, MaterialPageRoute(builder: (_) => MeshScreen(ble: widget.ble, nodeId: _nodeId, neighbors: _neighbors, neighborsRssi: _neighborsRssi, routes: _routes)));
+        break;
       case 'contacts':
         Navigator.push(context, MaterialPageRoute(builder: (_) => ContactsScreen(neighbors: _neighbors))).then((_) => _loadContactNicknames());
         break;
@@ -532,9 +799,11 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
             onRegionChanged: (r, c) => setState(() { _region = r; _channel = c; }),
             onPowersaveChanged: (v) => setState(() => _powersave = v),
             onGpsChanged: (v) => setState(() => _gpsEnabled = v),
+            meshAnimationEnabled: _meshAnimationEnabled,
+            onMeshAnimationChanged: _onMeshAnimationChanged,
           ))).then((_) => setState(() {}));
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.tr('connect_first'))));
+          _showSnack(context.l10n.tr('connect_first'));
         }
         break;
     }
@@ -545,22 +814,78 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
     final l = context.l10n;
     return Scaffold(
       resizeToAvoidBottomInset: true,
-      backgroundColor: AppColors.card,
+      backgroundColor: AppColors.surface,
+      extendBody: true,
       appBar: AppBar(
-        title: Text(l.tr('app_title'), style: const TextStyle(fontWeight: FontWeight.w600)),
+        toolbarHeight: 44,
+        title: Builder(
+          builder: (context) {
+            final name = (_nickname ?? _nodeId).trim();
+            final label = widget.ble.isConnected
+                ? (name.isNotEmpty ? name : '—')
+                : l.tr('disconnected');
+            final row = Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(widget.ble.isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled, size: 18, color: widget.ble.isConnected ? AppColors.success : AppColors.onSurfaceVariant),
+                const SizedBox(width: 6),
+                Flexible(
+                  child: Text(
+                    label,
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: widget.ble.isConnected ? AppColors.success : AppColors.onSurfaceVariant),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            );
+            if (!widget.ble.isConnected) {
+              return GestureDetector(
+                onTap: () => Navigator.of(context).pushAndRemoveUntil(
+                  MaterialPageRoute(builder: (_) => const ScanScreen()),
+                  (r) => false,
+                ),
+                child: row,
+              );
+            }
+            return GestureDetector(
+              onTap: _showConnectMenu,
+              child: row,
+            );
+          },
+        ),
         backgroundColor: AppColors.surfaceVariant,
         foregroundColor: AppColors.onSurface,
         elevation: 0,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.map),
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => MapScreen(ble: widget.ble))),
-            tooltip: l.tr('map'),
-          ),
-          IconButton(
-            icon: const Icon(Icons.hub),
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => MeshScreen(ble: widget.ble, nodeId: _nodeId, neighbors: _neighbors, neighborsRssi: _neighborsRssi, routes: _routes))),
-            tooltip: l.tr('mesh_topology'),
+          Padding(
+            padding: const EdgeInsets.only(right: 4, top: 2, bottom: 2),
+            child: GestureDetector(
+              onTap: widget.ble.isConnected ? () {
+                if (_group > 0) {
+                  setState(() => _group = 0);
+                } else if (_groups.isNotEmpty) {
+                  setState(() => _group = _groups.first);
+                } else {
+                  _showSnack(context.l10n.tr('no_groups'));
+                }
+              } : null,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                decoration: BoxDecoration(
+                  color: _group > 0 ? AppColors.primary.withOpacity(0.12) : AppColors.onSurface.withOpacity(0.03),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: _group > 0 ? AppColors.primary.withOpacity(0.5) : AppColors.onSurfaceVariant.withOpacity(0.3),
+                    width: 1,
+                  ),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(_group == 0 ? Icons.public : Icons.group, size: 12, color: _group > 0 ? AppColors.primary : AppColors.onSurfaceVariant),
+                  const SizedBox(width: 3),
+                  Text(_group == 0 ? 'BC' : 'G$_group', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: _group > 0 ? AppColors.primary : AppColors.onSurfaceVariant)),
+                ]),
+              ),
+            ),
           ),
           IconButton(
             icon: const Icon(Icons.more_vert),
@@ -569,51 +894,51 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
           ),
         ],
       ),
-      body: SafeArea(
-        top: false,
-        child: Stack(
-          children: [
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (_reconnecting)
             Positioned.fill(
-              child: IgnorePointer(
-                child: ColoredBox(
-                  color: AppColors.surface,
-                  child: CustomPaint(painter: _MeshBackgroundPainter()),
+              child: Container(
+                color: Colors.black54,
+                child: Center(
+                  child: Card(
+                    color: AppColors.card,
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const CircularProgressIndicator(color: AppColors.primary),
+                          const SizedBox(height: 16),
+                          Text(l.tr('reconnecting', {'n': '${_reconnectAttempt}/3'}), style: const TextStyle(color: AppColors.onSurface)),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
-            Column(
+          Positioned.fill(
+            child: IgnorePointer(
+              child: ColoredBox(
+                color: AppColors.surface,
+                child: ListenableBuilder(
+                  listenable: _meshAnimationEnabled && _meshAnimController != null ? _meshAnimController! : const AlwaysStoppedAnimation(0),
+                  builder: (_, __) => CustomPaint(
+                    painter: MeshBackgroundPainter(progress: _meshAnimController?.value ?? 0, animated: _meshAnimationEnabled),
+                  ),
+                ),
+              ),
+            ),
+          ),
+          SafeArea(
+            top: false,
+            bottom: false,
+            child: Column(
               mainAxisSize: MainAxisSize.max,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              color: AppColors.surface,
-              child: Row(
-                children: [
-                  Icon(widget.ble.isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled, size: 18, color: widget.ble.isConnected ? AppColors.success : AppColors.onSurfaceVariant),
-                  const SizedBox(width: 8),
-                  Text(widget.ble.isConnected ? l.tr('connected') : l.tr('disconnected'), style: TextStyle(fontSize: 13, color: widget.ble.isConnected ? AppColors.success : AppColors.onSurfaceVariant)),
-                  if (_nodeId.isNotEmpty) ...[const Spacer(), Text(_nickname ?? _nodeId, style: const TextStyle(fontSize: 13, color: AppColors.onSurfaceVariant, fontFamily: 'monospace'), overflow: TextOverflow.ellipsis)],
-                  const Spacer(),
-                  GestureDetector(
-                    onTap: widget.ble.isConnected ? () => setState(() => _group = _group == 0 ? 1 : 0) : null,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: _group > 0 ? AppColors.primary.withOpacity(0.2) : AppColors.surfaceVariant,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: _group > 0 ? AppColors.primary : AppColors.divider),
-                      ),
-                      child: Row(mainAxisSize: MainAxisSize.min, children: [
-                        Icon(_group == 0 ? Icons.public : Icons.group, size: 16, color: _group > 0 ? AppColors.primary : AppColors.onSurfaceVariant),
-                        const SizedBox(width: 4),
-                        Text(_group == 0 ? 'BC' : 'G$_group', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500, color: _group > 0 ? AppColors.primary : AppColors.onSurface)),
-                      ]),
-                    ),
-                  ),
-                ],
-              ),
-            ),
             const Divider(height: 1, color: AppColors.divider),
             if (_nodeId.isNotEmpty && _neighbors.isNotEmpty) _buildRecipientBar(l),
             Expanded(
@@ -622,7 +947,16 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
                   Container(
                     color: Colors.transparent,
                     child: _visibleMessages.isEmpty
-                      ? Center(child: Text(l.tr('no_messages'), style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 15)))
+                      ? Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.chat_bubble_outline, size: 48, color: AppColors.onSurfaceVariant.withOpacity(0.4)),
+                              const SizedBox(height: 12),
+                              Text(l.tr('no_messages'), style: TextStyle(color: AppColors.onSurfaceVariant.withOpacity(0.7), fontSize: 14)),
+                            ],
+                          ),
+                        )
                       : ListView(
                           controller: _scrollController,
                           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -656,8 +990,8 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
             _buildInputBar(l),
               ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -672,8 +1006,9 @@ class _ChatScreenState extends State<ChatScreen> with SingleTickerProviderStateM
     final tenths = (elapsed.inMilliseconds % 1000) ~/ 100;
     final timeStr = '${sec ~/ 60}:${(sec % 60).toString().padLeft(2, '0')},$tenths';
 
+    final bottomPad = MediaQuery.of(context).padding.bottom;
     return Container(
-      padding: const EdgeInsets.fromLTRB(20, 10, 8, 10),
+      padding: EdgeInsets.fromLTRB(20, 10, 8, 10 + bottomPad),
       decoration: BoxDecoration(
         color: AppColors.surfaceVariant.withOpacity(0.92),
         border: const Border(top: BorderSide(color: AppColors.divider, width: 0.5)),
@@ -1015,49 +1350,245 @@ class _TtlTapButtonState extends State<_TtlTapButton> {
   }
 }
 
-/// Незатейливый абстрактный фон: узлы сети и тонкие линии связи
-class _MeshBackgroundPainter extends CustomPainter {
+/// Окно Ping по центру экрана — красивая карточка с вводом (Navigator.push)
+class _PingDialogRoute extends PageRouteBuilder<void> {
+  final AppLocalizations l;
+  final String? prefilledId;
+  final Future<void> Function(String id) onPing;
+
+  _PingDialogRoute({required this.l, this.prefilledId, required this.onPing})
+      : super(
+          opaque: false,
+          barrierColor: Colors.black54,
+          barrierDismissible: true,
+          pageBuilder: (context, animation, secondaryAnimation) => _PingDialogContent(l: l, prefilledId: prefilledId, onPing: onPing),
+          transitionsBuilder: (context, animation, secondaryAnimation, child) {
+            return Stack(
+              children: [
+                Positioned.fill(
+                  child: GestureDetector(
+                    onTap: () => Navigator.pop(context),
+                    behavior: HitTestBehavior.opaque,
+                    child: Container(color: Colors.transparent),
+                  ),
+                ),
+                Center(
+                  child: FadeTransition(
+                    opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
+                    child: ScaleTransition(
+                      scale: Tween<double>(begin: 0.9, end: 1.0).animate(CurvedAnimation(parent: animation, curve: Curves.easeOut)),
+                      child: child,
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+}
+
+class _PingDialogContent extends StatefulWidget {
+  final AppLocalizations l;
+  final String? prefilledId;
+  final Future<void> Function(String id) onPing;
+
+  const _PingDialogContent({required this.l, this.prefilledId, required this.onPing});
+
   @override
-  void paint(Canvas canvas, Size size) {
-    const spacing = 56.0;
-    const dotRadius = 1.2;
-    const lineOpacity = 0.04;
-    const dotOpacity = 0.06;
-    final paint = Paint()..color = AppColors.primary.withOpacity(dotOpacity);
-    final linePaint = Paint()
-      ..color = AppColors.primary.withOpacity(lineOpacity)
-      ..strokeWidth = 0.8
-      ..style = PaintingStyle.stroke;
+  State<_PingDialogContent> createState() => _PingDialogContentState();
+}
 
-    final cols = (size.width / spacing).floor() + 2;
-    final rows = (size.height / spacing).floor() + 2;
-    final points = <Offset>[];
+class _PingDialogContentState extends State<_PingDialogContent> {
+  late final TextEditingController _controller;
 
-    for (var r = 0; r < rows; r++) {
-      for (var c = 0; c < cols; c++) {
-        final x = c * spacing + (r.isOdd ? spacing * 0.5 : 0);
-        final y = r * spacing * 0.85;
-        if (x <= size.width + spacing && y <= size.height + spacing) {
-          points.add(Offset(x, y));
-        }
-      }
-    }
-
-    for (final p in points) {
-      canvas.drawCircle(p, dotRadius, paint);
-    }
-
-    for (var i = 0; i < points.length; i++) {
-      for (var j = i + 1; j < points.length; j++) {
-        if ((points[i] - points[j]).distance < spacing * 1.5) {
-          canvas.drawLine(points[i], points[j], linePaint);
-        }
-      }
-    }
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.prefilledId ?? '');
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _doPing() async {
+    final id = _controller.text.trim().toUpperCase();
+    if (id.length != 8) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(widget.l.tr('ping_invalid')),
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.only(bottom: 100, left: 16, right: 16),
+      ));
+      return;
+    }
+    Navigator.pop(context);
+    await widget.onPing(id);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: Container(
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            color: AppColors.card,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: AppColors.divider),
+            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.4), blurRadius: 24, offset: const Offset(0, 8))],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.radar, color: AppColors.primary, size: 28),
+                  const SizedBox(width: 12),
+                  Text(widget.l.tr('ping'), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Container(
+                decoration: BoxDecoration(
+                  color: AppColors.surfaceVariant,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: AppColors.divider),
+                ),
+                child: CupertinoTextField(
+                  controller: _controller,
+                  placeholder: 'A1B2C3D4',
+                  maxLength: 8,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 16, color: AppColors.onSurface),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  decoration: const BoxDecoration(color: Colors.transparent),
+                  placeholderStyle: const TextStyle(color: AppColors.onSurfaceVariant),
+                  textCapitalization: TextCapitalization.characters,
+                  onSubmitted: (_) => _doPing(),
+                ),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(onPressed: () => Navigator.pop(context), child: Text(widget.l.tr('cancel'))),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: Colors.white),
+                    onPressed: _doPing,
+                    child: const Text('Ping'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Маршрут в стиле Telegram — всплывающее меню сверху справа
+class _PopoverMenuRoute<T> extends PageRouteBuilder<T> {
+  final WidgetBuilder builder;
+
+  _PopoverMenuRoute({required this.builder})
+      : super(
+          opaque: false,
+          barrierColor: Colors.black38,
+          barrierDismissible: true,
+          pageBuilder: (context, animation, secondaryAnimation) => builder(context),
+          transitionsBuilder: (context, animation, secondaryAnimation, child) {
+            return Stack(
+              children: [
+                Positioned.fill(
+                  child: GestureDetector(
+                    onTap: () => Navigator.pop(context),
+                    behavior: HitTestBehavior.opaque,
+                    child: Container(color: Colors.transparent),
+                  ),
+                ),
+                Align(
+                  alignment: Alignment.topRight,
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 56, right: 12),
+                    child: FadeTransition(
+                      opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
+                      child: ScaleTransition(
+                        scale: Tween<double>(begin: 0.9, end: 1.0).animate(CurvedAnimation(parent: animation, curve: Curves.easeOut)),
+                        alignment: Alignment.topRight,
+                        child: child,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+}
+
+/// Popover меню в стиле Telegram — компактная карточка сверху справа
+class _AppMenuPopover extends StatelessWidget {
+  final AppLocalizations l;
+
+  const _AppMenuPopover({required this.l});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        constraints: const BoxConstraints(minWidth: 200, maxWidth: 260),
+        decoration: BoxDecoration(
+          color: AppColors.card,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: AppColors.divider, width: 0.5),
+          boxShadow: [
+            BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 16, offset: const Offset(0, 4)),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _popoverItem(context, Icons.map, l.tr('map'), 'map'),
+              _popoverItem(context, Icons.hub, l.tr('mesh_topology'), 'mesh'),
+              _popoverItem(context, Icons.people, l.tr('contacts'), 'contacts'),
+              _popoverItem(context, Icons.group, l.tr('groups'), 'groups'),
+              _popoverItem(context, Icons.radar, l.tr('ping'), 'ping'),
+              _popoverItem(context, Icons.update, 'OTA', 'ota'),
+              _popoverItem(context, Icons.settings, l.tr('settings'), 'settings'),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _popoverItem(BuildContext context, IconData icon, String label, String value) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => Navigator.pop(context, value),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          child: Row(
+            children: [
+              Icon(icon, size: 22, color: AppColors.onSurface),
+              const SizedBox(width: 14),
+              Text(label, style: const TextStyle(fontSize: 15, color: AppColors.onSurface)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 // ── Data classes ──

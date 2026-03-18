@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
+import '../widgets/mesh_background.dart';
 
 class SettingsScreen extends StatefulWidget {
   final RiftLinkBle ble;
@@ -17,11 +18,14 @@ class SettingsScreen extends StatefulWidget {
   final void Function(String, int?) onRegionChanged;
   final void Function(bool) onPowersaveChanged;
   final void Function(bool) onGpsChanged;
+  final bool meshAnimationEnabled;
+  final void Function(bool) onMeshAnimationChanged;
 
   const SettingsScreen({super.key, required this.ble, required this.nodeId, this.nickname, required this.region, this.channel,
     this.gpsPresent = false, this.gpsEnabled = false, this.gpsFix = false, this.powersave = false,
     this.offlinePending, this.batteryMv, required this.onDisconnect, required this.onNicknameChanged,
-    required this.onRegionChanged, required this.onPowersaveChanged, required this.onGpsChanged});
+    required this.onRegionChanged, required this.onPowersaveChanged, required this.onGpsChanged,
+    this.meshAnimationEnabled = true, required this.onMeshAnimationChanged});
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -61,9 +65,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return Scaffold(
       backgroundColor: AppColors.surface,
       appBar: AppBar(title: Text(l.tr('settings')), leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context))),
-      body: Material(
-        color: AppColors.surface,
-        child: ListView(padding: const EdgeInsets.all(16), children: [
+      body: MeshBackgroundWrapper(
+        child: Material(
+          color: Colors.transparent,
+          child: ListView(padding: const EdgeInsets.all(16), children: [
         _section(l.tr('connection'), [
           ListTile(
             leading: const Icon(Icons.link_off, color: AppColors.error),
@@ -171,12 +176,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ])),
         ]),
         _section(l.tr('other'), [
+          SwitchListTile(
+            title: Text(l.tr('mesh_animation'), style: const TextStyle(color: AppColors.onSurface)),
+            value: widget.meshAnimationEnabled,
+            activeColor: AppColors.primary,
+            onChanged: (v) => widget.onMeshAnimationChanged(v),
+          ),
           if (widget.offlinePending != null && widget.offlinePending! > 0) ListTile(leading: const Icon(Icons.schedule, color: AppColors.onSurfaceVariant), title: Text('${l.tr('offline_pending')}: ${widget.offlinePending}', style: const TextStyle(color: AppColors.onSurface))),
           if (widget.batteryMv != null && widget.batteryMv! > 0) ListTile(leading: const Icon(Icons.battery_charging_full, color: AppColors.onSurfaceVariant), title: Text('${(widget.batteryMv! / 1000).toStringAsFixed(2)} V', style: const TextStyle(color: AppColors.onSurface))),
           ListTile(leading: const Icon(Icons.health_and_safety, color: AppColors.primary), title: Text(l.tr('selftest'), style: const TextStyle(color: AppColors.onSurface)), onTap: widget.ble.isConnected ? () => widget.ble.selftest() : null),
         ]),
         const SizedBox(height: 32),
       ]),
+        ),
         ),
     );
   }

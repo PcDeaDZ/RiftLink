@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import '../widgets/mesh_background.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
@@ -55,9 +56,10 @@ class _MapScreenState extends State<MapScreen> {
           }),
         ],
       ),
-      body: Material(
-        color: Colors.white,
-        child: FlutterMap(
+      body: MeshBackgroundWrapper(
+        child: Material(
+          color: Colors.transparent,
+          child: FlutterMap(
         options: MapOptions(initialCenter: center, initialZoom: points.isEmpty ? 10 : 14),
         children: [
           TileLayer(urlTemplate: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}'),
@@ -73,6 +75,7 @@ class _MapScreenState extends State<MapScreen> {
           ]),
         ],
       ),
+        ),
         ),
       bottomSheet: _nodes.isEmpty && _myLocation == null
         ? Container(

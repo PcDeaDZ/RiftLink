@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'app_navigator.dart';
 import 'l10n/app_localizations.dart';
 import 'locale_notifier.dart';
 import 'screens/scan_screen.dart';
@@ -30,13 +32,27 @@ class RiftLinkApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return ListenableBuilder(
       listenable: localeNotifier,
-      builder: (_, __) => MaterialApp(
-        title: 'RiftLink',
-        locale: localeNotifier.value,
-        supportedLocales: const [Locale('en'), Locale('ru')],
-        theme: AppTheme.dark,
-        home: const ScanScreen(),
-      ),
+      builder: (_, __) {
+        final locale = localeNotifier.value;
+        return MaterialApp(
+          navigatorKey: navigatorKey,
+          key: ValueKey(locale.languageCode),
+          title: 'RiftLink',
+          locale: locale,
+          supportedLocales: const [Locale('en'), Locale('ru')],
+          localizationsDelegates: const [
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          theme: AppTheme.dark,
+          builder: (context, child) => Directionality(
+            textDirection: TextDirection.ltr,
+            child: child!,
+          ),
+          home: const ScanScreen(),
+        );
+      },
     );
   }
 }

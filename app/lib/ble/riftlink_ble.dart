@@ -17,13 +17,13 @@ class RiftLinkBle {
   BluetoothDevice? get device => _device;
   bool get isConnected => _device?.isConnected ?? false;
 
-  /// Проверка, что устройство — RiftLink (по имени RL-*, RiftLink или service UUID)
+  /// Проверка, что устройство — RiftLink (по имени RL-*, RiftLink, Heltec или service UUID)
   static bool isRiftLink(ScanResult r) {
     final name = r.device.platformName;
     final advName = r.device.advName;
-    final n = name.isNotEmpty ? name : advName;
+    final n = (name.isNotEmpty ? name : advName).toLowerCase();
     if (n.isNotEmpty) {
-      if (n.contains(deviceName) || n.startsWith('RL-')) return true;
+      if (n.contains('riftlink') || n.startsWith('rl-') || n.contains('heltec') || n.contains('lora')) return true;
     }
     final uuids = r.advertisementData.serviceUuids;
     if (uuids.isNotEmpty) {
@@ -36,7 +36,12 @@ class RiftLinkBle {
   }
 
   static Future<void> startScan({Duration timeout = const Duration(seconds: 10)}) async {
-    await FlutterBluePlus.startScan(timeout: timeout);
+    await FlutterBluePlus.startScan(
+      timeout: timeout,
+      androidUsesFineLocation: true,
+      androidCheckLocationServices: false,
+      androidLegacy: true,
+    );
   }
 
   static Future<void> stopScan() async {

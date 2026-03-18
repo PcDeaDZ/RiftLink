@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import '../app_navigator.dart';
 import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
+import '../widgets/mesh_background.dart';
 import '../theme/app_theme.dart';
 
 class ContactsScreen extends StatefulWidget {
@@ -28,7 +30,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
     final idC = TextEditingController(text: raw.length > 8 ? raw.substring(0, 8) : raw);
     final nickC = TextEditingController();
     final l = context.l10n;
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    showAppDialog(context: context, builder: (ctx) => AlertDialog(
       backgroundColor: AppColors.card,
       title: Text(prefilledId != null ? l.tr('edit_contact') : l.tr('add_contact'), style: const TextStyle(color: AppColors.onSurface)),
       content: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -73,7 +75,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
   Future<void> _delete(Contact c) async {
     final l = context.l10n;
-    final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
+    final ok = await showAppDialog<bool>(context: context, builder: (ctx) => AlertDialog(
       backgroundColor: AppColors.card,
       title: Text(l.tr('delete_contact'), style: const TextStyle(color: AppColors.onSurface)),
       content: Text('${c.nickname.isNotEmpty ? "${c.nickname} " : ""}(${c.id})', style: const TextStyle(color: AppColors.onSurface)),
@@ -89,11 +91,12 @@ class _ContactsScreenState extends State<ContactsScreen> {
   Widget build(BuildContext context) {
     final l = context.l10n;
     return Scaffold(
-      backgroundColor: AppColors.card,
+      backgroundColor: AppColors.surface,
       appBar: AppBar(title: Text(l.tr('contacts')), leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context))),
-      body: Material(
-        color: AppColors.card,
-        child: _loading ? const Center(child: CircularProgressIndicator(color: AppColors.primary))
+      body: MeshBackgroundWrapper(
+        child: Material(
+          color: Colors.transparent,
+          child: _loading ? const Center(child: CircularProgressIndicator(color: AppColors.primary))
           : Column(children: [
             if (widget.neighbors.isNotEmpty)
               Container(
@@ -140,6 +143,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                   ),
             ),
           ]),
+        ),
         ),
       floatingActionButton: FloatingActionButton(backgroundColor: AppColors.primary, foregroundColor: AppColors.card, onPressed: () => _showAddDialog(), tooltip: l.tr('add_contact'), child: const Icon(Icons.add)),
     );

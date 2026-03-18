@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import '../app_navigator.dart';
+import '../widgets/mesh_background.dart';
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
@@ -38,7 +40,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
   void _showAddDialog() {
     final c = TextEditingController();
     final l = context.l10n;
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    showAppDialog(context: context, builder: (ctx) => AlertDialog(
       backgroundColor: AppColors.card,
       title: Text(l.tr('add_group'), style: const TextStyle(color: AppColors.onSurface)),
       content: TextField(controller: c, style: const TextStyle(color: AppColors.onSurface), decoration: InputDecoration(labelText: l.tr('group_id_hint'), hintText: '1'), keyboardType: TextInputType.number, autofocus: true),
@@ -65,7 +67,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
   Widget build(BuildContext context) {
     final l = context.l10n;
     return Scaffold(
-      backgroundColor: AppColors.card,
+      backgroundColor: AppColors.surface,
       appBar: AppBar(
         title: Text(l.tr('groups')),
         leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context)),
