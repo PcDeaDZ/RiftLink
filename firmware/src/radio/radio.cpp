@@ -88,8 +88,16 @@ bool send(const uint8_t* data, size_t len) {
 
   int16_t st = lora->transmit(const_cast<uint8_t*>(data), len);
   if (st != RADIOLIB_ERR_NONE) {
-    Serial.printf("[RiftLink] TX failed: %d\n", st);
-    return false;
+    // -705 = SPI_CMD_TIMEOUT — радио могло зависнуть после RX, пробуем standby и повторить
+    if (st == -705) {
+      lora->standby();
+      delay(5);
+      st = lora->transmit(const_cast<uint8_t*>(data), len);
+    }
+    if (st != RADIOLIB_ERR_NONE) {
+      Serial.printf("[RiftLink] TX failed: %d\n", st);
+      return false;
+    }
   }
   duty_cycle::recordSend(toa);
   return true;
@@ -124,6 +132,7 @@ int receiveAsync(uint8_t* buf, size_t maxLen) {
   int16_t st = lora->readData(buf, len);
   if (st == RADIOLIB_ERR_RX_TIMEOUT) return 0;
   if (st < 0) return -1;
+  lora->standby();  // гарантировать standby после RX — иначе следующий TX может дать -705
   return (int)len;
 }
 

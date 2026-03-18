@@ -53,8 +53,9 @@ bool canSleep() {
 int sleepUntilPacketOrTimeout(uint8_t* buf, size_t maxLen) {
   if (!buf || maxLen == 0) return -1;
 
-  // Пробуждение по DIO1 (packet) или таймеру
+  // Пробуждение по DIO1 (packet), кнопке (GPIO0) или таймеру
   gpio_wakeup_enable((gpio_num_t)DIO1_GPIO, GPIO_INTR_HIGH_LEVEL);
+  gpio_wakeup_enable((gpio_num_t)0, GPIO_INTR_LOW_LEVEL);  // USER_SW — active low
   esp_sleep_enable_gpio_wakeup();
   esp_sleep_enable_timer_wakeup(SLEEP_TIMEOUT_US);
   esp_light_sleep_start();

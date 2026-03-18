@@ -16,6 +16,7 @@ void update();  // вызов из loop()
 void setOnSend(void (*cb)(const uint8_t* to, const char* text, uint8_t ttlMinutes));
 void setOnLocation(void (*cb)(float lat, float lon, int16_t alt));
 void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId = 0, int rssi = 0, uint8_t ttlMinutes = 0);
+void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId = 0, int rssi = 0, uint8_t ttlMinutes = 0);  // отложить — снизить стек в handlePacket
 void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi = 0);
 void notifyRead(const uint8_t* from, uint32_t msgId, int rssi = 0);
 /** evt "sent" — unicast поставлен в очередь (to, msgId) */
@@ -26,6 +27,7 @@ void notifyInfo();
 /** evt "invite" — id + pubKey (base64) для QR приглашения */
 void notifyInvite();
 void notifyNeighbors();  // evt "neighbors" — список соседей
+void requestNeighborsNotify();  // отложить в update() — снизить стек в handlePacket
 void notifyRoutes();    // evt "routes" — маршруты (dest, nextHop, hops, rssi) для mesh-визуализации
 void notifyGroups();    // evt "groups" — список групп
 void notifyOta(const char* ip, const char* ssid, const char* password);

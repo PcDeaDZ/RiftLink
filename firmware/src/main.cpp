@@ -7,6 +7,13 @@
 
 #include <Arduino.h>
 #include <esp_random.h>
+
+// Fallback: loopTask stack — build_flags -DARDUINO_LOOP_STACK_SIZE может не применяться к framework
+#if defined(ESP_LOOP_TASK_STACK_SIZE)
+ESP_LOOP_TASK_STACK_SIZE(32768);
+#elif defined(SET_LOOP_TASK_STACK_SIZE)
+SET_LOOP_TASK_STACK_SIZE(32768);
+#endif
 #include <nvs_flash.h>
 #include <esp_err.h>
 
@@ -47,13 +54,20 @@ static uint32_t lastGpsLoc = 0;
 static uint32_t lastSfAdapt = 0;
 static uint8_t rxBuf[protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
 
+// Статические буферы — не на стеке, иначе handlePacket переполняет loopTask
+static uint8_t s_decBuf[256];
+static uint8_t s_tmpBuf[256];
+static char s_msgStrBuf[256];
+static uint8_t s_fragOutBuf[frag::MAX_MSG_PLAIN];
+static uint8_t s_voiceOutBuf[voice_frag::MAX_VOICE_PLAIN + 1024];
+static uint8_t s_fwdBuf[protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+
 void sendHello() {
   uint8_t pkt[protocol::HEADER_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID,
       31, protocol::OP_HELLO, nullptr, 0);
-  if (len > 0) {
-    radio::send(pkt, len);
+  if (len > 0 && radio::send(pkt, len)) {
     Serial.println("[RiftLink] HELLO sent");
   }
 }
@@ -109,10 +123,9 @@ void handlePacket(const uint8_t* buf, size_t len) {
       (hdr.opcode == protocol::OP_GROUP_MSG) ||
       (hdr.opcode == protocol::OP_VOICE_MSG));
   if (needRelay) {
-    uint8_t fwd[protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
-    memcpy(fwd, buf, len);
-    fwd[1 + protocol::NODE_ID_LEN * 2]--;
-    radio::send(fwd, len);
+    memcpy(s_fwdBuf, buf, len);
+    s_fwdBuf[1 + protocol::NODE_ID_LEN * 2]--;
+    radio::send(s_fwdBuf, len);
     Serial.printf("[RiftLink] Relay from %02X%02X\n", hdr.from[0], hdr.from[1]);
   }
 
@@ -139,7 +152,7 @@ void handlePacket(const uint8_t* buf, size_t len) {
 
     case protocol::OP_HELLO:
       offline_queue::onNodeOnline(hdr.from);
-      if (neighbors::onHello(hdr.from, rssi)) ble::notifyNeighbors();
+      if (neighbors::onHello(hdr.from, rssi)) ble::requestNeighborsNotify();
       if (!x25519_keys::hasKeyFor(hdr.from)) x25519_keys::sendKeyExchange(hdr.from);
       Serial.printf("[RiftLink] HELLO from %02X%02X%02X%02X\n",
           hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
@@ -148,20 +161,18 @@ void handlePacket(const uint8_t* buf, size_t len) {
     case protocol::OP_MSG:
       if (payloadLen > 0) {
         if (protocol::isEncrypted(hdr)) {
-          uint8_t decBuf[256];
           size_t decLen = 0;
-          if (!crypto::decryptFrom(hdr.from, payload, payloadLen, decBuf, &decLen) || decLen >= 256) {
+          if (!crypto::decryptFrom(hdr.from, payload, payloadLen, s_decBuf, &decLen) || decLen >= 256) {
             Serial.println("[RiftLink] Decrypt FAILED");
             break;
           }
           if (protocol::isCompressed(hdr)) {
-            uint8_t tmp[256];
-            size_t d = compress::decompress(decBuf, decLen, tmp, sizeof(tmp));
+            size_t d = compress::decompress(s_decBuf, decLen, s_tmpBuf, sizeof(s_tmpBuf));
             if (d == 0 || d >= 256) {
               Serial.println("[RiftLink] Decompress FAILED");
               break;
             }
-            memcpy(decBuf, tmp, d);
+            memcpy(s_decBuf, s_tmpBuf, d);
             decLen = d;
           }
           const char* msg;
@@ -169,45 +180,43 @@ void handlePacket(const uint8_t* buf, size_t len) {
           uint32_t msgId = 0;
           uint8_t ttlMinutes = 0;
           size_t off = 0;
-          if (decLen >= 6 && decBuf[0] >= 1 && decBuf[0] <= 60) {
-            ttlMinutes = decBuf[0];
+          if (decLen >= 6 && s_decBuf[0] >= 1 && s_decBuf[0] <= 60) {
+            ttlMinutes = s_decBuf[0];
             off = 1;
           }
           if (protocol::isAckReq(hdr) && decLen >= off + msg_queue::MSG_ID_LEN && node::isForMe(hdr.to)) {
-            memcpy(&msgId, decBuf + off, msg_queue::MSG_ID_LEN);
+            memcpy(&msgId, s_decBuf + off, msg_queue::MSG_ID_LEN);
             uint8_t ackPayload[msg_queue::MSG_ID_LEN];
-            memcpy(ackPayload, decBuf + off, msg_queue::MSG_ID_LEN);
+            memcpy(ackPayload, s_decBuf + off, msg_queue::MSG_ID_LEN);
             uint8_t ackPkt[protocol::HEADER_LEN + msg_queue::MSG_ID_LEN];
             size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
                 node::getId(), hdr.from, 31, protocol::OP_ACK,
                 ackPayload, msg_queue::MSG_ID_LEN, false, false);
             if (ackLen > 0) radio::send(ackPkt, ackLen);
-            msg = (const char*)(decBuf + off + msg_queue::MSG_ID_LEN);
+            msg = (const char*)(s_decBuf + off + msg_queue::MSG_ID_LEN);
             msgLen = decLen - off - msg_queue::MSG_ID_LEN;
           } else {
-            msg = (const char*)(decBuf + off);
+            msg = (const char*)(s_decBuf + off);
             msgLen = decLen - off;
           }
           if (msgLen < 256 && msgLen > 0) {
-            char msgStr[256];
-            memcpy(msgStr, msg, msgLen);
-            msgStr[msgLen] = '\0';
-            Serial.printf("[RiftLink] MSG from %02X%02X: %s\n", hdr.from[0], hdr.from[1], msgStr);
-            ble::notifyMsg(hdr.from, msgStr, msgId, rssi, ttlMinutes);
+            memcpy(s_msgStrBuf, msg, msgLen);
+            s_msgStrBuf[msgLen] = '\0';
+            Serial.printf("[RiftLink] MSG from %02X%02X: %s\n", hdr.from[0], hdr.from[1], s_msgStrBuf);
+            ble::requestMsgNotify(hdr.from, s_msgStrBuf, msgId, rssi, ttlMinutes);
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
-            displaySetLastMsg(fromHex, msgStr);
+            displaySetLastMsg(fromHex, s_msgStrBuf);
           }
         } else {
           if (payloadLen < 256) {
-            char msg[256];
-            memcpy(msg, payload, payloadLen);
-            msg[payloadLen] = '\0';
-            Serial.printf("[RiftLink] MSG from %02X%02X: %s (plain)\n", hdr.from[0], hdr.from[1], msg);
-            ble::notifyMsg(hdr.from, msg, 0, rssi);
+            memcpy(s_msgStrBuf, payload, payloadLen);
+            s_msgStrBuf[payloadLen] = '\0';
+            Serial.printf("[RiftLink] MSG from %02X%02X: %s (plain)\n", hdr.from[0], hdr.from[1], s_msgStrBuf);
+            ble::requestMsgNotify(hdr.from, s_msgStrBuf, 0, rssi);
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
-            displaySetLastMsg(fromHex, msg);
+            displaySetLastMsg(fromHex, s_msgStrBuf);
           }
         }
       }
@@ -292,45 +301,41 @@ void handlePacket(const uint8_t* buf, size_t len) {
 
     case protocol::OP_GROUP_MSG:
       if (payloadLen > 0 && protocol::isEncrypted(hdr)) {
-        uint8_t decBuf[256];
         size_t decLen = 0;
-        if (!crypto::decrypt(payload, payloadLen, decBuf, &decLen) || decLen < GROUP_ID_LEN) break;
+        if (!crypto::decrypt(payload, payloadLen, s_decBuf, &decLen) || decLen < GROUP_ID_LEN) break;
         if (protocol::isCompressed(hdr)) {
-          uint8_t tmp[256];
-          size_t d = compress::decompress(decBuf, decLen, tmp, sizeof(tmp));
+          size_t d = compress::decompress(s_decBuf, decLen, s_tmpBuf, sizeof(s_tmpBuf));
           if (d == 0 || d < GROUP_ID_LEN) break;
-          memcpy(decBuf, tmp, d);
+          memcpy(s_decBuf, s_tmpBuf, d);
           decLen = d;
         }
         uint32_t groupId;
-        memcpy(&groupId, decBuf, GROUP_ID_LEN);
+        memcpy(&groupId, s_decBuf, GROUP_ID_LEN);
         if (!groups::isInGroup(groupId)) break;
-        const char* msg = (const char*)(decBuf + GROUP_ID_LEN);
+        const char* msg = (const char*)(s_decBuf + GROUP_ID_LEN);
         size_t msgLen = decLen - GROUP_ID_LEN;
         if (msgLen < 256) {
-          char msgStr[256];
-          memcpy(msgStr, msg, msgLen);
-          msgStr[msgLen] = '\0';
-          Serial.printf("[RiftLink] GROUP_MSG grp%u from %02X%02X: %s\n", (unsigned)groupId, hdr.from[0], hdr.from[1], msgStr);
-          ble::notifyMsg(hdr.from, msgStr, 0, rssi);
+          memcpy(s_msgStrBuf, msg, msgLen);
+          s_msgStrBuf[msgLen] = '\0';
+          Serial.printf("[RiftLink] GROUP_MSG grp%u from %02X%02X: %s\n", (unsigned)groupId, hdr.from[0], hdr.from[1], s_msgStrBuf);
+          ble::requestMsgNotify(hdr.from, s_msgStrBuf, 0, rssi);
           char fromHex[17];
           snprintf(fromHex, sizeof(fromHex), "grp%u %02X%02X", (unsigned)groupId, hdr.from[0], hdr.from[1]);
-          displaySetLastMsg(fromHex, msgStr);
+          displaySetLastMsg(fromHex, s_msgStrBuf);
         }
       }
       break;
 
     case protocol::OP_MSG_FRAG:
       if (payloadLen >= 6) {
-        uint8_t out[2048];
         size_t outLen = 0;
         if (frag::onFragment(hdr.from, hdr.to, payload, payloadLen,
-                             protocol::isCompressed(hdr), out, sizeof(out), &outLen)) {
-          if (outLen > 0 && outLen < sizeof(out)) {
-            out[outLen] = '\0';
-            const char* msgStr = (const char*)out;
+                             protocol::isCompressed(hdr), s_fragOutBuf, sizeof(s_fragOutBuf), &outLen)) {
+          if (outLen > 0 && outLen < sizeof(s_fragOutBuf)) {
+            s_fragOutBuf[outLen] = '\0';
+            const char* msgStr = (const char*)s_fragOutBuf;
             Serial.printf("[RiftLink] MSG_FRAG from %02X%02X: %s\n", hdr.from[0], hdr.from[1], msgStr);
-            ble::notifyMsg(hdr.from, msgStr, 0, rssi);
+            ble::requestMsgNotify(hdr.from, msgStr, 0, rssi);
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
             displaySetLastMsg(fromHex, msgStr);
@@ -341,12 +346,11 @@ void handlePacket(const uint8_t* buf, size_t len) {
 
     case protocol::OP_VOICE_MSG:
       if (payloadLen >= 6 && node::isForMe(hdr.to)) {
-        uint8_t out[voice_frag::MAX_VOICE_PLAIN + 1024];
         size_t outLen = 0;
         if (voice_frag::onFragment(hdr.from, hdr.to, payload, payloadLen,
-                                  out, sizeof(out), &outLen)) {
+                                  s_voiceOutBuf, sizeof(s_voiceOutBuf), &outLen)) {
           if (outLen > 0) {
-            ble::notifyVoice(hdr.from, out, outLen);
+            ble::notifyVoice(hdr.from, s_voiceOutBuf, outLen);
           }
         }
       }
@@ -633,6 +637,9 @@ void loop() {
     } else if (cmd == "selftest" || cmd == "test") {
       selftest::Result r;
       selftest::run(&r);
+    } else if (cmd == "sf" || cmd == "radio") {
+      Serial.printf("[RiftLink] SF=%u, %.1f MHz, neighbors=%d\n",
+          (unsigned)radio::getSpreadingFactor(), region::getFreq(), neighbors::getCount());
     }
   }
 
@@ -641,13 +648,26 @@ void loop() {
     radio::startReceiveWithTimeout(1000);
     n = powersave::sleepUntilPacketOrTimeout(rxBuf, sizeof(rxBuf));
   } else {
-    // Окно приёма: 80ms (BLE) / 150ms (без BLE). HELLO ~48ms ToA — короткое окно теряло пакеты.
-    uint32_t rxMs = ble::isConnected() ? 80 : 150;
+    // Окно приёма: при 0 соседей — 400ms (максимум для первого контакта), иначе 80ms (BLE) / 150ms (без BLE)
+    uint32_t rxMs = 150;
+    if (ble::isConnected()) rxMs = 80;
+    if (neighbors::getCount() == 0) rxMs = 400;
     radio::startReceiveWithTimeout(rxMs);
-    delay(rxMs);
+    // Чанкованное ожидание — опрос кнопки каждые ~50ms, иначе кнопка не реагирует при длинном RX
+    uint32_t t0 = millis();
+    while (millis() - t0 < rxMs) {
+      yield();
+      displayUpdate();
+      uint32_t elapsed = millis() - t0;
+      if (elapsed >= rxMs) break;
+      uint32_t chunk = (rxMs - elapsed) > 50 ? 50 : (rxMs - elapsed);
+      delay(chunk);
+    }
     n = radio::receiveAsync(rxBuf, sizeof(rxBuf));
   }
   if (n > 0) {
+    int rssi = radio::getLastRssi();
+    Serial.printf("[RiftLink] RX %d bytes, RSSI=%d\n", n, rssi);
     handlePacket(rxBuf, (size_t)n);
   }
 

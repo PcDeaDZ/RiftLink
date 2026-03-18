@@ -44,6 +44,8 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
   String? _connectingToRemoteId;
   String? _connectingToDeviceName;
   StreamSubscription? _scanSub;
+  Completer<void>? _scanCompleter;
+  bool _scanStoppedByUser = false;
 
   @override
   void initState() {
@@ -95,7 +97,19 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _startScan({String? connectToRemoteId, String? connectToDeviceName}) async {
-    setState(() { _scanning = true; _results = []; _connectingToRemoteId = connectToRemoteId; _connectingToDeviceName = connectToDeviceName; _error = null; });
+    String displayName = (connectToDeviceName != null && connectToDeviceName.isNotEmpty)
+        ? connectToDeviceName
+        : '';
+    if (displayName.isEmpty && connectToRemoteId != null && connectToRemoteId!.isNotEmpty) {
+      displayName = connectToRemoteId!.length > 16 ? connectToRemoteId!.substring(connectToRemoteId!.length - 16) : connectToRemoteId!;
+    }
+    if (displayName.isEmpty && connectToRemoteId != null) {
+      displayName = connectToRemoteId!;
+    }
+    // При подключении к недавнему: не перезаписывать имя пустым — сохранить из тапа
+    final keepExisting = connectToRemoteId != null && displayName.isEmpty && (_connectingToDeviceName != null && _connectingToDeviceName!.isNotEmpty);
+    final nameToShow = connectToRemoteId != null ? (displayName.isNotEmpty ? displayName : (keepExisting ? _connectingToDeviceName! : connectToRemoteId)) : null;
+    setState(() { _scanning = true; _scanStoppedByUser = false; _results = []; _connectingToRemoteId = connectToRemoteId; _connectingToDeviceName = nameToShow; _error = null; });
     try {
       if (!await FlutterBluePlus.isSupported) {
         throw Exception('Bluetooth not supported on this device');
@@ -109,15 +123,21 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
       }
       await RiftLinkBle.stopScan();
       await Future<void>.delayed(const Duration(milliseconds: 800));
+      final norm = (String s) => s.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
       _scanSub = FlutterBluePlus.scanResults.listen((results) {
         if (!mounted) return;
         final found = results.where(RiftLinkBle.isRiftLink).toList();
         for (final r in found) {
-          if (connectToRemoteId != null && r.device.remoteId.toString() == connectToRemoteId) {
+          final rStr = r.device.remoteId.toString();
+          final match = connectToRemoteId != null && (rStr == connectToRemoteId || norm(rStr) == norm(connectToRemoteId!));
+          if (match) {
             _scanSub?.cancel();
             _scanSub = null;
             RiftLinkBle.stopScan();
-            _connect(r.device);
+            final name = _connectingToDeviceName ?? connectToDeviceName ?? (r.device.advName.isNotEmpty ? r.device.advName
+                : r.device.platformName.isNotEmpty ? r.device.platformName
+                : r.device.remoteId.toString());
+            _connect(r.device, displayName: name.isNotEmpty ? name : r.device.remoteId.toString());
             return;
           }
           if (connectToRemoteId == null && !_results.any((x) => x.device.remoteId == r.device.remoteId)) {
@@ -126,8 +146,9 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
         }
       });
       const scanDuration = Duration(seconds: 12);
+      _scanCompleter = Completer<void>();
       await RiftLinkBle.startScan(timeout: scanDuration);
-      await Future<void>.delayed(scanDuration);
+      await Future.any([Future.delayed(scanDuration), _scanCompleter!.future]);
     } catch (e) {
       if (mounted) setState(() => _error = _formatBleError(context, e));
     } finally {
@@ -139,7 +160,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
           _scanning = false;
           _connectingToRemoteId = null;
           _connectingToDeviceName = null;
-          if (_error == null && _results.isEmpty && connectToRemoteId == null) {
+          if (_error == null && _results.isEmpty && connectToRemoteId == null && !_scanStoppedByUser) {
             _error = context.l10n.tr('scan_no_devices');
           }
         });
@@ -147,15 +168,15 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
     }
   }
 
-  Future<void> _connect(BluetoothDevice device) async {
-    final name = device.advName.isNotEmpty ? device.advName
+  Future<void> _connect(BluetoothDevice device, {String? displayName}) async {
+    final name = displayName ?? (device.advName.isNotEmpty ? device.advName
         : device.platformName.isNotEmpty ? device.platformName
-        : device.remoteId.toString().length > 12 ? device.remoteId.toString().substring(device.remoteId.toString().length - 12) : device.remoteId.toString();
-    final displayName = name.isNotEmpty ? name : context.l10n.tr('device');
+        : device.remoteId.toString().length > 12 ? device.remoteId.toString().substring(device.remoteId.toString().length - 12) : device.remoteId.toString());
+    final resolvedName = name.isNotEmpty ? name : context.l10n.tr('device');
     setState(() {
       _error = null;
       _connectingToRemoteId = device.remoteId.toString();
-      _connectingToDeviceName = displayName;
+      _connectingToDeviceName = resolvedName;
     });
     try {
       final ok = await _ble.connect(device);
@@ -170,9 +191,12 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
     }
   }
 
-  void _connectToRecent(RecentDevice dev) {
-    final name = dev.displayName.isNotEmpty ? dev.displayName : dev.nodeId.isNotEmpty ? dev.nodeId : dev.remoteId;
-    _startScan(connectToRemoteId: dev.remoteId, connectToDeviceName: name);
+  void _connectToRecent(RecentDevice dev, {String? displayLabel}) {
+    final name = (displayLabel != null && displayLabel.isNotEmpty)
+        ? displayLabel
+        : (dev.displayName.isNotEmpty ? dev.displayName : dev.nodeId.isNotEmpty ? dev.nodeId : dev.remoteId);
+    final connectName = name.isNotEmpty ? name : dev.remoteId;
+    _startScan(connectToRemoteId: dev.remoteId, connectToDeviceName: connectName);
   }
 
   Future<void> _confirmForgetDevice(RecentDevice d) async {
@@ -264,11 +288,12 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
               child: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                   const SizedBox(height: 20),
                   Icon(Icons.bluetooth_searching, size: 56, color: AppColors.primary),
                   const SizedBox(height: 12),
-                  Text(l10n.tr('find_device'), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
+                  Text(l10n.tr('find_device'), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: AppColors.onSurface), textAlign: TextAlign.center),
                   const SizedBox(height: 12),
                   if (_error != null)
                     Container(
@@ -305,7 +330,14 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                       width: double.infinity,
                       height: 48,
                       child: ElevatedButton.icon(
-                        onPressed: (_scanning || _connectingToRemoteId != null) ? null : () => _startScan(),
+                        onPressed: _connectingToRemoteId != null ? null : () {
+                          if (_scanning) {
+                            _scanStoppedByUser = true;
+                            _scanCompleter?.complete();
+                            return;
+                          }
+                          _startScan();
+                        },
                         icon: SizedBox(
                           width: 20,
                           height: 20,
@@ -320,16 +352,19 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                             String labelText = l10n.tr('search_devices');
                             if (_connectingToRemoteId != null) {
                               String name = _connectingToDeviceName ?? '';
-                              if (name.isEmpty && _connectingToRemoteId != null) {
-                                final rid = _connectingToRemoteId!;
-                                name = rid.length > 12 ? rid.substring(rid.length - 12) : rid;
+                              final rid = _connectingToRemoteId!;
+                              if (name.isEmpty) {
+                                final norm = (String s) => s.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+                                final d = _recent.where((x) => norm(x.remoteId) == norm(rid)).firstOrNull;
+                                name = d != null ? (d.displayName.isNotEmpty ? d.displayName : d.nodeId.isNotEmpty ? d.nodeId : d.remoteId) : '';
                               }
+                              if (name.isEmpty) name = rid.length > 16 ? rid.substring(rid.length - 16) : rid;
                               if (name.isEmpty) name = l10n.tr('device');
                               labelText = l10n.tr('connecting_to', {'name': name});
                             } else if (_scanning) {
-                              labelText = l10n.tr('scanning');
+                              labelText = l10n.tr('stop_scan');
                             }
-                            return Text(labelText, style: const TextStyle(color: Colors.white, fontSize: 15));
+                            return SizedBox(width: double.infinity, child: Center(child: Text(labelText, style: const TextStyle(color: Colors.white, fontSize: 15), textAlign: TextAlign.center)));
                           },
                         ),
                         style: ElevatedButton.styleFrom(
@@ -345,10 +380,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                     const SizedBox(height: 24),
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 24),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(l10n.tr('recent_devices'), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
-                      ),
+                      child: Center(child: Text(l10n.tr('recent_devices'), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.onSurface))),
                     ),
                     const SizedBox(height: 8),
                     Padding(
@@ -363,7 +395,22 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                             child: Material(
                               color: Colors.transparent,
                               child: InkWell(
-                                onTap: _scanning ? null : () => _connectToRecent(d),
+                                onTap: _scanning ? null : () {
+                                  final label = d.displayName.isNotEmpty ? d.displayName : (d.nodeId.isNotEmpty ? d.nodeId : d.remoteId);
+                                  setState(() {
+                                    _connectingToRemoteId = d.remoteId;
+                                    _connectingToDeviceName = label;
+                                    _scanning = true;
+                                    _scanStoppedByUser = false;
+                                    _results = [];
+                                    _error = null;
+                                  });
+                                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                                    if (mounted && _connectingToRemoteId == d.remoteId) {
+                                      _connectToRecent(d, displayLabel: label);
+                                    }
+                                  });
+                                },
                                 borderRadius: BorderRadius.circular(14),
                                 child: Container(
                                   width: double.infinity,
@@ -433,10 +480,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                         const SizedBox(height: 24),
                         Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 24),
-                          child: Align(
-                            alignment: Alignment.centerLeft,
-                            child: Text('${l10n.tr('found')} ${filtered.length}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
-                          ),
+                          child: Center(child: Text('${l10n.tr('found')} ${filtered.length}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.onSurface))),
                         ),
                         const SizedBox(height: 4),
                         const Divider(height: 1, color: AppColors.divider),
@@ -460,7 +504,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                               title: Text(name, style: const TextStyle(fontWeight: FontWeight.w500, color: AppColors.onSurface)),
                               subtitle: Text(r.device.remoteId.toString(), style: const TextStyle(fontFamily: 'monospace', fontSize: 12, color: AppColors.onSurfaceVariant)),
                               trailing: const Icon(Icons.chevron_right, color: AppColors.onSurfaceVariant),
-                              onTap: () => _connect(r.device),
+                              onTap: () => _connect(r.device, displayName: name),
                             );
                           },
                         ),

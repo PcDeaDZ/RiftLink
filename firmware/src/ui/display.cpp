@@ -5,6 +5,7 @@
  */
 
 #include "display.h"
+#include "bootscreen_oled.h"
 #include "locale/locale.h"
 #include "selftest/selftest.h"
 #include "node/node.h"
@@ -63,6 +64,7 @@ static Adafruit_SSD1306* disp = nullptr;
 static int s_currentScreen = 0;
 static uint32_t s_lastScreenUpdate = 0;
 static bool s_needRedrawInfo = false;
+static bool s_needRedrawMsg = false;
 static bool s_lastButton = false;
 static uint32_t s_pressStart = 0;
 static char s_lastMsgFrom[17] = {0};
@@ -175,34 +177,17 @@ void displaySetTextSize(uint8_t s) {
   if (disp) disp->setTextSize(s);
 }
 
-// Бут-скрин: RIFT — верхний левый угол, LINK — нижний правый, максимальный размер
+// Бут-скрин: логотип Rift Link из app_icon_source.png
 void displayShowBootScreen() {
   if (!disp) return;
   disp->clearDisplay();
+  disp->drawBitmap(0, 0, bootscreen_oled, BOOTSCREEN_OLED_W, BOOTSCREEN_OLED_H, SSD1306_WHITE);
   disp->setTextColor(SSD1306_WHITE);
-
-  int16_t tx, ty;
-  uint16_t tw, th;
-
-  // RIFT — верхний левый угол, size 4, жирный (двойной обвод)
-  disp->setTextSize(4);
-  disp->setCursor(2, 2);
-  disp->print("RIFT");
-  disp->setCursor(3, 2);
-  disp->print("RIFT");
-
-  // LINK — нижний правый угол, size 4
-  disp->getTextBounds("LINK", 0, 0, &tx, &ty, &tw, &th);
-  disp->setCursor(SCREEN_WIDTH - tw - 2, SCREEN_HEIGHT - th - 2);
-  disp->print("LINK");
-
-  // Версия — левый нижний угол
+  disp->setTextSize(1);
   char ver[16];
   snprintf(ver, sizeof(ver), "v%s", RIFTLINK_VERSION);
-  disp->setTextSize(1);
   disp->setCursor(2, SCREEN_HEIGHT - 8);
   disp->print(ver);
-
   disp->display();
 }
 
@@ -480,7 +465,7 @@ void displaySetLastMsg(const char* fromHex, const char* text) {
     strncpy(s_lastMsgText, text, 63);
     s_lastMsgText[63] = '\0';
   }
-  if (s_currentScreen == 4) drawScreen(4);  // Msg tab
+  if (s_currentScreen == 4) s_needRedrawMsg = true;  // отложить — не блокировать handlePacket (stack overflow)
 }
 
 void displayShowScreen(int screen) {
@@ -531,6 +516,11 @@ bool displayUpdate() {
     s_needRedrawInfo = false;
     s_lastActivityTime = now;  // BLE/ник — считаем активностью
     drawScreen(1);
+  }
+  if (s_needRedrawMsg && s_currentScreen == 4) {
+    s_needRedrawMsg = false;
+    s_lastActivityTime = now;  // входящее сообщение — активность
+    drawScreen(4);
   }
 
   bool btn = BTN_PRESSED;

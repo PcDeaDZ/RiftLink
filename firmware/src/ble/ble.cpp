@@ -4,6 +4,7 @@
  */
 
 #include "ble.h"
+#include <string.h>
 #include <NimBLEDevice.h>
 #include <ArduinoJson.h>
 #include "protocol/packet.h"
@@ -47,6 +48,12 @@ static volatile bool s_pendingSelftest = false;
 static volatile bool s_pendingGroupSend = false;
 static uint32_t s_pendingGroupId = 0;
 static char s_pendingGroupText[256] = {0};
+static volatile bool s_pendingMsg = false;
+static uint8_t s_pendingMsgFrom[8] = {0};
+static char s_pendingMsgText[256] = {0};
+static uint32_t s_pendingMsgId = 0;
+static int s_pendingMsgRssi = 0;
+static uint8_t s_pendingMsgTtl = 0;
 static volatile bool s_pendingNickname = false;
 static char s_pendingNicknameBuf[17] = {0};
 static volatile bool s_pendingGps = false;
@@ -394,6 +401,17 @@ void setOnLocation(void (*cb)(float lat, float lon, int16_t alt)) {
   s_onLocation = cb;
 }
 
+void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes) {
+  if (!from || !text) return;
+  memcpy(s_pendingMsgFrom, from, 8);
+  strncpy(s_pendingMsgText, text, 255);
+  s_pendingMsgText[255] = '\0';
+  s_pendingMsgId = msgId;
+  s_pendingMsgRssi = rssi;
+  s_pendingMsgTtl = ttlMinutes;
+  s_pendingMsg = true;
+}
+
 void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes) {
   if (!pRxChar || !s_connected) return;
 
@@ -637,6 +655,10 @@ void notifyGroups() {
   pRxChar->notify();
 }
 
+void requestNeighborsNotify() {
+  s_pendingNeighbors = true;
+}
+
 void notifyNeighbors() {
   if (!pRxChar || !s_connected) return;
 
@@ -831,6 +853,11 @@ void update() {
       s_pendingInfo = false;
       notifyInfo();
       vTaskDelay(pdMS_TO_TICKS(5));  // дать BLE отправить большой payload
+      return;
+    }
+    if (s_pendingMsg) {
+      s_pendingMsg = false;
+      notifyMsg(s_pendingMsgFrom, s_pendingMsgText, s_pendingMsgId, s_pendingMsgRssi, s_pendingMsgTtl);
       return;
     }
     if (s_pendingGroups) { s_pendingGroups = false; notifyGroups(); return; }

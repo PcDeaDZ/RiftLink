@@ -304,30 +304,56 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     _showSnack(l.tr('connecting_to', {'name': name}));
     await widget.ble.disconnect();
     await RiftLinkBle.stopScan();
-    await Future<void>.delayed(const Duration(milliseconds: 400));
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    // Сначала пробуем прямое подключение по remoteId (устройство уже было в recent)
+    try {
+      final device = BluetoothDevice.fromId(remoteId);
+      final ok = await widget.ble.connect(device);
+      if (mounted && ok) {
+        _intentionalDisconnect = false;
+        _currentBleRemoteId = remoteId;
+        _listenConnectionState();
+        widget.ble.getInfo();
+        _showSnack(l.tr('reconnect_ok'), backgroundColor: AppColors.success);
+        return;
+      }
+    } catch (_) {}
+
+    // Прямое подключение не сработало — сканируем
+    if (!mounted) return;
     StreamSubscription? scanSub;
-    BluetoothDevice? found;
+    final foundCompleter = Completer<BluetoothDevice?>();
     scanSub = FlutterBluePlus.scanResults.listen((results) {
+      if (foundCompleter.isCompleted) return;
       final r = results.where(RiftLinkBle.isRiftLink).toList();
       for (final r0 in r) {
         if (r0.device.remoteId.toString() == remoteId) {
-          found = r0.device;
           scanSub?.cancel();
           RiftLinkBle.stopScan();
+          if (!foundCompleter.isCompleted) foundCompleter.complete(r0.device);
           return;
         }
       }
     });
-    const scanDuration = Duration(seconds: 12);
+    const scanDuration = Duration(seconds: 10);
     try {
       await RiftLinkBle.startScan(timeout: scanDuration);
-      await Future<void>.delayed(scanDuration);
-    } catch (_) {}
+      await Future.any([
+        foundCompleter.future,
+        Future<void>.delayed(scanDuration, () {
+          if (!foundCompleter.isCompleted) foundCompleter.complete(null);
+        }),
+      ]);
+    } catch (_) {
+      if (!foundCompleter.isCompleted) foundCompleter.complete(null);
+    }
     await scanSub.cancel();
     await RiftLinkBle.stopScan();
+    final found = await foundCompleter.future;
     if (!mounted) return;
     if (found != null) {
-      final ok = await widget.ble.connect(found!);
+      final ok = await widget.ble.connect(found);
       if (mounted && ok) {
         _intentionalDisconnect = false;
         _currentBleRemoteId = remoteId;
@@ -857,33 +883,41 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         foregroundColor: AppColors.onSurface,
         elevation: 0,
         actions: [
-          Padding(
-            padding: const EdgeInsets.only(right: 4, top: 2, bottom: 2),
-            child: GestureDetector(
-              onTap: widget.ble.isConnected ? () {
-                if (_group > 0) {
-                  setState(() => _group = 0);
-                } else if (_groups.isNotEmpty) {
-                  setState(() => _group = _groups.first);
-                } else {
-                  _showSnack(context.l10n.tr('no_groups'));
-                }
-              } : null,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                decoration: BoxDecoration(
-                  color: _group > 0 ? AppColors.primary.withOpacity(0.12) : AppColors.onSurface.withOpacity(0.03),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: _group > 0 ? AppColors.primary.withOpacity(0.5) : AppColors.onSurfaceVariant.withOpacity(0.3),
-                    width: 1,
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: widget.ble.isConnected ? () {
+                    if (_group > 0) {
+                      setState(() => _group = 0);
+                    } else if (_groups.isNotEmpty) {
+                      setState(() => _group = _groups.first);
+                    } else {
+                      _showSnack(context.l10n.tr('no_groups'));
+                    }
+                  } : null,
+                  borderRadius: BorderRadius.circular(6),
+                  child: Container(
+                    height: 28,
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: _group > 0 ? AppColors.primary.withOpacity(0.12) : AppColors.onSurface.withOpacity(0.04),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(
+                        color: _group > 0 ? AppColors.primary.withOpacity(0.4) : AppColors.onSurfaceVariant.withOpacity(0.2),
+                        width: 0.5,
+                      ),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, mainAxisAlignment: MainAxisAlignment.center, children: [
+                      Icon(_group == 0 ? Icons.public : Icons.group, size: 12, color: _group > 0 ? AppColors.primary : AppColors.onSurfaceVariant),
+                      const SizedBox(width: 4),
+                      Text(_group == 0 ? 'BC' : 'G$_group', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: _group > 0 ? AppColors.primary : AppColors.onSurfaceVariant)),
+                    ]),
                   ),
                 ),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(_group == 0 ? Icons.public : Icons.group, size: 12, color: _group > 0 ? AppColors.primary : AppColors.onSurfaceVariant),
-                  const SizedBox(width: 3),
-                  Text(_group == 0 ? 'BC' : 'G$_group', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: _group > 0 ? AppColors.primary : AppColors.onSurfaceVariant)),
-                ]),
               ),
             ),
           ),

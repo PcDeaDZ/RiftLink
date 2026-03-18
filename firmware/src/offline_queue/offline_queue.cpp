@@ -36,6 +36,7 @@ struct StoredMsg {
 
 static StoredMsg s_msgs[OFFLINE_MAX_MSGS];
 static bool s_inited = false;
+static StoredMsgNvs s_nvsBuf[OFFLINE_MAX_MSGS];  // статика — saveToNvs/loadFromNvs вызываются из handlePacket (stack overflow)
 
 static void saveToNvs() {
   nvs_handle_t h;
@@ -44,16 +45,15 @@ static void saveToNvs() {
     Serial.printf("[RiftLink] NVS save failed: %s (0x%x)\n", esp_err_to_name(err), err);
     return;
   }
-  StoredMsgNvs buf[OFFLINE_MAX_MSGS];
   for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
-    buf[i].inUse = s_msgs[i].inUse ? 1 : 0;
-    memcpy(buf[i].to, s_msgs[i].to, protocol::NODE_ID_LEN);
-    buf[i].payloadLen = (uint16_t)s_msgs[i].payloadLen;
-    buf[i].opcode = s_msgs[i].opcode;
-    buf[i].flags = s_msgs[i].flags;
-    memcpy(buf[i].payload, s_msgs[i].payload, OFFLINE_MAX_LEN);
+    s_nvsBuf[i].inUse = s_msgs[i].inUse ? 1 : 0;
+    memcpy(s_nvsBuf[i].to, s_msgs[i].to, protocol::NODE_ID_LEN);
+    s_nvsBuf[i].payloadLen = (uint16_t)s_msgs[i].payloadLen;
+    s_nvsBuf[i].opcode = s_msgs[i].opcode;
+    s_nvsBuf[i].flags = s_msgs[i].flags;
+    memcpy(s_nvsBuf[i].payload, s_msgs[i].payload, OFFLINE_MAX_LEN);
   }
-  err = nvs_set_blob(h, NVS_KEY_OFFLINE, buf, sizeof(buf));
+  err = nvs_set_blob(h, NVS_KEY_OFFLINE, s_nvsBuf, sizeof(s_nvsBuf));
   if (err != ESP_OK) {
     Serial.printf("[RiftLink] NVS set_blob failed: %s\n", esp_err_to_name(err));
   } else if (nvs_commit(h) != ESP_OK) {
@@ -70,20 +70,19 @@ static void loadFromNvs() {
       Serial.printf("[RiftLink] NVS load failed: %s (0x%x)\n", esp_err_to_name(err), err);
     return;
   }
-  StoredMsgNvs buf[OFFLINE_MAX_MSGS];
-  size_t len = sizeof(buf);
-  if (nvs_get_blob(h, NVS_KEY_OFFLINE, buf, &len) != ESP_OK) {
+  size_t len = sizeof(s_nvsBuf);
+  if (nvs_get_blob(h, NVS_KEY_OFFLINE, s_nvsBuf, &len) != ESP_OK) {
     nvs_close(h);
     return;
   }
   nvs_close(h);
   for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
-    s_msgs[i].inUse = (buf[i].inUse != 0);
-    memcpy(s_msgs[i].to, buf[i].to, protocol::NODE_ID_LEN);
-    s_msgs[i].payloadLen = buf[i].payloadLen;
-    s_msgs[i].opcode = buf[i].opcode;
-    s_msgs[i].flags = buf[i].flags;
-    memcpy(s_msgs[i].payload, buf[i].payload, OFFLINE_MAX_LEN);
+    s_msgs[i].inUse = (s_nvsBuf[i].inUse != 0);
+    memcpy(s_msgs[i].to, s_nvsBuf[i].to, protocol::NODE_ID_LEN);
+    s_msgs[i].payloadLen = s_nvsBuf[i].payloadLen;
+    s_msgs[i].opcode = s_nvsBuf[i].opcode;
+    s_msgs[i].flags = s_nvsBuf[i].flags;
+    memcpy(s_msgs[i].payload, s_nvsBuf[i].payload, OFFLINE_MAX_LEN);
   }
 }
 
@@ -118,6 +117,8 @@ bool enqueue(const uint8_t* to, const uint8_t* encPayload, size_t encLen, uint8_
   return true;
 }
 
+static uint8_t s_onlinePktBuf[protocol::HEADER_LEN + OFFLINE_MAX_LEN];  // статика — onNodeOnline вызывается из handlePacket
+
 void onNodeOnline(const uint8_t* nodeId) {
   if (!s_inited || !nodeId) return;
 
@@ -126,9 +127,9 @@ void onNodeOnline(const uint8_t* nodeId) {
     if (!m->inUse) continue;
     if (memcmp(m->to, nodeId, protocol::NODE_ID_LEN) != 0) continue;
 
-    uint8_t pkt[protocol::HEADER_LEN + OFFLINE_MAX_LEN];
+    uint8_t* pkt = s_onlinePktBuf;
     bool compressed = (m->flags & 1) != 0;
-    size_t len = protocol::buildPacket(pkt, sizeof(pkt),
+    size_t len = protocol::buildPacket(pkt, sizeof(s_onlinePktBuf),
         node::getId(), m->to, 31, m->opcode,
         m->payload, m->payloadLen, true, true, compressed);
     if (len > 0) {

@@ -5,6 +5,7 @@
  */
 
 #include "../../display.h"
+#include "bootscreen_paper.h"
 #include "locale/locale.h"
 #include "selftest/selftest.h"
 #include "node/node.h"
@@ -348,26 +349,13 @@ void displaySetTextSize(uint8_t s) {
   if (disp) disp->setTextSize(s);
 }
 
-// Бут-скрин: RIFT — верхний левый, LINK — нижний правый, максимальный размер
+// Бут-скрин: логотип Rift Link из app_icon_source.png
 void displayShowBootScreen() {
   if (!disp) return;
   ensureCooldownBeforeDisplay();
-  disp->fillScreen(GxEPD_BLACK);
-  disp->setTextColor(GxEPD_WHITE);
-  int16_t tx, ty;
-  uint16_t tw, th;
-
-  disp->setTextSize(6);
-  disp->setCursor(4, 4);
-  disp->print("RIFT");
-  disp->setCursor(6, 4);
-  disp->print("RIFT");
-
-  disp->setTextSize(6);
-  disp->getTextBounds("LINK", 0, 0, &tx, &ty, &tw, &th);
-  disp->setCursor(SCREEN_WIDTH - tw - 4, SCREEN_HEIGHT - th - 4);
-  disp->print("LINK");
-
+  disp->fillScreen(GxEPD_WHITE);
+  disp->drawBitmap(0, 0, bootscreen_paper, BOOTSCREEN_PAPER_W, BOOTSCREEN_PAPER_H, GxEPD_BLACK);
+  disp->setTextColor(GxEPD_BLACK);
   disp->setTextSize(2);
   char ver[16];
   snprintf(ver, sizeof(ver), "v%s", RIFTLINK_VERSION);

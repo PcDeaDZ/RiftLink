@@ -17,6 +17,7 @@ final Map<String, Map<String, String>> _strings = {
   'device': {'en': 'device', 'ru': 'устройство'},
   'turn_on_heltec': {'en': 'Turn on Heltec LoRa and press the button', 'ru': 'Включите Heltec LoRa и нажмите кнопку'},
   'scanning': {'en': 'Scanning...', 'ru': 'Сканирование...'},
+  'stop_scan': {'en': 'Stop', 'ru': 'Остановить'},
   'found': {'en': 'Found:', 'ru': 'Найдено:'},
   'about': {'en': 'About', 'ru': 'О приложении'},
   'about_version': {'en': 'Version', 'ru': 'Версия'},
