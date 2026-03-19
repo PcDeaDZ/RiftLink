@@ -17,6 +17,7 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include <nvs_flash.h>
 #include <esp_err.h>
 #include <esp_heap_caps.h>
+#include <esp_event.h>
 
 #include "radio/radio.h"
 #include "protocol/packet.h"
@@ -1035,6 +1036,12 @@ void setup() {
     delayYield(100);
   }
   delayYield(200);
+
+  // Default event loop до любого esp_wifi_* — иначе "failed to post WiFi event=2 ret=259" (WIFI_EVENT_259_ANALYSIS.md)
+  esp_err_t ev = esp_event_loop_create_default();
+  if (ev != ESP_OK && ev != ESP_ERR_INVALID_STATE) {
+    Serial.printf("[RiftLink] Event loop: %s\n", esp_err_to_name(ev));
+  }
 
   esp_err_t nvs = nvs_flash_init();
   if (nvs == ESP_ERR_NVS_NO_FREE_PAGES || nvs == ESP_ERR_NVS_NEW_VERSION_FOUND) {
