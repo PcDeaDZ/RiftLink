@@ -6,6 +6,7 @@
 #include "log.h"
 #include "async_queues.h"
 #include "ui/display.h"
+#include "led/led.h"
 #include "radio/radio.h"
 #include "protocol/packet.h"
 #include "crypto/crypto.h"
@@ -44,6 +45,69 @@ bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf, bool priority) {
   item.txSf = (txSf >= 7 && txSf <= 12) ? txSf : 0;
   BaseType_t ok = priority ? xQueueSendToFront(sendQueue, &item, 0) : xQueueSend(sendQueue, &item, 0);
   return ok == pdTRUE;
+}
+
+#define DEFERRED_ACK_SLOTS 4
+#define DEFERRED_SEND_SLOTS 12   // MSG copy2, broadcast 2–3, KEY_EXCHANGE
+struct DeferredSlot {
+  uint8_t buf[PACKET_BUF_SIZE];
+  uint16_t len;
+  uint8_t txSf;
+  uint32_t sendAfter;
+  bool used;
+};
+static DeferredSlot s_deferredAck[DEFERRED_ACK_SLOTS];
+static DeferredSlot s_deferredSend[DEFERRED_SEND_SLOTS];
+
+static void flushDeferredSlots(DeferredSlot* slots, int n) {
+  if (!sendQueue) return;
+  uint32_t now = millis();
+  for (int i = 0; i < n; i++) {
+    if (slots[i].used && slots[i].sendAfter <= now) {
+      SendQueueItem item;
+      memcpy(item.buf, slots[i].buf, slots[i].len);
+      item.len = slots[i].len;
+      item.txSf = slots[i].txSf;
+      if (xQueueSendToFront(sendQueue, &item, 0) == pdTRUE) {
+        slots[i].used = false;
+      }
+    }
+  }
+}
+
+void queueDeferredAck(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs) {
+  uint32_t sendAfter = millis() + delayMs;
+  for (int i = 0; i < DEFERRED_ACK_SLOTS; i++) {
+    if (!s_deferredAck[i].used) {
+      memcpy(s_deferredAck[i].buf, pkt, len);
+      s_deferredAck[i].len = (uint16_t)len;
+      s_deferredAck[i].txSf = (txSf >= 7 && txSf <= 12) ? txSf : 0;
+      s_deferredAck[i].sendAfter = sendAfter;
+      s_deferredAck[i].used = true;
+      return;
+    }
+  }
+  queueSend(pkt, len, txSf, true);
+}
+
+void queueDeferredSend(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs) {
+  uint32_t sendAfter = millis() + delayMs;
+  for (int i = 0; i < DEFERRED_SEND_SLOTS; i++) {
+    if (!s_deferredSend[i].used) {
+      memcpy(s_deferredSend[i].buf, pkt, len);
+      s_deferredSend[i].len = (uint16_t)len;
+      s_deferredSend[i].txSf = (txSf >= 7 && txSf <= 12) ? txSf : 0;
+      s_deferredSend[i].sendAfter = sendAfter;
+      s_deferredSend[i].used = true;
+      return;
+    }
+  }
+  queueSend(pkt, len, txSf, true);  // слоты заняты — сразу в очередь
+}
+
+void flushDeferredSends() {
+  flushDeferredSlots(s_deferredAck, DEFERRED_ACK_SLOTS);
+  flushDeferredSlots(s_deferredSend, DEFERRED_SEND_SLOTS);
 }
 
 void queueDisplayLastMsg(const char* fromHex, const char* text) {
@@ -100,6 +164,17 @@ void queueDisplayLongPress(uint8_t screen) {
     Serial.println("[RiftLink] displayQueue full, fallback longPress");
     displayOnLongPress(screen);  // fallback при переполнении очереди
   }
+}
+
+void queueDisplayLedBlink() {
+  if (!displayQueue) {
+    ledBlink(20);
+    return;
+  }
+  DisplayQueueItem item = {};
+  item.cmd = CMD_BLINK_LED;
+  item.screen = 0;
+  xQueueSend(displayQueue, &item, 0);
 }
 
 void queueDisplayWake() {
@@ -221,8 +296,12 @@ static void displayTask(void* arg) {
           displayWake();
           displayShowScreen(displayGetCurrentScreen());
           break;
+        case CMD_BLINK_LED:
+          ledBlink(20);
+          break;
       }
     }
+    ledUpdate();
     displayUpdate();
     uint32_t now = millis();
     if (now - lastHeartbeat >= DISPLAY_HEARTBEAT_MS) {

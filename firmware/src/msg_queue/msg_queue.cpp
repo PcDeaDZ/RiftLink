@@ -4,6 +4,7 @@
 
 #include "msg_queue.h"
 #include "log.h"
+#include "async_tasks.h"
 #include "pkt_cache/pkt_cache.h"
 #include "node/node.h"
 #include "radio/radio.h"
@@ -22,6 +23,7 @@
 #define MAX_PENDING      8
 #define ACK_TIMEOUT_MS   6000
 #define MAX_RETRIES      3
+#define MUTEX_TIMEOUT_MS 100
 
 struct PendingMsg {
   uint32_t msgId;
@@ -70,7 +72,7 @@ constexpr size_t MSG_TTL_LEN = 1;
 
 bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
   if (!s_inited) return false;
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
 
   const bool isUnicast = !node::isBroadcast(to);
   size_t textLen = strlen(text);
@@ -144,9 +146,13 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     slot->retries = 0;
     slot->inUse = true;
 
-    if (!radio::send(slot->pkt, slot->pktLen, neighbors::rssiToSf(neighbors::getRssiFor(to)))) {
+    uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(to));
+    if (txSf == 0) txSf = 12;  // неизвестный сосед — SF12 для дальности
+    bool ok = radio::send(slot->pkt, slot->pktLen, txSf);
+    if (ok) {
+      queueDeferredSend(slot->pkt, slot->pktLen, txSf, 250 + (esp_random() % 100));  // 250–350 ms, без блокировки
+    } else {
       RIFTLINK_LOG_ERR("[RiftLink] MSG sendQueue full, to %02X%02X — retry via update\n", to[0], to[1]);
-      // slot остаётся inUse, update() повторит отправку
     }
     if (s_onUnicastSent) s_onUnicastSent(to, msgId);
     xSemaphoreGive(s_mutex);
@@ -185,10 +191,9 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     xSemaphoreGive(s_mutex);
     if (len > 0) {
       uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
-      for (int i = 0; i < 3; i++) {
-        if (i > 0) delay(200 + (esp_random() % 200));  // 200–400 ms между повторами — коллизия/обрезание
-        radio::send(pkt, len, sf);
-      }
+      radio::send(pkt, len, sf);
+      queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));   // 2-я копия
+      queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));   // 3-я копия
       return true;
     }
     return false;
@@ -234,10 +239,9 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
       encBuf, encLen, true, false, useCompressed);
   if (len > 0) {
     uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
-    for (int i = 0; i < 3; i++) {
-      if (i > 0) delay(200 + (esp_random() % 200));
-      radio::send(pkt, len, sf);
-    }
+    radio::send(pkt, len, sf);
+    queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));
+    queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));
     return true;
   }
   return false;
@@ -249,7 +253,7 @@ void setOnUnicastSent(void (*cb)(const uint8_t* to, uint32_t msgId)) {
 
 void onAckReceived(const uint8_t* payload, size_t payloadLen) {
   if (payloadLen < MSG_ID_LEN) return;
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
   uint32_t msgId;
   memcpy(&msgId, payload, MSG_ID_LEN);
   PendingMsg* p = findByMsgId(msgId);
@@ -277,7 +281,7 @@ void update() {
 
     p->retries++;
     p->lastSendTime = now;
-    radio::send(p->pkt, p->pktLen, neighbors::rssiToSf(neighbors::getRssiFor(p->to)));
+    radio::send(p->pkt, p->pktLen, neighbors::rssiToSf(neighbors::getRssiFor(p->to)), true);
   }
   xSemaphoreGive(s_mutex);
 }

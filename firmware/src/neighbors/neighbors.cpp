@@ -9,6 +9,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#define MUTEX_TIMEOUT_MS 100
+
 static SemaphoreHandle_t s_mutex = nullptr;
 
 struct Entry {
@@ -67,7 +69,7 @@ static int findFreeSlot() {
 
 bool onHello(const uint8_t* nodeId, int rssi) {
   if (!nodeId || node::isForMe(nodeId) || node::isSameShortId(nodeId) || node::isInvalidNodeId(nodeId)) return false;
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
 
   int idx = findSlot(nodeId);
   bool wasNew = (idx < 0);
@@ -90,7 +92,7 @@ bool onHello(const uint8_t* nodeId, int rssi) {
 
 void updateRssi(const uint8_t* nodeId, int rssi) {
   if (!nodeId || (rssi < -128 || rssi > 0)) return;
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
   int idx = findSlot(nodeId);
   if (idx >= 0) s_entries[idx].lastRssi = (int8_t)rssi;
   xSemaphoreGive(s_mutex);
@@ -98,7 +100,7 @@ void updateRssi(const uint8_t* nodeId, int rssi) {
 
 int getRssi(int i) {
   if (i < 0) return 0;
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return 0;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return 0;
   uint32_t now = millis();
   int idx = 0;
   for (int j = 0; j < NEIGHBORS_MAX; j++) {
@@ -116,7 +118,7 @@ int getRssi(int i) {
 
 int getRssiFor(const uint8_t* nodeId) {
   if (!nodeId) return -128;
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return -128;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return -128;
   uint32_t now = millis();
   int r = -128;
   for (int i = 0; i < NEIGHBORS_MAX; i++) {
@@ -131,7 +133,7 @@ int getRssiFor(const uint8_t* nodeId) {
 }
 
 int getMinRssi() {
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return 0;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return 0;
   uint32_t now = millis();
   int minRssi = 0;
   bool hasAny = false;
@@ -149,7 +151,7 @@ int getMinRssi() {
 }
 
 int getAverageRssi() {
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return -90;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return -90;
   uint32_t now = millis();
   int sum = 0;
   int n = 0;
@@ -166,7 +168,7 @@ int getAverageRssi() {
 }
 
 int getCount() {
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return 0;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return 0;
   uint32_t now = millis();
   int n = 0;
   for (int i = 0; i < NEIGHBORS_MAX; i++) {
@@ -180,7 +182,7 @@ int getCount() {
 
 bool getId(int i, uint8_t* out) {
   if (!out || i < 0) return false;
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
   uint32_t now = millis();
   int idx = 0;
   for (int j = 0; j < NEIGHBORS_MAX; j++) {

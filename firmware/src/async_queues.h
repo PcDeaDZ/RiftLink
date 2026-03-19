@@ -33,6 +33,7 @@ constexpr uint8_t CMD_SET_LAST_MSG = 2;
 constexpr uint8_t CMD_REQUEST_INFO_REDRAW = 3;
 constexpr uint8_t CMD_LONG_PRESS = 4;
 constexpr uint8_t CMD_WAKE = 5;
+constexpr uint8_t CMD_BLINK_LED = 6;
 
 struct DisplayQueueItem {
   uint8_t cmd;

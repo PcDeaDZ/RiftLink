@@ -121,8 +121,9 @@ bool sendDirectInternal(const uint8_t* data, size_t len) {
     if (attempt < CAD_MAX_RETRIES - 1) {
       uint32_t backoff = (esp_random() % CAD_CW_MAX) * CAD_SLOT_TIME_MS;
       if (backoff > 0) {
-        delay(backoff);
-        yield();
+        // Асинхронный backoff — не блокируем drainTask, повторная попытка через deferred
+        queueDeferredSend(data, len, getSpreadingFactor(), backoff);
+        return false;
       }
     }
   }

@@ -75,11 +75,11 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
     s_connected = true;
     displayWakeRequest();
-    vTaskDelay(pdMS_TO_TICKS(10));  // краткая пауза для GATT
+    vTaskDelay(pdMS_TO_TICKS(5));   // краткая пауза для GATT
   }
   void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
     s_connected = false;
-    vTaskDelay(pdMS_TO_TICKS(100));  // дать стеку освободить соединение
+    vTaskDelay(pdMS_TO_TICKS(50));  // дать стеку освободить соединение
     NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
     if (!pAdv->isAdvertising()) {
       pAdv->start();
@@ -847,7 +847,7 @@ void update() {
     if (s_pendingInfo) {
       s_pendingInfo = false;
       notifyInfo();
-      vTaskDelay(pdMS_TO_TICKS(5));  // дать BLE отправить большой payload
+      vTaskDelay(pdMS_TO_TICKS(2));  // дать BLE отправить большой payload
       return;
     }
     if (s_pendingMsg) {

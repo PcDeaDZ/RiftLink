@@ -12,6 +12,7 @@
 #include <esp_err.h>
 #include <string.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <freertos/semphr.h>
 
 #define NVS_NAMESPACE "riftlink"
@@ -43,13 +44,11 @@ static volatile bool s_dirty = false;  // отложенное сохранен�
 static SemaphoreHandle_t s_mutex = nullptr;
 static StoredMsgNvs s_nvsBuf[OFFLINE_MAX_MSGS];  // статика — saveToNvs/loadFromNvs вызываются из handlePacket (stack overflow)
 
-static void saveToNvs() {
-  nvs_handle_t h;
-  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
-  if (err != ESP_OK) {
-    Serial.printf("[RiftLink] NVS save failed: %s (0x%x)\n", esp_err_to_name(err), err);
-    return;
-  }
+#define NVS_SAVE_INTERVAL_MS 2000
+#define MUTEX_TIMEOUT_MS 100
+
+/** Копирование под mutex (быстро). Вызывать с захваченным mutex. */
+static void copyToNvsBuffer() {
   for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
     s_nvsBuf[i].inUse = s_msgs[i].inUse ? 1 : 0;
     memcpy(s_nvsBuf[i].to, s_msgs[i].to, protocol::NODE_ID_LEN);
@@ -58,6 +57,16 @@ static void saveToNvs() {
     s_nvsBuf[i].flags = s_msgs[i].flags;
     memcpy(s_nvsBuf[i].payload, s_msgs[i].payload, OFFLINE_MAX_LEN);
   }
+}
+
+/** Запись в NVS (без mutex — пишем s_nvsBuf). */
+static void writeNvsBuffer() {
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+  if (err != ESP_OK) {
+    Serial.printf("[RiftLink] NVS save failed: %s (0x%x)\n", esp_err_to_name(err), err);
+    return;
+  }
   err = nvs_set_blob(h, NVS_KEY_OFFLINE, s_nvsBuf, sizeof(s_nvsBuf));
   if (err != ESP_OK) {
     Serial.printf("[RiftLink] NVS set_blob failed: %s\n", esp_err_to_name(err));
@@ -65,6 +74,24 @@ static void saveToNvs() {
     Serial.println("[RiftLink] NVS commit failed");
   }
   nvs_close(h);
+}
+
+static void nvsTask(void* arg) {
+  vTaskDelay(pdMS_TO_TICKS(2000));  // дать init завершиться
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(NVS_SAVE_INTERVAL_MS));
+    if (!s_dirty || !s_mutex) continue;
+    bool doWrite = false;
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      if (s_dirty) {
+        copyToNvsBuffer();
+        s_dirty = false;
+        doWrite = true;
+      }
+      xSemaphoreGive(s_mutex);
+    }
+    if (doWrite) writeNvsBuffer();
+  }
 }
 
 static void loadFromNvs() {
@@ -93,11 +120,15 @@ static void loadFromNvs() {
 
 namespace offline_queue {
 
+#define NVS_TASK_STACK 2048
+#define NVS_TASK_PRIO 1
+
 void init() {
   s_mutex = xSemaphoreCreateMutex();
   memset(s_msgs, 0, sizeof(s_msgs));
   loadFromNvs();
   s_inited = true;
+  xTaskCreate(nvsTask, "nvs", NVS_TASK_STACK, nullptr, NVS_TASK_PRIO, nullptr);
 }
 
 static StoredMsg* findFree() {
@@ -109,7 +140,7 @@ static StoredMsg* findFree() {
 
 bool enqueue(const uint8_t* to, const uint8_t* encPayload, size_t encLen, uint8_t opcode, uint8_t flags) {
   if (!s_inited || !to || encLen > OFFLINE_MAX_LEN) return false;
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
 
   StoredMsg* slot = findFree();
   if (!slot) {
@@ -132,7 +163,7 @@ static uint8_t s_onlinePktBuf[protocol::PAYLOAD_OFFSET + OFFLINE_MAX_LEN];  // �
 
 void onNodeOnline(const uint8_t* nodeId) {
   if (!s_inited || !nodeId) return;
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
 
   bool modified = false;
   for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
@@ -157,7 +188,7 @@ void onNodeOnline(const uint8_t* nodeId) {
 }
 
 int getPendingCount() {
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return 0;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return 0;
   int n = 0;
   for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
     if (s_msgs[i].inUse) n++;
@@ -167,13 +198,7 @@ int getPendingCount() {
 }
 
 void update() {
-  if (!s_dirty || !s_mutex) return;
-  if (xSemaphoreTake(s_mutex, 0) != pdTRUE) return;
-  if (s_dirty) {
-    saveToNvs();
-    s_dirty = false;
-  }
-  xSemaphoreGive(s_mutex);
+  // Сохранение перенесено в nvsTask — loop не блокируется
 }
 
 }  // namespace offline_queue

@@ -14,7 +14,7 @@ static constexpr size_t PACKET_QUEUE_LEN =
 #else
     16;   // OLED: MSG+HELLO+KEY_EXCHANGE — не дропать при всплеске
 #endif
-static constexpr size_t SEND_QUEUE_LEN = 16;  // было 8 — KEY_EXCHANGE+MSG+relay+ACK конкурируют
+static constexpr size_t SEND_QUEUE_LEN = 24;  // ACK/relay приоритет — больше буфер для burst
 static constexpr size_t DISPLAY_QUEUE_LEN = 8;  // E-Ink обновления долгие — буфер для кнопки
 
 bool asyncQueuesInit() {

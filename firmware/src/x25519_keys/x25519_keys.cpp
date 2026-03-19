@@ -15,6 +15,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#define MUTEX_TIMEOUT_MS 100
+
 #define NVS_NAMESPACE "riftlink"
 #define NVS_KEY_X25519_PUB "x25519_pub"
 #define NVS_KEY_X25519_SEC "x25519_sec"
@@ -76,7 +78,7 @@ void init() {
 
 bool getOurPublicKey(uint8_t* out) {
   if (!s_inited || !out) return false;
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
   memcpy(out, s_pubKey, X25519_PUBKEY_LEN);
   xSemaphoreGive(s_mutex);
   return true;
@@ -107,7 +109,7 @@ static int findFreeSlot() {
 
 void onKeyExchange(const uint8_t* peerId, const uint8_t* theirPubKey) {
   if (!s_inited || !peerId || !theirPubKey || node::isForMe(peerId) || node::isInvalidNodeId(peerId)) return;
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
 
   int idx = findPeer(peerId);
   if (idx < 0) idx = findFreeSlot();
@@ -122,14 +124,14 @@ void onKeyExchange(const uint8_t* peerId, const uint8_t* theirPubKey) {
 }
 
 bool hasKeyFor(const uint8_t* peerId) {
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
   bool ok = findPeer(peerId) >= 0;
   xSemaphoreGive(s_mutex);
   return ok;
 }
 
 bool getKeyFor(const uint8_t* peerId, uint8_t* keyOut) {
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
   int idx = findPeer(peerId);
   bool ok = (idx >= 0 && keyOut);
   if (ok) {
@@ -142,7 +144,7 @@ bool getKeyFor(const uint8_t* peerId, uint8_t* keyOut) {
 
 void sendKeyExchange(const uint8_t* peerId, bool useSf12, bool forceSend, bool hadKeyBefore) {
   if (!s_inited || !peerId || node::isForMe(peerId) || node::isBroadcast(peerId) || node::isInvalidNodeId(peerId)) return;
-  if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
 
   if (forceSend && !hadKeyBefore) {
     // Первый ответ — без троттла, пир ждёт наш ключ
