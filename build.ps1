@@ -298,12 +298,18 @@ function Invoke-FlashFirmware {
     param([string]$EnvName, [string]$UploadPort, [switch]$Erase)
     try {
         Push-Location $FirmwareDir
-        if ($Erase) {
-            Write-Host "[RiftLink] Очистка flash на $UploadPort..." -ForegroundColor Yellow
-            pio run -e $EnvName -t erase --upload-port $UploadPort
+        if ($Erase -and $EnvName -match "heltec|paper") {
+            # upload_erase: одна сборка + erase + upload (Heltec V3/V4/Paper)
+            Write-Host "[RiftLink] Очистка flash + прошивка $EnvName на $UploadPort..." -ForegroundColor Cyan
+            pio run -e $EnvName -t upload_erase --upload-port $UploadPort
+        } elseif ($Erase -and $EnvName -match "faketec") {
+            # FakeTech: одна сборка, затем erase и upload
+            Write-Host "[RiftLink] Очистка flash + прошивка $EnvName на $UploadPort..." -ForegroundColor Cyan
+            pio run -e $EnvName -t erase -t upload --upload-port $UploadPort
+        } else {
+            Write-Host "[RiftLink] Прошивка $EnvName на $UploadPort..." -ForegroundColor Cyan
+            pio run -e $EnvName -t upload --upload-port $UploadPort
         }
-        Write-Host "[RiftLink] Прошивка $EnvName на $UploadPort..." -ForegroundColor Cyan
-        pio run -e $EnvName -t upload --upload-port $UploadPort
         return $LASTEXITCODE -eq 0
     } finally {
         Pop-Location
@@ -540,132 +546,126 @@ while ($true) {
                 Invoke-BuildFirmware -EnvName $EnvMap[$e].env
             }
         }
-        "2" {
+        "2" { & {
             Write-Host ""
-            Write-Host "  Выберите прошивку:"
+            Write-Host "  Прошивка — все параметры сразу:" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "  1. Прошивка:"
             foreach ($k in $EnvMap.Keys | Sort-Object) {
-                Write-Host "    $k. $($EnvMap[$k].name)"
+                Write-Host "     $k. $($EnvMap[$k].name)"
             }
-            $e = Read-Host "Номер"
-            if (-not $EnvMap.ContainsKey($e)) { break }
+            $e = Read-Host "     Номер"
+            if (-not $EnvMap.ContainsKey($e)) { return }
             $envName = $EnvMap[$e].env
             $ports = @(Get-SerialPorts)
             if ($ports.Count -eq 0) {
                 Write-Host "[ОШИБКА] Нет USB-портов (COM). Bluetooth не подходит." -ForegroundColor Red
-                break
+                return
             }
-            $port = $null
+            Write-Host ""
+            Write-Host "  2. Порт:"
             $preferFakeTech = $envName -match "faketec"
             $preferPaper = $envName -match "paper"
             $preferV4 = $envName -match "v4"
-            if ($ports.Count -eq 1) {
-                $port = $ports[0].Port
-                Write-Host ""
-                Write-Host "  Порт: $($ports[0].Port) [$($ports[0].Hint)]" -ForegroundColor Gray
-            } else {
-                $sorted = @($ports | ForEach-Object {
-                    $score = 0
-                    if ($preferFakeTech -and $_.Hint -match "FakeTech") { $score = 10 }
-                    elseif ($preferPaper -and $_.Hint -match "Paper") { $score = 10 }
-                    elseif ($preferV4 -and $_.Hint -match "V4") { $score = 10 }
-                    $comNum = [int]($_.Port -replace 'COM', '')
-                    [PSCustomObject]@{ Obj = $_; Score = $score; ComNum = $comNum }
-                } | Sort-Object { -$_.Score }, { $_.ComNum } | ForEach-Object { $_.Obj })
-                $n = $sorted.Count
-                Write-Host ""
-                Write-Host "  Подключённые порты (автоопределение по USB):"
-                for ($i = 0; $i -lt $n; $i++) {
-                    $p = $sorted[$i]
-                    $mark = ""
-                    if ($preferFakeTech -and $p.Hint -match "FakeTech") { $mark = " <- рекомендуется для FakeTech" }
-                    elseif ($preferPaper -and $p.Hint -match "Paper") { $mark = " <- рекомендуется для Paper" }
-                    elseif ($preferV4 -and $p.Hint -match "V4") { $mark = " <- рекомендуется для V4" }
-                    Write-Host "    $($i+1). $($p.Port) - $($p.Hint)$mark"
-                }
-                $pSel = Read-Host "Порт (1-$n)"
-                $pIdx = [int]$pSel - 1
-                if ($pIdx -ge 0 -and $pIdx -lt $n) { $port = $sorted[$pIdx].Port }
+            $sorted = @($ports | ForEach-Object {
+                $score = 0
+                if ($preferFakeTech -and $_.Hint -match "FakeTech") { $score = 10 }
+                elseif ($preferPaper -and $_.Hint -match "Paper") { $score = 10 }
+                elseif ($preferV4 -and $_.Hint -match "V4") { $score = 10 }
+                $comNum = [int]($_.Port -replace 'COM', '')
+                [PSCustomObject]@{ Obj = $_; Score = $score; ComNum = $comNum }
+            } | Sort-Object { -$_.Score }, { $_.ComNum } | ForEach-Object { $_.Obj })
+            for ($i = 0; $i -lt $sorted.Count; $i++) {
+                $p = $sorted[$i]
+                $mark = ""
+                if ($preferFakeTech -and $p.Hint -match "FakeTech") { $mark = " <- рекомендуется" }
+                elseif ($preferPaper -and $p.Hint -match "Paper") { $mark = " <- рекомендуется" }
+                elseif ($preferV4 -and $p.Hint -match "V4") { $mark = " <- рекомендуется" }
+                Write-Host "     $($i+1). $($p.Port) - $($p.Hint)$mark"
             }
+            $pSel = Read-Host "     Номер порта (1-$($sorted.Count))"
+            $pIdx = [int]$pSel - 1
+            $port = if ($pIdx -ge 0 -and $pIdx -lt $sorted.Count) { $sorted[$pIdx].Port } else { $null }
+            Write-Host ""
+            Write-Host "  3. Очистить flash перед прошивкой? (y/n)"
+            $yn = Read-Host "     "
+            $doErase = $yn -match '^[yY]'
+            Write-Host ""
             if ($port) {
                 if ($envName -eq "faketec_v5") {
-                    Write-Host "  [FakeTech] Двойной клик RST на NiceNano для DFU перед прошивкой." -ForegroundColor Yellow
+                    Write-Host "  [FakeTech] Двойной клик RST на NiceNano для DFU." -ForegroundColor Yellow
                 }
-                $yn = Read-Host "Очистить flash перед прошивкой? (y/n)"
-                $doErase = $yn -match '^[yY]'
                 Invoke-FlashFirmware -EnvName $envName -UploadPort $port -Erase:$doErase
             }
-        }
-        "3" {
+        } }
+        "3" { & {
             Write-Host ""
-            Write-Host "  Выберите прошивку:"
+            Write-Host "  Сборка + прошивка — все параметры сразу:" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "  1. Прошивка:"
             foreach ($k in $EnvMap.Keys | Sort-Object) {
-                Write-Host "    $k. $($EnvMap[$k].name)"
+                Write-Host "     $k. $($EnvMap[$k].name)"
             }
-            $e = Read-Host "Номер"
-            if (-not $EnvMap.ContainsKey($e)) { break }
+            $e = Read-Host "     Номер"
+            if (-not $EnvMap.ContainsKey($e)) { return }
             $envName = $EnvMap[$e].env
-            if (-not (Invoke-BuildFirmware -EnvName $envName)) { break }
             $ports = @(Get-SerialPorts)
             if ($ports.Count -eq 0) {
                 Write-Host "[ОШИБКА] Нет USB-портов (COM). Bluetooth не подходит." -ForegroundColor Red
-                break
+                return
             }
-            $port = $null
+            Write-Host ""
+            Write-Host "  2. Порт:"
             $preferFakeTech = $envName -match "faketec"
             $preferPaper = $envName -match "paper"
             $preferV4 = $envName -match "v4"
-            if ($ports.Count -eq 1) {
-                $port = $ports[0].Port
-                Write-Host ""
-                Write-Host "  Порт: $($ports[0].Port) [$($ports[0].Hint)]" -ForegroundColor Gray
-            } else {
-                $sorted = @($ports | ForEach-Object {
-                    $score = 0
-                    if ($preferFakeTech -and $_.Hint -match "FakeTech") { $score = 10 }
-                    elseif ($preferPaper -and $_.Hint -match "Paper") { $score = 10 }
-                    elseif ($preferV4 -and $_.Hint -match "V4") { $score = 10 }
-                    $comNum = [int]($_.Port -replace 'COM', '')
-                    [PSCustomObject]@{ Obj = $_; Score = $score; ComNum = $comNum }
-                } | Sort-Object { -$_.Score }, { $_.ComNum } | ForEach-Object { $_.Obj })
-                $n = $sorted.Count
-                Write-Host ""
-                Write-Host "  Подключённые порты (автоопределение по USB):"
-                for ($i = 0; $i -lt $n; $i++) {
-                    $p = $sorted[$i]
-                    $mark = ""
-                    if ($preferFakeTech -and $p.Hint -match "FakeTech") { $mark = " <- рекомендуется для FakeTech" }
-                    elseif ($preferPaper -and $p.Hint -match "Paper") { $mark = " <- рекомендуется для Paper" }
-                    elseif ($preferV4 -and $p.Hint -match "V4") { $mark = " <- рекомендуется для V4" }
-                    Write-Host "    $($i+1). $($p.Port) - $($p.Hint)$mark"
-                }
-                $pSel = Read-Host "Порт (1-$n)"
-                $pIdx = [int]$pSel - 1
-                if ($pIdx -ge 0 -and $pIdx -lt $n) { $port = $sorted[$pIdx].Port }
+            $sorted = @($ports | ForEach-Object {
+                $score = 0
+                if ($preferFakeTech -and $_.Hint -match "FakeTech") { $score = 10 }
+                elseif ($preferPaper -and $_.Hint -match "Paper") { $score = 10 }
+                elseif ($preferV4 -and $_.Hint -match "V4") { $score = 10 }
+                $comNum = [int]($_.Port -replace 'COM', '')
+                [PSCustomObject]@{ Obj = $_; Score = $score; ComNum = $comNum }
+            } | Sort-Object { -$_.Score }, { $_.ComNum } | ForEach-Object { $_.Obj })
+            for ($i = 0; $i -lt $sorted.Count; $i++) {
+                $p = $sorted[$i]
+                $mark = ""
+                if ($preferFakeTech -and $p.Hint -match "FakeTech") { $mark = " <- рекомендуется" }
+                elseif ($preferPaper -and $p.Hint -match "Paper") { $mark = " <- рекомендуется" }
+                elseif ($preferV4 -and $p.Hint -match "V4") { $mark = " <- рекомендуется" }
+                Write-Host "     $($i+1). $($p.Port) - $($p.Hint)$mark"
             }
+            $pSel = Read-Host "     Номер порта (1-$($sorted.Count))"
+            $pIdx = [int]$pSel - 1
+            $port = if ($pIdx -ge 0 -and $pIdx -lt $sorted.Count) { $sorted[$pIdx].Port } else { $null }
+            Write-Host ""
+            Write-Host "  3. Очистить flash перед прошивкой? (y/n)"
+            $yn = Read-Host "     "
+            $doErase = $yn -match '^[yY]'
+            Write-Host ""
             if ($port) {
                 if ($envName -eq "faketec_v5") {
-                    Write-Host "  [FakeTech] Двойной клик RST на NiceNano для DFU перед прошивкой." -ForegroundColor Yellow
+                    Write-Host "  [FakeTech] Двойной клик RST на NiceNano для DFU." -ForegroundColor Yellow
                 }
-                $yn = Read-Host "Очистить flash перед прошивкой? (y/n)"
-                $doErase = $yn -match '^[yY]'
                 Invoke-FlashFirmware -EnvName $envName -UploadPort $port -Erase:$doErase
             }
-        }
+        } }
         "4" {
+            Write-Host ""
+            Write-Host "  Монитор порта:" -ForegroundColor Cyan
             $ports = @(Get-SerialPorts)
             if ($ports.Count -eq 0) {
                 Write-Host "[ОШИБКА] Нет портов." -ForegroundColor Red
                 break
             }
-            $port = $ports[0].Port
-            if ($ports.Count -gt 1) {
-                for ($i = 0; $i -lt $ports.Count; $i++) {
-                    Write-Host "  $($i+1). $($ports[$i].Port) - $($ports[$i].Hint)"
-                }
-                $pSel = Read-Host "Порт"
-                $pIdx = [int]$pSel - 1
-                if ($pIdx -ge 0 -and $pIdx -lt $ports.Count) { $port = $ports[$pIdx].Port }
+            Write-Host ""
+            for ($i = 0; $i -lt $ports.Count; $i++) {
+                Write-Host "  $($i+1). $($ports[$i].Port) - $($ports[$i].Hint)"
             }
+            $pSel = Read-Host "Порт (1-$($ports.Count))"
+            $pIdx = [int]$pSel - 1
+            $port = if ($pIdx -ge 0 -and $pIdx -lt $ports.Count) { $ports[$pIdx].Port } else { $ports[0].Port }
+            Write-Host ""
             try {
                 Push-Location $FirmwareDir
                 pio device monitor --port $port

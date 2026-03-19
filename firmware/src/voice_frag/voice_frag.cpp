@@ -13,7 +13,11 @@
 
 #define FRAG_HEADER_LEN 6
 #define FRAG_DATA_MAX (protocol::MAX_PAYLOAD - FRAG_HEADER_LEN)
+#if defined(USE_EINK)
+#define VOICE_REASSEMBLE_MAX 1   // Paper: 1 слот ~11 KB (экономия heap)
+#else
 #define VOICE_REASSEMBLE_MAX 2
+#endif
 #define VOICE_TIMEOUT_MS 60000
 
 struct VoiceSlot {
@@ -36,10 +40,6 @@ namespace voice_frag {
 
 void init() {
   memset(s_slots, 0, sizeof(s_slots));
-  for (int i = 0; i < VOICE_REASSEMBLE_MAX; i++) {
-    s_slots[i].buf = (uint8_t*)malloc(MAX_VOICE_PLAIN + 1024);
-    s_slots[i].bufSize = MAX_VOICE_PLAIN + 1024;
-  }
   s_msgIdCounter = (uint32_t)esp_random();
   s_inited = true;
 }
@@ -58,6 +58,7 @@ static VoiceSlot* findFreeSlot() {
   for (int i = 0; i < VOICE_REASSEMBLE_MAX; i++) {
     if (!s_slots[i].inUse) return &s_slots[i];
     if (now - s_slots[i].lastTime > VOICE_TIMEOUT_MS) {
+      if (s_slots[i].buf) { free(s_slots[i].buf); s_slots[i].buf = nullptr; }
       s_slots[i].inUse = false;
       return &s_slots[i];
     }
@@ -113,6 +114,11 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
   if (!slot) {
     slot = findFreeSlot();
     if (!slot) return false;
+    if (!slot->buf) {
+      slot->buf = (uint8_t*)malloc(MAX_VOICE_PLAIN + 1024);
+      slot->bufSize = MAX_VOICE_PLAIN + 1024;
+    }
+    if (!slot->buf) return false;
     slot->msgId = msgId;
     memcpy(slot->from, from, protocol::NODE_ID_LEN);
     memcpy(slot->to, to, protocol::NODE_ID_LEN);
@@ -138,16 +144,22 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
   size_t decLen = 0;
   if (!crypto::decryptFrom(slot->from, slot->buf, encLen, decBuf, &decLen)) {
     slot->inUse = false;
+    free(slot->buf);
+    slot->buf = nullptr;
     return false;
   }
 
   if (decLen > outMaxLen) {
     slot->inUse = false;
+    free(slot->buf);
+    slot->buf = nullptr;
     return false;
   }
   memcpy(out, decBuf, decLen);
   *outLen = decLen;
   slot->inUse = false;
+  free(slot->buf);
+  slot->buf = nullptr;
   Serial.printf("[RiftLink] VOICE_MSG received %u bytes from %02X%02X\n",
       (unsigned)decLen, from[0], from[1]);
   return true;

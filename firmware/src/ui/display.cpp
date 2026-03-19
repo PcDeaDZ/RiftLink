@@ -593,6 +593,7 @@ bool displayUpdate() {
   // Таймер неактивности → слип
   if (!s_displaySleeping && (now - s_lastActivityTime) > DISPLAY_SLEEP_MS) {
     displaySleep();
+    return false;  // не вызывать drawScreen — иначе display() может включить дисплей обратно
   }
 
   if (!s_showingBootScreen && (millis() - s_lastScreenUpdate > 2000)) {

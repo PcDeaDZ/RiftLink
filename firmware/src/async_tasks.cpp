@@ -190,20 +190,19 @@ void queueDisplayRedraw(uint8_t screen, bool priority) {
   BaseType_t ok = priority ? xQueueSendToFront(displayQueue, &item, pdMS_TO_TICKS(200))
                            : xQueueSend(displayQueue, &item, pdMS_TO_TICKS(200));
   if (ok != pdTRUE) {
-    Serial.println("[RiftLink] displayQueue full, fallback draw");
+    static uint32_t s_lastFallbackLog = 0;
+    uint32_t now = millis();
+    if (now - s_lastFallbackLog >= 10000) {  // не спамить при OOM (heap ~5KB, queue=4)
+      s_lastFallbackLog = now;
+      Serial.println("[RiftLink] displayQueue full, fallback draw");
+    }
     displayShowScreen(screen);  // fallback при переполнении очереди
   }
 }
 
+/** Только флаг s_needRedrawInfo — без очереди. Отрисовка в displayUpdate() при s_currentScreen==1 */
 void queueDisplayRequestInfoRedraw() {
-  if (!displayQueue) {
-    displayRequestInfoRedraw();
-    return;
-  }
-  DisplayQueueItem item = {};
-  item.cmd = CMD_REQUEST_INFO_REDRAW;
-  item.screen = 1;
-  xQueueSend(displayQueue, &item, 0);
+  displayRequestInfoRedraw();
 }
 
 void queueDisplayLongPress(uint8_t screen) {
@@ -215,7 +214,12 @@ void queueDisplayLongPress(uint8_t screen) {
   item.cmd = CMD_LONG_PRESS;
   item.screen = screen;
   if (xQueueSend(displayQueue, &item, pdMS_TO_TICKS(200)) != pdTRUE) {
-    Serial.println("[RiftLink] displayQueue full, fallback longPress");
+    static uint32_t s_lastLongPressFallbackLog = 0;
+    uint32_t now = millis();
+    if (now - s_lastLongPressFallbackLog >= 10000) {
+      s_lastLongPressFallbackLog = now;
+      Serial.println("[RiftLink] displayQueue full, fallback longPress");
+    }
     displayOnLongPress(screen);  // fallback при переполнении очереди
   }
 }
@@ -257,6 +261,7 @@ static void packetTask(void* arg) {
 
 static void rxTask(void* arg) {
   static uint8_t rxBuf[protocol::SYNC_LEN + protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+  static TickType_t lastPacketQueueDropLog = 0;
   vTaskDelay(pdMS_TO_TICKS(500));  // дать setup завершиться
   for (;;) {
     if (powersave::canSleep()) {
@@ -280,12 +285,11 @@ static void rxTask(void* arg) {
     if (n > 0) {
       int rssi = radio::getLastRssi();
       if (packetQueue) {
-#if defined(USE_EINK)
-        // При почти полной очереди дропаем HELLO (дубликаты) — оставляем место для KEY_EXCHANGE
+        // При почти полной очереди дропаем HELLO (дубликаты) — место для KEY_EXCHANGE, MSG
+        UBaseType_t qCap = uxQueueSpacesAvailable(packetQueue) + uxQueueMessagesWaiting(packetQueue);
         UBaseType_t qLen = uxQueueMessagesWaiting(packetQueue);
         bool isHello = (n == 13 && rxBuf[0] == protocol::SYNC_BYTE && rxBuf[2] == protocol::OP_HELLO);
-        if (!(isHello && qLen >= 48))  // 75% от 64 — дроп HELLO, сохраняем KEY_EXCHANGE
-#endif
+        if (!(isHello && qLen >= (qCap * 3 / 4)))  // 75% — дроп HELLO (V3/V4/Paper)
         {
           PacketQueueItem pitem;
           if ((size_t)n <= sizeof(pitem.buf)) {
@@ -294,23 +298,25 @@ static void rxTask(void* arg) {
             pitem.rssi = (int8_t)rssi;
             pitem.sf = sf;
             if (xQueueSend(packetQueue, &pitem, pdMS_TO_TICKS(30)) != pdTRUE) {
-              // MSG/ACK важнее HELLO — при переполнении вытесняем HELLO
+              // При переполнении вытесняем старый HELLO (дубликаты) — место для нового пакета
               bool added = false;
-              bool isMsgOrAck = (n >= 13 && rxBuf[0] == protocol::SYNC_BYTE &&
-                  (rxBuf[2] == protocol::OP_MSG || rxBuf[2] == protocol::OP_ACK));
-              if (isMsgOrAck) {
-                PacketQueueItem discarded;
-                if (xQueueReceive(packetQueue, &discarded, 0) == pdTRUE) {
-                  bool wasHello = (discarded.len == 13 && discarded.buf[0] == protocol::SYNC_BYTE &&
-                      discarded.buf[2] == protocol::OP_HELLO);
-                  if (wasHello) {
-                    added = (xQueueSend(packetQueue, &pitem, 0) == pdTRUE);
-                  } else {
-                    xQueueSendToFront(packetQueue, &discarded, 0);
-                  }
+              PacketQueueItem discarded;
+              if (xQueueReceive(packetQueue, &discarded, 0) == pdTRUE) {
+                bool wasHello = (discarded.len == 13 && discarded.buf[0] == protocol::SYNC_BYTE &&
+                    discarded.buf[2] == protocol::OP_HELLO);
+                if (wasHello) {
+                  added = (xQueueSend(packetQueue, &pitem, 0) == pdTRUE);
+                } else {
+                  xQueueSendToFront(packetQueue, &discarded, 0);
                 }
               }
-              if (!added) RIFTLINK_LOG_ERR("[RiftLink] packetQueue full, drop\n");
+              if (!added) {
+                TickType_t now = xTaskGetTickCount();
+                if (now - lastPacketQueueDropLog >= pdMS_TO_TICKS(5000)) {
+                  lastPacketQueueDropLog = now;
+                  RIFTLINK_LOG_ERR("[RiftLink] packetQueue full, drop\n");
+                }
+              }
             }
           }
         }

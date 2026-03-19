@@ -11,7 +11,11 @@
 
 namespace voice_frag {
 
+#if defined(USE_EINK)
+constexpr size_t MAX_VOICE_PLAIN = 10240;   // Paper: ~10 KB (~10 сек), экономия heap
+#else
 constexpr size_t MAX_VOICE_PLAIN = 30720;   // ~30 KB (30 сек Opus 8 kbps)
+#endif
 constexpr size_t MAX_FRAGMENTS = 160;       // 30KB / 194
 
 /** Отправка голоса (unicast). data = Opus, plainLen ≤ MAX_VOICE_PLAIN */

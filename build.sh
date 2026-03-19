@@ -312,11 +312,19 @@ flash_firmware() {
     local port="$2"
     local do_erase="${3:-0}"
     if [[ $do_erase -eq 1 ]]; then
-        echo -e "\033[33m[RiftLink] Очистка flash на $port...\033[0m"
-        (cd "$FIRMWARE_DIR" && pio run -e "$env_name" -t erase --upload-port "$port")
+        if [[ "$env_name" == *heltec* || "$env_name" == *paper* ]]; then
+            # upload_erase: одна сборка + erase + upload (Heltec V3/V4/Paper)
+            echo -e "\033[36m[RiftLink] Очистка flash + прошивка $env_name на $port...\033[0m"
+            (cd "$FIRMWARE_DIR" && pio run -e "$env_name" -t upload_erase --upload-port "$port")
+        else
+            # FakeTech: одна сборка, затем erase и upload
+            echo -e "\033[36m[RiftLink] Очистка flash + прошивка $env_name на $port...\033[0m"
+            (cd "$FIRMWARE_DIR" && pio run -e "$env_name" -t erase -t upload --upload-port "$port")
+        fi
+    else
+        echo -e "\033[36m[RiftLink] Прошивка $env_name на $port...\033[0m"
+        (cd "$FIRMWARE_DIR" && pio run -e "$env_name" -t upload --upload-port "$port")
     fi
-    echo -e "\033[36m[RiftLink] Прошивка $env_name на $port...\033[0m"
-    (cd "$FIRMWARE_DIR" && pio run -e "$env_name" -t upload --upload-port "$port")
 }
 
 build_apk() {
@@ -472,12 +480,14 @@ while true; do
             ;;
         2)
             echo ""
-            echo "  Выберите прошивку:"
+            echo -e "\033[36m  Прошивка — все параметры сразу:\033[0m"
+            echo ""
+            echo "  1. Прошивка:"
             for i in "${!ENV_MAP[@]}"; do
                 IFS=: read -r _ name <<< "${ENV_MAP[$i]}"
-                echo "    $((i+1)). $name"
+                echo "     $((i+1)). $name"
             done
-            read -r -p "Номер: " e
+            read -r -p "     Номер: " e
             idx=$((e - 1))
             if [[ $idx -ge 0 && $idx -lt ${#ENV_MAP[@]} ]]; then
                 IFS=: read -r env_name _ <<< "${ENV_MAP[$idx]}"
@@ -485,96 +495,89 @@ while true; do
                 if [[ ${#ports[@]} -eq 0 ]]; then
                     echo -e "\033[31m[ОШИБКА] Нет USB-портов. Bluetooth не подходит.\033[0m"
                 else
+                    echo ""
+                    echo "  2. Порт:"
+                    prefer_paper=0; prefer_v4=0
+                    [[ "$env_name" == *paper* ]] && prefer_paper=1
+                    [[ "$env_name" == *v4* ]] && prefer_v4=1
+                    for i in "${!ports[@]}"; do
+                        p="${ports[$i]}"; pt="${p%%|*}"; ht="${p#*|}"
+                        mark=""
+                        [[ $prefer_paper -eq 1 && "$ht" == *Paper* ]] && mark=" <- рекомендуется"
+                        [[ $prefer_v4 -eq 1 && "$ht" == *V4* ]] && mark=" <- рекомендуется"
+                        echo "     $((i+1)). $pt - $ht$mark"
+                    done
+                    read -r -p "     Номер порта (1-${#ports[@]}): " pSel
+                    pIdx=$((pSel - 1))
                     port=""
-                    if [[ ${#ports[@]} -eq 1 ]]; then
-                        port="${ports[0]%%|*}"
-                        echo ""
-                        echo "  Порт: $port [${ports[0]#*|}]"
-                    else
-                        echo ""
-                        echo "  Подключённые порты (автоопределение):"
-                        prefer_paper=0; prefer_v4=0
-                        [[ "$env_name" == *paper* ]] && prefer_paper=1
-                        [[ "$env_name" == *v4* ]] && prefer_v4=1
-                        for i in "${!ports[@]}"; do
-                            p="${ports[$i]}"; pt="${p%%|*}"; ht="${p#*|}"
-                            mark=""
-                            [[ $prefer_paper -eq 1 && "$ht" == *Paper* ]] && mark=" <- рекомендуется для Paper"
-                            [[ $prefer_v4 -eq 1 && "$ht" == *V4* ]] && mark=" <- рекомендуется для V4"
-                            echo "    $((i+1)). $pt - $ht$mark"
-                        done
-                        read -r -p "Порт (1-${#ports[@]}): " pSel
-                        pIdx=$((pSel - 1))
-                        [[ $pIdx -ge 0 && $pIdx -lt ${#ports[@]} ]] && port="${ports[$pIdx]%%|*}"
-                    fi
-                    if [[ -n "$port" ]]; then
-                        read -r -p "Очистить flash перед прошивкой? (y/n): " yn
-                        do_erase=0; [[ "$yn" =~ ^[yY] ]] && do_erase=1
-                        flash_firmware "$env_name" "$port" "$do_erase"
-                    fi
+                    [[ $pIdx -ge 0 && $pIdx -lt ${#ports[@]} ]] && port="${ports[$pIdx]%%|*}"
+                    echo ""
+                    echo "  3. Очистить flash перед прошивкой? (y/n)"
+                    read -r -p "     " yn
+                    do_erase=0; [[ "$yn" =~ ^[yY] ]] && do_erase=1
+                    echo ""
+                    [[ -n "$port" ]] && flash_firmware "$env_name" "$port" "$do_erase"
                 fi
             fi
             ;;
         3)
             echo ""
-            echo "  Выберите прошивку:"
+            echo -e "\033[36m  Сборка + прошивка — все параметры сразу:\033[0m"
+            echo ""
+            echo "  1. Прошивка:"
             for i in "${!ENV_MAP[@]}"; do
                 IFS=: read -r _ name <<< "${ENV_MAP[$i]}"
-                echo "    $((i+1)). $name"
+                echo "     $((i+1)). $name"
             done
-            read -r -p "Номер: " e
+            read -r -p "     Номер: " e
             idx=$((e - 1))
             if [[ $idx -ge 0 && $idx -lt ${#ENV_MAP[@]} ]]; then
                 IFS=: read -r env_name _ <<< "${ENV_MAP[$idx]}"
-                build_firmware "$env_name" || continue
                 mapfile -t ports < <(get_serial_ports)
                 if [[ ${#ports[@]} -eq 0 ]]; then
                     echo -e "\033[31m[ОШИБКА] Нет USB-портов. Bluetooth не подходит.\033[0m"
                 else
+                    echo ""
+                    echo "  2. Порт:"
+                    prefer_paper=0; prefer_v4=0
+                    [[ "$env_name" == *paper* ]] && prefer_paper=1
+                    [[ "$env_name" == *v4* ]] && prefer_v4=1
+                    for i in "${!ports[@]}"; do
+                        p="${ports[$i]}"; pt="${p%%|*}"; ht="${p#*|}"
+                        mark=""
+                        [[ $prefer_paper -eq 1 && "$ht" == *Paper* ]] && mark=" <- рекомендуется"
+                        [[ $prefer_v4 -eq 1 && "$ht" == *V4* ]] && mark=" <- рекомендуется"
+                        echo "     $((i+1)). $pt - $ht$mark"
+                    done
+                    read -r -p "     Номер порта (1-${#ports[@]}): " pSel
+                    pIdx=$((pSel - 1))
                     port=""
-                    if [[ ${#ports[@]} -eq 1 ]]; then
-                        port="${ports[0]%%|*}"
-                        echo ""
-                        echo "  Порт: $port [${ports[0]#*|}]"
-                    else
-                        echo ""
-                        echo "  Подключённые порты (автоопределение):"
-                        prefer_paper=0; prefer_v4=0
-                        [[ "$env_name" == *paper* ]] && prefer_paper=1
-                        [[ "$env_name" == *v4* ]] && prefer_v4=1
-                        for i in "${!ports[@]}"; do
-                            p="${ports[$i]}"; pt="${p%%|*}"; ht="${p#*|}"
-                            mark=""
-                            [[ $prefer_paper -eq 1 && "$ht" == *Paper* ]] && mark=" <- рекомендуется для Paper"
-                            [[ $prefer_v4 -eq 1 && "$ht" == *V4* ]] && mark=" <- рекомендуется для V4"
-                            echo "    $((i+1)). $pt - $ht$mark"
-                        done
-                        read -r -p "Порт (1-${#ports[@]}): " pSel
-                        pIdx=$((pSel - 1))
-                        [[ $pIdx -ge 0 && $pIdx -lt ${#ports[@]} ]] && port="${ports[$pIdx]%%|*}"
-                    fi
-                    if [[ -n "$port" ]]; then
-                        read -r -p "Очистить flash перед прошивкой? (y/n): " yn
-                        do_erase=0; [[ "$yn" =~ ^[yY] ]] && do_erase=1
-                        flash_firmware "$env_name" "$port" "$do_erase"
-                    fi
+                    [[ $pIdx -ge 0 && $pIdx -lt ${#ports[@]} ]] && port="${ports[$pIdx]%%|*}"
+                    echo ""
+                    echo "  3. Очистить flash перед прошивкой? (y/n)"
+                    read -r -p "     " yn
+                    do_erase=0; [[ "$yn" =~ ^[yY] ]] && do_erase=1
+                    echo ""
+                    [[ -n "$port" ]] && flash_firmware "$env_name" "$port" "$do_erase"
                 fi
             fi
             ;;
         4)
+            echo ""
+            echo -e "\033[36m  Монитор порта:\033[0m"
             mapfile -t ports < <(get_serial_ports)
             if [[ ${#ports[@]} -eq 0 ]]; then
                 echo -e "\033[31m[ОШИБКА] Нет портов.\033[0m"
             else
+                echo ""
+                for i in "${!ports[@]}"; do
+                    p="${ports[$i]}"; echo "  $((i+1)). ${p/|/ - }"
+                done
+                read -r -p "Порт (1-${#ports[@]}): " pSel
+                pIdx=$((pSel - 1))
                 port="${ports[0]%%|*}"
-                if [[ ${#ports[@]} -gt 1 ]]; then
-                    for i in "${!ports[@]}"; do
-                        p="${ports[$i]}"; echo "  $((i+1)). ${p/|/ - }"
-                    done
-                    read -r -p "Порт: " pSel
-                    pIdx=$((pSel - 1))
-                    [[ $pIdx -ge 0 && $pIdx -lt ${#ports[@]} ]] && port="${ports[$pIdx]%%|*}"
-                fi
+                [[ $pIdx -ge 0 && $pIdx -lt ${#ports[@]} ]] && port="${ports[$pIdx]%%|*}"
+                echo ""
                 (cd "$FIRMWARE_DIR" && pio device monitor --port "$port")
             fi
             ;;

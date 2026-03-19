@@ -67,9 +67,9 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #define PENDING_REDRAW_RETRY_MS 2500  // retry смены вкладки, если дисплей не принял за 2.5с
 
 #define HELLO_INTERVAL_MS  30000  // 30с — спокойный режим (Meshtastic: position 15мин, telemetry 30мин)
-#define HELLO_INTERVAL_AGGRESSIVE_MS 15000  // 15с — discovery при 0 соседях
+#define HELLO_INTERVAL_AGGRESSIVE_MS 18000  // 18с — discovery при 0 соседях (меньше storm, фазирование по слоту)
 #define HELLO_JITTER_MS    3000   // ±3с — при 1+ соседях
-#define HELLO_JITTER_ZERO_MS 2000 // ±2с при 0 соседях
+#define HELLO_JITTER_ZERO_MS 1000 // ±1с при 0 соседях (фазирование по nodeId даёт основной spread)
 #define TELEM_INTERVAL_MS  60000
 #define GPS_LOC_INTERVAL_MS 60000  // интервал отправки локации с GPS
 #define SF_ADAPT_INTERVAL_MS 30000 // адаптивный SF по качеству связи
@@ -1047,9 +1047,13 @@ void setup() {
   }
 #if defined(USE_EINK)
   wifi::init();  // Paper: до displayInit (макс. heap), при OOM — WiFi/OTA отключены
+  Serial.printf("[RiftLink] Heap after wifi::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 #endif
   locale::init();
   displayInit();
+#if defined(USE_EINK)
+  Serial.printf("[RiftLink] Heap after displayInit: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
   displayShowBootScreen();
   s_bootPhase = BOOT_PHASE_WAIT_4S;
   s_bootPhaseStart = millis();
@@ -1085,12 +1089,18 @@ static void runBootStateMachine() {
     displayText(0, 10, locale::getForDisplay("radio_ok"));
     displayShow();
   }
+#if defined(USE_EINK)
+  Serial.printf("[RiftLink] Heap after radio::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
   if (!region::isSet()) {
     displayShowRegionPicker();
   }
   if (!ble::init()) {
     RIFTLINK_LOG_ERR("[RiftLink] BLE init FAILED — устройство не будет видно в скане\n");
   }
+#if defined(USE_EINK)
+  Serial.printf("[RiftLink] Heap after ble::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
   ble::setOnSend(sendMsg);
   ble::setOnLocation(sendLocation);
   msg_queue::init();
@@ -1107,6 +1117,9 @@ static void runBootStateMachine() {
     return msg_queue::registerPendingFromFusion(to, msgId, pkt, pktLen, txSf);
   });
   network_coding::init();
+#if defined(USE_EINK)
+  Serial.printf("[RiftLink] Heap after packet_fusion+network_coding: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
   msg_queue::setOnUnicastSent([](const uint8_t* to, uint32_t msgId) { ble::notifySent(to, msgId); });
   msg_queue::setOnUnicastUndelivered([](const uint8_t* to, uint32_t msgId) {
     radio::notifyCongestion();
@@ -1115,15 +1128,30 @@ static void runBootStateMachine() {
   msg_queue::setOnBroadcastSent([](uint32_t msgId) { ble::notifySent(protocol::BROADCAST_ID, msgId); });
   msg_queue::setOnBroadcastDelivery([](uint32_t msgId, int d, int t) { ble::notifyBroadcastDelivery(msgId, d, t); });
   frag::init();
+#if defined(USE_EINK)
+  Serial.printf("[RiftLink] Heap after frag::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
   telemetry::init();
   neighbors::init();
+#if defined(USE_EINK)
+  Serial.printf("[RiftLink] Heap after neighbors::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
   pkt_cache::init();
   groups::init();
   offline_queue::init();
   routing::init();
+#if defined(USE_EINK)
+  Serial.printf("[RiftLink] Heap after routing::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
   voice_frag::init();
+#if defined(USE_EINK)
+  Serial.printf("[RiftLink] Heap after voice_frag::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
   powersave::init();
   // Очереди, затем WiFi/ESP-NOW до async tasks — event loop WiFi нужен heap (~4KB task)
+#if defined(USE_EINK)
+  Serial.printf("[RiftLink] Heap before asyncQueues: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
   if (!asyncQueuesInit()) {
     RIFTLINK_LOG_ERR("[RiftLink] Async queues init FAILED\n");
   }
@@ -1168,13 +1196,15 @@ void loop() {
     return;
   }
 
-  // HELLO: 0 сосед — 15с (aggressive discovery); 1+ сосед — 30с; 6+ — 24с (меньше спама)
+  // HELLO: 0 сосед — 18с (aggressive discovery); 1+ сосед — 30с; 6+ — 24с (меньше спама)
+  // Фазирование по слоту (beacon_sync): при 0 соседях каждый узел смещён на свой слот — меньше storm
   int nNeigh = neighbors::getCount();
   uint32_t helloInterval = (nNeigh == 0 && aggressive) ? HELLO_INTERVAL_AGGRESSIVE_MS
       : ((nNeigh == 0) ? HELLO_INTERVAL_AGGRESSIVE_MS : (nNeigh >= 6 ? 24000 : HELLO_INTERVAL_MS));
   uint32_t jitterMs = (nNeigh == 0) ? HELLO_JITTER_ZERO_MS : HELLO_JITTER_MS;
   uint32_t jitter = (esp_random() % (jitterMs * 2)) - (int32_t)jitterMs;
-  if (millis() - lastHello > (helloInterval + (int32_t)jitter)) {
+  uint32_t phaseOffset = (nNeigh == 0) ? (beacon_sync::getSlotFor(node::getId()) * 400u) : 0;
+  if (millis() - lastHello > (helloInterval + (int32_t)jitter + phaseOffset)) {
     sendHello();
     lastHello = millis();
   }

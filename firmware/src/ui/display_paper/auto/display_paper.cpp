@@ -279,9 +279,13 @@ static void hibernateIfIdle() {
 #define LORA_NSS  8
 static void selectDisplaySPI() {
   radio::takeMutex(portMAX_DELAY);
+  SPI.end();  // иначе begin() не переконфигурирует пины (ESP32 Arduino)
+  delay(5);
   SPI.begin(EINK_SCLK, -1, EINK_MOSI, EINK_CS);  // -1 = MISO не используется (3-wire E-Ink)
 }
 static void releaseDisplaySPI() {
+  SPI.end();
+  delay(5);
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
   radio::releaseMutex();
 }

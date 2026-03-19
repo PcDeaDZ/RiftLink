@@ -14,10 +14,10 @@ static constexpr size_t PACKET_QUEUE_LEN =
 #if defined(USE_EINK)
     32;   // Paper: ~16KB heap; 64+WiFi давало OOM (ret=101)
 #else
-    16;   // OLED: MSG+HELLO+KEY_EXCHANGE — не дропать при всплеске
+    48;   // V3/V4: discovery burst — HELLO, KEY_EXCHANGE, MSG
 #endif
 static constexpr size_t SEND_QUEUE_LEN = 32;  // burst 1–15, ACK, relay, KEY_EXCHANGE
-static constexpr size_t DISPLAY_QUEUE_LEN = 8;  // E-Ink обновления долгие — буфер для кнопки
+static constexpr size_t DISPLAY_QUEUE_LEN = 12;  // burst HELLO → много Info redraw; coalesce в displayTask
 
 static bool tryCreateQueues(size_t pktLen, size_t sendLen, size_t dispLen) {
   if (packetQueue) { vQueueDelete(packetQueue); packetQueue = nullptr; }

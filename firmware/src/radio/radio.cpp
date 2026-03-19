@@ -59,6 +59,12 @@ namespace radio {
 
 bool init() {
   // SPI: ESP32 default (18,19,23) != Heltec (9,11,10). Явно задаём пины.
+  // Paper: displayInit уже вызвал SPI.begin(EINK...) — повторный begin() не переконфигурирует.
+  // SPI.end() сбрасывает _spi, чтобы begin() заново привязал пины к LoRa.
+#if defined(USE_EINK)
+  SPI.end();
+  delay(10);
+#endif
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
 
 #ifdef ARDUINO_heltec_wifi_lora_32_V4

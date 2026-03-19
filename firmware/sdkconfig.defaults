@@ -4,5 +4,6 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 # NimBLE: увеличен стек — Heltec V3/V4 перезагружается при BLE connect (Stack canary nimble_host)
 CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=20480
 
-# WiFi: больше слотов в event queue — "failed to post WiFi event=2 ret=259" на V4 (STA_START)
-CONFIG_ESP_SYSTEM_EVENT_QUEUE_SIZE=40
+# WiFi: больше слотов в event queue — "failed to post WiFi event=2 ret=259" (STA_START)
+# После изменения: pio run -t fullclean && pio run
+CONFIG_ESP_SYSTEM_EVENT_QUEUE_SIZE=64
