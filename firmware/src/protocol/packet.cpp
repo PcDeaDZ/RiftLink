@@ -29,16 +29,23 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
                   const uint8_t* from, const uint8_t* to,
                   uint8_t ttl, uint8_t opcode,
                   const uint8_t* payload, size_t payloadLen,
-                  bool encrypted, bool ackReq, bool compressed, uint8_t channel) {
+                  bool encrypted, bool ackReq, bool compressed, uint8_t channel, uint16_t pktId) {
   bool broadcast = isBroadcastTo(to);
-  size_t hdrLen = broadcast ? HEADER_LEN_BROADCAST : (SYNC_LEN + HEADER_LEN);
+  bool usePktId = (pktId != 0);
+  size_t hdrLen = usePktId
+      ? (broadcast ? HEADER_LEN_BROADCAST_PKTID : HEADER_LEN_PKTID)
+      : (broadcast ? HEADER_LEN_BROADCAST : (SYNC_LEN + HEADER_LEN));
   if (maxLen < hdrLen + payloadLen) return 0;
 
   uint8_t* p = buf;
   *p++ = SYNC_BYTE;
-  *p++ = VERSION_V2 | (broadcast ? FLAG_BROADCAST : 0) |
+  *p++ = (usePktId ? VERSION_V2_PKTID : VERSION_V2) | (broadcast ? FLAG_BROADCAST : 0) |
          (encrypted ? FLAG_ENCRYPTED : 0) | (ackReq ? FLAG_ACK_REQ : 0) | (compressed ? FLAG_COMPRESSED : 0);
-  *p++ = opcode;  // opcode первым — быстрая идентификация
+  *p++ = opcode;
+  if (usePktId) {
+    *p++ = (uint8_t)(pktId & 0xFF);
+    *p++ = (uint8_t)(pktId >> 8);
+  }
   memcpy(p, from, NODE_ID_LEN);
   p += NODE_ID_LEN;
   if (!broadcast) {
@@ -59,7 +66,7 @@ constexpr int OPCODE_OFFSET_V2 = 2;    // sync(1) + version(1)
 constexpr int OPCODE_OFFSET_LEGACY = 18; // version(1) + from(8) + to(8) + ttl(1)
 
 static bool isValidOpcode(uint8_t op) {
-  return (op >= 0x01 && op <= 0x0C) || op == OP_PONG || op == OP_PING;
+  return (op >= 0x01 && op <= 0x0D) || op == OP_PONG || op == OP_PING;
 }
 
 // Найти смещение начала пакета: sync-first, затем opcode-at-offset (v1 или v2)
@@ -112,24 +119,48 @@ bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr, const uint8_
   bool isV2 = ((v0 & 0xF0) == 0x20 || (v0 & 0xF0) == 0x30);
 
   if (isV2) {
-    // v2: opcode(1) + from(8) + [to(8)?] + ttl(1) + channel(1)
-    if (hLen < 12) return false;  // min: ver+opcode+from+ttl+channel
-    hdr->version_flags = v0;
-    hdr->opcode = h[1];
-    memcpy(hdr->from, h + 2, NODE_ID_LEN);
-    if (v0 & FLAG_BROADCAST) {
-      memcpy(hdr->to, BROADCAST_ID, NODE_ID_LEN);
-      hdr->ttl = h[10];
-      hdr->channel = h[11];
-      hdrLen = 12;
+    bool hasPktId = ((v0 & 0xF0) == 0x30);
+    if (hasPktId) {
+      // v2.1: opcode(1) + pktId(2) + from(8) + [to(8)?] + ttl(1) + channel(1)
+      if (hLen < 14) return false;
+      hdr->version_flags = v0;
+      hdr->opcode = h[1];
+      hdr->pktId = (uint16_t)h[2] | ((uint16_t)h[3] << 8);
+      memcpy(hdr->from, h + 4, NODE_ID_LEN);
+      if (v0 & FLAG_BROADCAST) {
+        memcpy(hdr->to, BROADCAST_ID, NODE_ID_LEN);
+        hdr->ttl = h[12];
+        hdr->channel = h[13];
+        hdrLen = 14;
+      } else {
+        if (hLen < 22) return false;
+        memcpy(hdr->to, h + 12, NODE_ID_LEN);
+        hdr->ttl = h[20];
+        hdr->channel = h[21];
+        hdrLen = 22;
+      }
     } else {
-      if (hLen < 20) return false;
-      memcpy(hdr->to, h + 10, NODE_ID_LEN);
-      hdr->ttl = h[18];
-      hdr->channel = h[19];
-      hdrLen = 20;
+      // v2: opcode(1) + from(8) + [to(8)?] + ttl(1) + channel(1)
+      if (hLen < 12) return false;
+      hdr->version_flags = v0;
+      hdr->opcode = h[1];
+      hdr->pktId = 0;
+      memcpy(hdr->from, h + 2, NODE_ID_LEN);
+      if (v0 & FLAG_BROADCAST) {
+        memcpy(hdr->to, BROADCAST_ID, NODE_ID_LEN);
+        hdr->ttl = h[10];
+        hdr->channel = h[11];
+        hdrLen = 12;
+      } else {
+        if (hLen < 20) return false;
+        memcpy(hdr->to, h + 10, NODE_ID_LEN);
+        hdr->ttl = h[18];
+        hdr->channel = h[19];
+        hdrLen = 20;
+      }
     }
   } else if ((v0 & 0xF0) == 0x10) {
+    hdr->pktId = 0;
     // v1: from(8) + to(8) + ttl(1) + opcode(1) + channel(1)
     if (hLen < HEADER_LEN_V0) return false;
     hdr->version_flags = v0;
@@ -146,6 +177,7 @@ bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr, const uint8_
     hdr->channel = (hLen >= HEADER_LEN) ? h[1 + NODE_ID_LEN * 2 + 2] : CHANNEL_DEFAULT;
     hdrLen = (hLen >= HEADER_LEN) ? HEADER_LEN : HEADER_LEN_V0;
   } else if (v0 == 0x00 && hLen > (size_t)(1 + NODE_ID_LEN * 2 + 1) && h[1 + NODE_ID_LEN * 2 + 1] == OP_HELLO) {
+    hdr->pktId = 0;
     hdr->version_flags = 0x10;
     memcpy(hdr->from, h + 1, NODE_ID_LEN);
     memcpy(hdr->to, h + 1 + NODE_ID_LEN, NODE_ID_LEN);
@@ -182,6 +214,8 @@ bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr, const uint8_
 size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadcast) {
   size_t hdrLen = isBroadcast ? HEADER_LEN_BROADCAST : (SYNC_LEN + HEADER_LEN);
   switch (opcode) {
+    case OP_NACK:
+      return (payloadLen == 2) ? (SYNC_LEN + HEADER_LEN + 2) : 0;  // unicast
     case OP_HELLO:
     case OP_PING:
     case OP_PONG:
@@ -239,6 +273,9 @@ bool getExpectedPayloadRange(uint8_t opcode, size_t* minOut, size_t* maxOut) {
     case OP_VOICE_MSG:
       *minOut = 6;   // FRAG_HEADER_LEN / voice header
       *maxOut = MAX_PAYLOAD;
+      return true;
+    case OP_NACK:
+      *minOut = *maxOut = 2;  // pktId
       return true;
     default:
       return false;

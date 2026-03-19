@@ -28,7 +28,7 @@ bool hasKeyFor(const uint8_t* peerId);
 /** Получить ключ для peer (32 байта). Возвращает false если нет */
 bool getKeyFor(const uint8_t* peerId, uint8_t* keyOut);
 
-/** Отправить наш публичный ключ peer (для вызова при HELLO и т.п.). useSf12=true → TX на SF12, priority в очереди */
-void sendKeyExchange(const uint8_t* peerId, bool useSf12 = false);
+/** Отправить наш публичный ключ peer. useSf12 → TX на SF12. forceSend → ответ на KEY_EXCHANGE. hadKeyBefore → уже был ключ, не спамить ответ (троттл 60с) */
+void sendKeyExchange(const uint8_t* peerId, bool useSf12 = false, bool forceSend = false, bool hadKeyBefore = false);
 
 }  // namespace x25519_keys

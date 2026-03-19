@@ -12,9 +12,9 @@ static constexpr size_t PACKET_QUEUE_LEN =
 #if defined(USE_EINK)
     64;   // Paper: ~16KB heap; 192 давало init FAILED (OOM)
 #else
-    8;
+    16;   // OLED: MSG+HELLO+KEY_EXCHANGE — не дропать при всплеске
 #endif
-static constexpr size_t SEND_QUEUE_LEN = 8;
+static constexpr size_t SEND_QUEUE_LEN = 16;  // было 8 — KEY_EXCHANGE+MSG+relay+ACK конкурируют
 static constexpr size_t DISPLAY_QUEUE_LEN = 8;  // E-Ink обновления долгие — буфер для кнопки
 
 bool asyncQueuesInit() {

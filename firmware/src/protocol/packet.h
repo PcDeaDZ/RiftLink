@@ -23,6 +23,7 @@ constexpr uint8_t OP_GROUP_MSG = 0x09;
 constexpr uint8_t OP_MSG_FRAG = 0x0A;
 constexpr uint8_t OP_VOICE_MSG = 0x0B;
 constexpr uint8_t OP_READ = 0x0C;   // Подтверждение прочтения (msg_id 4B)
+constexpr uint8_t OP_NACK = 0x0D;   // Запрос повтора (payload: pktId 2B)
 constexpr uint8_t OP_PONG = 0xFE;
 constexpr uint8_t OP_PING = 0xFF;
 
@@ -31,6 +32,11 @@ constexpr size_t NODE_ID_LEN = 8;
 constexpr uint8_t SYNC_BYTE = 0x5A;  // маркер начала пакета — искать при сдвиге (SX1262 corruption)
 constexpr size_t HEADER_LEN = 1 + NODE_ID_LEN * 2 + 1 + 1 + 1;  // version + From + To + TTL + Opcode + Channel (unicast)
 constexpr size_t HEADER_LEN_BROADCAST = 1 + 1 + 1 + NODE_ID_LEN + 1 + 1;  // v2: sync+ver+opcode+from+ttl+channel (13 B)
+// v2.1: version 0x30 = заголовок с pktId для NACK
+constexpr uint8_t VERSION_V2_PKTID = 0x30;
+constexpr size_t PKTID_LEN = 2;
+constexpr size_t HEADER_LEN_BROADCAST_PKTID = 1 + 1 + 1 + PKTID_LEN + NODE_ID_LEN + 1 + 1;  // 15 B
+constexpr size_t HEADER_LEN_PKTID = 1 + 1 + 1 + PKTID_LEN + NODE_ID_LEN * 2 + 1 + 1;  // 23 B
 constexpr size_t SYNC_LEN = 1;
 constexpr size_t PAYLOAD_OFFSET = SYNC_LEN + HEADER_LEN;  // смещение payload в пакете с sync
 constexpr uint8_t CHANNEL_DEFAULT = 0;  // Публичный канал
@@ -39,6 +45,7 @@ constexpr size_t MAX_PAYLOAD = 200;
 
 struct PacketHeader {
   uint8_t version_flags;
+  uint16_t pktId;   // 0 = без pktId (v2), ненулевой = v2.1 с NACK
   uint8_t from[NODE_ID_LEN];
   uint8_t to[NODE_ID_LEN];
   uint8_t ttl;
@@ -54,7 +61,7 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
                   uint8_t ttl, uint8_t opcode,
                   const uint8_t* payload, size_t payloadLen,
                   bool encrypted = false, bool ackReq = false, bool compressed = false,
-                  uint8_t channel = CHANNEL_DEFAULT);
+                  uint8_t channel = CHANNEL_DEFAULT, uint16_t pktId = 0);
 
 bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr,
                 const uint8_t** payload, size_t* payloadLen);

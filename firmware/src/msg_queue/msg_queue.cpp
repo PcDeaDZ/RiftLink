@@ -3,6 +3,8 @@
  */
 
 #include "msg_queue.h"
+#include "log.h"
+#include "pkt_cache/pkt_cache.h"
 #include "node/node.h"
 #include "radio/radio.h"
 #include "neighbors/neighbors.h"
@@ -78,7 +80,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
   size_t ttlOverhead = (ttlMinutes > 0) ? MSG_TTL_LEN : 0;
   size_t maxSingle = MAX_SINGLE_PLAIN - ttlOverhead
       - (isUnicast ? MSG_ID_LEN : 0)
-      - (isUnicast ? 0 : GROUP_ID_LEN);  // broadcast: groupId в payload
+      - (isUnicast ? 0 : GROUP_ID_LEN + MSG_ID_LEN);  // broadcast: groupId + msgId
   if (textLen > maxSingle) {
     xSemaphoreGive(s_mutex);
     if (textLen > frag::MAX_MSG_PLAIN) textLen = frag::MAX_MSG_PLAIN;
@@ -125,31 +127,38 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
       return false;
     }
 
+    uint16_t pktId = (uint16_t)(msgId & 0xFFFF);
     size_t pktLen = protocol::buildPacket(slot->pkt, sizeof(slot->pkt),
         node::getId(), to, 31, protocol::OP_MSG,
-        encBuf, encLen, true, true, useCompressed);
+        encBuf, encLen, true, true, useCompressed, protocol::CHANNEL_DEFAULT, pktId);
     if (pktLen == 0) {
       xSemaphoreGive(s_mutex);
       return false;
     }
 
     slot->msgId = msgId;
+    pkt_cache::add(to, pktId, slot->pkt, pktLen);
     memcpy(slot->to, to, protocol::NODE_ID_LEN);
     slot->pktLen = pktLen;
     slot->lastSendTime = millis();
     slot->retries = 0;
     slot->inUse = true;
 
-    radio::send(slot->pkt, slot->pktLen, neighbors::rssiToSf(neighbors::getRssiFor(to)));
+    if (!radio::send(slot->pkt, slot->pktLen, neighbors::rssiToSf(neighbors::getRssiFor(to)))) {
+      RIFTLINK_LOG_ERR("[RiftLink] MSG sendQueue full, to %02X%02X — retry via update\n", to[0], to[1]);
+      // slot остаётся inUse, update() повторит отправку
+    }
     if (s_onUnicastSent) s_onUnicastSent(to, msgId);
     xSemaphoreGive(s_mutex);
     return true;
   } else {
-    // Broadcast — OP_GROUP_MSG с groupId=GROUP_ALL (channel key), без ACK
+    // Broadcast — OP_GROUP_MSG с groupId=GROUP_ALL, msgId для дедупликации повторов
     const uint32_t groupId = groups::GROUP_ALL;
+    uint32_t bcMsgId = ++s_msgIdCounter;
     memcpy(plainBuf, &groupId, GROUP_ID_LEN);
-    memcpy(plainBuf + GROUP_ID_LEN, text, textLen);
-    plainLen = GROUP_ID_LEN + textLen;
+    memcpy(plainBuf + GROUP_ID_LEN, &bcMsgId, MSG_ID_LEN);
+    memcpy(plainBuf + GROUP_ID_LEN + MSG_ID_LEN, text, textLen);
+    plainLen = GROUP_ID_LEN + MSG_ID_LEN + textLen;
 
     uint8_t toEncrypt[protocol::MAX_PAYLOAD + crypto::OVERHEAD];
     size_t toEncryptLen = plainLen;
@@ -173,9 +182,16 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     size_t len = protocol::buildPacket(pkt, sizeof(pkt),
         node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_GROUP_MSG,
         encBuf, encLen, true, false, useCompressed);
-    if (len > 0) radio::send(pkt, len, neighbors::rssiToSf(neighbors::getMinRssi()));
     xSemaphoreGive(s_mutex);
-    return len > 0;
+    if (len > 0) {
+      uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
+      for (int i = 0; i < 3; i++) {
+        if (i > 0) delay(200 + (esp_random() % 200));  // 200–400 ms между повторами — коллизия/обрезание
+        radio::send(pkt, len, sf);
+      }
+      return true;
+    }
+    return false;
   }
 }
 
@@ -184,13 +200,15 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
 
   size_t textLen = strlen(text);
   if (textLen == 0) return false;  // пустые — не отправлять
-  constexpr size_t maxPlain = MAX_SINGLE_PLAIN - GROUP_ID_LEN;
+  constexpr size_t maxPlain = MAX_SINGLE_PLAIN - GROUP_ID_LEN - MSG_ID_LEN;
   if (textLen > maxPlain) return false;
 
+  uint32_t bcMsgId = ++s_msgIdCounter;
   uint8_t plainBuf[256];
   memcpy(plainBuf, &groupId, GROUP_ID_LEN);
-  memcpy(plainBuf + GROUP_ID_LEN, text, textLen + 1);
-  size_t plainLen = GROUP_ID_LEN + textLen;
+  memcpy(plainBuf + GROUP_ID_LEN, &bcMsgId, MSG_ID_LEN);
+  memcpy(plainBuf + GROUP_ID_LEN + MSG_ID_LEN, text, textLen + 1);
+  size_t plainLen = GROUP_ID_LEN + MSG_ID_LEN + textLen;
 
   uint8_t toEncrypt[protocol::MAX_PAYLOAD + crypto::OVERHEAD];
   size_t toEncryptLen = plainLen;
@@ -214,8 +232,15 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_GROUP_MSG,
       encBuf, encLen, true, false, useCompressed);
-  if (len > 0) radio::send(pkt, len, neighbors::rssiToSf(neighbors::getMinRssi()));
-  return len > 0;
+  if (len > 0) {
+    uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
+    for (int i = 0; i < 3; i++) {
+      if (i > 0) delay(200 + (esp_random() % 200));
+      radio::send(pkt, len, sf);
+    }
+    return true;
+  }
+  return false;
 }
 
 void setOnUnicastSent(void (*cb)(const uint8_t* to, uint32_t msgId)) {

@@ -43,6 +43,7 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include "async_queues.h"
 #include "async_tasks.h"
 #include "duty_cycle/duty_cycle.h"
+#include "pkt_cache/pkt_cache.h"
 #include "log.h"
 
 #define BUTTON_PIN         0    // Heltec USER_SW
@@ -75,6 +76,25 @@ static uint8_t s_sf12BurstCount = 0;  // 2 цикла SF12 подряд кажд
 static uint32_t s_lastSf12Burst = 0;
 static uint32_t s_lastKeyRetry = 0;   // retry KEY_EXCHANGE каждые 30с для соседей без ключа
 static uint8_t rxBuf[protocol::SYNC_LEN + protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+
+#define BC_DEDUP_SIZE 32
+struct BcDedupEntry { uint8_t from[2]; uint32_t msgId; };
+static BcDedupEntry s_bcDedup[BC_DEDUP_SIZE];
+static uint8_t s_bcDedupIdx = 0;
+
+static bool bcDedupSeen(const uint8_t* from, uint32_t msgId) {
+  for (int i = 0; i < BC_DEDUP_SIZE; i++) {
+    if (s_bcDedup[i].from[0] == from[0] && s_bcDedup[i].from[1] == from[1] && s_bcDedup[i].msgId == msgId)
+      return true;
+  }
+  return false;
+}
+static void bcDedupAdd(const uint8_t* from, uint32_t msgId) {
+  s_bcDedup[s_bcDedupIdx].from[0] = from[0];
+  s_bcDedup[s_bcDedupIdx].from[1] = from[1];
+  s_bcDedup[s_bcDedupIdx].msgId = msgId;
+  s_bcDedupIdx = (s_bcDedupIdx + 1) % BC_DEDUP_SIZE;
+}
 
 /** Параметры следующего RX-слота для rxTask. Вызывать из rxTask. */
 void getNextRxSlotParams(uint8_t* sfOut, uint32_t* slotMsOut) {
@@ -271,11 +291,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
   char msgStrBuf[256];
   uint8_t fwdBuf[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
 
-  // Self-reception: свой KEY_EXCHANGE (обрезанный до 13B) — отбросить без лога
-  if (len == 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 &&
-      buf[2] == protocol::OP_KEY_EXCHANGE && !(buf[1] & 0x01) &&  // unicast
-      memcmp(buf + 3, node::getId(), protocol::NODE_ID_LEN) == 0) {
-    return;  // наш исходящий KEY_EXCHANGE, принятый по эху/отражению
+  // Self-reception: свой KEY_EXCHANGE (обрезанный) — отбросить без лога
+  if (buf[0] == protocol::SYNC_BYTE && buf[2] == protocol::OP_KEY_EXCHANGE && !(buf[1] & 0x01)) {
+    const uint8_t* fromPtr = (buf[1] & 0xF0) == 0x30 ? (buf + 5) : (buf + 3);
+    if (len >= 13 && memcmp(fromPtr, node::getId(), protocol::NODE_ID_LEN) == 0) {
+      return;  // наш исходящий KEY_EXCHANGE, принятый по эху/отражению
+    }
   }
 
   protocol::PacketHeader hdr;
@@ -306,11 +327,34 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         neighbors::onHello(from, rssi);
       }
       return;
+    } else if (len >= 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x30 &&
+               !(buf[1] & 0x01)) {
+      // v2.1 с pktId — обрезанный пакет (13 B = sync+ver+opcode+pktId+from), отправить NACK для retransmit
+      uint16_t pktId = (uint16_t)buf[3] | ((uint16_t)buf[4] << 8);
+      uint8_t from[protocol::NODE_ID_LEN];
+      memcpy(from, buf + 5, protocol::NODE_ID_LEN);
+      if (!node::isBroadcast(from) && !node::isInvalidNodeId(from) &&
+          memcmp(from, node::getId(), protocol::NODE_ID_LEN) != 0) {
+        neighbors::onHello(from, rssi);
+        if (pktId != 0) {
+          uint8_t nackPayload[2] = {(uint8_t)(pktId & 0xFF), (uint8_t)(pktId >> 8)};
+          uint8_t nackPkt[protocol::PAYLOAD_OFFSET + 2];
+          size_t nackLen = protocol::buildPacket(nackPkt, sizeof(nackPkt),
+              node::getId(), from, 31, protocol::OP_NACK, nackPayload, 2);
+          if (nackLen > 0) radio::send(nackPkt, nackLen, neighbors::rssiToSf(neighbors::getRssiFor(from)), true);
+        }
+      }
+      return;
     } else {
       // len==13 и opcode MSG/TELEMETRY/GROUP_MSG/KEY_EXCHANGE — обрезанный пакет (коллизия/SF), не спамить
+      // broadcast (buf[1]&0x01) MSG/GROUP_MSG/TELEMETRY с len<45 — частично обрезан (min payload 32), не спамить
+      // opcode 0x0D (NACK) с len!=23 — скорее всего коррупция KEY_EXCHANGE, не спамить
       bool truncated = (len == 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 &&
           (buf[2] == protocol::OP_MSG || buf[2] == protocol::OP_TELEMETRY || buf[2] == protocol::OP_GROUP_MSG ||
-           buf[2] == protocol::OP_KEY_EXCHANGE));
+           buf[2] == protocol::OP_KEY_EXCHANGE)) ||
+          (len < 45 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 && (buf[1] & 0x01) &&
+          (buf[2] == protocol::OP_MSG || buf[2] == protocol::OP_TELEMETRY || buf[2] == protocol::OP_GROUP_MSG)) ||
+          (buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 && buf[2] == protocol::OP_NACK && len != 23);
 #if defined(DEBUG_PACKET_DUMP)
       if (!truncated) {
         Serial.printf("[RiftLink] Parse FAIL len=%u rssi=%d hex=", (unsigned)len, rssi);
@@ -339,15 +383,17 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
   // HELLO — всегда broadcast, не ретранслируем (защита от парсинга с перепутанным to)
   // ROUTE_REQ/REPLY обрабатываются модулем routing
   bool needRelay = (hdr.ttl > 0) && (hdr.opcode != protocol::OP_ROUTE_REQ) &&
-      (hdr.opcode != protocol::OP_ROUTE_REPLY) && (hdr.opcode != protocol::OP_HELLO) && (
+      (hdr.opcode != protocol::OP_ROUTE_REPLY) && (hdr.opcode != protocol::OP_HELLO) &&
+      (hdr.opcode != protocol::OP_NACK) && (
       (!node::isForMe(hdr.to) && !node::isBroadcast(hdr.to)) ||
       (hdr.opcode == protocol::OP_GROUP_MSG) ||
       (hdr.opcode == protocol::OP_VOICE_MSG));
   if (needRelay) {
     memcpy(fwdBuf, buf, len);
     size_t ttlOff;
-    if (buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20) {
-      ttlOff = (buf[1] & 0x01) ? 11 : 19;  // v2: broadcast=11, unicast=19
+    if (buf[0] == protocol::SYNC_BYTE && ((buf[1] & 0xF0) == 0x20 || (buf[1] & 0xF0) == 0x30)) {
+      bool hasPktId = (buf[1] & 0xF0) == 0x30;
+      ttlOff = (buf[1] & 0x01) ? (hasPktId ? 13 : 11) : (hasPktId ? 21 : 19);  // v2/v2.1
     } else {
       ttlOff = (buf[0] == protocol::SYNC_BYTE) ? (protocol::SYNC_LEN + 1 + protocol::NODE_ID_LEN * 2) : (1 + protocol::NODE_ID_LEN * 2);
     }
@@ -363,7 +409,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         txSf = neighbors::rssiToSf(r);
       }
     }
-    radio::send(fwdBuf, len, txSf);
+    if (!radio::send(fwdBuf, len, txSf)) {
+      RIFTLINK_LOG_ERR("[RiftLink] relay sendQueue full, drop\n");
+    }
   }
 
   if (!node::isForMe(hdr.to) && !node::isBroadcast(hdr.to)) {
@@ -376,8 +424,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info
         RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
       }
+      bool hadKey = x25519_keys::hasKeyFor(hdr.from);
       x25519_keys::onKeyExchange(hdr.from, payload);
-      { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
+      { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12, true, hadKey); }
     } else if (hdr.opcode == protocol::OP_HELLO) {
       offline_queue::onNodeOnline(hdr.from);
       if (neighbors::onHello(hdr.from, rssi)) {
@@ -399,8 +448,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info
           RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
         }
+        bool hadKey = x25519_keys::hasKeyFor(hdr.from);
         x25519_keys::onKeyExchange(hdr.from, payload);
-        { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
+        { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12, true, hadKey); }
       }
       break;
 
@@ -449,7 +499,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
                 node::getId(), hdr.from, 31, protocol::OP_ACK,
                 ackPayload, msg_queue::MSG_ID_LEN, false, false);
-            if (ackLen > 0) radio::send(ackPkt, ackLen, neighbors::rssiToSf(neighbors::getRssiFor(hdr.from)));
+            if (ackLen > 0 && !radio::send(ackPkt, ackLen, neighbors::rssiToSf(neighbors::getRssiFor(hdr.from)))) {
+              RIFTLINK_LOG_ERR("[RiftLink] ACK sendQueue full, drop\n");
+            }
             msg = (const char*)(decBuf + off + msg_queue::MSG_ID_LEN);
             msgLen = decLen - off - msg_queue::MSG_ID_LEN;
           } else {
@@ -530,7 +582,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         uint8_t pongPkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
         size_t pongLen = protocol::buildPacket(pongPkt, sizeof(pongPkt),
             node::getId(), hdr.from, 31, protocol::OP_PONG, nullptr, 0);
-        if (pongLen > 0) radio::send(pongPkt, pongLen, neighbors::rssiToSf(neighbors::getRssiFor(hdr.from)));
+        if (pongLen > 0 && !radio::send(pongPkt, pongLen, neighbors::rssiToSf(neighbors::getRssiFor(hdr.from)))) {
+          RIFTLINK_LOG_ERR("[RiftLink] PONG sendQueue full, drop\n");
+        }
       }
       break;
 
@@ -548,6 +602,16 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       ble::notifyPong(hdr.from, rssi);
       break;
 
+    case protocol::OP_NACK:
+      if (payloadLen >= 2 && node::isForMe(hdr.to)) {
+        uint16_t pktId = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
+        if (pkt_cache::retransmitOnNack(hdr.from, pktId)) {
+          RIFTLINK_LOG_EVENT("[RiftLink] NACK retransmit pktId=%u to %02X%02X\n",
+              (unsigned)pktId, hdr.from[0], hdr.from[1]);
+        }
+      }
+      break;
+
     case protocol::OP_GROUP_MSG:
       if (payloadLen > 0 && protocol::isEncrypted(hdr)) {
         if (node::isForMe(hdr.from)) break;  // своё сообщение (relay echo) — пропуск
@@ -562,8 +626,19 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         uint32_t groupId;
         memcpy(&groupId, decBuf, GROUP_ID_LEN);
         if (!groups::isInGroup(groupId)) break;
-        const char* msg = (const char*)(decBuf + GROUP_ID_LEN);
-        size_t msgLen = decLen - GROUP_ID_LEN;
+        const char* msg;
+        size_t msgLen;
+        if (decLen >= GROUP_ID_LEN + msg_queue::MSG_ID_LEN) {
+          uint32_t bcMsgId;
+          memcpy(&bcMsgId, decBuf + GROUP_ID_LEN, msg_queue::MSG_ID_LEN);
+          if (bcDedupSeen(hdr.from, bcMsgId)) break;  // дубликат broadcast (3x repeat)
+          bcDedupAdd(hdr.from, bcMsgId);
+          msg = (const char*)(decBuf + GROUP_ID_LEN + msg_queue::MSG_ID_LEN);
+          msgLen = decLen - GROUP_ID_LEN - msg_queue::MSG_ID_LEN;
+        } else {
+          msg = (const char*)(decBuf + GROUP_ID_LEN);
+          msgLen = decLen - GROUP_ID_LEN;
+        }
         if (msgLen < 256) {
           memcpy(msgStrBuf, msg, msgLen);
           msgStrBuf[msgLen] = '\0';
@@ -685,6 +760,7 @@ void setup() {
   frag::init();
   telemetry::init();
   neighbors::init();
+  pkt_cache::init();
   groups::init();
   offline_queue::init();
   routing::init();

@@ -56,7 +56,9 @@ void queueDisplayLastMsg(const char* fromHex, const char* text) {
   item.screen = 4;
   if (fromHex) strncpy(item.fromHex, fromHex, 16);
   if (text) strncpy(item.text, text, 63);
-  xQueueSend(displayQueue, &item, 0);
+  if (xQueueSend(displayQueue, &item, 0) != pdTRUE) {
+    displaySetLastMsg(fromHex, text);  // fallback — не терять сообщение при переполнении
+  }
 }
 
 void queueDisplayRedraw(uint8_t screen, bool priority) {
@@ -163,7 +165,23 @@ static void rxTask(void* arg) {
             pitem.rssi = (int8_t)rssi;
             pitem.sf = sf;
             if (xQueueSend(packetQueue, &pitem, pdMS_TO_TICKS(30)) != pdTRUE) {
-              RIFTLINK_LOG_ERR("[RiftLink] packetQueue full, drop\n");
+              // MSG/ACK важнее HELLO — при переполнении вытесняем HELLO
+              bool added = false;
+              bool isMsgOrAck = (n >= 13 && rxBuf[0] == protocol::SYNC_BYTE &&
+                  (rxBuf[2] == protocol::OP_MSG || rxBuf[2] == protocol::OP_ACK));
+              if (isMsgOrAck) {
+                PacketQueueItem discarded;
+                if (xQueueReceive(packetQueue, &discarded, 0) == pdTRUE) {
+                  bool wasHello = (discarded.len == 13 && discarded.buf[0] == protocol::SYNC_BYTE &&
+                      discarded.buf[2] == protocol::OP_HELLO);
+                  if (wasHello) {
+                    added = (xQueueSend(packetQueue, &pitem, 0) == pdTRUE);
+                  } else {
+                    xQueueSendToFront(packetQueue, &discarded, 0);
+                  }
+                }
+              }
+              if (!added) RIFTLINK_LOG_ERR("[RiftLink] packetQueue full, drop\n");
             }
           }
         }

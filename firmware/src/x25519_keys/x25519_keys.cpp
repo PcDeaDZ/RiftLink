@@ -3,6 +3,7 @@
  */
 
 #include "x25519_keys.h"
+#include "pkt_cache/pkt_cache.h"
 #include "node/node.h"
 #include "radio/radio.h"
 #include "log.h"
@@ -28,8 +29,16 @@ struct PeerKey {
 static uint8_t s_pubKey[X25519_PUBKEY_LEN];
 static uint8_t s_secKey[crypto_box_SECRETKEYBYTES];
 static PeerKey s_peers[X25519_MAX_PEERS];
+static uint16_t s_pktIdCounter = 0;
 static bool s_inited = false;
 static SemaphoreHandle_t s_mutex = nullptr;
+
+// Троттлинг: не спамить KEY_EXCHANGE одному пиру — иначе забивают канал, MSG не проходят
+#define KEY_EXCHANGE_THROTTLE_MS 18000   // мин. интервал до повторной отправки тому же пиру
+#define KEY_RESPONSE_THROTTLE_MS 60000  // ответ когда ключ уже был — макс. раз в 60с (пир может повторить)
+struct ThrottleEntry { uint8_t peerId[protocol::NODE_ID_LEN]; uint32_t lastSend; };
+static ThrottleEntry s_throttle[4];
+static uint8_t s_throttleIdx = 0;
 
 namespace x25519_keys {
 
@@ -45,6 +54,7 @@ void init() {
       nvs_close(h);
       s_inited = true;
       memset(s_peers, 0, sizeof(s_peers));
+      memset(s_throttle, 0, sizeof(s_throttle));
       return;
     }
     nvs_close(h);
@@ -60,6 +70,7 @@ void init() {
     nvs_close(hw);
   }
   memset(s_peers, 0, sizeof(s_peers));
+  memset(s_throttle, 0, sizeof(s_throttle));
   s_inited = true;
 }
 
@@ -121,23 +132,51 @@ bool getKeyFor(const uint8_t* peerId, uint8_t* keyOut) {
   if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
   int idx = findPeer(peerId);
   bool ok = (idx >= 0 && keyOut);
-  if (ok) memcpy(keyOut, s_peers[idx].sharedKey, 32);
+  if (ok) {
+    memcpy(keyOut, s_peers[idx].sharedKey, 32);
+    s_peers[idx].timestamp = millis();  // активное использование — не вытеснять при eviction
+  }
   xSemaphoreGive(s_mutex);
   return ok;
 }
 
-void sendKeyExchange(const uint8_t* peerId, bool useSf12) {
+void sendKeyExchange(const uint8_t* peerId, bool useSf12, bool forceSend, bool hadKeyBefore) {
   if (!s_inited || !peerId || node::isForMe(peerId) || node::isBroadcast(peerId) || node::isInvalidNodeId(peerId)) return;
   if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return;
 
+  if (forceSend && !hadKeyBefore) {
+    // Первый ответ — без троттла, пир ждёт наш ключ
+  } else {
+    uint32_t throttleMs = hadKeyBefore ? KEY_RESPONSE_THROTTLE_MS : KEY_EXCHANGE_THROTTLE_MS;
+    uint32_t now = millis();
+    for (int i = 0; i < 4; i++) {
+      if (memcmp(s_throttle[i].peerId, peerId, protocol::NODE_ID_LEN) == 0) {
+        if (now - s_throttle[i].lastSend < throttleMs) {
+          xSemaphoreGive(s_mutex);
+          return;  // троттл — ключ уже был, не дрочить
+        }
+        break;
+      }
+    }
+  }
+
   RIFTLINK_LOG_EVENT("[RiftLink] Sending KEY_EXCHANGE to %02X%02X\n", peerId[0], peerId[1]);
 
-  uint8_t pkt[protocol::PAYLOAD_OFFSET + X25519_PUBKEY_LEN];
+  // Записать в throttle
+  memcpy(s_throttle[s_throttleIdx].peerId, peerId, protocol::NODE_ID_LEN);
+  s_throttle[s_throttleIdx].lastSend = millis();
+  s_throttleIdx = (s_throttleIdx + 1) % 4;
+
+  uint16_t pktId = ++s_pktIdCounter;
+  uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN_PKTID + X25519_PUBKEY_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), peerId, 31, protocol::OP_KEY_EXCHANGE,
-      s_pubKey, X25519_PUBKEY_LEN);
+      s_pubKey, X25519_PUBKEY_LEN, false, false, false, protocol::CHANNEL_DEFAULT, pktId);
   uint8_t txSf = useSf12 ? 12 : 0;
-  if (len > 0) radio::send(pkt, len, txSf, useSf12);
+  if (len > 0) {
+    pkt_cache::add(peerId, pktId, pkt, len);
+    radio::send(pkt, len, txSf, useSf12);
+  }
   xSemaphoreGive(s_mutex);
 }
 
