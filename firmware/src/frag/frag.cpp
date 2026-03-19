@@ -36,10 +36,6 @@ namespace frag {
 
 void init() {
   memset(s_slots, 0, sizeof(s_slots));
-  for (int i = 0; i < FRAG_REASSEMBLE_MAX; i++) {
-    s_slots[i].buf = (uint8_t*)malloc(4096);  // encrypted blob
-    s_slots[i].bufSize = 4096;
-  }
   s_msgIdCounter = (uint32_t)esp_random();
   s_inited = true;
 }
@@ -58,6 +54,7 @@ static ReassembleSlot* findFreeSlot() {
   for (int i = 0; i < FRAG_REASSEMBLE_MAX; i++) {
     if (!s_slots[i].inUse) return &s_slots[i];
     if (now - s_slots[i].lastTime > FRAG_TIMEOUT_MS) {
+      if (s_slots[i].buf) { free(s_slots[i].buf); s_slots[i].buf = nullptr; }
       s_slots[i].inUse = false;
       return &s_slots[i];
     }
@@ -129,6 +126,11 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
   if (!slot) {
     slot = findFreeSlot();
     if (!slot) return false;
+    if (!slot->buf) {
+      slot->buf = (uint8_t*)malloc(4096);
+      slot->bufSize = 4096;
+    }
+    if (!slot->buf) return false;
     slot->msgId = msgId;
     memcpy(slot->from, from, protocol::NODE_ID_LEN);
     memcpy(slot->to, to, protocol::NODE_ID_LEN);
@@ -155,6 +157,8 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
   size_t decLen = 0;
   if (!crypto::decryptFrom(slot->from, slot->buf, encLen, decBuf, &decLen)) {
     slot->inUse = false;
+    free(slot->buf);
+    slot->buf = nullptr;
     return false;
   }
 
@@ -171,11 +175,15 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
 
   if (plainLen > outMaxLen) {
     slot->inUse = false;
+    free(slot->buf);
+    slot->buf = nullptr;
     return false;
   }
   memcpy(out, plain, plainLen);
   *outLen = plainLen;
   slot->inUse = false;
+  free(slot->buf);
+  slot->buf = nullptr;
   return true;
 }
 

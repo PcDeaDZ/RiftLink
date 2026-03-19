@@ -21,7 +21,7 @@ void queueDeferredRelay(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t d
     const uint8_t* from, uint32_t payloadHash);
 /** Уведомить: услышали ретрансляцию (from+hash) — отменить наш pending relay */
 void relayHeard(const uint8_t* from, uint32_t payloadHash);
-/** Переносит готовые deferred ACK/send в sendQueue. Вызывается из drainTask. */
+/** Переносит готовые deferred ACK/send в sendQueue. Вызывается из radioSchedulerTask. */
 void flushDeferredSends();
 
 /** Поставить CMD_SET_LAST_MSG в displayQueue */

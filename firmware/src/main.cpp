@@ -210,7 +210,8 @@ void getNextRxSlotParams(uint8_t* sfOut, uint32_t* slotMsOut) {
   (void)aggressive;
   (void)nNeigh;
   if (sfOut) *sfOut = 7;
-  if (slotMsOut) *slotMsOut = 200;  // 200ms — MSG ~80B на SF7 ~50ms, запас на коллизии
+  // При 0 соседях — 800ms (как V3/V4 1200ms), иначе 200ms. Иначе discovery почти не ловит HELLO.
+  if (slotMsOut) *slotMsOut = (nNeigh == 0) ? 800 : 200;
 #endif
 }
 
@@ -314,6 +315,7 @@ void sendHello() {
     radio::send(pkt, len, txSf, false);
   }
 #endif
+  Serial.printf("[RiftLink] HELLO sent n=%d heap=%u\n", n, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
 
 void sendPoll() {
@@ -631,11 +633,15 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       break;
 
     case protocol::OP_HELLO:
+      Serial.printf("[RiftLink] HELLO rx from %02X%02X rssi=%d heap=%u\n",
+          hdr.from[0], hdr.from[1], rssi, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       clock_drift::onHelloReceived(hdr.from);
       offline_queue::onNodeOnline(hdr.from);
       {
         int nBefore = neighbors::getCount();
         if (neighbors::onHello(hdr.from, rssi)) {
+          Serial.printf("[RiftLink] Discovery: new neighbor %02X%02X heap=%u\n",
+              hdr.from[0], hdr.from[1], (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
           if (nBefore == 0) {
             sendHello();
             lastHello = millis();  // Немедленный HELLO — узел с 0 соседями добавит нас сразу (асимметрия N1↔N2)
@@ -972,55 +978,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 
 #define LED_PIN 35  // Heltec V3/V4
 
-#define DRAIN_TASK_STACK 4096
-#define DRAIN_TASK_PRIO 2
-
-static void drainTask(void* arg) {
-  vTaskDelay(pdMS_TO_TICKS(500));  // дать setup завершиться
-  for (;;) {
-    vTaskDelay(pdMS_TO_TICKS(50 + (esp_random() % 51)));  // jitter — не блокирует loop
-    flushDeferredSends();
-    if (!sendQueue || uxQueueMessagesWaiting(sendQueue) == 0) continue;  // нечего слать — не держим mutex, RX свободен
-    if (radio::takeMutex(pdMS_TO_TICKS(200)) != pdTRUE) continue;
-    SendQueueItem item;
-#define DRAIN_PACKETS_PER_CYCLE 4   // было 3 — быстрее освобождаем очередь
-#if defined(SF_FORCE_7)
-    for (int i = 0; i < DRAIN_PACKETS_PER_CYCLE && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
-      if (item.len >= 54 && item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_KEY_EXCHANGE) {
-        queueDeferredSend(item.buf, item.len, item.txSf, 500 + (esp_random() % 1501));
-        continue;
-      }
-      radio::sendDirectInternal(item.buf, item.len);
-      if (item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_MSG) {
-        vTaskDelay(pdMS_TO_TICKS(60));  // окно RX — дать получателю отправить ACK
-      }
-    }
-#else
-    int highSfDrained = 0;
-    for (int i = 0; i < DRAIN_PACKETS_PER_CYCLE && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
-      if (item.txSf >= 10 && highSfDrained >= 2) {
-        xQueueSendToFront(sendQueue, &item, 0);
-        break;
-      }
-      if (item.len >= 54 && item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_KEY_EXCHANGE) {
-        queueDeferredSend(item.buf, item.len, item.txSf, 500 + (esp_random() % 1501));
-        continue;
-      }
-      if (item.txSf >= 7 && item.txSf <= 12) {
-        radio::setSpreadingFactor(item.txSf);
-        if (item.txSf >= 10) {
-          highSfDrained++;
-          s_nextRxSf12 = true;
-        }
-      }
-      radio::sendDirectInternal(item.buf, item.len);
-      if (item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_MSG) {
-        vTaskDelay(pdMS_TO_TICKS(60));  // окно RX — дать получателю отправить ACK
-      }
-    }
-#endif
-    radio::releaseMutex();
-  }
+/** Callback из radioSchedulerTask: после TX на SF12 — следующий RX слот на SF12 (V4). */
+void onRadioSchedulerTxSf12(void) {
+  s_nextRxSf12 = true;
 }
 
 #if defined(USE_EINK)
@@ -1186,12 +1146,7 @@ static void runBootStateMachine() {
   if (packetQueue && sendQueue && displayQueue) {
     radio::setAsyncMode(true);
     displaySetButtonPolledExternally(true);
-    asyncTasksStart();
-#if defined(USE_EINK)
-    xTaskCreatePinnedToCore(drainTask, "drain", DRAIN_TASK_STACK, nullptr, DRAIN_TASK_PRIO, nullptr, 1);
-#else
-    xTaskCreate(drainTask, "drain", DRAIN_TASK_STACK, nullptr, DRAIN_TASK_PRIO, nullptr);
-#endif
+    asyncTasksStart();  // radioSchedulerTask = RX + drain в одном таске
   }
   displayShowScreenForceFull(0);
   s_bootTime = millis();
@@ -1408,7 +1363,7 @@ void loop() {
     }
   }
 
-  pollButtonAndQueue();  // drain вынесен в drainTask — loop не блокируется
+  pollButtonAndQueue();  // drain в radioSchedulerTask — loop не блокируется
 
   // Fallback: loop помогает drain packetQueue если packetTask не успевает (V3/V4/Paper)
   if (packetQueue && uxQueueMessagesWaiting(packetQueue) > 8) {
