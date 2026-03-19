@@ -14,7 +14,7 @@ static constexpr size_t PACKET_QUEUE_LEN =
 #if defined(USE_EINK)
     32;   // Paper: ~16KB heap; 64+WiFi давало OOM (ret=101)
 #else
-    48;   // V3/V4: discovery burst — HELLO, KEY_EXCHANGE, MSG
+    64;   // V3/V4: discovery burst — HELLO, KEY_EXCHANGE, MSG
 #endif
 static constexpr size_t SEND_QUEUE_LEN = 32;  // burst 1–15, ACK, relay, KEY_EXCHANGE
 static constexpr size_t DISPLAY_QUEUE_LEN = 12;  // burst HELLO → много Info redraw; coalesce в displayTask

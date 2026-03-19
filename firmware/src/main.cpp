@@ -476,7 +476,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         item.len = (uint16_t)decodedLen;
         item.rssi = (int8_t)rssi;
         item.sf = sf;
-        xQueueSend(packetQueue, &item, 0);
+        if (xQueueSend(packetQueue, &item, 0) != pdTRUE) {
+          handlePacket(decodedBuf, decodedLen, rssi, sf);  // fallback при полной очереди
+        }
       } else {
         handlePacket(decodedBuf, decodedLen, rssi, sf);
       }
@@ -553,7 +555,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           item.len = (uint16_t)decodedLen;
           item.rssi = (int8_t)rssi;
           item.sf = sf;
-          xQueueSend(packetQueue, &item, 0);
+          if (xQueueSend(packetQueue, &item, 0) != pdTRUE) {
+            handlePacket(decodedBuf, decodedLen, rssi, sf);  // fallback при полной очереди
+          }
         } else {
           handlePacket(decodedBuf, decodedLen, rssi, sf);
         }
@@ -840,8 +844,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         uint8_t pongPkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
         size_t pongLen = protocol::buildPacket(pongPkt, sizeof(pongPkt),
             node::getId(), hdr.from, 31, protocol::OP_PONG, nullptr, 0);
-        if (pongLen > 0 && !radio::send(pongPkt, pongLen, neighbors::rssiToSf(neighbors::getRssiFor(hdr.from)), true)) {
-          RIFTLINK_LOG_ERR("[RiftLink] PONG sendQueue full, drop\n");
+        if (pongLen > 0) {
+          uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(hdr.from));
+          if (txSf == 0) txSf = 12;
+          if (!radio::send(pongPkt, pongLen, txSf, true)) {
+            queueDeferredSend(pongPkt, pongLen, txSf, 50);  // fallback при полной sendQueue
+          }
         }
       }
       break;
@@ -1395,15 +1403,13 @@ void loop() {
 
   pollButtonAndQueue();  // drain вынесен в drainTask — loop не блокируется
 
-#if defined(USE_EINK)
-  // Paper: loop также обрабатывает packetQueue — fallback если packetTask не успевает/заблокирован
-  if (packetQueue) {
+  // Fallback: loop помогает drain packetQueue если packetTask не успевает (V3/V4/Paper)
+  if (packetQueue && uxQueueMessagesWaiting(packetQueue) > 8) {
     PacketQueueItem pitem;
     for (int i = 0; i < 8 && xQueueReceive(packetQueue, &pitem, 0) == pdTRUE; i++) {
       handlePacket(pitem.buf, pitem.len, (int)pitem.rssi, pitem.sf);
     }
   }
-#endif
 
   // Retry KEY_EXCHANGE: каждые 25–35с (jitter!) — иначе оба узла синхронно → коллизии → deadlock
   // Фаза по nodeId[0]: разные узлы смещены — меньше шанс одновременного TX
