@@ -403,12 +403,13 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
   // Relay: unicast не для нас, или GROUP_MSG (broadcast) с TTL>0
   // HELLO — всегда broadcast, не ретранслируем (защита от парсинга с перепутанным to)
   // ROUTE_REQ/REPLY обрабатываются модулем routing
+  // Broadcast relay только при 2+ соседях — иначе ping-pong между двумя устройствами, HELLO не проходят
   bool needRelay = (hdr.ttl > 0) && (hdr.opcode != protocol::OP_ROUTE_REQ) &&
       (hdr.opcode != protocol::OP_ROUTE_REPLY) && (hdr.opcode != protocol::OP_HELLO) &&
       (hdr.opcode != protocol::OP_NACK) && (
       (!node::isForMe(hdr.to) && !node::isBroadcast(hdr.to)) ||
-      (hdr.opcode == protocol::OP_GROUP_MSG) ||
-      (hdr.opcode == protocol::OP_VOICE_MSG));
+      ((hdr.opcode == protocol::OP_GROUP_MSG || hdr.opcode == protocol::OP_VOICE_MSG) &&
+       neighbors::getCount() >= 2));
   if (needRelay) {
     memcpy(fwdBuf, buf, len);
     size_t ttlOff;
@@ -730,7 +731,7 @@ static void drainTask(void* arg) {
     if (!sendQueue || radio::takeMutex(pdMS_TO_TICKS(200)) != pdTRUE) continue;
     SendQueueItem item;
 #if defined(SF_FORCE_7)
-    for (int i = 0; i < 2 && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
+    for (int i = 0; i < 3 && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
       if (item.len >= 54 && item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_KEY_EXCHANGE) {
         queueDeferredSend(item.buf, item.len, item.txSf, 500 + (esp_random() % 1501));
         continue;
@@ -739,8 +740,8 @@ static void drainTask(void* arg) {
     }
 #else
     int highSfDrained = 0;
-    for (int i = 0; i < 2 && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
-      if (item.txSf >= 10 && highSfDrained >= 1) {
+    for (int i = 0; i < 3 && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
+      if (item.txSf >= 10 && highSfDrained >= 2) {
         xQueueSendToFront(sendQueue, &item, 0);
         break;
       }

@@ -125,6 +125,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     uint8_t encBuf[protocol::MAX_PAYLOAD + crypto::OVERHEAD];
     size_t encLen = sizeof(encBuf);
     if (!crypto::encryptFor(to, toEncrypt, toEncryptLen, encBuf, &encLen)) {
+      RIFTLINK_LOG_ERR("[RiftLink] MSG encrypt FAIL (no key for %02X%02X)\n", to[0], to[1]);
       xSemaphoreGive(s_mutex);
       return false;
     }
@@ -150,7 +151,8 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     if (txSf == 0) txSf = 12;  // неизвестный сосед — SF12 для дальности
     bool ok = radio::send(slot->pkt, slot->pktLen, txSf);
     if (ok) {
-      queueDeferredSend(slot->pkt, slot->pktLen, txSf, 250 + (esp_random() % 100));  // 250–350 ms, без блокировки
+      queueDeferredSend(slot->pkt, slot->pktLen, txSf, 250 + (esp_random() % 100));   // copy2: 250–350 ms
+      queueDeferredSend(slot->pkt, slot->pktLen, txSf, 500 + (esp_random() % 150));   // copy3: 500–650 ms
     } else {
       RIFTLINK_LOG_ERR("[RiftLink] MSG sendQueue full, to %02X%02X — retry via update\n", to[0], to[1]);
     }
@@ -191,7 +193,10 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     xSemaphoreGive(s_mutex);
     if (len > 0) {
       uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
-      radio::send(pkt, len, sf);
+      if (!radio::send(pkt, len, sf)) {
+        RIFTLINK_LOG_ERR("[RiftLink] MSG broadcast sendQueue full, drop\n");
+        return false;
+      }
       queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));   // 2-я копия
       queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));   // 3-я копия
       return true;
@@ -239,7 +244,10 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
       encBuf, encLen, true, false, useCompressed);
   if (len > 0) {
     uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
-    radio::send(pkt, len, sf);
+    if (!radio::send(pkt, len, sf)) {
+      RIFTLINK_LOG_ERR("[RiftLink] MSG group sendQueue full, drop\n");
+      return false;
+    }
     queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));
     queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));
     return true;

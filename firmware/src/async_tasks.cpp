@@ -48,7 +48,7 @@ bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf, bool priority) {
 }
 
 #define DEFERRED_ACK_SLOTS 4
-#define DEFERRED_SEND_SLOTS 12   // MSG copy2, broadcast 2–3, KEY_EXCHANGE
+#define DEFERRED_SEND_SLOTS 24   // MSG copy2–3, broadcast 2–3, KEY_EXCHANGE — burst 1–15
 struct DeferredSlot {
   uint8_t buf[PACKET_BUF_SIZE];
   uint16_t len;
