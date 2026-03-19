@@ -436,6 +436,29 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         setState(() { for (var i = 0; i < _messages.length; i++) { final m = _messages[i]; if (!m.isIncoming && m.to == evt.from && m.msgId == evt.msgId) { _messages[i] = m.copyWith(status: _St.delivered); break; } } });
       } else if (evt is RiftLinkReadEvent) {
         setState(() { for (var i = 0; i < _messages.length; i++) { final m = _messages[i]; if (!m.isIncoming && m.to == evt.from && m.msgId == evt.msgId) { _messages[i] = m.copyWith(status: _St.read); break; } } });
+      } else if (evt is RiftLinkUndeliveredEvent) {
+        setState(() {
+          for (var i = 0; i < _messages.length; i++) {
+            final m = _messages[i];
+            if (!m.isIncoming && m.msgId == evt.msgId) {
+              final isBroadcast = evt.to.isEmpty || m.to == _broadcastTo;
+              if (isBroadcast || m.to == evt.to) {
+                _messages[i] = m.copyWith(status: _St.undelivered, delivered: evt.delivered ?? 0, total: evt.total ?? 0);
+                break;
+              }
+            }
+          }
+        });
+      } else if (evt is RiftLinkBroadcastDeliveryEvent) {
+        setState(() {
+          for (var i = 0; i < _messages.length; i++) {
+            final m = _messages[i];
+            if (!m.isIncoming && m.msgId == evt.msgId && (m.to == _broadcastTo || m.to == null)) {
+              _messages[i] = m.copyWith(status: evt.delivered > 0 ? _St.delivered : _St.undelivered, delivered: evt.delivered, total: evt.total);
+              break;
+            }
+          }
+        });
       } else if (evt is RiftLinkInfoEvent) {
         final bleDev = widget.ble.device;
         if (bleDev != null) _currentBleRemoteId = bleDev.remoteId.toString();
@@ -1247,9 +1270,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
             )),
           Row(mainAxisSize: MainAxisSize.min, children: [
             Flexible(child: Text(m.text, style: const TextStyle(color: AppColors.onSurface, fontSize: 14))),
-            if (!m.isIncoming && m.to != null) Padding(padding: const EdgeInsets.only(left: 6), child: Text(
-              m.status == _St.read ? '✓✓✓' : m.status == _St.delivered ? '✓✓' : '✓',
-              style: TextStyle(fontSize: 10, color: m.status == _St.read ? AppColors.primary : AppColors.onSurfaceVariant),
+            if (!m.isIncoming) Padding(padding: const EdgeInsets.only(left: 6), child: Text(
+              m.status == _St.undelivered
+                  ? (m.total != null && m.total! > 0 ? '✗ 0/${m.total}' : '✗')
+                  : m.status == _St.read
+                      ? '✓✓✓'
+                      : m.status == _St.delivered
+                          ? (m.delivered != null && m.total != null && m.total! > 0 ? '✓ ${m.delivered}/${m.total}' : '✓✓')
+                          : '✓',
+              style: TextStyle(fontSize: 10, color: m.status == _St.undelivered ? AppColors.error : (m.status == _St.read ? AppColors.primary : AppColors.onSurfaceVariant)),
             )),
             if (m.isIncoming && m.rssi != null && m.rssi != 0) Padding(padding: const EdgeInsets.only(left: 6), child: Text('${m.rssi}dBm', style: const TextStyle(fontSize: 9, color: AppColors.onSurfaceVariant))),
             if (m.isVoice && m.voiceData != null) IconButton(
@@ -1644,8 +1673,9 @@ class _AppMenuPopover extends StatelessWidget {
 
 // ── Data classes ──
 
-enum _St { sent, delivered, read }
+enum _St { sent, delivered, read, undelivered }
 
+/// Для broadcast: delivered/total — доставлено X из Y
 class _Msg {
   final String from;
   final String text;
@@ -1658,11 +1688,14 @@ class _Msg {
   final int? rssi;
   final DateTime? deleteAt;
   final _St status;
+  final int? delivered;  // broadcast: доставлено X
+  final int? total;     // broadcast: всего Y
 
-  _Msg({required this.from, required this.text, required this.isIncoming, this.isLocation = false, this.isVoice = false, this.voiceData, this.msgId, this.to, this.rssi, this.deleteAt, this.status = _St.sent});
+  _Msg({required this.from, required this.text, required this.isIncoming, this.isLocation = false, this.isVoice = false, this.voiceData, this.msgId, this.to, this.rssi, this.deleteAt, this.status = _St.sent, this.delivered, this.total});
 
-  _Msg copyWith({int? msgId, String? to, _St? status}) => _Msg(
+  _Msg copyWith({int? msgId, String? to, _St? status, int? delivered, int? total}) => _Msg(
     from: from, text: text, isIncoming: isIncoming, isLocation: isLocation, isVoice: isVoice, voiceData: voiceData,
     msgId: msgId ?? this.msgId, to: to ?? this.to, rssi: rssi, deleteAt: deleteAt, status: status ?? this.status,
+    delivered: delivered ?? this.delivered, total: total ?? this.total,
   );
 }

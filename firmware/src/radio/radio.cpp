@@ -102,6 +102,15 @@ uint32_t getTimeOnAir(size_t len) {
   return (uint32_t)lora->getTimeOnAir(len);
 }
 
+bool isChannelFree() {
+  if (!lora) return true;
+  if (!takeMutex(pdMS_TO_TICKS(50))) return false;  // не блокировать надолго
+  lora->standby();
+  int16_t cad = lora->scanChannel();
+  releaseMutex();
+  return (cad == RADIOLIB_CHANNEL_FREE);
+}
+
 void setAsyncMode(bool on) { s_asyncMode = on; }
 
 bool sendDirectInternal(const uint8_t* data, size_t len) {

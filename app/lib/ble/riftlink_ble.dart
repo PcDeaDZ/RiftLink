@@ -225,6 +225,19 @@ class RiftLinkBle {
             from: json['from'] as String? ?? '',
             msgId: (json['msgId'] as num?)?.toInt() ?? 0,
           );
+        } else if (evt == 'undelivered') {
+          yield RiftLinkUndeliveredEvent(
+            to: json['to'] as String? ?? '',
+            msgId: (json['msgId'] as num?)?.toInt() ?? 0,
+            delivered: (json['delivered'] as num?)?.toInt(),
+            total: (json['total'] as num?)?.toInt(),
+          );
+        } else if (evt == 'broadcast_delivery') {
+          yield RiftLinkBroadcastDeliveryEvent(
+            msgId: (json['msgId'] as num?)?.toInt() ?? 0,
+            delivered: (json['delivered'] as num?)?.toInt() ?? 0,
+            total: (json['total'] as num?)?.toInt() ?? 0,
+          );
         } else if (evt == 'info') {
           final nb = json['neighbors'];
           final neighbors = nb is List ? (nb as List).map((e) => e.toString()).toList() : <String>[];
@@ -402,6 +415,23 @@ class RiftLinkReadEvent extends RiftLinkEvent {
   final String from;
   final int msgId;
   RiftLinkReadEvent({required this.from, required this.msgId});
+}
+
+/// Unicast: ACK не получен. Broadcast: delivered=0 при total>0.
+class RiftLinkUndeliveredEvent extends RiftLinkEvent {
+  final String to;
+  final int msgId;
+  final int? delivered;  // для broadcast: 0
+  final int? total;      // для broadcast: кол-во соседей
+  RiftLinkUndeliveredEvent({required this.to, required this.msgId, this.delivered, this.total});
+}
+
+/// Broadcast: доставлено X из Y
+class RiftLinkBroadcastDeliveryEvent extends RiftLinkEvent {
+  final int msgId;
+  final int delivered;
+  final int total;
+  RiftLinkBroadcastDeliveryEvent({required this.msgId, required this.delivered, required this.total});
 }
 
 class RiftLinkInfoEvent extends RiftLinkEvent {

@@ -312,9 +312,8 @@ void sendMsg(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
   if (!msg_queue::enqueue(to, text, ttlMinutes)) {
     RIFTLINK_LOG_ERR("[RiftLink] Queue full or encrypt FAILED\n");
     ble::notifyError("send_failed", "Очередь полна или нет ключа шифрования");
-  } else if (node::isBroadcast(to)) {
-    ble::notifySent(protocol::BROADCAST_ID, 0);  // broadcast — без msgId, чтобы вкладка сообщений показывала отправку
   }
+  // broadcast "sent" с msgId — через setOnBroadcastSent (сопоставление с delivery)
 }
 
 void sendLocation(float lat, float lon, int16_t alt) {
@@ -622,8 +621,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       if (payloadLen >= msg_queue::MSG_ID_LEN) {
         uint32_t msgId;
         memcpy(&msgId, payload, msg_queue::MSG_ID_LEN);
-        msg_queue::onAckReceived(payload, payloadLen);
-        ble::notifyDelivered(hdr.from, msgId, rssi);
+        if (msg_queue::onAckReceived(hdr.from, payload, payloadLen)) {
+          ble::notifyDelivered(hdr.from, msgId, rssi);
+        }
       }
       break;
 
@@ -714,6 +714,16 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           bcDedupAdd(hdr.from, bcMsgId);
           msg = (const char*)(decBuf + GROUP_ID_LEN + msg_queue::MSG_ID_LEN);
           msgLen = decLen - GROUP_ID_LEN - msg_queue::MSG_ID_LEN;
+          // ACK отправителю — для статуса delivered X/Y
+          uint8_t ackPayload[msg_queue::MSG_ID_LEN];
+          memcpy(ackPayload, &bcMsgId, msg_queue::MSG_ID_LEN);
+          uint8_t ackPkt[protocol::PAYLOAD_OFFSET + msg_queue::MSG_ID_LEN];
+          size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
+              node::getId(), hdr.from, 31, protocol::OP_ACK, ackPayload, msg_queue::MSG_ID_LEN, false, false);
+          if (ackLen > 0) {
+            uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(hdr.from));
+            queueDeferredAck(ackPkt, ackLen, txSf, 80);  // как unicast — не коллидировать с burst отправителя
+          }
         } else {
           msg = (const char*)(decBuf + GROUP_ID_LEN);
           msgLen = decLen - GROUP_ID_LEN;
@@ -773,19 +783,24 @@ static void drainTask(void* arg) {
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(50 + (esp_random() % 51)));  // jitter — не блокирует loop
     flushDeferredSends();
-    if (!sendQueue || radio::takeMutex(pdMS_TO_TICKS(200)) != pdTRUE) continue;
+    if (!sendQueue || uxQueueMessagesWaiting(sendQueue) == 0) continue;  // нечего слать — не держим mutex, RX свободен
+    if (radio::takeMutex(pdMS_TO_TICKS(200)) != pdTRUE) continue;
     SendQueueItem item;
+#define DRAIN_PACKETS_PER_CYCLE 4   // было 3 — быстрее освобождаем очередь
 #if defined(SF_FORCE_7)
-    for (int i = 0; i < 3 && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
+    for (int i = 0; i < DRAIN_PACKETS_PER_CYCLE && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
       if (item.len >= 54 && item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_KEY_EXCHANGE) {
         queueDeferredSend(item.buf, item.len, item.txSf, 500 + (esp_random() % 1501));
         continue;
       }
       radio::sendDirectInternal(item.buf, item.len);
+      if (item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_MSG) {
+        vTaskDelay(pdMS_TO_TICKS(60));  // окно RX — дать получателю отправить ACK
+      }
     }
 #else
     int highSfDrained = 0;
-    for (int i = 0; i < 3 && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
+    for (int i = 0; i < DRAIN_PACKETS_PER_CYCLE && xQueueReceive(sendQueue, &item, 0) == pdTRUE; i++) {
       if (item.txSf >= 10 && highSfDrained >= 2) {
         xQueueSendToFront(sendQueue, &item, 0);
         break;
@@ -802,6 +817,9 @@ static void drainTask(void* arg) {
         }
       }
       radio::sendDirectInternal(item.buf, item.len);
+      if (item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_MSG) {
+        vTaskDelay(pdMS_TO_TICKS(60));  // окно RX — дать получателю отправить ACK
+      }
     }
 #endif
     radio::releaseMutex();
@@ -891,6 +909,9 @@ static void runBootStateMachine() {
   ble::setOnLocation(sendLocation);
   msg_queue::init();
   msg_queue::setOnUnicastSent([](const uint8_t* to, uint32_t msgId) { ble::notifySent(to, msgId); });
+  msg_queue::setOnUnicastUndelivered([](const uint8_t* to, uint32_t msgId) { ble::notifyUndelivered(to, msgId); });
+  msg_queue::setOnBroadcastSent([](uint32_t msgId) { ble::notifySent(protocol::BROADCAST_ID, msgId); });
+  msg_queue::setOnBroadcastDelivery([](uint32_t msgId, int d, int t) { ble::notifyBroadcastDelivery(msgId, d, t); });
   frag::init();
   telemetry::init();
   neighbors::init();

@@ -37,8 +37,10 @@ extern void getNextRxSlotParams(uint8_t* sfOut, uint32_t* slotMsOut);
 // Forward — реализация в main.cpp (async)
 extern void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf);
 
+#define ACK_RESERVE_SLOTS 4   // резерв для ACK — обычные пакеты отклоняются при ≤4 свободных
 bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf, bool priority) {
   if (!sendQueue || len > PACKET_BUF_SIZE) return false;
+  if (!priority && uxQueueSpacesAvailable(sendQueue) <= ACK_RESERVE_SLOTS) return false;
   SendQueueItem item;
   memcpy(item.buf, buf, len);
   item.len = (uint16_t)len;
@@ -102,7 +104,9 @@ void queueDeferredSend(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t de
       return;
     }
   }
-  queueSend(pkt, len, txSf, true);  // слоты заняты — сразу в очередь
+  if (!queueSend(pkt, len, txSf, true)) {
+    RIFTLINK_LOG_ERR("[RiftLink] deferred fallback sendQueue full, drop copy\n");
+  }
 }
 
 void flushDeferredSends() {

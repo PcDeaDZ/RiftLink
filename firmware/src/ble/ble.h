@@ -21,6 +21,10 @@ void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi = 0);
 void notifyRead(const uint8_t* from, uint32_t msgId, int rssi = 0);
 /** evt "sent" — unicast поставлен в очередь (to, msgId) */
 void notifySent(const uint8_t* to, uint32_t msgId);
+/** evt "undelivered" — ACK не получен после всех retry (to, msgId) */
+void notifyUndelivered(const uint8_t* to, uint32_t msgId);
+/** evt "broadcast_delivery" — delivered/total (msgId, delivered, total). При total>0 и delivered=0 — undelivered */
+void notifyBroadcastDelivery(uint32_t msgId, int delivered, int total);
 void notifyLocation(const uint8_t* from, float lat, float lon, int16_t alt, int rssi = 0);
 void notifyTelemetry(const uint8_t* from, uint16_t batteryMv, uint16_t heapKb, int rssi = 0);
 void notifyInfo();

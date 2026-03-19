@@ -483,6 +483,41 @@ void notifySent(const uint8_t* to, uint32_t msgId) {
   pRxChar->notify();
 }
 
+void notifyUndelivered(const uint8_t* to, uint32_t msgId) {
+  if (!pRxChar || !s_connected) return;
+
+  JsonDocument doc;
+  doc["evt"] = "undelivered";
+  char toHex[17] = {0};
+  for (int i = 0; i < 8; i++) snprintf(toHex + i*2, 3, "%02X", to[i]);
+  doc["to"] = toHex;
+  doc["msgId"] = msgId;
+
+  char buf[80];
+  size_t len = serializeJson(doc, buf);
+  pRxChar->setValue((uint8_t*)buf, len);
+  pRxChar->notify();
+}
+
+void notifyBroadcastDelivery(uint32_t msgId, int delivered, int total) {
+  if (!pRxChar || !s_connected) return;
+
+  JsonDocument doc;
+  if (total > 0 && delivered == 0) {
+    doc["evt"] = "undelivered";
+  } else {
+    doc["evt"] = "broadcast_delivery";
+  }
+  doc["msgId"] = msgId;
+  doc["delivered"] = delivered;
+  doc["total"] = total;
+
+  char buf[80];
+  size_t len = serializeJson(doc, buf);
+  pRxChar->setValue((uint8_t*)buf, len);
+  pRxChar->notify();
+}
+
 void notifyLocation(const uint8_t* from, float lat, float lon, int16_t alt, int rssi) {
   if (!pRxChar || !s_connected) return;
 
