@@ -103,8 +103,7 @@ enum PressType { PRESS_NONE = 0, PRESS_SHORT = 1, PRESS_LONG = 2 };
 #include <esp_task_wdt.h>
 #include "../../../radio/radio.h"
 static void busyCallback(const void*) {
-  esp_task_wdt_status_t st;
-  if (esp_task_wdt_status(NULL, &st) == ESP_OK) esp_task_wdt_reset();
+  if (esp_task_wdt_status(NULL) == ESP_OK) esp_task_wdt_reset();
 }
 // Глобальный SPI (FSPI) вместо HSPI — workaround hang в beginTransaction на ESP32-S3
 #define EINK_USE_GLOBAL_SPI 1

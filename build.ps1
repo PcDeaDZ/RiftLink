@@ -4,7 +4,7 @@
 
 param(
     [switch]$Setup,     # Установка зависимостей (Python, PlatformIO, Flutter, Android SDK)
-    [switch]$Update,    # Обновление из репозитория (git pull)
+    [switch]$Update,    # Обновление из репозитория (перезапись локальных изменений)
     [switch]$Flash,
     [switch]$Monitor,
     [switch]$Ota,
@@ -144,11 +144,12 @@ function Invoke-Setup {
     Write-Host ""
 }
 
-# --- Обновление из репозитория ---
+# --- Обновление из репозитория (перезапись всех локальных изменений) ---
 function Invoke-Update {
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host "  RiftLink — обновление из репозитория" -ForegroundColor Cyan
+    Write-Host "  (перезапись всех локальных изменений)" -ForegroundColor Gray
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host ""
     $gitDir = Join-Path $ScriptRoot ".git"
@@ -158,13 +159,16 @@ function Invoke-Update {
     }
     try {
         Push-Location $ScriptRoot
-        git pull
-        $ok = $LASTEXITCODE -eq 0
-        if ($ok) {
-            Write-Host ""
-            Write-Host "Готово! Обновление завершено." -ForegroundColor Green
-        }
-        return $ok
+        git fetch origin
+        if ($LASTEXITCODE -ne 0) { return $false }
+        $branch = git rev-parse --abbrev-ref HEAD 2>$null
+        if (-not $branch) { $branch = "main" }
+        git reset --hard "origin/$branch"
+        if ($LASTEXITCODE -ne 0) { return $false }
+        git clean -fd
+        Write-Host ""
+        Write-Host "Готово! Репозиторий обновлён." -ForegroundColor Green
+        return $true
     } finally {
         Pop-Location
     }
@@ -254,7 +258,7 @@ function Show-Menu {
     Write-Host ""
     Write-Host "  Окружение:"
     Write-Host "    8. Setup — установка зависимостей (Python, PlatformIO, Flutter, Android)"
-    Write-Host "    9. Обновление из репозитория (git pull)"
+    Write-Host "    9. Обновление из репозитория (перезапись локальных изменений)"
     Write-Host ""
     Write-Host "    0. Выход"
     Write-Host ""

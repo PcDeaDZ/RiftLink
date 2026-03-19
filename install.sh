@@ -40,8 +40,8 @@ echo ""
 # 2. Клонирование
 echo "[2/3] Клонирование репозитория..."
 if [[ -d "$DEST/.git" ]]; then
-    echo "  Папка $DEST уже существует (git). Обновление..."
-    (cd "$DEST" && git pull)
+    echo "  Папка $DEST уже существует (git). Обновление (перезапись локальных изменений)..."
+    (cd "$DEST" && git fetch origin && git reset --hard "origin/$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)" && git clean -fd)
 else
     git clone "$REPO" "$DEST"
 fi

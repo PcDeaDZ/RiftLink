@@ -221,25 +221,27 @@ do_setup() {
     echo "  Сборка: ./build.sh --v4"
     echo "  Прошивка: ./build.sh --v4 --flash"
     echo "  APK: ./build.sh --app --install"
+    echo "  Обновление репо: ./update.sh   (перезапись локальных изменений)"
     echo ""
 }
 
-# --- Обновление из репозитория ---
+# --- Обновление из репозитория (перезапись всех локальных изменений) ---
 do_update() {
     echo ""
     echo -e "\033[36m========================================"
     echo "  RiftLink — обновление из репозитория"
+    echo "  (перезапись всех локальных изменений)"
     echo -e "========================================\033[0m"
     echo ""
     if [[ ! -d "$SCRIPT_DIR/.git" ]]; then
         echo -e "\033[31m[ОШИБКА] Не git-репозиторий: $SCRIPT_DIR\033[0m"
         return 1
     fi
-    (cd "$SCRIPT_DIR" && git pull)
+    (cd "$SCRIPT_DIR" && git fetch origin && git reset --hard "origin/$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)" && git clean -fd)
     local ret=$?
     if [[ $ret -eq 0 ]]; then
         echo ""
-        echo -e "\033[32mГотово! Обновление завершено.\033[0m"
+        echo -e "\033[32mГотово! Репозиторий обновлён.\033[0m"
     fi
     return $ret
 }
@@ -283,7 +285,7 @@ show_menu() {
     echo ""
     echo "  Окружение:"
     echo "    8. Setup — установка зависимостей (Python, PlatformIO, Flutter, Android)"
-    echo "    9. Обновление из репозитория (git pull)"
+    echo "    9. Обновление из репозитория (перезапись локальных изменений)"
     echo ""
     echo "    0. Выход"
     echo ""

@@ -33,9 +33,13 @@ Write-Host ""
 # 2. Клонирование
 Write-Host "[2/3] Клонирование репозитория..." -ForegroundColor Yellow
 if (Test-Path (Join-Path $Dest ".git")) {
-    Write-Host "  Папка $Dest уже существует. Обновление..."
+    Write-Host "  Папка $Dest уже существует. Обновление (перезапись локальных изменений)..."
     Push-Location $Dest
-    git pull
+    git fetch origin
+    $branch = git rev-parse --abbrev-ref HEAD 2>$null
+    if (-not $branch) { $branch = "main" }
+    git reset --hard "origin/$branch"
+    git clean -fd
     Pop-Location
 } else {
     git clone $Repo $Dest

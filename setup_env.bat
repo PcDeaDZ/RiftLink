@@ -223,6 +223,7 @@ echo Сборка прошивки:    cd firmware ^&^& pio run -e heltec_v4
 echo Прошивка:           cd firmware ^&^& pio run -e heltec_v4 -t upload
 echo Сборка APK:         cd app ^&^& flutter build apk --release
 echo Тесты:              pytest
+echo Обновление репо:    update.bat   (перезапись локальных изменений)
 echo.
 echo Если сборка APK падает: flutter doctor --android-licenses
 echo.
