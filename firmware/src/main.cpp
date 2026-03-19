@@ -16,6 +16,7 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #endif
 #include <nvs_flash.h>
 #include <esp_err.h>
+#include <esp_heap_caps.h>
 
 #include "radio/radio.h"
 #include "protocol/packet.h"
@@ -331,7 +332,6 @@ void sendMsg(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     return;
   }
   if (!msg_queue::enqueue(to, text, ttlMinutes)) {
-    RIFTLINK_LOG_ERR("[RiftLink] Queue full or encrypt FAILED\n");
     ble::notifyError("send_failed", "Очередь полна или нет ключа шифрования");
   }
   // broadcast "sent" с msgId — через setOnBroadcastSent (сопоставление с delivery)
@@ -1123,15 +1123,17 @@ static void runBootStateMachine() {
   routing::init();
   voice_frag::init();
   powersave::init();
+  // Очереди, затем WiFi/ESP-NOW до async tasks — event loop WiFi нужен heap (~4KB task)
+  if (!asyncQueuesInit()) {
+    RIFTLINK_LOG_ERR("[RiftLink] Async queues init FAILED\n");
+  }
   if (wifi::isAvailable()) {
+    Serial.printf("[RiftLink] Heap before ESP-NOW: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     esp_now_slots::init();
     if (wifi::hasCredentials()) wifi::connect();
   }
   gps::init();
-  displayShowScreenForceFull(0);
-  if (!asyncQueuesInit()) {
-    RIFTLINK_LOG_ERR("[RiftLink] Async queues init FAILED\n");
-  } else {
+  if (packetQueue && sendQueue && displayQueue) {
     radio::setAsyncMode(true);
     displaySetButtonPolledExternally(true);
     asyncTasksStart();
@@ -1141,6 +1143,7 @@ static void runBootStateMachine() {
     xTaskCreate(drainTask, "drain", DRAIN_TASK_STACK, nullptr, DRAIN_TASK_PRIO, nullptr);
 #endif
   }
+  displayShowScreenForceFull(0);
   s_bootTime = millis();
   s_lastSf12Burst = millis();
   s_lastKeyRetry = millis() + (node::getId()[0] % 16) * 500;

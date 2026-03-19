@@ -30,6 +30,12 @@
 #define MAX_PENDING           8
 #define MAX_PENDING_BROADCAST 4
 #define MAX_RETRIES           4   // макс. повторов при отсутствии ACK (не вечно)
+// Paper: 2 deferred copies (sendQueue 16) — экономия слотов при heap ~10KB
+#if defined(USE_EINK)
+#define BROADCAST_DEFERRED_COPIES 2
+#else
+#define BROADCAST_DEFERRED_COPIES 3
+#endif
 #define BROADCAST_ACK_TIMEOUT_MS 12000  // 12 с — ждём ACK от соседей
 #define MUTEX_TIMEOUT_MS 100
 
@@ -188,6 +194,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
 
     PendingMsg* slot = findFreeSlot();
     if (!slot) {
+      RIFTLINK_LOG_ERR("[RiftLink] MSG pending slots full (max %d)\n", MAX_PENDING);
       xSemaphoreGive(s_mutex);
       return false;
     }
@@ -272,7 +279,10 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
 
     uint8_t encBuf[protocol::MAX_PAYLOAD + crypto::OVERHEAD];
     size_t encLen = sizeof(encBuf);
-    if (!crypto::encrypt(toEncrypt, toEncryptLen, encBuf, &encLen)) return false;
+    if (!crypto::encrypt(toEncrypt, toEncryptLen, encBuf, &encLen)) {
+      RIFTLINK_LOG_ERR("[RiftLink] MSG broadcast encrypt FAILED\n");
+      return false;
+    }
 
     uint8_t pkt[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
     size_t len = protocol::buildPacket(pkt, sizeof(pkt),
@@ -289,9 +299,11 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
         return false;
       }
       if (s_onBroadcastSent) s_onBroadcastSent(bcMsgId);
-      queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));   // 2-я копия
-      queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));   // 3-я копия
-      queueDeferredSend(pkt, len, sf, 800 + (esp_random() % 150));   // 4-я копия: 800–950 ms
+      queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));
+      if (BROADCAST_DEFERRED_COPIES >= 2)
+        queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));
+      if (BROADCAST_DEFERRED_COPIES >= 3)
+        queueDeferredSend(pkt, len, sf, 800 + (esp_random() % 150));
       return true;
     }
     return false;
@@ -351,8 +363,10 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
     }
     if (s_onBroadcastSent) s_onBroadcastSent(bcMsgId);
     queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));
-    queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));
-    queueDeferredSend(pkt, len, sf, 800 + (esp_random() % 150));   // 4-я копия
+    if (BROADCAST_DEFERRED_COPIES >= 2)
+      queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));
+    if (BROADCAST_DEFERRED_COPIES >= 3)
+      queueDeferredSend(pkt, len, sf, 800 + (esp_random() % 150));
     return true;
   }
   return false;

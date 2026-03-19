@@ -8,7 +8,6 @@
 #include "node/node.h"
 #include <esp_wifi.h>
 #include <esp_now.h>
-#include <WiFi.h>
 #include <Arduino.h>
 #include <string.h>
 
@@ -47,8 +46,8 @@ static void pruneRtsCache() {
   s_rtsCount = w;
 }
 
-static void recvCb(const uint8_t* mac, const uint8_t* data, int len) {
-  (void)mac;
+static void recvCb(const esp_now_recv_info_t* recv_info, const uint8_t* data, int len) {
+  (void)recv_info;
   if (!data || len < 19) return;
   if (data[0] != (RTS_COMPANY_ID & 0xFF) || data[1] != ((RTS_COMPANY_ID >> 8) & 0xFF)) return;
   if (data[2] != 0x52 || data[3] != 0x54 || data[4] != 0x53) return;  // "RTS"
@@ -71,11 +70,15 @@ void init() {
   s_rtsCount = 0;
   s_ok = false;
 
-  WiFi.mode(WIFI_STA);
-  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  // esp_wifi API вместо WiFi.mode() — единообразие с wifi::init(), меньше обвязки Arduino
+  esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+  if (err != ESP_OK) return;
+  err = esp_wifi_start();
+  if (err != ESP_OK) return;
   delay(200);  // дать WiFi время на запуск
+  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
 
-  esp_err_t err = esp_now_init();
+  err = esp_now_init();
   if (err != ESP_OK) return;
 
   esp_now_peer_info_t peer = {};

@@ -1,5 +1,5 @@
 #!/bin/bash
-# RiftLink — установка «в один клик»: git clone + setup_env
+# RiftLink — установка «в один клик»: git clone + build.sh --setup
 # Использование: curl -fsSL https://raw.githubusercontent.com/PcDeaDZ/RiftLink/master/install.sh | bash
 # Или: wget -qO- https://raw.../install.sh | bash
 #
@@ -47,14 +47,14 @@ else
 fi
 echo ""
 
-# 3. Запуск setup_env
-echo "[3/3] Установка зависимостей (setup_env.sh)..."
+# 3. Запуск setup (build.sh --setup)
+echo "[3/3] Установка зависимостей (build.sh --setup)..."
 cd "$DEST"
-if [[ -f setup_env.sh ]]; then
-    chmod +x setup_env.sh
-    ./setup_env.sh
+if [[ -f build.sh ]]; then
+    chmod +x build.sh
+    ./build.sh --setup
 else
-    echo "[ОШИБКА] setup_env.sh не найден в $DEST"
+    echo "[ОШИБКА] build.sh не найден в $DEST"
     exit 1
 fi
 

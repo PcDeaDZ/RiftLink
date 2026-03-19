@@ -5,6 +5,7 @@
  */
 
 #include "../../display.h"
+#include "../../display_tabs.h"
 #include "bootscreen_paper.h"
 #include "locale/locale.h"
 #include "selftest/selftest.h"
@@ -46,15 +47,6 @@
 #define ICON_H 8
 #define ICON_SCALE 2
 
-static const uint8_t ICON_MAIN[]  = {0x08,0x0C,0x0E,0x08,0x08,0x08,0x1C,0x00};
-static const uint8_t ICON_INFO[]  = {0x00,0x1C,0x08,0x08,0x08,0x08,0x1C,0x00};
-static const uint8_t ICON_WIFI[]  = {0x00,0x08,0x14,0x22,0x41,0x22,0x14,0x08};
-static const uint8_t ICON_SYS[]   = {0x18,0x3C,0x5A,0xBD,0xBD,0x5A,0x3C,0x18};
-static const uint8_t ICON_MSG[]   = {0x3C,0x42,0x42,0x42,0x42,0x3C,0x7E,0x00};
-static const uint8_t ICON_LANG[]  = {0x3C,0x42,0x99,0xBD,0xBD,0x99,0x42,0x3C};
-static const uint8_t ICON_GPS[]   = {0x0C,0x1E,0x1E,0x1E,0x3F,0x1E,0x0C,0x00};
-static const uint8_t* TAB_ICONS_NO_WIFI[] = {ICON_MAIN, ICON_INFO, ICON_SYS, ICON_MSG, ICON_LANG, ICON_GPS};
-static const uint8_t* TAB_ICONS_WIFI[] = {ICON_MAIN, ICON_INFO, ICON_WIFI, ICON_SYS, ICON_MSG, ICON_LANG, ICON_GPS};
 #define CONTENT_Y TAB_H
 #define CONTENT_H (SCREEN_HEIGHT - TAB_H)
 #define LINE_H 12
@@ -106,21 +98,6 @@ static char s_lastMsgText[64] = {0};
 #define POST_PRESS_DEBOUNCE_MS 200  // пауза после обработки нажатия — против двойного срабатывания
 #define LED_PIN 35  // Heltec V3/V4 — мигание при нажатии (обратная связь)
 enum PressType { PRESS_NONE = 0, PRESS_SHORT = 1, PRESS_LONG = 2 };
-
-static int getTabCount() {
-  return wifi::isAvailable() ? (gps::isPresent() ? 7 : 6) : (gps::isPresent() ? 6 : 5);
-}
-
-enum ContentTab { CT_MAIN, CT_INFO, CT_WIFI, CT_SYS, CT_MSG, CT_LANG, CT_GPS };
-static ContentTab contentForTab(int tab) {
-  if (wifi::isAvailable()) {
-    switch (tab) { case 0: return CT_MAIN; case 1: return CT_INFO; case 2: return CT_WIFI;
-      case 3: return CT_SYS; case 4: return CT_MSG; case 5: return CT_LANG; default: return CT_GPS; }
-  } else {
-    switch (tab) { case 0: return CT_MAIN; case 1: return CT_INFO; case 2: return CT_SYS;
-      case 3: return CT_MSG; case 4: return CT_LANG; default: return CT_GPS; }
-  }
-}
 
 #if defined(ESP32)
 static SPIClass hspi(HSPI);
@@ -175,29 +152,29 @@ static void drawContentLine(int line, const char* s, bool useUtf8 = false) {
 
 /** Хеш контента вкладки — для пропуска идентичных кадров (как Meshtastic checkFrameMatchesPrevious) */
 static uint32_t computeContentHash(int tab) {
-  ContentTab ct = contentForTab(tab);
+  display_tabs::ContentTab ct = display_tabs::contentForTab(tab);
   uint32_t h = (uint32_t)tab * 31;
-  if (ct == CT_MAIN) {
+  if (ct == display_tabs::CT_MAIN) {
     const uint8_t* id = node::getId();
     h ^= id[0] ^ (id[1] << 8) ^ (id[2] << 16) ^ (id[3] << 24);
     h ^= (uint32_t)region::getChannel() * 7;
     h ^= (uint32_t)(region::getFreq() * 100) * 11;
     h ^= (uint32_t)neighbors::getCount() * 13;
-  } else if (ct == CT_INFO) {
+  } else if (ct == display_tabs::CT_INFO) {
     char nick[17];
     node::getNickname(nick, sizeof(nick));
     for (int i = 0; nick[i] && i < 16; i++) h = h * 31 + (uint8_t)nick[i];
     h ^= (uint32_t)(region::getFreq() * 100) * 17;
-  } else if (ct == CT_WIFI) {
+  } else if (ct == display_tabs::CT_WIFI) {
     char ssid[24] = {0}, ip[20] = {0};
     wifi::getStatus(ssid, sizeof(ssid), ip, sizeof(ip));
     for (int i = 0; ssid[i] && i < 23; i++) h = h * 31 + (uint8_t)ssid[i];
     for (int i = 0; ip[i] && i < 19; i++) h = h * 31 + (uint8_t)ip[i];
     h ^= ota::isActive() ? 0x1234 : 0;
-  } else if (ct == CT_MSG) {
+  } else if (ct == display_tabs::CT_MSG) {
     for (int i = 0; s_lastMsgFrom[i] && i < 16; i++) h = h * 31 + (uint8_t)s_lastMsgFrom[i];
     for (int i = 0; s_lastMsgText[i] && i < 63; i++) h = h * 31 + (uint8_t)s_lastMsgText[i];
-  } else if (ct == CT_GPS && gps::isPresent()) {
+  } else if (ct == display_tabs::CT_GPS && gps::isPresent()) {
     h ^= gps::isEnabled() ? 1 : 0;
     h ^= gps::hasFix() ? 2 : 0;
     h ^= (uint32_t)gps::getSatellites() * 19;
@@ -301,6 +278,7 @@ void displayInit() {
   model = EINK_E0213A367;
 #endif
 
+  pinMode(EINK_CS, OUTPUT);   // иначе __digitalWrite: IO 4 is not set as GPIO (Arduino 3.x)
   pinMode(EINK_DC, OUTPUT);
   pinMode(EINK_BUSY, INPUT);
   pinMode(EINK_RST, OUTPUT);
@@ -353,13 +331,19 @@ void displayInit() {
     Serial.println("[RiftLink] E-Ink init (E0213A367 V1.2)...");
     dispB73 = new DispB73(GxEPD2_213_E0213A367(EINK_CS, EINK_DC, EINK_RST, EINK_BUSY, hspi));
     dispB73->epd2.setBusyCallback(busyCallback);
+    Serial.println("[RiftLink] E-Ink epd init...");
     dispB73->init(0, true, 20, false);
+    Serial.println("[RiftLink] E-Ink epd init ok");
     dispB73->setRotation(3);
     dispB73->fillScreen(GxEPD_WHITE);
     dispB73->setTextColor(GxEPD_BLACK);
     dispB73->setTextSize(1);
     dispB73->cp437(true);
+    // E0213A367: BUSY=HIGH когда занят; pull-down при idle — иначе плавающий пин даёт зависание
+    pinMode(EINK_BUSY, INPUT_PULLDOWN);
+    Serial.println("[RiftLink] E-Ink display refresh (~3-5s)...");
     dispB73->display(false);
+    Serial.println("[RiftLink] E-Ink display ok");
     delay(200);  // панель должна стабилизироваться после первого display()
     s_lastDisplayEnd = millis();
     s_previousRunMs = millis();
@@ -611,11 +595,11 @@ static void drawFrame(int activeTab) {
   if (!disp) return;
   disp->fillScreen(GxEPD_WHITE);
   disp->setTextColor(GxEPD_BLACK);
-  int nTabs = getTabCount();
+  int nTabs = display_tabs::getTabCount();
   int tabW = SCREEN_WIDTH / nTabs;
   int iconSize = ICON_W * ICON_SCALE;
   for (int i = 0; i < nTabs; i++) {
-    const uint8_t* icon = wifi::isAvailable() ? TAB_ICONS_WIFI[i] : TAB_ICONS_NO_WIFI[i];
+    const uint8_t* icon = display_tabs::getIconForTab(i);
     int x = i * tabW;
     int iconX = x + (tabW - iconSize) / 2;
     int iconY = (TAB_H - iconSize) / 2;
@@ -754,14 +738,14 @@ static void drawContentGps() {
 
 static void drawScreenContent(int tab) {
   drawFrame(tab);
-  switch (contentForTab(tab)) {
-    case CT_MAIN: drawContentMain(); break;
-    case CT_INFO: drawContentInfo(); break;
-    case CT_WIFI: drawContentWiFi(); break;
-    case CT_SYS: drawContentSys(); break;
-    case CT_MSG: drawContentMsg(); break;
-    case CT_LANG: drawContentLang(); break;
-    case CT_GPS: drawContentGps(); break;
+  switch (display_tabs::contentForTab(tab)) {
+    case display_tabs::CT_MAIN: drawContentMain(); break;
+    case display_tabs::CT_INFO: drawContentInfo(); break;
+    case display_tabs::CT_WIFI: drawContentWiFi(); break;
+    case display_tabs::CT_SYS: drawContentSys(); break;
+    case display_tabs::CT_MSG: drawContentMsg(); break;
+    case display_tabs::CT_LANG: drawContentLang(); break;
+    case display_tabs::CT_GPS: drawContentGps(); break;
   }
 }
 
@@ -780,8 +764,8 @@ static bool performDisplayUpdate(int tab, bool isResponsive, bool forceUpdate = 
 
   drawScreenContent(tab);
   uint32_t hash = computeContentHash(tab);
-  ContentTab ct = contentForTab(tab);
-  if (!forceUpdate && hash == s_previousImageHash && ct != CT_SYS && ct != CT_LANG) {
+  display_tabs::ContentTab ct = display_tabs::contentForTab(tab);
+  if (!forceUpdate && hash == s_previousImageHash && ct != display_tabs::CT_SYS && ct != display_tabs::CT_LANG) {
     s_previousRunMs = now;  // не спамить — иначе CPU burn при неизменном контенте
     return false;
   }
@@ -857,12 +841,12 @@ void displaySetLastMsg(const char* fromHex, const char* text) {
   s_lastActivityTime = millis();
   if (fromHex) { strncpy(s_lastMsgFrom, fromHex, 16); s_lastMsgFrom[16] = '\0'; }
   if (text) { strncpy(s_lastMsgText, text, 63); s_lastMsgText[63] = '\0'; }
-  if (contentForTab(s_currentScreen) == CT_MSG) s_needRedrawMsg = true;
+  if (display_tabs::contentForTab(s_currentScreen) == display_tabs::CT_MSG) s_needRedrawMsg = true;
 }
 
 void displayShowScreen(int screen) {
   s_lastActivityTime = millis();
-  int nTabs = getTabCount();
+  int nTabs = display_tabs::getTabCount();
   if (screen >= nTabs) screen = nTabs - 1;
   s_currentScreen = screen;
   s_previousRunMs = 0;
@@ -871,7 +855,7 @@ void displayShowScreen(int screen) {
 }
 
 void displayShowScreenForceFull(int screen) {
-  int nTabs = getTabCount();
+  int nTabs = display_tabs::getTabCount();
   if (screen >= nTabs) screen = nTabs - 1;
   s_currentScreen = screen;
   s_previousRunMs = 0;
@@ -883,26 +867,26 @@ int displayGetCurrentScreen() {
 }
 
 int displayGetNextScreen(int current) {
-  return (current + 1) % getTabCount();
+  return (current + 1) % display_tabs::getTabCount();
 }
 
 void displayOnLongPress(int screen) {
   s_lastActivityTime = millis();
   ensureCooldownBeforeDisplay();
-  ContentTab ct = contentForTab(screen);
-  if (ct == CT_MAIN) {
+  display_tabs::ContentTab ct = display_tabs::contentForTab(screen);
+  if (ct == display_tabs::CT_MAIN) {
     displayShowRegionPicker();
     s_previousImageHash = 0;
     drawScreen(s_currentScreen);
-  } else if (ct == CT_LANG) {
+  } else if (ct == display_tabs::CT_LANG) {
     displayShowLanguagePicker();
     s_previousImageHash = 0;
     drawScreen(s_currentScreen);
-  } else if (ct == CT_GPS && gps::isPresent()) {
+  } else if (ct == display_tabs::CT_GPS && gps::isPresent()) {
     gps::toggle();
     s_previousImageHash = 0;
     drawScreen(s_currentScreen);
-  } else if (ct == CT_SYS) {
+  } else if (ct == display_tabs::CT_SYS) {
     selftest::run(nullptr);
     s_previousImageHash = 0;
     drawScreen(s_currentScreen);
@@ -950,7 +934,7 @@ bool displayUpdate() {
     }
     return false;
   }
-  if (s_needRedrawMsg && contentForTab(s_currentScreen) == CT_MSG) {
+  if (s_needRedrawMsg && display_tabs::contentForTab(s_currentScreen) == display_tabs::CT_MSG) {
     if (performDisplayUpdate(s_currentScreen, true, true)) s_needRedrawMsg = false;
     else {
       drawScreen(s_currentScreen, powersave::isEnabled());  // fallback при cooldown — ждём и рисуем
@@ -963,8 +947,8 @@ bool displayUpdate() {
   hibernateIfIdle();  // 30 с неактивности → панель в hibernate
 
   // Периодика только для вкладок с живыми данными. Lang, Sys, Msg — только по событию
-  ContentTab ct = contentForTab(s_currentScreen);
-  const bool tabHasLiveData = (ct == CT_MAIN || ct == CT_INFO || ct == CT_WIFI || ct == CT_GPS);
+  display_tabs::ContentTab ct = display_tabs::contentForTab(s_currentScreen);
+  const bool tabHasLiveData = (ct == display_tabs::CT_MAIN || ct == display_tabs::CT_INFO || ct == display_tabs::CT_WIFI || ct == display_tabs::CT_GPS);
   if (tabHasLiveData) {
     performDisplayUpdate(s_currentScreen, false);
   }

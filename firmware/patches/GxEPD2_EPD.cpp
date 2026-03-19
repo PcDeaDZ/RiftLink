@@ -114,12 +114,15 @@ void GxEPD2_EPD::_waitWhileBusy(const char* comment, uint16_t busy_time)
   {
     delay(1); // add some margin to become active
     unsigned long startMs = millis();  // millis() overflow 49 дней vs micros() 71 мин
-    unsigned long maxWaitMs = (busy_time >= 100 && busy_time <= 15000) ? (unsigned long)busy_time : 4000;
+    unsigned long maxWaitMs = (busy_time >= 100 && busy_time <= 15000) ? (unsigned long)busy_time : 8000;
+    Serial.print("[E-Ink] wait "); Serial.println(comment ? comment : "?");
+    unsigned long lastDot = startMs;
     while (1)
     {
       if (digitalRead(_busy) != _busy_level) break;
       yield();  // allow other tasks to run
       if (_busy_callback) _busy_callback(nullptr);  // e.g. esp_task_wdt_reset()
+      if (millis() - lastDot >= 1000) { Serial.print("."); lastDot = millis(); }
       delay(1);
       if (millis() - startMs > maxWaitMs)
       {
@@ -163,6 +166,8 @@ void GxEPD2_EPD::_waitWhileBusy(const char* comment, uint16_t busy_time)
 
 void GxEPD2_EPD::_writeCommand(uint8_t c)
 {
+  static bool first = true;
+  if (first) { Serial.println("[E-Ink] SPI cmd"); first = false; }
   _spi.beginTransaction(_spi_settings);
   if (_dc >= 0) digitalWrite(_dc, LOW);
   if (_cs >= 0) digitalWrite(_cs, LOW);

@@ -1,4 +1,4 @@
-﻿# Однократное исправление кодировки после клонирования
+# Однократное исправление кодировки после клонирования
 # .ps1: UTF-8 с BOM, CRLF (PowerShell на Windows)
 # .sh: UTF-8 без BOM, LF (bash)
 $root = if ($PSScriptRoot) { (Get-Item $PSScriptRoot).Parent.FullName } else { Get-Location }

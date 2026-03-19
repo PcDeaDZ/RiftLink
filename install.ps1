@@ -1,4 +1,4 @@
-﻿# RiftLink — установка «в один клик»: git clone + setup_env
+# RiftLink — установка «в один клик»: git clone + build.ps1 -Setup
 # Использование: irm https://raw.githubusercontent.com/PcDeaDZ/RiftLink/master/install.ps1 | iex
 # Или: Invoke-Expression (Invoke-WebRequest -Uri "https://raw.../install.ps1" -UseBasicParsing).Content
 #
@@ -42,15 +42,15 @@ if (Test-Path (Join-Path $Dest ".git")) {
 }
 Write-Host ""
 
-# 3. Запуск setup_env.bat
-Write-Host "[3/3] Установка зависимостей (setup_env.bat)..." -ForegroundColor Yellow
-$setupBat = Join-Path $Dest "setup_env.bat"
-if (Test-Path $setupBat) {
+# 3. Запуск setup (build.ps1 -Setup)
+Write-Host "[3/3] Установка зависимостей (build.ps1 -Setup)..." -ForegroundColor Yellow
+$buildPs1 = Join-Path $Dest "build.ps1"
+if (Test-Path $buildPs1) {
     Push-Location $Dest
-    cmd /c "setup_env.bat"
+    & $buildPs1 -Setup
     Pop-Location
 } else {
-    Write-Host "[ОШИБКА] setup_env.bat не найден в $Dest" -ForegroundColor Red
+    Write-Host "[ОШИБКА] build.ps1 не найден в $Dest" -ForegroundColor Red
     exit 1
 }
 

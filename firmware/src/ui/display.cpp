@@ -5,6 +5,7 @@
  */
 
 #include "display.h"
+#include "display_tabs.h"
 #include "bootscreen_oled.h"
 #include "locale/locale.h"
 #include "selftest/selftest.h"
@@ -43,31 +44,7 @@
 #define MAX_LINE_CHARS 20
 #define CONTENT_X 4
 
-// Иконки вкладок 8x8 (1=пиксель, MSB слева) — уникальные для каждой вкладки
-static const uint8_t ICON_MAIN[]  = {0x08,0x0C,0x0E,0x08,0x08,0x08,0x1C,0x00};  // антенна/радио
-static const uint8_t ICON_INFO[]  = {0x00,0x1C,0x08,0x08,0x08,0x08,0x1C,0x00};  // i в скобках
-static const uint8_t ICON_WIFI[]  = {0x00,0x08,0x14,0x22,0x41,0x22,0x14,0x08};  // wifi дуги
-static const uint8_t ICON_SYS[]   = {0x18,0x3C,0x5A,0xBD,0xBD,0x5A,0x3C,0x18};  // шестерёнка
-static const uint8_t ICON_MSG[]   = {0x3C,0x42,0x42,0x42,0x42,0x3C,0x7E,0x00};  // пузырь чата
-static const uint8_t ICON_LANG[]  = {0x3C,0x42,0x99,0xBD,0xBD,0x99,0x42,0x3C};  // глобус
-static const uint8_t ICON_GPS[]   = {0x0C,0x1E,0x1E,0x1E,0x3F,0x1E,0x0C,0x00};  // метка места
-static const uint8_t* TAB_ICONS[] = {ICON_MAIN, ICON_INFO, ICON_WIFI, ICON_SYS, ICON_MSG, ICON_LANG, ICON_GPS};
-
 static const char* TAB_KEYS[] = {"tab_main", "tab_info", "tab_wifi", "tab_sys", "tab_msg", "tab_lang", "tab_gps"};
-
-enum ContentTab { CT_MAIN, CT_INFO, CT_WIFI, CT_SYS, CT_MSG, CT_LANG, CT_GPS };
-static int getTabCount() {
-  return wifi::isAvailable() ? (gps::isPresent() ? 7 : 6) : (gps::isPresent() ? 6 : 5);
-}
-static ContentTab contentForTab(int tab) {
-  if (wifi::isAvailable()) {
-    switch (tab) { case 0: return CT_MAIN; case 1: return CT_INFO; case 2: return CT_WIFI;
-      case 3: return CT_SYS; case 4: return CT_MSG; case 5: return CT_LANG; default: return CT_GPS; }
-  } else {
-    switch (tab) { case 0: return CT_MAIN; case 1: return CT_INFO; case 2: return CT_SYS;
-      case 3: return CT_MSG; case 4: return CT_LANG; default: return CT_GPS; }
-  }
-}
 
 #define SHORT_PRESS_MS  350   // короткое = смена вкладки
 #define LONG_PRESS_MS   500   // длинное = подтверждение / вход в режим модификации
@@ -336,7 +313,7 @@ static void drawFrame(int activeTab) {
   if (!disp) return;
   disp->clearDisplay();
 
-  int nTabs = getTabCount();
+  int nTabs = display_tabs::getTabCount();
   int tabW = SCREEN_WIDTH / nTabs;
 
   // Вкладки с иконками
@@ -344,7 +321,7 @@ static void drawFrame(int activeTab) {
     int x = i * tabW;
     int iconX = x + (tabW - ICON_W) / 2;
     int iconY = 2;
-    const uint8_t* icon = TAB_ICONS[(int)contentForTab(i)];
+    const uint8_t* icon = display_tabs::getIconForTab(i);
     if (i == activeTab) {
       disp->fillRoundRect(x + 1, 1, tabW - 2, TAB_H - 2, 1, SSD1306_WHITE);
       disp->drawBitmap(iconX, iconY, icon, ICON_W, ICON_H, SSD1306_BLACK);
@@ -486,13 +463,13 @@ static void drawContentGps() {
 
 static void drawScreen(int tab) {
   drawFrame(tab);
-  switch (contentForTab(tab)) {
-    case CT_MAIN: drawContentMain(); break;
-    case CT_INFO: drawContentInfo(); break;
-    case CT_WIFI: drawContentWiFi(); break;
-    case CT_SYS: drawContentSys(); break;
-    case CT_MSG: drawContentMsg(); break;
-    case CT_LANG: drawContentLang(); break;
+  switch (display_tabs::contentForTab(tab)) {
+    case display_tabs::CT_MAIN: drawContentMain(); break;
+    case display_tabs::CT_INFO: drawContentInfo(); break;
+    case display_tabs::CT_WIFI: drawContentWiFi(); break;
+    case display_tabs::CT_SYS: drawContentSys(); break;
+    case display_tabs::CT_MSG: drawContentMsg(); break;
+    case display_tabs::CT_LANG: drawContentLang(); break;
     default: drawContentGps(); break;
   }
   disp->display();
@@ -513,7 +490,7 @@ void displaySetLastMsg(const char* fromHex, const char* text) {
 }
 
 void displayShowScreen(int screen) {
-  int nTabs = getTabCount();
+  int nTabs = display_tabs::getTabCount();
   s_currentScreen = (screen < nTabs) ? screen : (nTabs - 1);
   s_lastActivityTime = millis();  // смена экрана (пикеры) — активность
   drawScreen(s_currentScreen);
@@ -528,22 +505,22 @@ int displayGetCurrentScreen() {
 }
 
 int displayGetNextScreen(int current) {
-  return (current + 1) % getTabCount();
+  return (current + 1) % display_tabs::getTabCount();
 }
 
 void displayOnLongPress(int screen) {
   s_lastActivityTime = millis();
-  ContentTab ct = contentForTab(screen);
-  if (ct == CT_MAIN) {
+  display_tabs::ContentTab ct = display_tabs::contentForTab(screen);
+  if (ct == display_tabs::CT_MAIN) {
     displayShowRegionPicker();
     drawScreen(s_currentScreen);
-  } else if (ct == CT_LANG) {
+  } else if (ct == display_tabs::CT_LANG) {
     displayShowLanguagePicker();
     drawScreen(s_currentScreen);
-  } else if (ct == CT_GPS && gps::isPresent()) {
+  } else if (ct == display_tabs::CT_GPS && gps::isPresent()) {
     gps::toggle();
     drawScreen(s_currentScreen);
-  } else if (ct == CT_SYS) {
+  } else if (ct == display_tabs::CT_SYS) {
     selftest::run(nullptr);
   }
 }
@@ -620,8 +597,8 @@ bool displayUpdate() {
 
   if (!s_showingBootScreen && (millis() - s_lastScreenUpdate > 2000)) {
     s_lastScreenUpdate = millis();
-    ContentTab ct = contentForTab(s_currentScreen);
-    if (ct == CT_MAIN || ct == CT_INFO || ct == CT_WIFI || ct == CT_GPS) drawScreen(s_currentScreen);
+    display_tabs::ContentTab ct = display_tabs::contentForTab(s_currentScreen);
+    if (ct == display_tabs::CT_MAIN || ct == display_tabs::CT_INFO || ct == display_tabs::CT_WIFI || ct == display_tabs::CT_GPS) drawScreen(s_currentScreen);
   }
   return false;
 }

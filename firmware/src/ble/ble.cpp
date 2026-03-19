@@ -996,6 +996,8 @@ void update() {
   }
 
   // BLS-N: при подключённом телефоне — BLE scan для приёма RTS от соседей
+  // Paper: отключено — BLE scan вызывает Malloc failed при heap ~10KB (много advertisers)
+#if !defined(USE_EINK)
   if (s_connected) {
     NimBLEScan* pScan = NimBLEDevice::getScan();
     if (pScan && !pScan->isScanning() && !s_blsScanActive) {
@@ -1014,6 +1016,7 @@ void update() {
       }
     }
   }
+#endif  // !USE_EINK
 }
 
 bool isConnected() { return s_connected; }
