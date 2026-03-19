@@ -1,0 +1,15 @@
+# RiftLink — кодировка скриптов
+root = true
+
+# PowerShell: UTF-8 с BOM для корректного отображения русского на Windows
+[*.ps1]
+charset = utf-8
+end_of_line = crlf
+
+[*.sh]
+charset = utf-8
+end_of_line = lf
+
+[*.bat]
+charset = utf-8
+end_of_line = crlf

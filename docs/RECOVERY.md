@@ -36,13 +36,10 @@
 
 ```powershell
 # Полная очистка flash + прошивка V3
-.\build_and_flash.ps1 -Flash -Erase
+.\build.ps1 -Flash -Erase
 
-# Для V4 — безопасный конфиг (совместим с V3)
-.\build_and_flash.ps1 -V4Safe -Flash -Erase
-
-# Для V4 — полный конфиг (16MB)
-.\build_and_flash.ps1 -V4 -Flash -Erase
+# Для V4
+.\build.ps1 -V4 -Flash -Erase
 ```
 
 ### 4. ⌨️ Ручная очистка через esptool
@@ -55,7 +52,7 @@ cd firmware
 
 pio run -e heltec_v3 -t erase
 # или
-pio run -e heltec_v4_safe -t erase
+pio run -e heltec_v4 -t erase
 ```
 
 ### 5. 🔄 Если прошили не ту прошивку
@@ -64,7 +61,7 @@ pio run -e heltec_v4_safe -t erase
 |-------|---------|---------|
 | V3 | V4 (16MB) | `-Flash -Erase` без -V4 — прошить V3 |
 | V4 | V3 | Работает (V4 совместим) |
-| V4 | V4, не грузится | `-V4Safe -Flash -Erase` — безопасный конфиг |
+| V4 | V4, не грузится | `-V4 -Flash -Erase` — полная очистка и перепрошивка |
 
 ### 6. 🔌 V4: USB не определяется
 

@@ -57,55 +57,81 @@ dual_boot/
 ├── firmware/       # Прошивка ESP32 (PlatformIO, C++)
 ├── app/            # Flutter-приложение (Android, iOS, Web/PWA)
 ├── docs/           # Спецификации, API, планы
-├── scripts/        # Serial API тест (Python)
-└── build_and_flash.ps1 / .sh
+├── scripts/        # Serial API тест, fix_encoding (кодировка build.ps1/sh)
+├── build.ps1       # Менеджер (Windows): setup + build + flash + APK + монитор
+├── build.sh        # То же для Linux/macOS
+└── .env.example    # Шаблон путей → копируйте в .env.local
 ```
+
+---
+
+## 🛠️ Установка зависимостей
+
+**Windows:** `.\build.ps1 -Setup`  
+**Linux/macOS:** `./build.sh --setup`
+
+Или в меню: пункт 8 «Setup». Устанавливает: Python, pip-пакеты (pyserial, pytest, platformio), Flutter, проверяет Android SDK и Java. Пути — в `.env.local` (FLUTTER_ROOT, ANDROID_SDK_ROOT).
 
 ---
 
 ## 🚀 Быстрый старт
 
-### Прошивка (Windows)
+### Менеджер сборки (интерактивное меню)
+
+**Windows:** `.\build.ps1`  
+**Linux/macOS:** `./build.sh`
+
+| Пункт | Действие |
+|-------|----------|
+| 1 | Сборка прошивки (выбор V3 / Paper / V4) |
+| 2 | Прошивка (выбор порта + устройства) |
+| 3 | Сборка + прошивка |
+| 4 | Монитор порта (просмотр вывода устройства) |
+| 5 | Сборка APK |
+| 6 | Установка APK на устройство (adb) |
+| 7 | Сборка + установка APK |
+| 8 | Setup — установка зависимостей |
+| 0 | Выход |
+
+**Автоопределение портов:** CP210x → Paper, native USB (303A) → V4. При нескольких портах показываются подсказки. Перед прошивкой — вопрос об очистке flash. Скрипт не меняет текущую директорию.
+
+### Прошивка (CLI)
 
 ```powershell
-# Сборка
-.\build_and_flash.ps1
-
-# Сборка + прошивка
-.\build_and_flash.ps1 -Flash
-
-# Heltec V4
-.\build_and_flash.ps1 -V4 -Flash
-
-# Heltec V3 Paper (E-Ink)
-.\build_and_flash.ps1 -V3Paper -Flash
-
-# OTA (WiFi): BLE → {"cmd":"ota"} → WiFi RiftLink-OTA → пароль riftlink123
-.\build_and_flash.ps1 -Flash -Ota
+# Windows
+.\build.ps1 -Setup                   # Установка зависимостей
+.\build.ps1 -V4 -Flash               # Прошивка V4 (автовыбор порта)
+.\build.ps1 -V3Paper -Flash -Erase   # Прошивка Paper с очисткой flash
+.\build.ps1 -V4 -Flash -Port COM6    # Прошивка на указанный порт
+.\build.ps1 -Monitor                 # Монитор порта (просмотр вывода)
+.\build.ps1 -Monitor -Port COM6      # Монитор на указанный порт
+.\build.ps1 -App                     # Сборка APK
+.\build.ps1 -InstallApk              # Установка APK (выбор устройства)
+.\build.ps1 -InstallApk -DeviceId 1  # Установка на устройство №1 из списка
 ```
-
-**Требуется:** [PlatformIO](https://platformio.org/)
-
-### Прошивка (Linux)
 
 ```bash
-chmod +x build_and_flash.sh
-./build_and_flash.sh              # Сборка V3
-./build_and_flash.sh --v4 --flash # V4 + прошивка
-./build_and_flash.sh --app       # Flutter APK
+# Linux/macOS
+./build.sh --setup                   # Установка зависимостей
+./build.sh --v4 --flash              # Прошивка V4
+./build.sh --v3paper --flash --erase # Прошивка Paper с очисткой flash
+./build.sh --v4 --flash --port /dev/ttyUSB0
+./build.sh --monitor                 # Монитор порта
+./build.sh --monitor --port /dev/ttyUSB0
+./build.sh --app                     # Сборка APK
+./build.sh --install                  # Установка APK (выбор устройства)
+./build.sh --install --device R5CY123 # Установка на конкретное устройство
 ```
 
-### Приложение (Flutter)
+### Приложение (APK)
 
-```bash
-cd app
-flutter pub get
-flutter run -d chrome    # Web/PWA
-flutter run -d android   # Android
-flutter run -d ios       # iOS (macOS)
-```
+`.\build.ps1 -App -InstallApk` (Windows) или `./build.sh --app --install` (Linux/macOS)
 
-**Сборка PWA:** `flutter build web` → `app/build/web/`
+**Требуется:** [PlatformIO](https://platformio.org/), Flutter, Android SDK
+
+### Кодировка
+
+После правок в `build.ps1` или `build.sh` выполните `.\scripts\fix_encoding.ps1` — восстановит UTF-8 BOM (PowerShell) и LF (bash).
 
 ---
 

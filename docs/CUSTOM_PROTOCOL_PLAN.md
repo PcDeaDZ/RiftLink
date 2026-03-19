@@ -506,7 +506,7 @@ dual_boot/                  # Корень проекта (RiftLink)
 │   ├── API.md              # BLE/Serial API
 │   ├── RECOVERY.md         # Восстановление при «не включается»
 │   └── plans/              # Планы, анализ (ADDITIONAL_FEATURES_PLAN, PACKET_*)
-├── build_and_flash.ps1     # Сборка и прошивка
+├── build.ps1               # Сборка и прошивка
 └── README.md
 ```
 

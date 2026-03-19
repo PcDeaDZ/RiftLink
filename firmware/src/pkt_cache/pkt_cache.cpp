@@ -50,6 +50,7 @@ void add(const uint8_t* to, uint16_t pktId, const uint8_t* pkt, size_t len) {
 
 bool retransmitOnNack(const uint8_t* from, uint16_t pktId) {
   if (!s_inited || !from) return false;
+  radio::notifyCongestion();  // NACK = коллизия/потеря — увеличить BEB CW
   for (int i = 0; i < CACHE_SIZE; i++) {
     if (!s_cache[i].inUse) continue;
     if (memcmp(s_cache[i].to, from, protocol::NODE_ID_LEN) != 0) continue;

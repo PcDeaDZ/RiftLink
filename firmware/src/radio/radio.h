@@ -31,5 +31,7 @@ uint8_t getSpreadingFactor();            // текущий SF (для info/evt)
 uint32_t getTimeOnAir(size_t len);       // мкс, для duty cycle
 /** CAD — канал свободен? Перед retry для снижения коллизий */
 bool isChannelFree();
+/** Сигнал перегрузки (NACK, undelivered) — увеличивает BEB CW для следующих TX */
+void notifyCongestion();
 
 }  // namespace radio

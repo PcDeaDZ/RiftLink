@@ -373,6 +373,7 @@ void update() {
     if (now - p->lastSendTime < ackTimeout + jitter) continue;
 
     if (p->retries >= MAX_RETRIES) {
+      if (s_onUnicastUndelivered) s_onUnicastUndelivered(p->to, p->msgId);
       uint8_t flags = (p->pkt[protocol::SYNC_LEN] & 0x04) ? 1 : 0;  // compressed (version_flags)
       offline_queue::enqueue(p->to, p->pkt + protocol::PAYLOAD_OFFSET,
           p->pktLen - protocol::PAYLOAD_OFFSET, protocol::OP_MSG, flags);

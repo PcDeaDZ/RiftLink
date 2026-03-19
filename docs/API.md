@@ -333,4 +333,4 @@ cd firmware
 pio run -t upload -e heltec_v3_ota
 ```
 
-Или: `.\build_and_flash.ps1 -Flash -Ota`
+Или: `.\build.ps1 -Flash -Ota`

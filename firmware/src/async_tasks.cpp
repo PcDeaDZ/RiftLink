@@ -49,7 +49,7 @@ bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf, bool priority) {
   return ok == pdTRUE;
 }
 
-#define DEFERRED_ACK_SLOTS 4
+#define DEFERRED_ACK_SLOTS 8   // broadcast: несколько соседей шлют ACK почти одновременно
 #define DEFERRED_SEND_SLOTS 24   // MSG copy2–3, broadcast 2–3, KEY_EXCHANGE — burst 1–15
 struct DeferredSlot {
   uint8_t buf[PACKET_BUF_SIZE];

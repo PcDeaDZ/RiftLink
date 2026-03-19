@@ -234,7 +234,7 @@ bool getExpectedPayloadRange(uint8_t opcode, size_t* minOut, size_t* maxOut) {
       return true;
     case OP_TELEMETRY:
       *minOut = 28;  // 4 plain + crypto::OVERHEAD
-      *maxOut = 48;
+      *maxOut = 64;  // 48 было мало — коллизии/мерж дают до 56B
       return true;
     case OP_LOCATION:
       *minOut = 38;  // 10 plain + crypto::OVERHEAD

@@ -12,6 +12,7 @@
 #include <RadioLib.h>
 #include <SPI.h>
 #include <esp_random.h>
+#include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -38,12 +39,16 @@ static SemaphoreHandle_t s_radioMutex = nullptr;
 #define LORA_CR    5
 #define TCXO_VOLTAGE 1.8f   // SX1262 TCXO 1.8V (V3/V4)
 
-// CSMA/CA (как Meshtastic): CAD перед TX, random backoff при занятом канале
+// CSMA/CA: CAD перед TX, Binary Exponential Backoff (BEB) при занятом канале
+// См. docs/plans/CHANNEL_ACCESS_ANALYSIS.md
 #define CAD_SLOT_TIME_MS  4
-#define CAD_CW_MAX        8
+#define CAD_CW_MIN        4
+#define CAD_CW_MAX        64
 #define CAD_MAX_RETRIES   5
+#define CAD_BEB_MAX       5   // макс. экспонента: CW = min(CW_MIN*2^n, CW_MAX)
 
 static Module* mod = nullptr;
+static std::atomic<uint8_t> s_cadBusyCount{0};  // BEB: растёт при busy/NACK/undelivered, сброс при успешной TX
 static SX1262* lora = nullptr;
 static uint8_t s_currentSf = LORA_SF;
 
@@ -111,6 +116,11 @@ bool isChannelFree() {
   return (cad == RADIOLIB_CHANNEL_FREE);
 }
 
+void notifyCongestion() {
+  uint8_t c = s_cadBusyCount.load(std::memory_order_relaxed);
+  if (c < 255) s_cadBusyCount.store(c + 1, std::memory_order_relaxed);
+}
+
 void setAsyncMode(bool on) { s_asyncMode = on; }
 
 bool sendDirectInternal(const uint8_t* data, size_t len) {
@@ -122,15 +132,19 @@ bool sendDirectInternal(const uint8_t* data, size_t len) {
     return false;
   }
 
-  // CSMA/CA: CAD перед TX, random backoff при занятом канале (как Meshtastic)
+  // CSMA/CA + BEB: CAD перед TX, exponential backoff при занятом канале
   lora->standby();
   for (int attempt = 0; attempt < CAD_MAX_RETRIES; attempt++) {
     int16_t cad = lora->scanChannel();
     if (cad == RADIOLIB_CHANNEL_FREE) break;
     if (attempt < CAD_MAX_RETRIES - 1) {
-      uint32_t backoff = (esp_random() % CAD_CW_MAX) * CAD_SLOT_TIME_MS;
+      // BEB: CW = min(CW_MIN * 2^s_cadBusyCount, CW_MAX)
+      uint8_t c = s_cadBusyCount.load(std::memory_order_relaxed);
+      uint32_t cw = CAD_CW_MIN * (1u << (c < CAD_BEB_MAX ? c : CAD_BEB_MAX));
+      if (cw > CAD_CW_MAX) cw = CAD_CW_MAX;
+      if (c < 255) s_cadBusyCount.store(c + 1, std::memory_order_relaxed);
+      uint32_t backoff = (esp_random() % cw) * CAD_SLOT_TIME_MS;
       if (backoff > 0) {
-        // Асинхронный backoff — не блокируем drainTask, повторная попытка через deferred
         queueDeferredSend(data, len, getSpreadingFactor(), backoff);
         return false;
       }
@@ -151,6 +165,7 @@ bool sendDirectInternal(const uint8_t* data, size_t len) {
     }
   }
   duty_cycle::recordSend(toa);
+  s_cadBusyCount.store(0, std::memory_order_relaxed);  // успешная TX — сброс BEB
   return true;
 }
 

@@ -105,10 +105,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     _ttlTimer = Timer.periodic(const Duration(minutes: 1), (_) {
       if (mounted && _messages.any((m) => m.deleteAt != null && DateTime.now().isAfter(m.deleteAt!))) setState(() {});
     });
-    // Периодический getInfo при пустых соседях — V4 и др. могут обнаружить их после подключения
+    // Периодический getInfo: пустые соседи — discovery; есть без ключа — обновить hasKey после KEY_EXCHANGE
     _neighborsPollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (!mounted || !widget.ble.isConnected || _neighbors.isNotEmpty) return;
-      widget.ble.getInfo();
+      if (!mounted || !widget.ble.isConnected) return;
+      final needRefresh = _neighbors.isEmpty ||
+          _neighborsHasKey.length != _neighbors.length ||
+          _neighborsHasKey.any((k) => !k);
+      if (needRefresh) widget.ble.getInfo();
     });
   }
 

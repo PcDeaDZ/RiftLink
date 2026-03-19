@@ -478,9 +478,11 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         txSf = neighbors::rssiToSf(r);
       }
     }
-    if (!radio::send(fwdBuf, len, txSf, true)) {
-      RIFTLINK_LOG_ERR("[RiftLink] relay sendQueue full, drop\n");
-    }
+    // SNR-based backoff: дальние узлы (слабый rssi) ретранслируют раньше — лучше охват mesh
+    int rssiClamp = (rssi < -120) ? -120 : (rssi > -40 ? -40 : rssi);
+    int32_t d = 10 * (rssiClamp + 100);
+    uint32_t delayMs = (d <= 0) ? 0 : ((d > 500) ? 500 : (uint32_t)d);
+    queueDeferredSend(fwdBuf, len, txSf, delayMs);  // fallback в queueSend при полных слотах
   }
 
   if (!node::isForMe(hdr.to) && !node::isBroadcast(hdr.to)) {
@@ -517,12 +519,14 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     case protocol::OP_KEY_EXCHANGE:
       if (payloadLen >= 32) {
         if (neighbors::onHello(hdr.from, rssi)) {
+          ble::requestNeighborsNotify();
           queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info
           RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
         }
         bool hadKey = x25519_keys::hasKeyFor(hdr.from);
         x25519_keys::onKeyExchange(hdr.from, payload);
-        if (!hadKey) {  // ответ только если ключа не было — иначе KEY_EXCHANGE storm
+        if (!hadKey) {
+          ble::requestNeighborsNotify();  // приложение: обновить hasKey (ожидание ключа → готов)
           bool useSf12 = (rssi < -90) || (sf == 12);
           x25519_keys::sendKeyExchange(hdr.from, useSf12, true, false);
         }
@@ -725,7 +729,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
               node::getId(), hdr.from, 31, protocol::OP_ACK, ackPayload, msg_queue::MSG_ID_LEN, false, false);
           if (ackLen > 0) {
             uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(hdr.from));
-            queueDeferredAck(ackPkt, ackLen, txSf, 80);  // как unicast — не коллидировать с burst отправителя
+            // 250–400 ms — после burst копий 1–2 (0, 220ms), jitter чтобы несколько получателей не коллидировали
+            uint32_t ackDelay = 250 + (esp_random() % 150);
+            queueDeferredAck(ackPkt, ackLen, txSf, ackDelay);
           }
         } else {
           msg = (const char*)(decBuf + GROUP_ID_LEN);
@@ -912,7 +918,10 @@ static void runBootStateMachine() {
   ble::setOnLocation(sendLocation);
   msg_queue::init();
   msg_queue::setOnUnicastSent([](const uint8_t* to, uint32_t msgId) { ble::notifySent(to, msgId); });
-  msg_queue::setOnUnicastUndelivered([](const uint8_t* to, uint32_t msgId) { ble::notifyUndelivered(to, msgId); });
+  msg_queue::setOnUnicastUndelivered([](const uint8_t* to, uint32_t msgId) {
+    radio::notifyCongestion();
+    ble::notifyUndelivered(to, msgId);
+  });
   msg_queue::setOnBroadcastSent([](uint32_t msgId) { ble::notifySent(protocol::BROADCAST_ID, msgId); });
   msg_queue::setOnBroadcastDelivery([](uint32_t msgId, int d, int t) { ble::notifyBroadcastDelivery(msgId, d, t); });
   frag::init();

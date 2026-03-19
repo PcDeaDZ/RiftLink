@@ -74,6 +74,7 @@ static bool s_displaySleeping = false;
 static bool s_wakeRequested = false;
 static uint32_t s_lastActivityTime = 0;
 static bool s_buttonPolledExternally = false;
+static bool s_showingBootScreen = false;  // не перезаписывать бутскрин displayUpdate()
 
 /** Печать CP1251: конвертация в кодировку glcdfont AdafruitGFXRusFonts */
 static void drawTruncRaw(int x, int y, const char* s, int maxLen) {
@@ -155,6 +156,7 @@ bool displayIsSleeping() {
 }
 
 void displayClear() {
+  s_showingBootScreen = false;
   if (disp) disp->clearDisplay();
 }
 
@@ -182,6 +184,7 @@ void displaySetTextSize(uint8_t s) {
 // Бут-скрин: логотип Rift Link из app_icon_source.png
 void displayShowBootScreen() {
   if (!disp) return;
+  s_showingBootScreen = true;
   disp->clearDisplay();
   disp->drawBitmap(0, 0, bootscreen_oled, BOOTSCREEN_OLED_W, BOOTSCREEN_OLED_H, SSD1306_WHITE);
   disp->setTextColor(SSD1306_WHITE);
@@ -599,7 +602,7 @@ bool displayUpdate() {
     displaySleep();
   }
 
-  if (millis() - s_lastScreenUpdate > 2000) {
+  if (!s_showingBootScreen && (millis() - s_lastScreenUpdate > 2000)) {
     s_lastScreenUpdate = millis();
     if (s_currentScreen == 0 || s_currentScreen == 1 || s_currentScreen == 2 || s_currentScreen == 6) drawScreen(s_currentScreen);
   }

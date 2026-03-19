@@ -1,0 +1,11 @@
+# RiftLink — зависимости для разработки (скрипты, тесты, прошивка)
+# Установка: pip install -r requirements-dev.txt
+
+# Скрипты (serial_test и т.д.)
+pyserial>=3.5
+
+# Тесты
+pytest>=7.0.0
+
+# PlatformIO — сборка прошивки (pio run, pio run -t upload)
+platformio>=6.0.0
