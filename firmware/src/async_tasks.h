@@ -16,6 +16,11 @@ bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf = 0, bool priority =
 void queueDeferredAck(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs = 80);
 /** Любой пакет с задержкой — MSG copy2, broadcast 2–3, KEY_EXCHANGE jitter */
 void queueDeferredSend(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs);
+/** Relay с задержкой — Managed flooding: отмена при услышанной ретрансляции */
+void queueDeferredRelay(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs,
+    const uint8_t* from, uint32_t payloadHash);
+/** Уведомить: услышали ретрансляцию (from+hash) — отменить наш pending relay */
+void relayHeard(const uint8_t* from, uint32_t payloadHash);
 /** Переносит готовые deferred ACK/send в sendQueue. Вызывается из drainTask. */
 void flushDeferredSends();
 

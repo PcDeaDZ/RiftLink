@@ -378,6 +378,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     } else if (len == 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 &&
                buf[2] == protocol::OP_KEY_EXCHANGE && !(buf[1] & 0x01)) {
       // Обрезанный KEY_EXCHANGE (коллизия/half-duplex) — извлечь from, добавить в соседи
+      radio::notifyCongestion();  // коллизия → BEB увеличит CW
       uint8_t from[protocol::NODE_ID_LEN];
       memcpy(from, buf + 3, protocol::NODE_ID_LEN);
       if (!node::isBroadcast(from) && !node::isInvalidNodeId(from)) {
@@ -387,6 +388,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     } else if (len >= 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x30 &&
                !(buf[1] & 0x01)) {
       // v2.1 с pktId — обрезанный пакет (13 B = sync+ver+opcode+pktId+from), отправить NACK для retransmit
+      radio::notifyCongestion();  // коллизия → BEB
       uint16_t pktId = (uint16_t)buf[3] | ((uint16_t)buf[4] << 8);
       uint8_t from[protocol::NODE_ID_LEN];
       memcpy(from, buf + 5, protocol::NODE_ID_LEN);
@@ -415,6 +417,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           (buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 && buf[2] == protocol::OP_NACK && len != 23) ||
           (buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 && buf[2] == protocol::OP_ACK &&
           len != 25 && len != 17);  // ACK: unicast 25B, broadcast 17B
+      if (truncated) radio::notifyCongestion();  // коллизия/обрезанный пакет → BEB
 #if defined(DEBUG_PACKET_DUMP)
       if (!truncated) {
         Serial.printf("[RiftLink] Parse FAIL len=%u rssi=%d hex=", (unsigned)len, rssi);
@@ -452,7 +455,10 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
   uint32_t relayPayloadHashVal = 0;
   if (needRelay) {
     relayPayloadHashVal = relayPayloadHash(payload ? payload : (const uint8_t*)"", payloadLen);
-    if (relayDedupSeen(hdr.from, relayPayloadHashVal)) needRelay = false;
+    if (relayDedupSeen(hdr.from, relayPayloadHashVal)) {
+      needRelay = false;
+      relayHeard(hdr.from, relayPayloadHashVal);
+    }
     if (needRelay && relayRateLimitExceeded()) needRelay = false;
   }
   if (needRelay) {
@@ -482,7 +488,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     int rssiClamp = (rssi < -120) ? -120 : (rssi > -40 ? -40 : rssi);
     int32_t d = 10 * (rssiClamp + 100);
     uint32_t delayMs = (d <= 0) ? 0 : ((d > 500) ? 500 : (uint32_t)d);
-    queueDeferredSend(fwdBuf, len, txSf, delayMs);  // fallback в queueSend при полных слотах
+    queueDeferredRelay(fwdBuf, len, txSf, delayMs, hdr.from, relayPayloadHashVal);
   }
 
   if (!node::isForMe(hdr.to) && !node::isBroadcast(hdr.to)) {
@@ -1171,12 +1177,15 @@ void loop() {
 
   // Retry KEY_EXCHANGE: каждые 25–35с (jitter!) — иначе оба узла синхронно → коллизии → deadlock
   // Фаза по nodeId[0]: разные узлы смещены — меньше шанс одновременного TX
+  // Доп. jitter 0–3 с — ещё меньше синхронных TX при плотной сети
   #define KEY_RETRY_BASE_MS  25000
   #define KEY_RETRY_JITTER_MS 10000
+  #define KEY_RETRY_EXTRA_JITTER_MS 3000
   static uint32_t s_keyRetryCooldownUntil = 0;  // без блокировки loop
   if (millis() >= s_lastKeyRetry && millis() >= s_keyRetryCooldownUntil) {
     uint32_t phase = (node::getId()[0] % 16) * 500;  // 0–8 с смещение по ID
-    s_lastKeyRetry = millis() + KEY_RETRY_BASE_MS + (esp_random() % KEY_RETRY_JITTER_MS) + phase;
+    uint32_t extraJitter = esp_random() % KEY_RETRY_EXTRA_JITTER_MS;
+    s_lastKeyRetry = millis() + KEY_RETRY_BASE_MS + (esp_random() % KEY_RETRY_JITTER_MS) + phase + extraJitter;
     int n = neighbors::getCount();
     for (int i = 0; i < n; i++) {
       uint8_t peerId[protocol::NODE_ID_LEN];

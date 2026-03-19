@@ -51,21 +51,43 @@ bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf, bool priority) {
 
 #define DEFERRED_ACK_SLOTS 8   // broadcast: несколько соседей шлют ACK почти одновременно
 #define DEFERRED_SEND_SLOTS 24   // MSG copy2–3, broadcast 2–3, KEY_EXCHANGE — burst 1–15
+#define HEARD_RELAY_SIZE 8   // Managed flooding: отмена relay при услышанной ретрансляции
 struct DeferredSlot {
   uint8_t buf[PACKET_BUF_SIZE];
   uint16_t len;
   uint8_t txSf;
   uint32_t sendAfter;
   bool used;
+  bool isRelay;   // relay: отменить если услышали ретрансляцию
+  uint8_t relayFrom[protocol::NODE_ID_LEN];
+  uint32_t relayHash;
 };
+struct HeardRelayEntry { uint8_t from[protocol::NODE_ID_LEN]; uint32_t hash; };
+static HeardRelayEntry s_heardRelay[HEARD_RELAY_SIZE];
+static uint8_t s_heardRelayIdx = 0;
+
 static DeferredSlot s_deferredAck[DEFERRED_ACK_SLOTS];
 static DeferredSlot s_deferredSend[DEFERRED_SEND_SLOTS];
+
+static bool relayHeardCheckAndRemove(const uint8_t* from, uint32_t hash) {
+  for (int i = 0; i < HEARD_RELAY_SIZE; i++) {
+    if (memcmp(s_heardRelay[i].from, from, protocol::NODE_ID_LEN) == 0 && s_heardRelay[i].hash == hash) {
+      s_heardRelay[i].hash = 0xFFFFFFFFU;
+      return true;
+    }
+  }
+  return false;
+}
 
 static void flushDeferredSlots(DeferredSlot* slots, int n) {
   if (!sendQueue) return;
   uint32_t now = millis();
   for (int i = 0; i < n; i++) {
     if (slots[i].used && slots[i].sendAfter <= now) {
+      if (slots[i].isRelay && relayHeardCheckAndRemove(slots[i].relayFrom, slots[i].relayHash)) {
+        slots[i].used = false;
+        continue;
+      }
       SendQueueItem item;
       memcpy(item.buf, slots[i].buf, slots[i].len);
       item.len = slots[i].len;
@@ -86,6 +108,7 @@ void queueDeferredAck(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t del
       s_deferredAck[i].txSf = (txSf >= 7 && txSf <= 12) ? txSf : 0;
       s_deferredAck[i].sendAfter = sendAfter;
       s_deferredAck[i].used = true;
+      s_deferredAck[i].isRelay = false;
       return;
     }
   }
@@ -101,12 +124,40 @@ void queueDeferredSend(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t de
       s_deferredSend[i].txSf = (txSf >= 7 && txSf <= 12) ? txSf : 0;
       s_deferredSend[i].sendAfter = sendAfter;
       s_deferredSend[i].used = true;
+      s_deferredSend[i].isRelay = false;
       return;
     }
   }
   if (!queueSend(pkt, len, txSf, true)) {
     RIFTLINK_LOG_ERR("[RiftLink] deferred fallback sendQueue full, drop copy\n");
   }
+}
+
+void queueDeferredRelay(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs,
+    const uint8_t* from, uint32_t payloadHash) {
+  uint32_t sendAfter = millis() + delayMs;
+  for (int i = 0; i < DEFERRED_SEND_SLOTS; i++) {
+    if (!s_deferredSend[i].used) {
+      memcpy(s_deferredSend[i].buf, pkt, len);
+      s_deferredSend[i].len = (uint16_t)len;
+      s_deferredSend[i].txSf = (txSf >= 7 && txSf <= 12) ? txSf : 0;
+      s_deferredSend[i].sendAfter = sendAfter;
+      s_deferredSend[i].used = true;
+      s_deferredSend[i].isRelay = true;
+      memcpy(s_deferredSend[i].relayFrom, from, protocol::NODE_ID_LEN);
+      s_deferredSend[i].relayHash = payloadHash;
+      return;
+    }
+  }
+  if (!queueSend(pkt, len, txSf, true)) {
+    RIFTLINK_LOG_ERR("[RiftLink] deferred relay fallback sendQueue full, drop\n");
+  }
+}
+
+void relayHeard(const uint8_t* from, uint32_t payloadHash) {
+  memcpy(s_heardRelay[s_heardRelayIdx].from, from, protocol::NODE_ID_LEN);
+  s_heardRelay[s_heardRelayIdx].hash = payloadHash;
+  s_heardRelayIdx = (s_heardRelayIdx + 1) % HEARD_RELAY_SIZE;
 }
 
 void flushDeferredSends() {

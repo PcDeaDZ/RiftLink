@@ -41,14 +41,17 @@ static SemaphoreHandle_t s_radioMutex = nullptr;
 
 // CSMA/CA: CAD перед TX, Binary Exponential Backoff (BEB) при занятом канале
 // См. docs/plans/CHANNEL_ACCESS_ANALYSIS.md
+// CW увеличен для плотных сетей — больше слотов, меньше коллизий
 #define CAD_SLOT_TIME_MS  4
-#define CAD_CW_MIN        4
-#define CAD_CW_MAX        64
+#define CAD_CW_MIN        8
+#define CAD_CW_MAX        128
 #define CAD_MAX_RETRIES   5
 #define CAD_BEB_MAX       5   // макс. экспонента: CW = min(CW_MIN*2^n, CW_MAX)
+#define BEB_DECAY_MS      8000  // без congestion 8 с → CW уменьшается на 1
 
 static Module* mod = nullptr;
 static std::atomic<uint8_t> s_cadBusyCount{0};  // BEB: растёт при busy/NACK/undelivered, сброс при успешной TX
+static std::atomic<uint32_t> s_lastCongestionTime{0};  // для decay BEB
 static SX1262* lora = nullptr;
 static uint8_t s_currentSf = LORA_SF;
 
@@ -119,12 +122,21 @@ bool isChannelFree() {
 void notifyCongestion() {
   uint8_t c = s_cadBusyCount.load(std::memory_order_relaxed);
   if (c < 255) s_cadBusyCount.store(c + 1, std::memory_order_relaxed);
+  s_lastCongestionTime.store((uint32_t)millis(), std::memory_order_relaxed);
 }
 
 void setAsyncMode(bool on) { s_asyncMode = on; }
 
 bool sendDirectInternal(const uint8_t* data, size_t len) {
   if (!lora || len > RADIOLIB_SX126X_MAX_PACKET_LENGTH) return false;
+
+  // BEB decay: без congestion N с → уменьшить CW
+  uint32_t now = (uint32_t)millis();
+  uint8_t c = s_cadBusyCount.load(std::memory_order_relaxed);
+  if (c > 0 && (now - s_lastCongestionTime.load(std::memory_order_relaxed)) >= BEB_DECAY_MS) {
+    s_cadBusyCount.store(c - 1, std::memory_order_relaxed);
+    s_lastCongestionTime.store(now, std::memory_order_relaxed);
+  }
 
   uint32_t toa = getTimeOnAir(len);
   if (!duty_cycle::canSend(toa)) {
@@ -142,7 +154,10 @@ bool sendDirectInternal(const uint8_t* data, size_t len) {
       uint8_t c = s_cadBusyCount.load(std::memory_order_relaxed);
       uint32_t cw = CAD_CW_MIN * (1u << (c < CAD_BEB_MAX ? c : CAD_BEB_MAX));
       if (cw > CAD_CW_MAX) cw = CAD_CW_MAX;
-      if (c < 255) s_cadBusyCount.store(c + 1, std::memory_order_relaxed);
+      if (c < 255) {
+        s_cadBusyCount.store(c + 1, std::memory_order_relaxed);
+        s_lastCongestionTime.store((uint32_t)millis(), std::memory_order_relaxed);
+      }
       uint32_t backoff = (esp_random() % cw) * CAD_SLOT_TIME_MS;
       if (backoff > 0) {
         queueDeferredSend(data, len, getSpreadingFactor(), backoff);
