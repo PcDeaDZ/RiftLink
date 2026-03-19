@@ -25,6 +25,7 @@ fi
 
 # Параметры
 SETUP=0
+UPDATE=0
 FLASH=0
 MONITOR=0
 OTA=0
@@ -40,6 +41,7 @@ DEVICE_ID=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --setup)     SETUP=1; shift ;;
+        --update)    UPDATE=1; shift ;;
         --flash)     FLASH=1; shift ;;
         --monitor)   MONITOR=1; shift ;;
         --ota)       OTA=1; shift ;;
@@ -138,6 +140,26 @@ do_setup() {
     echo ""
 }
 
+# --- Обновление из репозитория ---
+do_update() {
+    echo ""
+    echo -e "\033[36m========================================"
+    echo "  RiftLink — обновление из репозитория"
+    echo -e "========================================\033[0m"
+    echo ""
+    if [[ ! -d "$SCRIPT_DIR/.git" ]]; then
+        echo -e "\033[31m[ОШИБКА] Не git-репозиторий: $SCRIPT_DIR\033[0m"
+        return 1
+    fi
+    (cd "$SCRIPT_DIR" && git pull)
+    local ret=$?
+    if [[ $ret -eq 0 ]]; then
+        echo ""
+        echo -e "\033[32mГотово! Обновление завершено.\033[0m"
+    fi
+    return $ret
+}
+
 # Список портов (USB Serial, без Bluetooth) — формат: "PORT|HINT"
 # pio: порт, -----, Hardware ID (BTHENUM=Bluetooth), Description
 get_serial_ports() {
@@ -177,6 +199,7 @@ show_menu() {
     echo ""
     echo "  Окружение:"
     echo "    8. Setup — установка зависимостей (Python, PlatformIO, Flutter, Android)"
+    echo "    9. Обновление из репозитория (git pull)"
     echo ""
     echo "    0. Выход"
     echo ""
@@ -255,6 +278,10 @@ install_apk() {
 # Режим CLI
 if [[ $SETUP -eq 1 ]]; then
     do_setup
+    exit $?
+fi
+if [[ $UPDATE -eq 1 ]]; then
+    do_update
     exit $?
 fi
 # Монитор порта (просмотр вывода устройства)
@@ -469,6 +496,7 @@ while true; do
         6) install_apk ;;
         7) build_apk && install_apk ;;
         8) do_setup ;;
+        9) do_update ;;
         0) exit 0 ;;
         *) echo "Неверный выбор." ;;
     esac

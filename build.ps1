@@ -4,6 +4,7 @@
 
 param(
     [switch]$Setup,     # Установка зависимостей (Python, PlatformIO, Flutter, Android SDK)
+    [switch]$Update,    # Обновление из репозитория (git pull)
     [switch]$Flash,
     [switch]$Monitor,
     [switch]$Ota,
@@ -143,6 +144,32 @@ function Invoke-Setup {
     Write-Host ""
 }
 
+# --- Обновление из репозитория ---
+function Invoke-Update {
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "  RiftLink — обновление из репозитория" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ""
+    $gitDir = Join-Path $ScriptRoot ".git"
+    if (-not (Test-Path $gitDir)) {
+        Write-Host "[ОШИБКА] Не git-репозиторий: $ScriptRoot" -ForegroundColor Red
+        return $false
+    }
+    try {
+        Push-Location $ScriptRoot
+        git pull
+        $ok = $LASTEXITCODE -eq 0
+        if ($ok) {
+            Write-Host ""
+            Write-Host "Готово! Обновление завершено." -ForegroundColor Green
+        }
+        return $ok
+    } finally {
+        Pop-Location
+    }
+}
+
 # Сопоставление env для firmware
 $EnvMap = @{
     "1" = @{ env = "heltec_v3";      name = "V3 (OLED)" }
@@ -227,6 +254,7 @@ function Show-Menu {
     Write-Host ""
     Write-Host "  Окружение:"
     Write-Host "    8. Setup — установка зависимостей (Python, PlatformIO, Flutter, Android)"
+    Write-Host "    9. Обновление из репозитория (git pull)"
     Write-Host ""
     Write-Host "    0. Выход"
     Write-Host ""
@@ -372,6 +400,9 @@ try {
 if ($Setup) {
     Invoke-Setup
     exit 0
+}
+if ($Update) {
+    if (Invoke-Update) { exit 0 } else { exit 1 }
 }
 # Монитор порта (просмотр вывода устройства)
 if ($Monitor -and -not $Flash -and -not $App -and -not $InstallApk -and -not $All -and $BuildEnv -eq "") {
@@ -648,6 +679,7 @@ while ($true) {
             if (Invoke-BuildApk) { Invoke-InstallApk | Out-Null }
         }
         "8" { Invoke-Setup }
+        "9" { Invoke-Update | Out-Null }
         "0" { exit 0 }
         default { Write-Host "Неверный выбор." -ForegroundColor Yellow }
     }

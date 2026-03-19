@@ -166,8 +166,8 @@ void GxEPD2_EPD::_waitWhileBusy(const char* comment, uint16_t busy_time)
 
 void GxEPD2_EPD::_writeCommand(uint8_t c)
 {
-  static bool first = true;
-  if (first) { Serial.println("[E-Ink] SPI cmd"); first = false; }
+  static int n = 0;
+  if (n < 5) { Serial.print("[E-Ink] cmd"); Serial.println(n); n++; }
   _spi.beginTransaction(_spi_settings);
   if (_dc >= 0) digitalWrite(_dc, LOW);
   if (_cs >= 0) digitalWrite(_cs, LOW);
@@ -179,6 +179,9 @@ void GxEPD2_EPD::_writeCommand(uint8_t c)
 
 void GxEPD2_EPD::_writeData(uint8_t d)
 {
+  static int dn = 0;
+  if (dn < 3 || (dn > 0 && (dn % 1000) == 0)) { Serial.print("[E-Ink] data "); Serial.println(dn); }
+  dn++;
   _spi.beginTransaction(_spi_settings);
   if (_cs >= 0) digitalWrite(_cs, LOW);
   _spi.transfer(d);
