@@ -1045,8 +1045,10 @@ void setup() {
     RIFTLINK_LOG_ERR("[RiftLink] NVS init FAILED: %s (0x%x) — настройки не сохранятся\n",
         esp_err_to_name(nvs), (unsigned)nvs);
   }
+#if defined(USE_EINK)
+  wifi::init();  // Paper: до displayInit (макс. heap), при OOM — WiFi/OTA отключены
+#endif
   locale::init();
-
   displayInit();
   displayShowBootScreen();
   s_bootPhase = BOOT_PHASE_WAIT_4S;
@@ -1072,7 +1074,9 @@ static void runBootStateMachine() {
   region::init();
   crypto::init();
   x25519_keys::init();
-  wifi::init();  // раньше — до тяжёлых модулей; OOM на Paper при позднем init (ret=101)
+#if !defined(USE_EINK)
+  wifi::init();  // OLED: после crypto
+#endif
   if (!radio::init()) {
     RIFTLINK_LOG_ERR("[RiftLink] Radio init FAILED\n");
     displayText(0, 10, locale::getForDisplay("radio_fail"));
@@ -1119,9 +1123,11 @@ static void runBootStateMachine() {
   routing::init();
   voice_frag::init();
   powersave::init();
-  esp_now_slots::init();  // после wifi::init — переключает WiFi в STA для ESP-NOW
+  if (wifi::isAvailable()) {
+    esp_now_slots::init();
+    if (wifi::hasCredentials()) wifi::connect();
+  }
   gps::init();
-  if (wifi::hasCredentials()) wifi::connect();
   displayShowScreenForceFull(0);
   if (!asyncQueuesInit()) {
     RIFTLINK_LOG_ERR("[RiftLink] Async queues init FAILED\n");

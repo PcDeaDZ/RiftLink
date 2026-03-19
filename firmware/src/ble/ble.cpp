@@ -232,7 +232,7 @@ class CharCallbacks : public NimBLECharacteristicCallbacks {
 
     if (strcmp(cmd, "ota") == 0) {
       ota::start();
-      ble::notifyOta("192.168.4.1", "RiftLink-OTA", "riftlink123");
+      if (ota::isActive()) ble::notifyOta("192.168.4.1", "RiftLink-OTA", "riftlink123");
       return;
     }
 

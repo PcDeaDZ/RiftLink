@@ -54,7 +54,20 @@ static const uint8_t ICON_GPS[]   = {0x0C,0x1E,0x1E,0x1E,0x3F,0x1E,0x0C,0x00};  
 static const uint8_t* TAB_ICONS[] = {ICON_MAIN, ICON_INFO, ICON_WIFI, ICON_SYS, ICON_MSG, ICON_LANG, ICON_GPS};
 
 static const char* TAB_KEYS[] = {"tab_main", "tab_info", "tab_wifi", "tab_sys", "tab_msg", "tab_lang", "tab_gps"};
-#define N_TABS 7
+
+enum ContentTab { CT_MAIN, CT_INFO, CT_WIFI, CT_SYS, CT_MSG, CT_LANG, CT_GPS };
+static int getTabCount() {
+  return wifi::isAvailable() ? (gps::isPresent() ? 7 : 6) : (gps::isPresent() ? 6 : 5);
+}
+static ContentTab contentForTab(int tab) {
+  if (wifi::isAvailable()) {
+    switch (tab) { case 0: return CT_MAIN; case 1: return CT_INFO; case 2: return CT_WIFI;
+      case 3: return CT_SYS; case 4: return CT_MSG; case 5: return CT_LANG; default: return CT_GPS; }
+  } else {
+    switch (tab) { case 0: return CT_MAIN; case 1: return CT_INFO; case 2: return CT_SYS;
+      case 3: return CT_MSG; case 4: return CT_LANG; default: return CT_GPS; }
+  }
+}
 
 #define SHORT_PRESS_MS  350   // короткое = смена вкладки
 #define LONG_PRESS_MS   500   // длинное = подтверждение / вход в режим модификации
@@ -323,7 +336,7 @@ static void drawFrame(int activeTab) {
   if (!disp) return;
   disp->clearDisplay();
 
-  int nTabs = gps::isPresent() ? 7 : 6;
+  int nTabs = getTabCount();
   int tabW = SCREEN_WIDTH / nTabs;
 
   // Вкладки с иконками
@@ -331,11 +344,12 @@ static void drawFrame(int activeTab) {
     int x = i * tabW;
     int iconX = x + (tabW - ICON_W) / 2;
     int iconY = 2;
+    const uint8_t* icon = TAB_ICONS[(int)contentForTab(i)];
     if (i == activeTab) {
       disp->fillRoundRect(x + 1, 1, tabW - 2, TAB_H - 2, 1, SSD1306_WHITE);
-      disp->drawBitmap(iconX, iconY, TAB_ICONS[i], ICON_W, ICON_H, SSD1306_BLACK);
+      disp->drawBitmap(iconX, iconY, icon, ICON_W, ICON_H, SSD1306_BLACK);
     } else {
-      disp->drawBitmap(iconX, iconY, TAB_ICONS[i], ICON_W, ICON_H, SSD1306_WHITE);
+      disp->drawBitmap(iconX, iconY, icon, ICON_W, ICON_H, SSD1306_WHITE);
     }
     if (i < nTabs - 1) {
       disp->drawLine(x + tabW, 2, x + tabW, TAB_H - 2, SSD1306_WHITE);
@@ -472,13 +486,15 @@ static void drawContentGps() {
 
 static void drawScreen(int tab) {
   drawFrame(tab);
-  if (tab == 0) drawContentMain();
-  else if (tab == 1) drawContentInfo();
-  else if (tab == 2) drawContentWiFi();
-  else if (tab == 3) drawContentSys();
-  else if (tab == 4) drawContentMsg();
-  else if (tab == 5) drawContentLang();
-  else drawContentGps();
+  switch (contentForTab(tab)) {
+    case CT_MAIN: drawContentMain(); break;
+    case CT_INFO: drawContentInfo(); break;
+    case CT_WIFI: drawContentWiFi(); break;
+    case CT_SYS: drawContentSys(); break;
+    case CT_MSG: drawContentMsg(); break;
+    case CT_LANG: drawContentLang(); break;
+    default: drawContentGps(); break;
+  }
   disp->display();
 }
 
@@ -497,8 +513,8 @@ void displaySetLastMsg(const char* fromHex, const char* text) {
 }
 
 void displayShowScreen(int screen) {
-  if (screen == 6 && !gps::isPresent()) screen = 5;
-  s_currentScreen = screen % N_TABS;
+  int nTabs = getTabCount();
+  s_currentScreen = (screen < nTabs) ? screen : (nTabs - 1);
   s_lastActivityTime = millis();  // смена экрана (пикеры) — активность
   drawScreen(s_currentScreen);
 }
@@ -512,22 +528,22 @@ int displayGetCurrentScreen() {
 }
 
 int displayGetNextScreen(int current) {
-  int nTabs = gps::isPresent() ? 7 : 6;
-  return (current + 1) % nTabs;
+  return (current + 1) % getTabCount();
 }
 
 void displayOnLongPress(int screen) {
   s_lastActivityTime = millis();
-  if (screen == 0) {
+  ContentTab ct = contentForTab(screen);
+  if (ct == CT_MAIN) {
     displayShowRegionPicker();
     drawScreen(s_currentScreen);
-  } else if (screen == 5) {
+  } else if (ct == CT_LANG) {
     displayShowLanguagePicker();
     drawScreen(s_currentScreen);
-  } else if (screen == 6 && gps::isPresent()) {
+  } else if (ct == CT_GPS && gps::isPresent()) {
     gps::toggle();
     drawScreen(s_currentScreen);
-  } else if (screen == 3) {
+  } else if (ct == CT_SYS) {
     selftest::run(nullptr);
   }
 }
@@ -604,7 +620,8 @@ bool displayUpdate() {
 
   if (!s_showingBootScreen && (millis() - s_lastScreenUpdate > 2000)) {
     s_lastScreenUpdate = millis();
-    if (s_currentScreen == 0 || s_currentScreen == 1 || s_currentScreen == 2 || s_currentScreen == 6) drawScreen(s_currentScreen);
+    ContentTab ct = contentForTab(s_currentScreen);
+    if (ct == CT_MAIN || ct == CT_INFO || ct == CT_WIFI || ct == CT_GPS) drawScreen(s_currentScreen);
   }
   return false;
 }

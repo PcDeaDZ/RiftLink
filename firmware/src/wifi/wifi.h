@@ -9,7 +9,10 @@
 
 namespace wifi {
 
-void init();
+/** Инициализация WiFi. Возвращает true при успехе. При ошибке (OOM и т.д.) — false, WiFi/OTA/ESP-NOW отключены. */
+bool init();
+/** WiFi доступен (init успешен)? */
+bool isAvailable();
 bool setCredentials(const char* ssid, const char* pass);
 void connect();
 void disconnect();

@@ -5,6 +5,7 @@
  */
 
 #include "ota.h"
+#include "wifi/wifi.h"
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 
@@ -18,7 +19,10 @@ namespace ota {
 
 void start() {
   if (s_active) return;
-
+  if (!wifi::isAvailable()) {
+    Serial.println("[OTA] WiFi unavailable — use USB");
+    return;
+  }
   WiFi.mode(WIFI_AP);
   WiFi.softAP(OTA_AP_SSID, OTA_AP_PASS);
   IPAddress ip = WiFi.softAPIP();

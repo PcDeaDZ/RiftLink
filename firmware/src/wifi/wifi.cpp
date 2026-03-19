@@ -4,6 +4,7 @@
 
 #include "wifi.h"
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <cstring>
 #include <nvs.h>
 #include <nvs_flash.h>
@@ -15,15 +16,30 @@
 namespace wifi {
 
 static bool s_inited = false;
+static bool s_available = false;
 
-void init() {
-  if (s_inited) return;
-  WiFi.mode(WIFI_OFF);
+bool init() {
+  if (s_inited) return s_available;
   s_inited = true;
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  esp_err_t err = esp_wifi_init(&cfg);
+  if (err != ESP_OK) {
+    Serial.printf("[RiftLink] WiFi init failed: %s (0x%x) — OTA/ESP-NOW отключены\n",
+        esp_err_to_name(err), (unsigned)err);
+    s_available = false;
+    return false;
+  }
+  esp_wifi_set_mode(WIFI_MODE_NULL);
+  s_available = true;
+  return true;
+}
+
+bool isAvailable() {
+  return s_available;
 }
 
 bool setCredentials(const char* ssid, const char* pass) {
-  if (!ssid || strlen(ssid) == 0) return false;
+  if (!s_available || !ssid || strlen(ssid) == 0) return false;
 
   nvs_handle_t h;
   if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
@@ -36,6 +52,7 @@ bool setCredentials(const char* ssid, const char* pass) {
 }
 
 void connect() {
+  if (!s_available) return;
   nvs_handle_t h;
   char ssid[64] = {0};
   char pass[64] = {0};
@@ -65,13 +82,13 @@ void disconnect() {
 }
 
 bool isConnected() {
-  return WiFi.status() == WL_CONNECTED;
+  return s_available && WiFi.status() == WL_CONNECTED;
 }
 
 void getStatus(char* ssidOut, size_t ssidLen, char* ipOut, size_t ipLen) {
   if (ssidOut && ssidLen > 0) ssidOut[0] = '\0';
   if (ipOut && ipLen > 0) ipOut[0] = '\0';
-
+  if (!s_available) return;
   if (WiFi.status() == WL_CONNECTED) {
     if (ssidOut && ssidLen > 0) {
       strncpy(ssidOut, WiFi.SSID().c_str(), ssidLen - 1);
@@ -85,6 +102,7 @@ void getStatus(char* ssidOut, size_t ssidLen, char* ipOut, size_t ipLen) {
 }
 
 bool hasCredentials() {
+  if (!s_available) return false;
   nvs_handle_t h;
   char ssid[8] = {0};
   size_t len = sizeof(ssid);
