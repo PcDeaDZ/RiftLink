@@ -447,7 +447,10 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       }
       bool hadKey = x25519_keys::hasKeyFor(hdr.from);
       x25519_keys::onKeyExchange(hdr.from, payload);
-      { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12, true, hadKey); }
+      if (!hadKey) {  // ответ только если ключа не было — иначе KEY_EXCHANGE storm
+        bool useSf12 = (rssi < -90) || (sf == 12);
+        x25519_keys::sendKeyExchange(hdr.from, useSf12, true, false);
+      }
     } else if (hdr.opcode == protocol::OP_HELLO) {
       offline_queue::onNodeOnline(hdr.from);
       if (neighbors::onHello(hdr.from, rssi)) {
@@ -471,7 +474,10 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         }
         bool hadKey = x25519_keys::hasKeyFor(hdr.from);
         x25519_keys::onKeyExchange(hdr.from, payload);
-        { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12, true, hadKey); }
+        if (!hadKey) {  // ответ только если ключа не было — иначе KEY_EXCHANGE storm
+          bool useSf12 = (rssi < -90) || (sf == 12);
+          x25519_keys::sendKeyExchange(hdr.from, useSf12, true, false);
+        }
       }
       break;
 

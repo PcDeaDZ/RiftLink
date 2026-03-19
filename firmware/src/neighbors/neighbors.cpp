@@ -94,7 +94,10 @@ void updateRssi(const uint8_t* nodeId, int rssi) {
   if (!nodeId || (rssi < -128 || rssi > 0)) return;
   if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
   int idx = findSlot(nodeId);
-  if (idx >= 0) s_entries[idx].lastRssi = (int8_t)rssi;
+  if (idx >= 0) {
+    s_entries[idx].lastRssi = (int8_t)rssi;
+    s_entries[idx].lastSeenMs = millis();  // любой пакет — продлеваем «онлайн»
+  }
   xSemaphoreGive(s_mutex);
 }
 

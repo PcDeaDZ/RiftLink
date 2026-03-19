@@ -60,43 +60,29 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
   return hdrLen + payloadLen;
 }
 
-constexpr size_t HEADER_LEN_V0 = 19;  // Без channel (обратная совместимость)
-constexpr int OPCODE_OFFSET_V1 = 19;   // sync(1) + version(1) + from(8) + to(8) + ttl(1)
-constexpr int OPCODE_OFFSET_V2 = 2;    // sync(1) + version(1)
-constexpr int OPCODE_OFFSET_LEGACY = 18; // version(1) + from(8) + to(8) + ttl(1)
+constexpr int OPCODE_OFFSET_V2 = 2;  // sync(1) + version(1)
 
 static bool isValidOpcode(uint8_t op) {
   return (op >= 0x01 && op <= 0x0D) || op == OP_PONG || op == OP_PING;
 }
 
-// Найти смещение начала пакета: sync-first, затем opcode-at-offset (v1 или v2)
+// Только v2 (0x20) и v2.1 (0x30) — все устройства на одной версии
 static int findPacketStart(const uint8_t* buf, size_t len) {
-  if (len < HEADER_LEN_BROADCAST) return -1;  // v2 broadcast HELLO = 13 байт
-  // Стратегия 1: поиск SYNC_BYTE в первых 8 байтах
+  if (len < HEADER_LEN_BROADCAST) return -1;
   for (int off = 0; off <= 8 && off + HEADER_LEN_BROADCAST <= (int)len; off++) {
     if (buf[off] == SYNC_BYTE) {
       uint8_t v = buf[off + 1];
-      if ((v & 0xF0) == 0x10 || (v & 0xF0) == 0x20 || (v & 0xF0) == 0x30) return off;
+      if ((v & 0xF0) == 0x20 || (v & 0xF0) == 0x30) return off;
     }
   }
-  // Стратегия 2: поиск opcode на offset v2 (2) или v1 (19)
   for (int i = 0; i < (int)len && i <= 32; i++) {
     if (!isValidOpcode(buf[i])) continue;
     int start = i - OPCODE_OFFSET_V2;
     if (start >= 0 && start + 2 <= (int)len && buf[start] == SYNC_BYTE) {
       uint8_t v = buf[start + 1];
-      if ((v & 0xF0) == 0x10 || (v & 0xF0) == 0x20 || (v & 0xF0) == 0x30) return start;
-    }
-    start = i - OPCODE_OFFSET_V1;
-    if (start >= 0 && start + 2 <= (int)len && buf[start] == SYNC_BYTE) {
-      uint8_t v = buf[start + 1];
-      if ((v & 0xF0) == 0x10 || (v & 0xF0) == 0x20 || (v & 0xF0) == 0x30) return start;
+      if ((v & 0xF0) == 0x20 || (v & 0xF0) == 0x30) return start;
     }
   }
-  // Legacy: без sync
-  uint8_t v0 = buf[0];
-  if ((v0 & 0xF0) == 0x10 || (v0 & 0xF0) == 0x20 || (v0 & 0xF0) == 0x30) return 0;
-  if (v0 == 0x00 && len > (size_t)OPCODE_OFFSET_LEGACY && buf[OPCODE_OFFSET_LEGACY] == OP_HELLO) return 0;
   return -1;
 }
 
@@ -159,34 +145,8 @@ bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr, const uint8_
         hdrLen = 20;
       }
     }
-  } else if ((v0 & 0xF0) == 0x10) {
-    hdr->pktId = 0;
-    // v1: from(8) + to(8) + ttl(1) + opcode(1) + channel(1)
-    if (hLen < HEADER_LEN_V0) return false;
-    hdr->version_flags = v0;
-    memcpy(hdr->from, h + 1, NODE_ID_LEN);
-    memcpy(hdr->to, h + 1 + NODE_ID_LEN, NODE_ID_LEN);
-    if (hdr->from[0] == 0xFF && hdr->from[1] == 0xFF && (hdr->to[0] != 0xFF || hdr->to[1] != 0xFF)) {
-      uint8_t tmp[NODE_ID_LEN];
-      memcpy(tmp, hdr->from, NODE_ID_LEN);
-      memcpy(hdr->from, hdr->to, NODE_ID_LEN);
-      memcpy(hdr->to, tmp, NODE_ID_LEN);
-    }
-    hdr->ttl = h[1 + NODE_ID_LEN * 2];
-    hdr->opcode = h[1 + NODE_ID_LEN * 2 + 1];
-    hdr->channel = (hLen >= HEADER_LEN) ? h[1 + NODE_ID_LEN * 2 + 2] : CHANNEL_DEFAULT;
-    hdrLen = (hLen >= HEADER_LEN) ? HEADER_LEN : HEADER_LEN_V0;
-  } else if (v0 == 0x00 && hLen > (size_t)(1 + NODE_ID_LEN * 2 + 1) && h[1 + NODE_ID_LEN * 2 + 1] == OP_HELLO) {
-    hdr->pktId = 0;
-    hdr->version_flags = 0x10;
-    memcpy(hdr->from, h + 1, NODE_ID_LEN);
-    memcpy(hdr->to, h + 1 + NODE_ID_LEN, NODE_ID_LEN);
-    hdr->ttl = h[1 + NODE_ID_LEN * 2];
-    hdr->opcode = OP_HELLO;
-    hdr->channel = CHANNEL_DEFAULT;
-    hdrLen = HEADER_LEN_V0;
   } else {
-    return false;
+    return false;  // только v2/v2.1
   }
 
   // HELLO: строгая длина
@@ -219,7 +179,7 @@ size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadca
     case OP_HELLO:
     case OP_PING:
     case OP_PONG:
-      return 0;  // переменная: v2 broadcast=13, v1/v2 unicast=21
+      return 0;  // переменная: v2 broadcast=13, unicast=21
     case OP_ACK:
     case OP_READ:
       return (payloadLen == 4) ? (hdrLen + 4) : 0;
