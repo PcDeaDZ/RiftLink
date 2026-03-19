@@ -34,6 +34,9 @@ int getChannel();
 /** Установить канал (0–2). Только для EU/UK. Возвращает true при успехе */
 bool setChannel(int ch);
 
+/** Channel Hopping: при congestion переключить на следующий канал (EU 868.1→868.3→868.5). Rate-limited. */
+void switchChannelOnCongestion();
+
 /** Количество регионов для выбора при первом буте */
 int getPresetCount();
 

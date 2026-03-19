@@ -8,7 +8,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/spec_version-0.2-888?style=flat-square" alt="Spec" />
-  <img src="https://img.shields.io/badge/firmware-1.3.5-E7352C?style=flat-square&logo=espressif" alt="Firmware" />
+  <img src="https://img.shields.io/badge/firmware-1.3.6-E7352C?style=flat-square&logo=espressif" alt="Firmware" />
   <img src="https://img.shields.io/badge/LoRa-SX1262-00B0FF?style=flat-square&logo=lorawan" alt="LoRa" />
   <img src="https://img.shields.io/badge/X25519-ChaCha20-4CAF50?style=flat-square" alt="Crypto" />
 </p>
@@ -70,6 +70,10 @@
 | 0x0B | VOICE_MSG | Голосовое сообщение (Opus, фрагменты как MSG_FRAG) |
 | 0x0C | READ | Подтверждение прочтения (payload: msg_id 4B) |
 | 0x0D | NACK | Запрос повтора (payload: pktId 2B, v2.1) |
+| 0x0E | ECHO | Эхо вместо ACK: broadcast msgId+originalFrom (12B) |
+| 0x0F | POLL | RIT: broadcast «присылайте пакеты для меня» (payload пустой) |
+| 0x10 | MSG_BATCH | Packet Fusion: count(1) + [len(2)+enc]* — несколько MSG в одном пакете |
+| 0x11 | XOR_RELAY | Network Coding: XOR(A,B) broadcast, meta: pktIdA/B, fromA/B, toA/B |
 | 0xFE | PONG | Ответ на PING |
 | 0xFF | PING | Проверка связи (получатель отвечает PONG) |
 

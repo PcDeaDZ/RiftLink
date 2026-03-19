@@ -60,7 +60,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
           child: Text(l.tr('add')),
         ),
       ],
-    ));
+    )).then((_) => c.dispose());
   }
 
   @override

@@ -67,6 +67,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   final Set<String> _pendingPings = {};
   Timer? _ttlTimer;
   Timer? _neighborsPollTimer;
+  Timer? _gpsSyncTimer;
   bool _meshAnimationEnabled = true;
   AnimationController? _meshAnimController;
   StreamSubscription? _connStateSub;
@@ -113,6 +114,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           _neighborsHasKey.any((k) => !k);
       if (needRefresh) widget.ble.getInfo();
     });
+    // GPS sync от телефона: UTC + координаты для beacon-sync (устройство без GPS)
+    _gpsSyncTimer = Timer.periodic(const Duration(seconds: 15), (_) => _sendGpsSyncFromPhone());
   }
 
   void _onTextChanged() {
@@ -157,6 +160,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     localeNotifier.removeListener(_onLocaleChanged);
     _ttlTimer?.cancel();
     _neighborsPollTimer?.cancel();
+    _gpsSyncTimer?.cancel();
     _voiceRecordTicker?.dispose();
     _meshAnimController?.dispose();
     _sub?.cancel();
@@ -502,7 +506,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       else if (evt is RiftLinkErrorEvent) { _showSnack('${context.l10n.tr('error')}: ${evt.msg}', backgroundColor: AppColors.error); }
       else if (evt is RiftLinkWifiEvent) { _showSnack(evt.connected ? 'WiFi: ${evt.ssid} — ${evt.ip}' : 'WiFi: не подключено'); }
       else if (evt is RiftLinkGpsEvent) { setState(() { _gpsPresent = evt.present; _gpsEnabled = evt.enabled; _gpsFix = evt.hasFix; }); }
-      else if (evt is RiftLinkInviteEvent) { _showInviteDialog(evt.id, evt.pubKey); }
+      else if (evt is RiftLinkInviteEvent) { _showInviteDialog(evt.id, evt.pubKey, evt.channelKey); }
       else if (evt is RiftLinkSelftestEvent) {
         final ok = evt.radioOk && evt.displayOk;
         _showSnack('Selftest: ${evt.radioOk ? "✓" : "✗"} радио, ${evt.displayOk ? "✓" : "✗"} дисплей. ${evt.batteryMv}mV', backgroundColor: ok ? null : AppColors.error);
@@ -588,6 +592,18 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       if (mounted) { setState(() { _messages.add(_Msg(from: _nodeId, text: '📍 ${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)}', isIncoming: false, isLocation: true)); }); _scrollToBottom(); }
     } catch (e) { if (mounted) _showSnack(e.toString()); }
     finally { if (mounted) setState(() => _locationLoading = false); }
+  }
+
+  /// Периодическая отправка GPS от телефона для beacon-sync (устройство без аппаратного GPS)
+  Future<void> _sendGpsSyncFromPhone() async {
+    if (!mounted || !widget.ble.isConnected) return;
+    try {
+      final perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) return;
+      final pos = await Geolocator.getCurrentPosition();
+      final utcMs = DateTime.now().millisecondsSinceEpoch;
+      await widget.ble.sendGpsSync(utcMs: utcMs, lat: pos.latitude, lon: pos.longitude, alt: pos.altitude.toInt());
+    } catch (_) {}
   }
 
   Future<void> _toggleVoiceRecord() async {
@@ -776,11 +792,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           child: Text(context.l10n.tr('save')),
         ),
       ],
-    ));
+    )).then((_) => nc.dispose());
   }
 
-  void _showInviteDialog(String id, String pubKey) {
-    final data = '{"id":"$id","pubKey":"$pubKey"}';
+  void _showInviteDialog(String id, String pubKey, [String? channelKey]) {
+    final map = <String, String>{'id': id, 'pubKey': pubKey};
+    if (channelKey != null && channelKey.isNotEmpty) map['channelKey'] = channelKey;
+    final data = jsonEncode(map);
     showAppDialog(context: context, builder: (ctx) => AlertDialog(
       title: Text(context.l10n.tr('invite_created'), style: const TextStyle(color: AppColors.onSurface)),
       content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [

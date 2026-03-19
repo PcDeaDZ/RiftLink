@@ -7,6 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="description" content="RiftLink — mesh-мессенджер">
   <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
   <title>RiftLink</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -158,9 +159,17 @@
         <h3>E2E Invite</h3>
         <button id="btnInvite" class="btn small primary">Создать приглашение</button>
         <div id="inviteResult" class="invite-result" style="display:none"></div>
-        <div class="row" style="margin-top:12px">
+        <div class="row" style="margin-top:12px;flex-wrap:wrap">
           <input type="text" id="acceptId" placeholder="ID пригласившего" maxlength="16" class="short">
+          <button id="btnPasteInvite" class="btn small" title="Вставить из буфера">Вставить</button>
+        </div>
+        <div class="row" style="margin-top:6px">
           <input type="text" id="acceptPubKey" placeholder="PubKey base64" style="flex:1;min-width:0">
+        </div>
+        <div class="row" style="margin-top:6px">
+          <input type="text" id="acceptChannelKey" placeholder="ChannelKey base64 (опционально)" style="flex:1;min-width:0">
+        </div>
+        <div class="row" style="margin-top:6px">
           <button id="btnAcceptInvite" class="btn small primary">Принять</button>
         </div>
       </section>

@@ -10,7 +10,7 @@ QueueHandle_t displayQueue = nullptr;
 
 static constexpr size_t PACKET_QUEUE_LEN =
 #if defined(USE_EINK)
-    64;   // Paper: ~16KB heap; 192 давало init FAILED (OOM)
+    32;   // Paper: ~16KB heap; 64+WiFi давало OOM (ret=101)
 #else
     16;   // OLED: MSG+HELLO+KEY_EXCHANGE — не дропать при всплеске
 #endif

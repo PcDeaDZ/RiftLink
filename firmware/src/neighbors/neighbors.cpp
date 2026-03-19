@@ -119,6 +119,17 @@ int getRssi(int i) {
   return 0;
 }
 
+uint8_t rssiToSfOrthogonal(const uint8_t* nodeId) {
+  if (!nodeId) return 0;
+  int r = getRssiFor(nodeId);
+  uint8_t sfRssi = rssiToSf(r);
+  if (getCount() < 2) return sfRssi ? sfRssi : 12;
+  uint32_t h = 0;
+  for (size_t i = 0; i < protocol::NODE_ID_LEN; i++) h = h * 31 + nodeId[i];
+  uint8_t sfOrtho = 7 + (uint8_t)(h % 6);
+  return (sfRssi > 0 && sfRssi > sfOrtho) ? sfRssi : sfOrtho;
+}
+
 int getRssiFor(const uint8_t* nodeId) {
   if (!nodeId) return -128;
   if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return -128;

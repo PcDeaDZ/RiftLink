@@ -63,7 +63,7 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
 constexpr int OPCODE_OFFSET_V2 = 2;  // sync(1) + version(1)
 
 static bool isValidOpcode(uint8_t op) {
-  return (op >= 0x01 && op <= 0x0D) || op == OP_PONG || op == OP_PING;
+  return (op >= 0x01 && op <= 0x11) || op == OP_PONG || op == OP_PING;
 }
 
 // Только v2 (0x20) и v2.1 (0x30) — все устройства на одной версии
@@ -208,6 +208,10 @@ size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadca
       return (payloadLen == 21) ? (HEADER_LEN_BROADCAST + 21) : 0;  // всегда broadcast
     case OP_ROUTE_REPLY:
       return (payloadLen == 21) ? (SYNC_LEN + HEADER_LEN + 21) : 0;  // всегда unicast
+    case OP_ECHO:
+      return (payloadLen == 12) ? (HEADER_LEN_BROADCAST + 12) : 0;  // broadcast: msgId(4)+originalFrom(8)
+    case OP_POLL:
+      return (payloadLen == 0) ? HEADER_LEN_BROADCAST : 0;  // RIT: broadcast без payload
     default:
       return 0;  // переменная длина
   }
@@ -232,6 +236,12 @@ bool getExpectedPayloadRange(uint8_t opcode, size_t* minOut, size_t* maxOut) {
     case OP_ROUTE_REPLY:
       *minOut = *maxOut = 21;
       return true;
+    case OP_ECHO:
+      *minOut = *maxOut = 12;  // msgId(4) + originalFrom(8)
+      return true;
+    case OP_POLL:
+      *minOut = *maxOut = 0;
+      return true;
     case OP_TELEMETRY:
       *minOut = 28;  // 4 plain + crypto::OVERHEAD
       *maxOut = 64;  // 48 было мало — коллизии/мерж дают до 56B
@@ -255,6 +265,10 @@ bool getExpectedPayloadRange(uint8_t opcode, size_t* minOut, size_t* maxOut) {
       return true;
     case OP_NACK:
       *minOut = *maxOut = 2;  // pktId
+      return true;
+    case OP_XOR_RELAY:
+      *minOut = 36;  // pktIdA(2)+pktIdB(2)+fromA(8)+toA(8)+fromB(8)+toB(8)
+      *maxOut = 36 + MAX_PAYLOAD;
       return true;
     default:
       return false;

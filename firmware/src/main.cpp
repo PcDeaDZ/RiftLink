@@ -24,11 +24,19 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include "crypto/crypto.h"
 #include "ble/ble.h"
 #include "msg_queue/msg_queue.h"
+#include "mab/mab.h"
 #include "compress/compress.h"
 #include "frag/frag.h"
 #include "telemetry/telemetry.h"
 #include "ota/ota.h"
 #include "region/region.h"
+#include "collision_slots/collision_slots.h"
+#include "beacon_sync/beacon_sync.h"
+#include "clock_drift/clock_drift.h"
+#include "bls_n/bls_n.h"
+#include "esp_now_slots/esp_now_slots.h"
+#include "packet_fusion/packet_fusion.h"
+#include "network_coding/network_coding.h"
 #include "neighbors/neighbors.h"
 #include "groups/groups.h"
 #include "offline_queue/offline_queue.h"
@@ -64,8 +72,10 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #define TELEM_INTERVAL_MS  60000
 #define GPS_LOC_INTERVAL_MS 60000  // интервал отправки локации с GPS
 #define SF_ADAPT_INTERVAL_MS 30000 // адаптивный SF по качеству связи
+#define POLL_INTERVAL_MS   8000    // RIT: «присылайте пакеты для меня» каждые 8с
 
 static uint32_t lastHello = 0;
+static uint32_t lastPoll = 0;
 static uint32_t lastTelemetry = 0;
 static uint32_t lastGpsLoc = 0;
 static uint32_t lastSfAdapt = 0;
@@ -304,6 +314,17 @@ void sendHello() {
 #endif
 }
 
+void sendPoll() {
+  uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN_BROADCAST];
+  size_t len = protocol::buildPacket(pkt, sizeof(pkt),
+      node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_POLL, nullptr, 0);
+  if (len == 0) return;
+  uint8_t txSf = neighbors::getCount() > 0
+      ? neighbors::rssiToSf(neighbors::getMinRssi()) : 12;
+  if (txSf == 0) txSf = 12;
+  radio::send(pkt, len, txSf, false);
+}
+
 void sendMsg(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
   if (text == nullptr || strlen(text) == 0) {
     ble::notifyError("send_empty", "Пустое сообщение не отправляется");
@@ -417,7 +438,11 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           (buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 && buf[2] == protocol::OP_NACK && len != 23) ||
           (buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 && buf[2] == protocol::OP_ACK &&
           len != 25 && len != 17);  // ACK: unicast 25B, broadcast 17B
-      if (truncated) radio::notifyCongestion();  // коллизия/обрезанный пакет → BEB
+      if (truncated) {
+        radio::notifyCongestion();  // коллизия/обрезанный пакет → BEB
+        region::switchChannelOnCongestion();  // Channel Hopping: EU 868.1→868.3→868.5
+        collision_slots::recordCollision();  // Predictive Slot Avoidance
+      }
 #if defined(DEBUG_PACKET_DUMP)
       if (!truncated) {
         Serial.printf("[RiftLink] Parse FAIL len=%u rssi=%d hex=", (unsigned)len, rssi);
@@ -438,6 +463,25 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 
   // from=broadcast — некорректно, отбрасываем
   if (node::isBroadcast(hdr.from) || node::isInvalidNodeId(hdr.from)) return;
+
+  // OP_XOR_RELAY: попытка декодировать (если есть один из пакетов в кэше)
+  if (hdr.opcode == protocol::OP_XOR_RELAY) {
+    uint8_t decodedBuf[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+    size_t decodedLen = 0;
+    if (network_coding::onXorRelayReceived(buf, len, decodedBuf, &decodedLen) && decodedLen > 0) {
+      if (packetQueue && decodedLen <= PACKET_BUF_SIZE) {
+        PacketQueueItem item;
+        memcpy(item.buf, decodedBuf, decodedLen);
+        item.len = (uint16_t)decodedLen;
+        item.rssi = (int8_t)rssi;
+        item.sf = sf;
+        xQueueSend(packetQueue, &item, 0);
+      } else {
+        handlePacket(decodedBuf, decodedLen, rssi, sf);
+      }
+    }
+    return;
+  }
 
   // HELLO всегда broadcast — иначе сдвиг/коррупция (ghost-соседи)
   if (hdr.opcode == protocol::OP_HELLO && !node::isBroadcast(hdr.to)) return;
@@ -464,15 +508,10 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
   if (needRelay) {
     relayDedupAdd(hdr.from, relayPayloadHashVal);
     relayRateRecord();
-    memcpy(fwdBuf, buf, len);
-    size_t ttlOff;
-    if (buf[0] == protocol::SYNC_BYTE && ((buf[1] & 0xF0) == 0x20 || (buf[1] & 0xF0) == 0x30)) {
-      bool hasPktId = (buf[1] & 0xF0) == 0x30;
-      ttlOff = (buf[1] & 0x01) ? (hasPktId ? 13 : 11) : (hasPktId ? 21 : 19);  // v2/v2.1
-    } else {
-      ttlOff = (buf[0] == protocol::SYNC_BYTE) ? (protocol::SYNC_LEN + 1 + protocol::NODE_ID_LEN * 2) : (1 + protocol::NODE_ID_LEN * 2);
+    if (hdr.opcode == protocol::OP_MSG && hdr.pktId != 0 && !node::isBroadcast(hdr.to)) {
+      pkt_cache::addOverheard(hdr.from, hdr.to, hdr.pktId, buf, len);
     }
-    if (ttlOff < len) fwdBuf[ttlOff]--;
+
     uint8_t txSf = 0;
     if (node::isBroadcast(hdr.to)) {
       int minRssi = neighbors::getMinRssi();
@@ -483,15 +522,61 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         int r = neighbors::getRssiFor(nextHop);
         txSf = neighbors::rssiToSf(r);
       }
+      if (txSf == 0) txSf = 12;
     }
-    // SNR-based backoff: дальние узлы (слабый rssi) ретранслируют раньше — лучше охват mesh
     int rssiClamp = (rssi < -120) ? -120 : (rssi > -40 ? -40 : rssi);
     int32_t d = 10 * (rssiClamp + 100);
     uint32_t delayMs = (d <= 0) ? 0 : ((d > 500) ? 500 : (uint32_t)d);
-    queueDeferredRelay(fwdBuf, len, txSf, delayMs, hdr.from, relayPayloadHashVal);
+
+    bool xorSent = false;
+    if (network_coding::addForXor(buf, len, hdr.from, hdr.to)) {
+      uint8_t otherFrom[protocol::NODE_ID_LEN];
+      uint32_t otherHash;
+      network_coding::getLastPairOther(otherFrom, &otherHash);
+      relayHeard(otherFrom, otherHash);
+      uint8_t xorBuf[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+      size_t xorLen = 0;
+      if (network_coding::getXorPacket(xorBuf, sizeof(xorBuf), &xorLen)) {
+        queueDeferredSend(xorBuf, xorLen, txSf, delayMs);
+        xorSent = true;
+      }
+    }
+    if (!xorSent) {
+      uint8_t decodedBuf[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+      size_t decodedLen = 0;
+        if (network_coding::getDecodedFromPending(buf, len, hdr.from, hdr.to, hdr.pktId,
+                                                  decodedBuf, &decodedLen) && decodedLen > 0) {
+        if (packetQueue && decodedLen <= PACKET_BUF_SIZE) {
+          PacketQueueItem item;
+          memcpy(item.buf, decodedBuf, decodedLen);
+          item.len = (uint16_t)decodedLen;
+          item.rssi = (int8_t)rssi;
+          item.sf = sf;
+          xQueueSend(packetQueue, &item, 0);
+        } else {
+          handlePacket(decodedBuf, decodedLen, rssi, sf);
+        }
+      }
+      memcpy(fwdBuf, buf, len);
+      size_t ttlOff;
+      if (buf[0] == protocol::SYNC_BYTE && ((buf[1] & 0xF0) == 0x20 || (buf[1] & 0xF0) == 0x30)) {
+        bool hasPktId = (buf[1] & 0xF0) == 0x30;
+        ttlOff = (buf[1] & 0x01) ? (hasPktId ? 13 : 11) : (hasPktId ? 21 : 19);
+      } else {
+        ttlOff = (buf[0] == protocol::SYNC_BYTE) ? (protocol::SYNC_LEN + 1 + protocol::NODE_ID_LEN * 2) : (1 + protocol::NODE_ID_LEN * 2);
+      }
+      if (ttlOff < len) fwdBuf[ttlOff]--;
+      queueDeferredRelay(fwdBuf, len, txSf, delayMs, hdr.from, relayPayloadHashVal);
+    }
   }
 
   if (!node::isForMe(hdr.to) && !node::isBroadcast(hdr.to)) {
+    if (hdr.opcode == protocol::OP_NACK && payloadLen >= 2) {
+      uint16_t pktId = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
+      if (pkt_cache::retransmitOverheard(hdr.from, hdr.to, pktId)) {
+        RIFTLINK_LOG_EVENT("[RiftLink] Overhear retransmit pktId=%u\n", (unsigned)pktId);
+      }
+    }
     if (hdr.opcode == protocol::OP_ROUTE_REQ) {
       routing::onRouteReq(hdr.from, payload, payloadLen);
     } else if (hdr.opcode == protocol::OP_ROUTE_REPLY) {
@@ -508,6 +593,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         x25519_keys::sendKeyExchange(hdr.from, useSf12, true, false);
       }
     } else if (hdr.opcode == protocol::OP_HELLO) {
+      beacon_sync::onBeaconReceived(hdr.from);
       offline_queue::onNodeOnline(hdr.from);
       if (neighbors::onHello(hdr.from, rssi)) {
         ble::requestNeighborsNotify();
@@ -540,6 +626,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       break;
 
     case protocol::OP_HELLO:
+      clock_drift::onHelloReceived(hdr.from);
       offline_queue::onNodeOnline(hdr.from);
       if (neighbors::onHello(hdr.from, rssi)) {
         ble::requestNeighborsNotify();
@@ -585,9 +672,22 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
                 node::getId(), hdr.from, 31, protocol::OP_ACK,
                 ackPayload, msg_queue::MSG_ID_LEN, false, false);
             if (ackLen > 0) {
-              uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(hdr.from));
+              uint8_t txSf = neighbors::rssiToSfOrthogonal(hdr.from);
               if (txSf == 0) txSf = 12;
               queueDeferredAck(ackPkt, ackLen, txSf, 80);  // без блокировки — RX window для след. MSG
+            }
+            // Echo Protocol: broadcast echo для Witness ACK (отправитель может услышать даже при коллизии ACK)
+            uint8_t echoPayload[12];
+            memcpy(echoPayload, decBuf + off, msg_queue::MSG_ID_LEN);
+            memcpy(echoPayload + msg_queue::MSG_ID_LEN, hdr.from, protocol::NODE_ID_LEN);
+            uint8_t echoPkt[protocol::PAYLOAD_OFFSET + 32];
+            size_t echoLen = protocol::buildPacket(echoPkt, sizeof(echoPkt),
+                node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_ECHO,
+                echoPayload, 12, false, false);
+            if (echoLen > 0) {
+              uint8_t echoSf = neighbors::rssiToSf(neighbors::getMinRssi());
+              if (echoSf == 0) echoSf = 12;
+              queueDeferredSend(echoPkt, echoLen, echoSf, 120);  // 120 ms после ACK — не коллидировать
             }
             msg = (const char*)(decBuf + off + msg_queue::MSG_ID_LEN);
             msgLen = decLen - off - msg_queue::MSG_ID_LEN;
@@ -630,6 +730,55 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       }
       break;
 
+    case protocol::OP_MSG_BATCH:
+      if (payloadLen >= 1 && node::isForMe(hdr.to)) {
+        uint8_t count = payload[0];
+        if (count >= 1 && count <= 4) {
+          size_t off = 1;
+          for (uint8_t i = 0; i < count && off + 2 <= payloadLen; i++) {
+            uint16_t encLen = (uint16_t)payload[off] | ((uint16_t)payload[off + 1] << 8);
+            off += 2;
+            if (encLen == 0 || off + encLen > payloadLen) break;
+            size_t decLen = 0;
+            if (!crypto::decryptFrom(hdr.from, payload + off, encLen, decBuf, &decLen) || decLen >= 256) break;
+            off += encLen;
+            size_t d = compress::decompress(decBuf, decLen, tmpBuf, sizeof(tmpBuf));
+            if (d > 0 && d < 256) {
+              memcpy(decBuf, tmpBuf, d);
+              decLen = d;
+            }
+            if (decLen >= 6 && decBuf[0] >= 1 && decBuf[0] <= 60) {
+              size_t msgOff = 1;
+              uint32_t msgId = 0;
+              memcpy(&msgId, decBuf + msgOff, msg_queue::MSG_ID_LEN);
+              msgOff += msg_queue::MSG_ID_LEN;
+              uint8_t ackPayload[msg_queue::MSG_ID_LEN];
+              memcpy(ackPayload, &msgId, msg_queue::MSG_ID_LEN);
+              uint8_t ackPkt[protocol::PAYLOAD_OFFSET + msg_queue::MSG_ID_LEN];
+              size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
+                  node::getId(), hdr.from, 31, protocol::OP_ACK,
+                  ackPayload, msg_queue::MSG_ID_LEN, false, false);
+              if (ackLen > 0) {
+                uint8_t txSf = neighbors::rssiToSfOrthogonal(hdr.from);
+                if (txSf == 0) txSf = 12;
+                queueDeferredAck(ackPkt, ackLen, txSf, 80 + (i * 50));
+              }
+              size_t msgLen = decLen - msgOff;
+              if (msgLen < 256 && !ucDedupSeen(hdr.from, msgId)) {
+                ucDedupAdd(hdr.from, msgId);
+                memcpy(msgStrBuf, decBuf + msgOff, msgLen);
+                msgStrBuf[msgLen] = '\0';
+                ble::requestMsgNotify(hdr.from, msgStrBuf, msgId, rssi, decBuf[0]);
+                char fromHex[17];
+                snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
+                queueDisplayLastMsg(fromHex, msgStrBuf);
+              }
+            }
+          }
+        }
+      }
+      break;
+
     case protocol::OP_ACK:
       if (payloadLen >= msg_queue::MSG_ID_LEN) {
         uint32_t msgId;
@@ -638,6 +787,22 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           ble::notifyDelivered(hdr.from, msgId, rssi);
         }
       }
+      break;
+
+    case protocol::OP_ECHO:
+      // Echo Protocol: broadcast msgId+originalFrom — отправитель принимает как ACK
+      if (payloadLen >= 12 && memcmp(payload + msg_queue::MSG_ID_LEN, node::getId(), protocol::NODE_ID_LEN) == 0) {
+        uint32_t msgId;
+        memcpy(&msgId, payload, msg_queue::MSG_ID_LEN);
+        if (msg_queue::onAckReceived(hdr.from, payload, msg_queue::MSG_ID_LEN)) {
+          ble::notifyDelivered(hdr.from, msgId, rssi);
+        }
+      }
+      break;
+
+    case protocol::OP_POLL:
+      // RIT: получатель шлёт «присылайте пакеты» — ускоряем отправку pending для него
+      msg_queue::onPollReceived(hdr.from);
       break;
 
     case protocol::OP_READ:
@@ -698,6 +863,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       if (payloadLen >= 2 && node::isForMe(hdr.to)) {
         uint16_t pktId = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
         if (pkt_cache::retransmitOnNack(hdr.from, pktId)) {
+          region::switchChannelOnCongestion();  // Channel Hopping при NACK
           RIFTLINK_LOG_EVENT("[RiftLink] NACK retransmit pktId=%u to %02X%02X\n",
               (unsigned)pktId, hdr.from[0], hdr.from[1]);
         }
@@ -906,6 +1072,7 @@ static void runBootStateMachine() {
   region::init();
   crypto::init();
   x25519_keys::init();
+  wifi::init();  // раньше — до тяжёлых модулей; OOM на Paper при позднем init (ret=101)
   if (!radio::init()) {
     RIFTLINK_LOG_ERR("[RiftLink] Radio init FAILED\n");
     displayText(0, 10, locale::getForDisplay("radio_fail"));
@@ -923,6 +1090,19 @@ static void runBootStateMachine() {
   ble::setOnSend(sendMsg);
   ble::setOnLocation(sendLocation);
   msg_queue::init();
+  mab::init();
+  collision_slots::init();
+  beacon_sync::init();
+  clock_drift::init();
+  bls_n::init();
+  packet_fusion::init();
+  packet_fusion::setOnBatchSent([](const uint8_t* to, const uint32_t* msgIds, int count) {
+    msg_queue::registerBatchSent(to, msgIds, count);
+  });
+  packet_fusion::setOnSingleFlush([](const uint8_t* to, uint32_t msgId, const uint8_t* pkt, size_t pktLen, uint8_t txSf) {
+    return msg_queue::registerPendingFromFusion(to, msgId, pkt, pktLen, txSf);
+  });
+  network_coding::init();
   msg_queue::setOnUnicastSent([](const uint8_t* to, uint32_t msgId) { ble::notifySent(to, msgId); });
   msg_queue::setOnUnicastUndelivered([](const uint8_t* to, uint32_t msgId) {
     radio::notifyCongestion();
@@ -939,7 +1119,7 @@ static void runBootStateMachine() {
   routing::init();
   voice_frag::init();
   powersave::init();
-  wifi::init();
+  esp_now_slots::init();  // после wifi::init — переключает WiFi в STA для ESP-NOW
   gps::init();
   if (wifi::hasCredentials()) wifi::connect();
   displayShowScreenForceFull(0);
@@ -988,6 +1168,10 @@ void loop() {
   if (millis() - lastHello > (helloInterval + (int32_t)jitter)) {
     sendHello();
     lastHello = millis();
+  }
+  if (millis() - lastPoll > POLL_INTERVAL_MS) {
+    sendPoll();
+    lastPoll = millis();
   }
   if (millis() - lastTelemetry > TELEM_INTERVAL_MS) {
     telemetry::send();

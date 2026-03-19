@@ -2,12 +2,12 @@
   <img src="https://img.shields.io/badge/RiftLink-Recovery_Guide-42A5F5?style=for-the-badge&logo=radio&logoColor=white" alt="RiftLink" />
 </p>
 
-# 🔧 Восстановление Heltec WiFi LoRa 32 (V3/V4)
+# 🔧 Восстановление Heltec WiFi LoRa 32 (V3/V4/Paper)
 
 > Инструкция при «не включается» после прошивки
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Heltec-V3%20%7C%20V4-00B0FF?style=flat-square&logo=lorawan" alt="Heltec" />
+  <img src="https://img.shields.io/badge/Heltec-V3%20%7C%20V4%20%7C%20Paper-00B0FF?style=flat-square&logo=lorawan" alt="Heltec" />
   <img src="https://img.shields.io/badge/ESP32--S3-Bootloader-E7352C?style=flat-square&logo=espressif" alt="ESP32" />
   <img src="https://img.shields.io/badge/esptool-Erase%20%26%20Flash-00979D?style=flat-square&logo=platformio" alt="esptool" />
 </p>
@@ -19,6 +19,7 @@
 ### 1. 🔍 Определите плату
 
 - **V3**: ESP32-S3FN8, 8MB встроенная flash, CP2102 (USB-UART)
+- **V3 Paper**: ESP32-S3, E-Ink 2.13", CP2102 (USB-UART) — как V3
 - **V4**: ESP32-S3R2, 16MB внешняя flash, native USB (без CP2102)
 
 ### 2. 📥 Режим загрузчика (bootloader)
@@ -40,6 +41,9 @@
 
 # Для V4
 .\build.ps1 -V4 -Flash -Erase
+
+# Для V3 Paper
+.\build.ps1 -V3Paper -Flash -Erase
 ```
 
 ### 4. ⌨️ Ручная очистка через esptool

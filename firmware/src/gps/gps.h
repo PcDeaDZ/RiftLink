@@ -34,4 +34,10 @@ void getPins(int* rx, int* tx, int* en);
 /** Сохранить конфиг в NVS */
 void saveConfig();
 
+/** Beacon-sync + GPS: данные от телефона по BLE (gps_sync). UTC ms, lat, lon, alt */
+void setPhoneSync(int64_t utcMs, float lat, float lon, int16_t alt);
+
+/** Есть ли данные от телефона (для beacon с timestamp) */
+bool hasPhoneSync();
+
 }  // namespace gps

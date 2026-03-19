@@ -10,8 +10,11 @@
 #include <nvs.h>
 #include <esp_random.h>
 #include <string.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #define NVS_NAMESPACE "riftlink"
+#define MUTEX_TIMEOUT_MS 50
 #define NVS_KEY_CHANNEL "chkey"
 #define KEY_LEN crypto_aead_chacha20poly1305_ietf_KEYBYTES
 #define NONCE_LEN crypto_aead_chacha20poly1305_ietf_NPUBBYTES
@@ -20,11 +23,14 @@
 static uint8_t s_key[KEY_LEN];
 static uint32_t s_nonceCounter = 0;
 static bool s_inited = false;
+static SemaphoreHandle_t s_mutex = nullptr;
 
 namespace crypto {
 
 bool init() {
   if (sodium_init() < 0) return false;
+  s_mutex = xSemaphoreCreateMutex();
+  if (!s_mutex) return false;
 
   nvs_handle_t h;
   if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
@@ -38,8 +44,7 @@ bool init() {
     nvs_close(h);
   }
 
-  // MVP: дефолтный ключ канала (все устройства в одной сети)
-  // TODO: KEY_EXCHANGE, QR-приглашение для смены ключа
+  // Дефолтный ключ канала (при первом запуске). Смена через BLE: channelKey, invite/acceptInvite.
   static const uint8_t DEFAULT_KEY[KEY_LEN] = {
     0x52, 0x69, 0x66, 0x74, 0x4c, 0x69, 0x6e, 0x6b,
     0x2d, 0x52, 0x4c, 0x2d, 0x63, 0x68, 0x61, 0x6e,
@@ -62,9 +67,10 @@ bool init() {
 
 bool encrypt(const uint8_t* plain, size_t len, uint8_t* out, size_t* outLen) {
   if (!s_inited || len > 4096) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
 
   size_t need = NONCE_LEN + len + TAG_LEN;
-  if (outLen && *outLen < need) return false;
+  if (outLen && *outLen < need) { xSemaphoreGive(s_mutex); return false; }
 
   uint8_t nonce[NONCE_LEN];
   memset(nonce, 0, NONCE_LEN);
@@ -78,17 +84,19 @@ bool encrypt(const uint8_t* plain, size_t len, uint8_t* out, size_t* outLen) {
       nullptr, 0,  // no additional data
       nullptr, nonce, s_key);
 
-  if (r != 0) return false;
+  if (r != 0) { xSemaphoreGive(s_mutex); return false; }
 
   memcpy(out, nonce, NONCE_LEN);
   *outLen = NONCE_LEN + clen;
 
   s_nonceCounter++;
+  xSemaphoreGive(s_mutex);
   return true;
 }
 
 bool decrypt(const uint8_t* cipher, size_t len, uint8_t* out, size_t* outLen) {
   if (!s_inited || len < NONCE_LEN + TAG_LEN) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
 
   const uint8_t* nonce = cipher;
   const uint8_t* c = cipher + NONCE_LEN;
@@ -101,6 +109,7 @@ bool decrypt(const uint8_t* cipher, size_t len, uint8_t* out, size_t* outLen) {
       nullptr, 0,
       nonce, s_key);
 
+  xSemaphoreGive(s_mutex);
   if (r != 0) return false;
   *outLen = (size_t)mlen;
   return true;
@@ -160,6 +169,32 @@ bool decryptFrom(const uint8_t* senderId, const uint8_t* cipher, size_t len, uin
     if (decryptWithKey(peerKey, cipher, len, out, outLen)) return true;
   }
   return decrypt(cipher, len, out, outLen);
+}
+
+bool setChannelKey(const uint8_t* key) {
+  if (!key) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
+
+  memcpy(s_key, key, KEY_LEN);
+  s_nonceCounter = 0;
+
+  nvs_handle_t h;
+  if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+    nvs_set_blob(h, NVS_KEY_CHANNEL, s_key, KEY_LEN);
+    nvs_set_u32(h, "nonce_ctr", s_nonceCounter);
+    nvs_commit(h);
+    nvs_close(h);
+  }
+  xSemaphoreGive(s_mutex);
+  return true;
+}
+
+bool getChannelKey(uint8_t* out) {
+  if (!s_inited || !out) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
+  memcpy(out, s_key, KEY_LEN);
+  xSemaphoreGive(s_mutex);
+  return true;
 }
 
 }  // namespace crypto

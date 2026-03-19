@@ -16,8 +16,12 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-firmware_1.3.5_|_app_1.0.1-888?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-firmware_1.3.6_|_app_1.0.1-888?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/license-See_project-888?style=flat-square" alt="License" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/PcDeaDZ/RiftLink">GitHub</a>
 </p>
 
 ---
@@ -56,8 +60,11 @@
 dual_boot/
 ├── firmware/       # Прошивка ESP32 (PlatformIO, C++)
 ├── app/            # Flutter-приложение (Android, iOS, Web/PWA)
+├── pwa-app/        # PWA (Vite, Vitest) — веб-версия
 ├── docs/           # Спецификации, API, планы
-├── scripts/        # Serial API тест, fix_encoding (кодировка build.ps1/sh)
+├── scripts/        # Serial API тест, fix_encoding (кодировка build/install .ps1/.sh)
+├── install.sh      # curl | bash — клон + setup (Linux/macOS)
+├── install.ps1     # irm | iex — клон + setup (Windows)
 ├── build.ps1       # Менеджер (Windows): setup + build + flash + APK + монитор
 ├── build.sh        # То же для Linux/macOS
 └── .env.example    # Шаблон путей → копируйте в .env.local
@@ -65,7 +72,29 @@ dual_boot/
 
 ---
 
-## 🛠️ Установка зависимостей
+## ⚡ Установка «в один клик» (curl / wget)
+
+Скрипт проверяет Git (устанавливает при необходимости), клонирует репозиторий и запускает `setup_env`:
+
+**Linux / macOS / Git Bash:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/PcDeaDZ/RiftLink/master/install.sh | bash
+```
+или
+```bash
+wget -qO- https://raw.githubusercontent.com/PcDeaDZ/RiftLink/master/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/PcDeaDZ/RiftLink/master/install.ps1 | iex
+```
+
+Папка по умолчанию: `~/riftlink` или `%USERPROFILE%\riftlink`. Переменные: `RIFTLINK_REPO`, `RIFTLINK_DIR`.
+
+---
+
+## 🛠️ Установка зависимостей (если уже клонировали)
 
 **Windows:** `.\build.ps1 -Setup`  
 **Linux/macOS:** `./build.sh --setup`
@@ -131,7 +160,7 @@ dual_boot/
 
 ### Кодировка
 
-После правок в `build.ps1` или `build.sh` выполните `.\scripts\fix_encoding.ps1` — восстановит UTF-8 BOM (PowerShell) и LF (bash).
+После правок в `build.ps1`, `build.sh`, `install.ps1` или `install.sh` выполните `.\scripts\fix_encoding.ps1` — восстановит UTF-8 BOM (PowerShell) и LF (bash).
 
 ---
 
@@ -152,8 +181,9 @@ dual_boot/
 | 📊 **TELEMETRY** | Батарея, heap, RSSI |
 | 🔄 **OTA** | Обновление по WiFi (ArduinoOTA) |
 | 🌐 **Регионы** | EU, UK, RU, US, AU |
-| 🤝 **Invite/AcceptInvite** | QR-приглашение для присоединения к сети |
+| 🤝 **Invite/AcceptInvite** | QR-приглашение, channelKey для приватных сетей |
 | 🛡️ **Валидация** | Толерантность к RF-помехам, sync byte 0x5A |
+| 📡 **NACK** | Запрос повтора по pktId (v2.1) |
 
 ---
 
@@ -170,6 +200,18 @@ dual_boot/
 | [📡 PROTOCOL.md](docs/PROTOCOL.md) | Формат пакетов, opcodes, BLE, Serial |
 | [📘 API.md](docs/API.md) | BLE/Serial API с примерами |
 | [🔧 RECOVERY.md](docs/RECOVERY.md) | Восстановление при «не включается» |
+
+---
+
+## 🧪 Тесты
+
+| Компонент | Команда |
+|-----------|---------|
+| **Flutter** | `cd app && flutter test` |
+| **PWA** | `cd pwa-app && npm test` |
+| **Firmware (native)** | `cd firmware && pio test -e native` — 54 теста, требуется GCC (MSYS2 на Windows) |
+
+Синтетические тесты проверяют: invite/acceptInvite с channelKey, парсинг BLE-событий, формат JSON, protocol::buildPacket/parsePacket. См. [firmware/test/README.md](firmware/test/README.md).
 
 ---
 

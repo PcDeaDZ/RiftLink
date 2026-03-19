@@ -52,7 +52,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           child: Text(l.tr('save')),
         ),
       ],
-    ));
+    )).then((_) { idC.dispose(); nickC.dispose(); });
   }
 
   void _showEditDialog(Contact c) {
@@ -70,7 +70,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           child: Text(l.tr('ok')),
         ),
       ],
-    ));
+    )).then((_) => nickC.dispose());
   }
 
   Future<void> _delete(Contact c) async {

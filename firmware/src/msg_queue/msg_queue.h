@@ -26,6 +26,14 @@ bool enqueueGroup(uint32_t groupId, const char* text);
 // Обработка входящего ACK. from = кто прислал ACK. Возвращает true если unicast доставлен (для notifyDelivered)
 bool onAckReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLen);
 
+// RIT: при получении POLL от получателя — ускорить отправку pending для него
+void onPollReceived(const uint8_t* from);
+
+// Packet Fusion: зарегистрировать batch для ACK tracking
+void registerBatchSent(const uint8_t* to, const uint32_t* msgIds, int count);
+// Packet Fusion: single message flush — добавить в pending
+bool registerPendingFromFusion(const uint8_t* to, uint32_t msgId, const uint8_t* pkt, size_t pktLen, uint8_t txSf);
+
 // Callback при успешной постановке unicast в очередь (для evt "sent")
 void setOnUnicastSent(void (*cb)(const uint8_t* to, uint32_t msgId));
 // Callback при неудачной доставке — ACK не получен после всех retry (для evt "undelivered")

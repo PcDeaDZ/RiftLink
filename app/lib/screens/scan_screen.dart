@@ -65,6 +65,9 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    _scanSub?.cancel();
+    _scanSub = null;
+    RiftLinkBle.stopScan();  // fire-and-forget, очистка при закрытии
     _meshAnimController?.dispose();
     super.dispose();
   }

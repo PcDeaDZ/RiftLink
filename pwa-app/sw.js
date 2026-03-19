@@ -3,7 +3,7 @@ const CACHE = 'riftlink-app-v1';
 self.addEventListener('install', (e) => {
   e.waitUntil(
     caches.open(CACHE).then((cache) =>
-      cache.addAll(['./', './index.html', './manifest.json', './style.css', './app.js'])
+      cache.addAll(['./', './index.html', './manifest.json', './style.css', './app.js', './icon.svg'])
     )
   );
   self.skipWaiting();

@@ -8,6 +8,7 @@ param(
     [switch]$Monitor,
     [switch]$Ota,
     [switch]$All,      # Сборка для всех env (V3, Paper, V4)
+    [switch]$FakeTech, # Сборка/прошивка FakeTech V5 (nRF52)
     [switch]$Erase,    # Очистка flash перед прошивкой
     [switch]$V3,
     [switch]$V3Paper,
@@ -147,6 +148,7 @@ $EnvMap = @{
     "1" = @{ env = "heltec_v3";      name = "V3 (OLED)" }
     "2" = @{ env = "heltec_v3_paper"; name = "V3 Paper (e-ink)" }
     "3" = @{ env = "heltec_v4";       name = "V4 (OLED)" }
+    "4" = @{ env = "faketec_v5";     name = "FakeTech V5 (nRF52)" }
 }
 
 function Get-SerialPorts {
@@ -177,6 +179,8 @@ function Get-SerialPorts {
                     $hint = "V4 (native USB)"
                 } elseif ($hwid -match "CP210|10C4:EA60|Silicon Labs" -or $desc -match "CP210|Silicon Labs") {
                     $hint = "Paper (CP210x)"
+                } elseif ($hwid -match "239A|VID_239A|Adafruit" -or $desc -match "Adafruit|последовательн") {
+                    $hint = "FakeTech (nRF52)"
                 }
                 $ports += [PSCustomObject]@{ Port = $port; Desc = $desc; HwId = $hwid; Hint = $hint }
             }
@@ -236,12 +240,20 @@ function Invoke-BuildFirmware {
         pio run -e $EnvName
         $ok = $LASTEXITCODE -eq 0
         if ($ok) {
-            $src = Join-Path $FirmwareDir ".pio\build\$EnvName\firmware.bin"
-            if (Test-Path $src) {
-                $outDir = Join-Path $FirmwareDir "out\$EnvName"
-                New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-                Copy-Item $src (Join-Path $outDir "firmware.bin") -Force
-                Write-Host "[out] $EnvName/firmware.bin" -ForegroundColor Green
+            $outDir = Join-Path $FirmwareDir "out\$EnvName"
+            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+            $buildDir = Join-Path $FirmwareDir ".pio\build\$EnvName"
+            if ($EnvName -eq "faketec_v5") {
+                $hex = Join-Path $buildDir "firmware.hex"
+                $zip = Join-Path $buildDir "firmware.zip"
+                if (Test-Path $hex) { Copy-Item $hex (Join-Path $outDir "firmware.hex") -Force; Write-Host "[out] $EnvName/firmware.hex" -ForegroundColor Green }
+                if (Test-Path $zip) { Copy-Item $zip (Join-Path $outDir "firmware.zip") -Force; Write-Host "[out] $EnvName/firmware.zip" -ForegroundColor Green }
+            } else {
+                $src = Join-Path $buildDir "firmware.bin"
+                if (Test-Path $src) {
+                    Copy-Item $src (Join-Path $outDir "firmware.bin") -Force
+                    Write-Host "[out] $EnvName/firmware.bin" -ForegroundColor Green
+                }
             }
         }
         return $ok
@@ -392,12 +404,13 @@ if ($Monitor -and -not $Flash -and -not $App -and -not $InstallApk -and -not $Al
     }
     exit $LASTEXITCODE
 }
-if ($Flash -or $App -or $InstallApk -or $All -or $BuildEnv -ne "") {
+if ($Flash -or $App -or $InstallApk -or $All -or $FakeTech -or $BuildEnv -ne "") {
     $envChoice = $BuildEnv
-    if ($V4) { $envChoice = "heltec_v4" }
+    if ($FakeTech) { $envChoice = "faketec_v5" }
+    elseif ($V4) { $envChoice = "heltec_v4" }
     elseif ($V3Paper) { $envChoice = "heltec_v3_paper" }
     elseif ($V3 -or $envChoice -eq "") { $envChoice = "heltec_v3" }
-    if ($Ota) {
+    if ($Ota -and $envChoice -ne "faketec_v5") {
         $envChoice = switch ($envChoice) {
             "heltec_v4" { "heltec_v4_ota" }
             "heltec_v3_paper" { "heltec_v3_paper_ota" }
@@ -418,7 +431,7 @@ if ($Flash -or $App -or $InstallApk -or $All -or $BuildEnv -ne "") {
     }
     Set-Location $FirmwareDir
     if ($All) {
-        $allEnvs = @("heltec_v3", "heltec_v3_paper", "heltec_v4")
+        $allEnvs = @("heltec_v3", "heltec_v3_paper", "heltec_v4", "faketec_v5")
         foreach ($e in $allEnvs) {
             Invoke-BuildFirmware -EnvName $e
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -435,12 +448,14 @@ if ($Flash -or $App -or $InstallApk -or $All -or $BuildEnv -ne "") {
             }
             $preferPaper = $envChoice -match "paper"
             $preferV4 = $envChoice -match "v4"
+            $preferFakeTech = $envChoice -match "faketec"
             if ($ports.Count -eq 1) {
                 $uploadPort = $ports[0].Port
             } else {
                 $sorted = @($ports | ForEach-Object {
                     $s = 0
-                    if ($preferPaper -and $_.Hint -match "Paper") { $s = 10 }
+                    if ($preferFakeTech -and $_.Hint -match "FakeTech") { $s = 10 }
+                    elseif ($preferPaper -and $_.Hint -match "Paper") { $s = 10 }
                     elseif ($preferV4 -and $_.Hint -match "V4") { $s = 10 }
                     $comNum = [int]($_.Port -replace 'COM', '')
                     [PSCustomObject]@{ Obj = $_; Score = $s; ComNum = $comNum }
@@ -450,7 +465,8 @@ if ($Flash -or $App -or $InstallApk -or $All -or $BuildEnv -ne "") {
                 for ($i = 0; $i -lt $n; $i++) {
                     $p = $sorted[$i]
                     $m = ""
-                    if ($preferPaper -and $p.Hint -match "Paper") { $m = " <- Paper" }
+                    if ($preferFakeTech -and $p.Hint -match "FakeTech") { $m = " <- FakeTech" }
+                    elseif ($preferPaper -and $p.Hint -match "Paper") { $m = " <- Paper" }
                     elseif ($preferV4 -and $p.Hint -match "V4") { $m = " <- V4" }
                     Write-Host "  $($i+1). $($p.Port) - $($p.Hint)$m"
                 }
@@ -460,6 +476,9 @@ if ($Flash -or $App -or $InstallApk -or $All -or $BuildEnv -ne "") {
             }
         }
         if ($uploadPort) {
+            if ($envChoice -eq "faketec_v5") {
+                Write-Host "[FakeTech] Двойной клик RST на NiceNano для DFU, затем прошивка..." -ForegroundColor Yellow
+            }
             Invoke-FlashFirmware -EnvName $envChoice -UploadPort $uploadPort -Erase:$Erase
         }
     }
@@ -501,6 +520,7 @@ while ($true) {
                 break
             }
             $port = $null
+            $preferFakeTech = $envName -match "faketec"
             $preferPaper = $envName -match "paper"
             $preferV4 = $envName -match "v4"
             if ($ports.Count -eq 1) {
@@ -510,7 +530,8 @@ while ($true) {
             } else {
                 $sorted = @($ports | ForEach-Object {
                     $score = 0
-                    if ($preferPaper -and $_.Hint -match "Paper") { $score = 10 }
+                    if ($preferFakeTech -and $_.Hint -match "FakeTech") { $score = 10 }
+                    elseif ($preferPaper -and $_.Hint -match "Paper") { $score = 10 }
                     elseif ($preferV4 -and $_.Hint -match "V4") { $score = 10 }
                     $comNum = [int]($_.Port -replace 'COM', '')
                     [PSCustomObject]@{ Obj = $_; Score = $score; ComNum = $comNum }
@@ -521,7 +542,8 @@ while ($true) {
                 for ($i = 0; $i -lt $n; $i++) {
                     $p = $sorted[$i]
                     $mark = ""
-                    if ($preferPaper -and $p.Hint -match "Paper") { $mark = " <- рекомендуется для Paper" }
+                    if ($preferFakeTech -and $p.Hint -match "FakeTech") { $mark = " <- рекомендуется для FakeTech" }
+                    elseif ($preferPaper -and $p.Hint -match "Paper") { $mark = " <- рекомендуется для Paper" }
                     elseif ($preferV4 -and $p.Hint -match "V4") { $mark = " <- рекомендуется для V4" }
                     Write-Host "    $($i+1). $($p.Port) - $($p.Hint)$mark"
                 }
@@ -530,6 +552,9 @@ while ($true) {
                 if ($pIdx -ge 0 -and $pIdx -lt $n) { $port = $sorted[$pIdx].Port }
             }
             if ($port) {
+                if ($envName -eq "faketec_v5") {
+                    Write-Host "  [FakeTech] Двойной клик RST на NiceNano для DFU перед прошивкой." -ForegroundColor Yellow
+                }
                 $yn = Read-Host "Очистить flash перед прошивкой? (y/n)"
                 $doErase = $yn -match '^[yY]'
                 Invoke-FlashFirmware -EnvName $envName -UploadPort $port -Erase:$doErase
@@ -551,6 +576,7 @@ while ($true) {
                 break
             }
             $port = $null
+            $preferFakeTech = $envName -match "faketec"
             $preferPaper = $envName -match "paper"
             $preferV4 = $envName -match "v4"
             if ($ports.Count -eq 1) {
@@ -560,7 +586,8 @@ while ($true) {
             } else {
                 $sorted = @($ports | ForEach-Object {
                     $score = 0
-                    if ($preferPaper -and $_.Hint -match "Paper") { $score = 10 }
+                    if ($preferFakeTech -and $_.Hint -match "FakeTech") { $score = 10 }
+                    elseif ($preferPaper -and $_.Hint -match "Paper") { $score = 10 }
                     elseif ($preferV4 -and $_.Hint -match "V4") { $score = 10 }
                     $comNum = [int]($_.Port -replace 'COM', '')
                     [PSCustomObject]@{ Obj = $_; Score = $score; ComNum = $comNum }
@@ -571,7 +598,8 @@ while ($true) {
                 for ($i = 0; $i -lt $n; $i++) {
                     $p = $sorted[$i]
                     $mark = ""
-                    if ($preferPaper -and $p.Hint -match "Paper") { $mark = " <- рекомендуется для Paper" }
+                    if ($preferFakeTech -and $p.Hint -match "FakeTech") { $mark = " <- рекомендуется для FakeTech" }
+                    elseif ($preferPaper -and $p.Hint -match "Paper") { $mark = " <- рекомендуется для Paper" }
                     elseif ($preferV4 -and $p.Hint -match "V4") { $mark = " <- рекомендуется для V4" }
                     Write-Host "    $($i+1). $($p.Port) - $($p.Hint)$mark"
                 }
@@ -580,6 +608,9 @@ while ($true) {
                 if ($pIdx -ge 0 -and $pIdx -lt $n) { $port = $sorted[$pIdx].Port }
             }
             if ($port) {
+                if ($envName -eq "faketec_v5") {
+                    Write-Host "  [FakeTech] Двойной клик RST на NiceNano для DFU перед прошивкой." -ForegroundColor Yellow
+                }
                 $yn = Read-Host "Очистить flash перед прошивкой? (y/n)"
                 $doErase = $yn -match '^[yY]'
                 Invoke-FlashFirmware -EnvName $envName -UploadPort $port -Erase:$doErase

@@ -45,4 +45,7 @@ inline uint8_t rssiToSf(int rssi) {
   return 12;
 }
 
+/** SF-orthogonality: разные SF соседям для параллельной передачи. 2+ соседей → hash(nodeId)%6. */
+uint8_t rssiToSfOrthogonal(const uint8_t* nodeId);
+
 }  // namespace neighbors

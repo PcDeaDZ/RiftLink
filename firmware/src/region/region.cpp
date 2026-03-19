@@ -152,6 +152,18 @@ bool setChannel(int ch) {
   return true;
 }
 
+#define CHANNEL_HOP_MIN_MS 30000  // не чаще 1 раза в 30 с
+static uint32_t s_lastChannelHop = 0;
+
+void switchChannelOnCongestion() {
+  if (!s_current.hasChannels || EU_N_CHANNELS < 2) return;
+  uint32_t now = (uint32_t)millis();
+  if (now - s_lastChannelHop < CHANNEL_HOP_MIN_MS) return;
+  s_lastChannelHop = now;
+  int next = (s_euChannel + 1) % EU_N_CHANNELS;
+  setChannel(next);
+}
+
 int getPresetCount() {
   return (int)N_PRESETS;
 }

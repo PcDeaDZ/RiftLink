@@ -50,22 +50,36 @@ class RiftLinkBle {
 
   Future<bool> _sendCmd(Map<String, dynamic> payload) async {
     if (_txChar == null || !isConnected) return false;
-    final json = jsonEncode(payload);
-    await _txChar!.write(utf8.encode(json), withoutResponse: true);
-    return true;
+    try {
+      final json = jsonEncode(payload);
+      await _txChar!.write(utf8.encode(json), withoutResponse: true);
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Подключение к устройству
   Future<bool> connect(BluetoothDevice dev) async {
     await disconnect();
     _device = dev;
-    await dev.connect();
-    await dev.discoverServices();
+    try {
+      await dev.connect();
+      await dev.discoverServices();
+    } catch (_) {
+      _device = null;
+      _txChar = null;
+      _rxChar = null;
+      rethrow;
+    }
 
     final service = dev.servicesList
         .where((s) => s.uuid.toString().toLowerCase() == serviceUuid)
         .firstOrNull;
-    if (service == null) return false;
+    if (service == null) {
+      await disconnect();
+      return false;
+    }
 
     _txChar = service.characteristics
         .where((c) => c.uuid.toString().toLowerCase() == charTxUuid)
@@ -74,7 +88,10 @@ class RiftLinkBle {
         .where((c) => c.uuid.toString().toLowerCase() == charRxUuid)
         .firstOrNull;
 
-    if (_txChar == null || _rxChar == null) return false;
+    if (_txChar == null || _rxChar == null) {
+      await disconnect();
+      return false;
+    }
     getInfo();
     getGroups();
     getRoutes();
@@ -96,6 +113,10 @@ class RiftLinkBle {
   /// Отправка геолокации (broadcast)
   Future<bool> sendLocation({required double lat, required double lon, int alt = 0}) async =>
       _sendCmd({'cmd': 'location', 'lat': lat, 'lon': lon, 'alt': alt});
+
+  /// GPS sync от телефона: UTC ms, lat, lon, alt — для beacon-sync (устройство без GPS)
+  Future<bool> sendGpsSync({required int utcMs, required double lat, required double lon, int alt = 0}) async =>
+      utcMs != 0 ? _sendCmd({'cmd': 'gps_sync', 'utc_ms': utcMs, 'lat': lat, 'lon': lon, 'alt': alt}) : Future.value(false);
 
   /// Установить регион (EU, RU, UK, US, AU)
   Future<bool> setRegion(String region) async =>
@@ -174,9 +195,12 @@ class RiftLinkBle {
   /// Создать E2E invite (evt "invite")
   Future<bool> createInvite() async => _sendCmd({'cmd': 'invite'});
 
-  /// Принять invite (id + pubKey base64)
-  Future<bool> acceptInvite({required String id, required String pubKey}) async =>
-      _sendCmd({'cmd': 'acceptInvite', 'id': id, 'pubKey': pubKey});
+  /// Принять invite (id + pubKey base64, опционально channelKey base64)
+  Future<bool> acceptInvite({required String id, required String pubKey, String? channelKey}) async {
+    final payload = <String, dynamic>{'cmd': 'acceptInvite', 'id': id, 'pubKey': pubKey};
+    if (channelKey != null && channelKey.isNotEmpty) payload['channelKey'] = channelKey;
+    return _sendCmd(payload);
+  }
 
   /// Selftest (evt "selftest")
   Future<bool> selftest() async => _sendCmd({'cmd': 'selftest'});
@@ -374,6 +398,7 @@ class RiftLinkBle {
           yield RiftLinkInviteEvent(
             id: json['id'] as String? ?? '',
             pubKey: json['pubKey'] as String? ?? '',
+            channelKey: json['channelKey'] as String?,
           );
         } else if (evt == 'selftest') {
           yield RiftLinkSelftestEvent(
@@ -492,7 +517,8 @@ class RiftLinkGpsEvent extends RiftLinkEvent {
 class RiftLinkInviteEvent extends RiftLinkEvent {
   final String id;
   final String pubKey;
-  RiftLinkInviteEvent({required this.id, required this.pubKey});
+  final String? channelKey;  // base64, опционально
+  RiftLinkInviteEvent({required this.id, required this.pubKey, this.channelKey});
 }
 
 class RiftLinkSelftestEvent extends RiftLinkEvent {

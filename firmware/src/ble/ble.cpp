@@ -27,6 +27,8 @@
 #include "ui/display.h"
 #include "async_tasks.h"
 #include "version.h"
+#include "bls_n/bls_n.h"
+#include "crypto/crypto.h"
 #include <mbedtls/base64.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -71,6 +73,38 @@ static size_t s_voiceBufLen = 0;
 static int s_voiceChunkTotal = -1;
 static uint8_t s_voiceTo[protocol::NODE_ID_LEN];
 
+// BLS-N: BLE scan для приёма RTS при подключённом телефоне
+static bool s_blsScanActive = false;
+static bool s_blsScanEnded = false;
+static uint32_t s_blsScanLastStart = 0;
+#define BLS_SCAN_DURATION_SEC 15
+#define BLS_SCAN_RESTART_DELAY_MS 500
+
+class BlsScanCallbacks : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* advertisedDevice) override {
+    if (!advertisedDevice->haveManufacturerData()) return;
+    std::string mfr = advertisedDevice->getManufacturerData();
+    if (mfr.size() < 19) return;
+    const uint8_t* d = (const uint8_t*)mfr.data();
+    if (d[0] != 0x4C || d[1] != 0x52) return;  // company ID 0x524C little-endian
+    if (d[2] != 0x52 || d[3] != 0x54 || d[4] != 0x53) return;  // "RTS"
+    uint8_t from4[4], to4[4];
+    memcpy(from4, d + 5, 4);
+    memcpy(to4, d + 9, 4);
+    uint16_t len = (uint16_t)d[13] << 8 | d[14];
+    uint32_t txAt = (uint32_t)d[15] << 24 | (uint32_t)d[16] << 16 | (uint32_t)d[17] << 8 | d[18];
+    bls_n::addReceivedRts(from4, to4, len, txAt);
+  }
+  void onScanEnd(const NimBLEScanResults& scanResults, int reason) override {
+    (void)scanResults;
+    (void)reason;
+    s_blsScanActive = false;
+    s_blsScanEnded = true;
+  }
+};
+
+static BlsScanCallbacks s_blsScanCallbacks;
+
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
     s_connected = true;
@@ -79,6 +113,12 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
   void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
     s_connected = false;
+    s_blsScanEnded = true;
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+    if (pScan && pScan->isScanning()) {
+      pScan->stop();
+      s_blsScanActive = false;
+    }
     vTaskDelay(pdMS_TO_TICKS(50));  // дать стеку освободить соединение
     NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
     if (!pAdv->isAdvertising()) {
@@ -111,10 +151,32 @@ class CharCallbacks : public NimBLECharacteristicCallbacks {
       return;
     }
 
+    if (strcmp(cmd, "channelKey") == 0) {
+      const char* keyB64 = doc["key"];
+      if (keyB64) {
+        size_t decLen;
+        uint8_t key[32];
+        if (mbedtls_base64_decode(key, 32, &decLen, (const unsigned char*)keyB64, strlen(keyB64)) == 0 && decLen == 32) {
+          if (crypto::setChannelKey(key)) {
+            s_pendingInfo = true;
+          }
+        }
+      }
+      return;
+    }
+
     if (strcmp(cmd, "acceptInvite") == 0) {
       const char* idStr = doc["id"];
       const char* pubKeyB64 = doc["pubKey"];
+      const char* channelKeyB64 = doc["channelKey"];
       if (idStr && strlen(idStr) >= 8 && pubKeyB64) {
+        if (channelKeyB64) {
+          size_t decLen;
+          uint8_t chKey[32];
+          if (mbedtls_base64_decode(chKey, 32, &decLen, (const unsigned char*)channelKeyB64, strlen(channelKeyB64)) == 0 && decLen == 32) {
+            crypto::setChannelKey(chKey);
+          }
+        }
         uint8_t nodeId[protocol::NODE_ID_LEN];
         memset(nodeId, 0xFF, protocol::NODE_ID_LEN);
         int n = (strlen(idStr) >= 16) ? 8 : 4;
@@ -252,6 +314,15 @@ class CharCallbacks : public NimBLECharacteristicCallbacks {
         groups::removeGroup(gid);
         s_pendingGroups = true;
       }
+      return;
+    }
+
+    if (strcmp(cmd, "gps_sync") == 0) {
+      int64_t utcMs = doc["utc_ms"] | 0;
+      float lat = doc["lat"] | 0.0f;
+      float lon = doc["lon"] | 0.0f;
+      int16_t alt = doc["alt"] | 0;
+      if (utcMs != 0) gps::setPhoneSync(utcMs, lat, lon, alt);
       return;
     }
 
@@ -632,7 +703,18 @@ void notifyInvite() {
   doc["id"] = idHex;
   doc["pubKey"] = pubKeyB64;
 
-  char buf[120];
+  uint8_t chKey[32];
+  if (crypto::getChannelKey(chKey)) {
+    size_t chB64Len;
+    mbedtls_base64_encode(nullptr, 0, &chB64Len, chKey, 32);
+    char chKeyB64[64];
+    if (mbedtls_base64_encode((unsigned char*)chKeyB64, sizeof(chKeyB64), &chB64Len, chKey, 32) == 0) {
+      chKeyB64[chB64Len] = '\0';
+      doc["channelKey"] = chKeyB64;
+    }
+  }
+
+  char buf[200];
   size_t len = serializeJson(doc, buf);
   pRxChar->setValue((uint8_t*)buf, len);
   pRxChar->notify();
@@ -910,6 +992,26 @@ void update() {
     NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
     if (!pAdv->isAdvertising()) {
       pAdv->start();
+    }
+  }
+
+  // BLS-N: при подключённом телефоне — BLE scan для приёма RTS от соседей
+  if (s_connected) {
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+    if (pScan && !pScan->isScanning() && !s_blsScanActive) {
+      if (s_blsScanEnded && (millis() - s_blsScanLastStart) < BLS_SCAN_RESTART_DELAY_MS)
+        ;  // ждём перед повторной попыткой
+      else {
+        if (s_blsScanEnded) s_blsScanEnded = false;
+        pScan->setScanCallbacks(&s_blsScanCallbacks, true);
+        if (pScan->start(BLS_SCAN_DURATION_SEC, false, false)) {
+          s_blsScanActive = true;
+          s_blsScanLastStart = millis();
+        } else {
+          s_blsScanEnded = true;
+          s_blsScanLastStart = millis();  // throttle при конфликте scan+GATT
+        }
+      }
     }
   }
 }

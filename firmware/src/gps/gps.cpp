@@ -35,6 +35,10 @@ static bool s_inited = false;
 
 static HardwareSerial* s_serial = nullptr;
 static TinyGPSPlus s_gps;
+static int64_t s_phoneUtcMs = 0;
+static float s_phoneLat = 0, s_phoneLon = 0;
+static int16_t s_phoneAlt = 0;
+static uint32_t s_phoneSyncTime = 0;
 
 static void applyPower(bool on) {
   if (s_pinEn < 0) return;
@@ -223,6 +227,18 @@ void saveConfig() {
   nvs_set_u8(h, NVS_KEY_GPS_PWR, s_enabled ? 1 : 0);
   nvs_commit(h);
   nvs_close(h);
+}
+
+void setPhoneSync(int64_t utcMs, float lat, float lon, int16_t alt) {
+  s_phoneUtcMs = utcMs;
+  s_phoneLat = lat;
+  s_phoneLon = lon;
+  s_phoneAlt = alt;
+  s_phoneSyncTime = (uint32_t)millis();
+}
+
+bool hasPhoneSync() {
+  return (millis() - s_phoneSyncTime) < 60000;  // 1 мин — телефон должен обновлять
 }
 
 }  // namespace gps

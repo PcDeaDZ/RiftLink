@@ -14,6 +14,13 @@
 #include "frag/frag.h"
 #include "groups/groups.h"
 #include "offline_queue/offline_queue.h"
+#include "mab/mab.h"
+#include "collision_slots/collision_slots.h"
+#include "beacon_sync/beacon_sync.h"
+#include "clock_drift/clock_drift.h"
+#include "packet_fusion/packet_fusion.h"
+#include "bls_n/bls_n.h"
+#include "esp_now_slots/esp_now_slots.h"
 #include <Arduino.h>
 #include <esp_random.h>
 #include <string.h>
@@ -41,6 +48,8 @@ struct PendingMsg {
   uint8_t retries;
   uint8_t txSf;   // SF при отправке — для timeout и retry
   bool inUse;
+  bool triggerSend;  // RIT: отправить при следующем update (получили POLL от получателя)
+  int8_t lastAction;  // MAB: последнее действие (0..2) для reward
 };
 
 struct PendingBroadcast {
@@ -52,7 +61,16 @@ struct PendingBroadcast {
   bool inUse;
 };
 
+struct PendingBatch {
+  uint8_t to[protocol::NODE_ID_LEN];
+  uint32_t msgIds[4];
+  uint8_t acked[4];
+  int count;
+  bool inUse;
+};
+
 static PendingMsg s_pending[MAX_PENDING];
+static PendingBatch s_batchPending[2];
 static PendingBroadcast s_bcPending[MAX_PENDING_BROADCAST];
 static uint32_t s_msgIdCounter = 0;
 static bool s_inited = false;
@@ -147,11 +165,6 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
   size_t plainLen;
 
   if (isUnicast) {
-    PendingMsg* slot = findFreeSlot();
-    if (!slot) {
-      xSemaphoreGive(s_mutex);
-      return false;
-    }
     uint32_t msgId = ++s_msgIdCounter;
     size_t off = 0;
     if (ttlMinutes > 0) {
@@ -162,16 +175,27 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     memcpy(plainBuf + off + MSG_ID_LEN, text, textLen);
     plainLen = off + MSG_ID_LEN + textLen;
 
-    uint8_t toEncrypt[protocol::MAX_PAYLOAD + crypto::OVERHEAD];
-    size_t toEncryptLen = plainLen;
-    bool useCompressed = false;
-
     uint8_t compBuf[protocol::MAX_PAYLOAD];
     size_t compLen = compress::compress(plainBuf, plainLen, compBuf, sizeof(compBuf));
-    if (compLen > 0) {
+    bool useCompressed = (compLen > 0);
+    const uint8_t* toOffer = useCompressed ? compBuf : plainBuf;
+    size_t toOfferLen = useCompressed ? compLen : plainLen;
+    if (packet_fusion::offer(to, toOffer, toOfferLen, msgId, useCompressed)) {
+      if (s_onUnicastSent) s_onUnicastSent(to, msgId);
+      xSemaphoreGive(s_mutex);
+      return true;
+    }
+
+    PendingMsg* slot = findFreeSlot();
+    if (!slot) {
+      xSemaphoreGive(s_mutex);
+      return false;
+    }
+
+    uint8_t toEncrypt[protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+    size_t toEncryptLen = useCompressed ? compLen : plainLen;
+    if (useCompressed) {
       memcpy(toEncrypt, compBuf, compLen);
-      toEncryptLen = compLen;
-      useCompressed = true;
     } else {
       memcpy(toEncrypt, plainBuf, plainLen);
     }
@@ -200,10 +224,20 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     slot->lastSendTime = millis();
     slot->retries = 0;
     slot->inUse = true;
+    slot->triggerSend = false;
+    slot->lastAction = -1;
 
-    uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(to));
+    uint8_t txSf = neighbors::rssiToSfOrthogonal(to);
     if (txSf == 0) txSf = 12;  // неизвестный сосед — SF12 для дальности
     slot->txSf = txSf;
+
+    // BLS-N + ESP-NOW: RTS перед LoRa, defer при конфликте
+    if (bls_n::shouldDeferTx(to) || esp_now_slots::shouldDeferTx(to)) {
+      xSemaphoreGive(s_mutex);
+      return true;  // отложить, update повторит
+    }
+    if (bls_n::sendRtsBeforeLora(to, slot->pktLen)) delay(50);
+    if (esp_now_slots::sendRtsBeforeLora(to, slot->pktLen)) delay(50);
 
     // Unicast: только одна отправка. Повтор — только при отсутствии ACK (update), не слепые копии
     bool ok = radio::send(slot->pkt, slot->pktLen, txSf);
@@ -244,6 +278,9 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     size_t len = protocol::buildPacket(pkt, sizeof(pkt),
         node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_GROUP_MSG,
         encBuf, encLen, true, false, useCompressed);
+    if (len > 0) {
+      registerBroadcastPending(bcMsgId, neighbors::getCount());
+    }
     xSemaphoreGive(s_mutex);
     if (len > 0) {
       uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
@@ -251,7 +288,6 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
         RIFTLINK_LOG_ERR("[RiftLink] MSG broadcast sendQueue full, drop\n");
         return false;
       }
-      registerBroadcastPending(bcMsgId, neighbors::getCount());
       if (s_onBroadcastSent) s_onBroadcastSent(bcMsgId);
       queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));   // 2-я копия
       queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));   // 3-я копия
@@ -264,11 +300,12 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
 
 bool enqueueGroup(uint32_t groupId, const char* text) {
   if (!s_inited) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
 
   size_t textLen = strlen(text);
-  if (textLen == 0) return false;  // пустые — не отправлять
+  if (textLen == 0) { xSemaphoreGive(s_mutex); return false; }  // пустые — не отправлять
   constexpr size_t maxPlain = MAX_SINGLE_PLAIN - GROUP_ID_LEN - MSG_ID_LEN;
-  if (textLen > maxPlain) return false;
+  if (textLen > maxPlain) { xSemaphoreGive(s_mutex); return false; }
 
   uint32_t bcMsgId = ++s_msgIdCounter;
   uint8_t plainBuf[256];
@@ -293,19 +330,25 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
 
   uint8_t encBuf[protocol::MAX_PAYLOAD + crypto::OVERHEAD];
   size_t encLen = sizeof(encBuf);
-  if (!crypto::encrypt(toEncrypt, toEncryptLen, encBuf, &encLen)) return false;
+  if (!crypto::encrypt(toEncrypt, toEncryptLen, encBuf, &encLen)) {
+    xSemaphoreGive(s_mutex);
+    return false;
+  }
 
   uint8_t pkt[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_GROUP_MSG,
       encBuf, encLen, true, false, useCompressed);
   if (len > 0) {
+    registerBroadcastPending(bcMsgId, neighbors::getCount());
+  }
+  xSemaphoreGive(s_mutex);
+  if (len > 0) {
     uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
     if (!radio::send(pkt, len, sf)) {
       RIFTLINK_LOG_ERR("[RiftLink] MSG group sendQueue full, drop\n");
       return false;
     }
-    registerBroadcastPending(bcMsgId, neighbors::getCount());
     if (s_onBroadcastSent) s_onBroadcastSent(bcMsgId);
     queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));
     queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));
@@ -339,9 +382,29 @@ bool onAckReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLe
   bool unicastCleared = false;
   PendingMsg* p = findByMsgId(msgId);
   if (p && memcmp(p->to, from, protocol::NODE_ID_LEN) == 0) {
+    if (p->lastAction >= 0) mab::reward(p->lastAction, 1);
     p->inUse = false;
     unicastCleared = true;
   } else {
+    for (int i = 0; i < 2; i++) {
+      if (!s_batchPending[i].inUse) continue;
+      if (memcmp(s_batchPending[i].to, from, protocol::NODE_ID_LEN) != 0) continue;
+      for (int j = 0; j < s_batchPending[i].count; j++) {
+        if (s_batchPending[i].msgIds[j] == msgId && !s_batchPending[i].acked[j]) {
+          s_batchPending[i].acked[j] = 1;
+          unicastCleared = true;
+          bool allDone = true;
+          for (int k = 0; k < s_batchPending[i].count; k++) {
+            if (!s_batchPending[i].acked[k]) { allDone = false; break; }
+          }
+          if (allDone) s_batchPending[i].inUse = false;
+          break;
+        }
+      }
+      if (unicastCleared) break;
+    }
+  }
+  if (!unicastCleared) {
     PendingBroadcast* pb = findBroadcastByMsgId(msgId);
     if (pb) addBroadcastAck(pb, from);
   }
@@ -349,10 +412,55 @@ bool onAckReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLe
   return unicastCleared;
 }
 
+bool registerPendingFromFusion(const uint8_t* to, uint32_t msgId, const uint8_t* pkt, size_t pktLen, uint8_t txSf) {
+  if (!s_inited || !to || !pkt || pktLen > sizeof(s_pending[0].pkt)) return false;
+  PendingMsg* slot = findFreeSlot();
+  if (!slot) return false;
+  slot->msgId = msgId;
+  memcpy(slot->to, to, protocol::NODE_ID_LEN);
+  memcpy(slot->pkt, pkt, pktLen);
+  slot->pktLen = pktLen;
+  slot->lastSendTime = millis();
+  slot->retries = 0;
+  slot->txSf = txSf;
+  slot->inUse = true;
+  slot->triggerSend = false;
+  slot->lastAction = -1;
+  return true;
+}
+
+void registerBatchSent(const uint8_t* to, const uint32_t* msgIds, int count) {
+  if (!to || !msgIds || count < 1 || count > 4) return;
+  for (int i = 0; i < 2; i++) {
+    if (!s_batchPending[i].inUse) {
+      memcpy(s_batchPending[i].to, to, protocol::NODE_ID_LEN);
+      for (int j = 0; j < count; j++) s_batchPending[i].msgIds[j] = msgIds[j];
+      memset(s_batchPending[i].acked, 0, sizeof(s_batchPending[i].acked));
+      s_batchPending[i].count = count;
+      s_batchPending[i].inUse = true;
+      return;
+    }
+  }
+}
+
+void onPollReceived(const uint8_t* from) {
+  if (!from || !s_inited || !s_mutex) return;
+  if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
+  for (int i = 0; i < MAX_PENDING; i++) {
+    if (s_pending[i].inUse && memcmp(s_pending[i].to, from, protocol::NODE_ID_LEN) == 0) {
+      s_pending[i].triggerSend = true;
+      break;
+    }
+  }
+  xSemaphoreGive(s_mutex);
+}
+
 void update() {
   if (!s_inited) return;
   if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
   uint32_t now = millis();
+
+  packet_fusion::flush();
 
   for (int i = 0; i < MAX_PENDING_BROADCAST; i++) {
     PendingBroadcast* pb = &s_bcPending[i];
@@ -368,11 +476,31 @@ void update() {
     PendingMsg* p = &s_pending[i];
     if (!p->inUse) continue;
 
+    // RIT: POLL от получателя — отправить с малым jitter (50–150 ms)
+    if (p->triggerSend) {
+      p->triggerSend = false;
+      uint32_t jitter = 50 + (uint32_t)(esp_random() % 100);
+      if (now - p->lastSendTime >= jitter && radio::isChannelFree()) {
+        if (bls_n::shouldDeferTx(p->to) || esp_now_slots::shouldDeferTx(p->to)) continue;
+        if (bls_n::sendRtsBeforeLora(p->to, p->pktLen)) delay(50);
+        if (esp_now_slots::sendRtsBeforeLora(p->to, p->pktLen)) delay(50);
+        p->retries++;
+        p->lastSendTime = now;
+        radio::send(p->pkt, p->pktLen, p->txSf, true);
+      }
+      continue;
+    }
+
     uint32_t ackTimeout = getAckTimeoutMs(p->txSf);
-    uint32_t jitter = 400 + (uint32_t)(esp_random() % 200);  // 400–600 ms — избежать синхронных retry
+    int action = mab::selectAction();
+    uint32_t jitter = mab::getDelayMs(action) + collision_slots::getAvoidanceDelayMs()
+        + beacon_sync::getAvoidanceDelayMs();
+    uint32_t quietMs = clock_drift::getQuietWindowMs(p->to);
+    if (quietMs > 0 && quietMs > jitter) jitter = quietMs;  // предпочесть «тихое» окно соседа
     if (now - p->lastSendTime < ackTimeout + jitter) continue;
 
     if (p->retries >= MAX_RETRIES) {
+      if (p->lastAction >= 0) mab::reward(p->lastAction, -1);
       if (s_onUnicastUndelivered) s_onUnicastUndelivered(p->to, p->msgId);
       uint8_t flags = (p->pkt[protocol::SYNC_LEN] & 0x04) ? 1 : 0;  // compressed (version_flags)
       offline_queue::enqueue(p->to, p->pkt + protocol::PAYLOAD_OFFSET,
@@ -387,6 +515,10 @@ void update() {
       p->lastSendTime = now - ackTimeout - jitter + 200;  // retry через 200 ms
       continue;
     }
+    if (bls_n::shouldDeferTx(p->to) || esp_now_slots::shouldDeferTx(p->to)) continue;
+    if (bls_n::sendRtsBeforeLora(p->to, p->pktLen)) delay(50);
+    if (esp_now_slots::sendRtsBeforeLora(p->to, p->pktLen)) delay(50);
+    p->lastAction = action;
     p->retries++;
     p->lastSendTime = now;
     radio::send(p->pkt, p->pktLen, p->txSf, true);

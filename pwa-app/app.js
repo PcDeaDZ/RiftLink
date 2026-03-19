@@ -28,6 +28,8 @@ let telemetry = {};  // from -> { battery, heapKb }
 let gpsPresent = false;
 let gpsEnabled = false;
 let gpsFix = false;
+let intentionalDisconnect = false;
+let reconnectingPromise = null;
 
 function loadContacts() {
   try {
@@ -54,30 +56,43 @@ function removeContact(id) {
   localStorage.setItem(CONTACTS_KEY, JSON.stringify(contacts));
 }
 
+function addRxListener() {
+  if (!rxChar) return;
+  rxChar.addEventListener('characteristicvaluechanged', (e) => {
+    handleEvent(new TextDecoder().decode(e.target.value));
+  });
+}
+
 async function ensureConnected() {
   if (!device) return false;
   if (device.gatt?.connected && txChar) return true;
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  if (reconnectingPromise) return reconnectingPromise;
+  reconnectingPromise = (async () => {
     try {
-      const server = await device.gatt.connect();
-      if (!server.connected) continue;
-      const service = await server.getPrimaryService(SERVICE_UUID);
-      txChar = await service.getCharacteristic(TX_UUID);
-      rxChar = await service.getCharacteristic(RX_UUID);
-      await rxChar.startNotifications();
-      rxChar.addEventListener('characteristicvaluechanged', (e) => {
-        handleEvent(new TextDecoder().decode(e.target.value));
-      });
-      return true;
-    } catch (e) {
-      if (attempt === 2 || e?.message?.includes('disconnect') || e?.message?.includes('GATT')) {
-        if (e?.message?.includes('disconnect') || e?.message?.includes('GATT')) handleDisconnect();
-        return false;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const server = await device.gatt.connect();
+          if (!server.connected) continue;
+          const service = await server.getPrimaryService(SERVICE_UUID);
+          txChar = await service.getCharacteristic(TX_UUID);
+          rxChar = await service.getCharacteristic(RX_UUID);
+          await rxChar.startNotifications();
+          addRxListener();
+          return true;
+        } catch (e) {
+          if (attempt === 2 || e?.message?.includes('disconnect') || e?.message?.includes('GATT')) {
+            if (e?.message?.includes('disconnect') || e?.message?.includes('GATT')) handleDisconnect();
+            return false;
+          }
+          await new Promise(r => setTimeout(r, 400));
+        }
       }
-      await new Promise(r => setTimeout(r, 400));
+      return false;
+    } finally {
+      reconnectingPromise = null;
     }
-  }
-  return false;
+  })();
+  return reconnectingPromise;
 }
 
 function sendCmd(cmd) {
@@ -258,7 +273,7 @@ function handleEvent(data) {
       nodeId = obj.id || '';
       nickname = obj.nickname || '';
       if (Array.isArray(obj.groups)) groups = obj.groups;
-      if (Array.isArray(obj.neighbors)) { neighbors = obj.neighbors; neighborsRssi = obj.neighborsRssi || []; }
+      if (Array.isArray(obj.neighbors)) { neighbors = obj.neighbors; neighborsRssi = obj.neighborsRssi || obj.rssi || []; }
       if (Array.isArray(obj.routes)) routes = obj.routes;
       currentRegion = obj.region || '';
       currentChannel = obj.channel ?? -1;
@@ -279,7 +294,7 @@ function handleEvent(data) {
     } else if (evt === 'groups') {
       if (Array.isArray(obj.groups)) { groups = obj.groups; renderRecipient(); renderGroups(); }
     } else if (evt === 'neighbors') {
-      if (Array.isArray(obj.neighbors)) { neighbors = obj.neighbors; neighborsRssi = obj.rssi || []; renderRecipient(); renderNeighbors(); }
+      if (Array.isArray(obj.neighbors)) { neighbors = obj.neighbors; neighborsRssi = obj.rssi || obj.neighborsRssi || []; renderRecipient(); renderNeighbors(); }
     } else if (evt === 'routes') {
       if (Array.isArray(obj.routes)) { routes = obj.routes; renderRoutes(); }
     } else if (evt === 'location') {
@@ -334,10 +349,11 @@ function handleEvent(data) {
     } else if (evt === 'invite') {
       const id = obj.id || '';
       const pubKey = obj.pubKey || '';
+      const channelKey = obj.channelKey || '';
       const el = document.getElementById('inviteResult');
       if (el) {
         el.style.display = 'block';
-        const copyData = JSON.stringify({ id, pubKey });
+        const copyData = channelKey ? JSON.stringify({ id, pubKey, channelKey }) : JSON.stringify({ id, pubKey });
         el.innerHTML = `
           <div class="invite-card">
             <div class="invite-row">
@@ -538,9 +554,8 @@ async function connect() {
         await new Promise(r => setTimeout(r, isGatt ? 6000 : 1500));
       }
     }
-    rxChar.addEventListener('characteristicvaluechanged', (e) => {
-      handleEvent(new TextDecoder().decode(e.target.value));
-    });
+    addRxListener();
+    try { device.removeEventListener('gattserverdisconnected', handleDisconnect); } catch (_) {}
     device.addEventListener('gattserverdisconnected', handleDisconnect);
     await new Promise(r => setTimeout(r, 200));
     sendCmd({ cmd: 'info' }).then(() => sendCmd({ cmd: 'groups' })).then(() => sendCmd({ cmd: 'routes' })).catch(() => {});
@@ -562,6 +577,7 @@ async function connect() {
 }
 
 function handleDisconnect() {
+  if (intentionalDisconnect) return;
   txChar = null;
   rxChar = null;
   document.getElementById('appView').classList.remove('active');
@@ -577,10 +593,17 @@ function updateConnectButton() {
 }
 
 function disconnect() {
-  if (device?.gatt?.connected) device.gatt.disconnect();
+  intentionalDisconnect = true;
+  if (device?.gatt?.connected) {
+    try {
+      device.removeEventListener('gattserverdisconnected', handleDisconnect);
+    } catch (_) {}
+    device.gatt.disconnect();
+  }
   txChar = null;
   rxChar = null;
   device = null;
+  intentionalDisconnect = false;
   document.getElementById('appView').classList.remove('active');
   document.getElementById('scanView').classList.add('active');
   updateConnectButton();
@@ -626,9 +649,8 @@ async function reconnect() {
         await new Promise(r => setTimeout(r, isGatt ? 6000 : 1500));
       }
     }
-    rxChar.addEventListener('characteristicvaluechanged', (e) => {
-      handleEvent(new TextDecoder().decode(e.target.value));
-    });
+    addRxListener();
+    try { device.removeEventListener('gattserverdisconnected', handleDisconnect); } catch (_) {}
     device.addEventListener('gattserverdisconnected', handleDisconnect);
     await new Promise(r => setTimeout(r, 200));
     sendCmd({ cmd: 'info' }).then(() => sendCmd({ cmd: 'groups' })).then(() => sendCmd({ cmd: 'routes' })).catch(() => {});
@@ -783,14 +805,31 @@ function init() {
     showToast('Создание приглашения...', '');
   });
 
+  document.getElementById('btnPasteInvite')?.addEventListener('click', async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      const r = JSON.parse(text);
+      const id = (r?.id ?? '').replace(/[^0-9A-Fa-f]/g, '').slice(0, 16);
+      const pubKey = r?.pubKey ?? '';
+      const channelKey = r?.channelKey ?? '';
+      document.getElementById('acceptId').value = id;
+      document.getElementById('acceptPubKey').value = pubKey;
+      document.getElementById('acceptChannelKey').value = channelKey;
+      showToast('Вставлено');
+    } catch (_) { showToast('Ошибка вставки (ожидается JSON invite)', 'error'); }
+  });
+
   document.getElementById('btnAcceptInvite')?.addEventListener('click', async () => {
     const id = (document.getElementById('acceptId')?.value || '').trim().replace(/[^0-9A-Fa-f]/g, '').slice(0, 16);
     const pubKey = (document.getElementById('acceptPubKey')?.value || '').trim();
+    const channelKey = (document.getElementById('acceptChannelKey')?.value || '').trim();
     if (id.length < 8 || !pubKey) {
       showToast('Введите ID и PubKey', 'error');
       return;
     }
-    const ok = await sendCmd({ cmd: 'acceptInvite', id, pubKey });
+    const cmd = { cmd: 'acceptInvite', id, pubKey };
+    if (channelKey) cmd.channelKey = channelKey;
+    const ok = await sendCmd(cmd);
     if (ok) {
       showToast('Приглашение принято');
       sendCmd({ cmd: 'info' });
@@ -859,6 +898,9 @@ function init() {
   document.querySelectorAll('.back-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.panel-view').forEach(v => v.classList.remove('active'));
+      document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+      const chatNav = document.querySelector('.nav-btn[data-view="chat"]');
+      if (chatNav) chatNav.classList.add('active');
     });
   });
 

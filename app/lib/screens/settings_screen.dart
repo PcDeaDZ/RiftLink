@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../ble/riftlink_ble.dart';
@@ -37,6 +38,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _wifiPassController;
   late final TextEditingController _inviteIdController;
   late final TextEditingController _inviteKeyController;
+  late final TextEditingController _inviteChannelKeyController;
 
   late String _region;
   late int? _channel;
@@ -61,6 +63,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _wifiPassController = TextEditingController();
     _inviteIdController = TextEditingController();
     _inviteKeyController = TextEditingController();
+    _inviteChannelKeyController = TextEditingController();
   }
 
   @override
@@ -72,7 +75,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void dispose() {
     _nickController.dispose(); _wifiSsidController.dispose(); _wifiPassController.dispose();
-    _inviteIdController.dispose(); _inviteKeyController.dispose(); super.dispose();
+    _inviteIdController.dispose(); _inviteKeyController.dispose(); _inviteChannelKeyController.dispose(); super.dispose();
   }
 
   void _snack(String t) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t)));
@@ -180,17 +183,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onTap: widget.ble.isConnected ? () => widget.ble.createInvite() : null,
           ),
           Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-            TextField(controller: _inviteIdController, style: const TextStyle(color: AppColors.onSurface), decoration: InputDecoration(labelText: l.tr('inviter_id')), maxLength: 16),
+            Row(children: [
+              Expanded(child: TextField(controller: _inviteIdController, style: const TextStyle(color: AppColors.onSurface), decoration: InputDecoration(labelText: l.tr('inviter_id')), maxLength: 16)),
+              const SizedBox(width: 8),
+              TextButton.icon(
+                icon: const Icon(Icons.content_paste, size: 18, color: AppColors.primary),
+                label: Text(l.tr('paste'), style: const TextStyle(color: AppColors.primary)),
+                onPressed: () async {
+                  final data = await Clipboard.getData(Clipboard.kTextPlain);
+                  final text = data?.text?.trim();
+                  if (text == null || text.isEmpty) return;
+                  try {
+                    final m = jsonDecode(text) as Map<String, dynamic>?;
+                    if (m != null) {
+                      final id = (m['id'] as String?) ?? '';
+                      final pk = (m['pubKey'] as String?) ?? '';
+                      final ck = (m['channelKey'] as String?) ?? '';
+                      _inviteIdController.text = id.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
+                      _inviteKeyController.text = pk;
+                      _inviteChannelKeyController.text = ck;
+                      if (mounted) setState(() {});
+                    }
+                  } catch (_) {}
+                },
+              ),
+            ]),
             const SizedBox(height: 8),
             TextField(controller: _inviteKeyController, style: const TextStyle(color: AppColors.onSurface), decoration: const InputDecoration(labelText: 'PubKey base64'), maxLines: 2),
+            const SizedBox(height: 8),
+            TextField(controller: _inviteChannelKeyController, style: const TextStyle(color: AppColors.onSurface), decoration: const InputDecoration(labelText: 'ChannelKey base64 (опционально)'), maxLines: 2),
             const SizedBox(height: 12),
             ElevatedButton(
               style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: Colors.white),
               onPressed: widget.ble.isConnected ? () async {
                 final id = _inviteIdController.text.trim().replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
                 final key = _inviteKeyController.text.trim();
+                final ck = _inviteChannelKeyController.text.trim();
                 if (id.length < 8 || key.isEmpty) return;
-                if (await widget.ble.acceptInvite(id: id.substring(0, id.length > 16 ? 16 : id.length), pubKey: key)) { if (mounted) _snack(l.tr('invite_accepted')); }
+                if (await widget.ble.acceptInvite(id: id.substring(0, id.length > 16 ? 16 : id.length), pubKey: key, channelKey: ck.isEmpty ? null : ck)) { if (mounted) _snack(l.tr('invite_accepted')); }
               } : null,
               child: Text(l.tr('accept_invite')),
             ),

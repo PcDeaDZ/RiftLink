@@ -8,14 +8,14 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/doc_version-0.2-888?style=flat-square" alt="Doc" />
-  <img src="https://img.shields.io/badge/firmware-1.3.5-E7352C?style=flat-square&logo=espressif" alt="Firmware" />
+  <img src="https://img.shields.io/badge/firmware-1.3.6-E7352C?style=flat-square&logo=espressif" alt="Firmware" />
   <img src="https://img.shields.io/badge/platform-Heltec_V3%2FV4%2FPaper-00B0FF?style=flat-square&logo=lorawan" alt="Platform" />
   <img src="https://img.shields.io/badge/ESP32--S3-SX1262-4CAF50?style=flat-square" alt="Hardware" />
 </p>
 
 ---
 
-### 📌 Текущее состояние (прошивка 1.3.5)
+### 📌 Текущее состояние (прошивка 1.3.6)
 
 Основной функционал реализован: MSG, X25519 E2E, GROUP_MSG, офлайн-очередь, ROUTE_REQ/REPLY, VOICE_MSG, ACK/READ, LZ4, MSG_FRAG, LOCATION, TELEMETRY, OTA, регионы, invite/acceptInvite (QR). Валидация пакетов при RF-помехах. Поддержка V3 (OLED), V4 (OLED), V3 Paper (E-Ink).
 

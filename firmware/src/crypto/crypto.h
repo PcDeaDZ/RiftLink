@@ -20,6 +20,12 @@ bool encryptFor(const uint8_t* peerId, const uint8_t* plain, size_t len, uint8_t
 /** Расшифровка от sender. Сначала per-peer, затем сетевой ключ */
 bool decryptFrom(const uint8_t* senderId, const uint8_t* cipher, size_t len, uint8_t* out, size_t* outLen);
 
+/** Установить ключ канала (32 байта), сохранить в NVS, сбросить nonce_ctr */
+bool setChannelKey(const uint8_t* key);
+
+/** Получить текущий ключ канала (32 байта) для экспорта в QR/BLE evt */
+bool getChannelKey(uint8_t* out);
+
 // Размер overhead: nonce 12 + tag 16 = 28 байт
 constexpr size_t OVERHEAD = 12 + 16;
 

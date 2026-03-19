@@ -133,15 +133,15 @@
 {"cmd":"invite"}
 ```
 
-Ответ: `{"evt":"invite","id":"A1B2C3D4E5F60708","pubKey":"base64..."}` — Node ID и публичный ключ X25519 для QR.
+Ответ: `{"evt":"invite","id":"A1B2C3D4E5F60708","pubKey":"base64...","channelKey":"base64..."}` — Node ID, публичный ключ X25519 и опционально ключ канала (32 байта base64) для QR.
 
 ### 2.12 acceptInvite — принять приглашение (сканирование QR)
 
 ```json
-{"cmd":"acceptInvite","id":"A1B2C3D4E5F60708","pubKey":"base64..."}
+{"cmd":"acceptInvite","id":"A1B2C3D4E5F60708","pubKey":"base64...","channelKey":"base64..."}
 ```
 
-Добавляет ключ узла и отправляет ему свой KEY_EXCHANGE. Формат QR: `riftlink:id:pubKey`.
+Добавляет ключ узла и отправляет ему свой KEY_EXCHANGE. `channelKey` — опционально, ключ канала 32 байта (base64) для присоединения к приватной сети. Формат QR: `riftlink:id:pubKey` или JSON с channelKey.
 
 Ответ: `{"evt":"region","region":"EU","freq":868.0,"power":14}`
 
@@ -154,10 +154,10 @@
 ### 3.1 info — при подключении
 
 ```json
-{"evt":"info","id":"A1B2C3D4E5F60708","nickname":"Alice","region":"EU","freq":868.1,"power":14,"channel":0,"version":"1.3.5"}
+{"evt":"info","id":"A1B2C3D4E5F60708","nickname":"Alice","region":"EU","freq":868.1,"power":14,"channel":0,"version":"1.3.6"}
 ```
 
-`nickname` — опционально. `channel` — только для EU/UK (0–2). `neighbors` — массив Node ID (hex) видимых соседей. `version` — версия прошивки (например 1.3.5).
+`nickname` — опционально. `channel` — только для EU/UK (0–2). `neighbors` — массив Node ID (hex) видимых соседей. `version` — версия прошивки (например 1.3.6).
 
 ### 3.2 msg — входящее сообщение
 

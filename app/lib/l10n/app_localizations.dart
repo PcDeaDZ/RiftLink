@@ -115,6 +115,7 @@ final Map<String, Map<String, String>> _strings = {
   'invite_accepted': {'en': 'Invite accepted', 'ru': 'Приглашение принято'},
   'copy': {'en': 'Copy', 'ru': 'Копировать'},
   'copied': {'en': 'Copied', 'ru': 'Скопировано'},
+  'paste': {'en': 'Paste', 'ru': 'Вставить'},
   'offline_pending': {'en': 'In queue', 'ru': 'В очереди'},
   'gps_enable': {'en': 'Enable GPS', 'ru': 'Включить GPS'},
   'gps_fix_yes': {'en': 'Fix acquired', 'ru': 'Фикс есть'},

@@ -24,6 +24,10 @@ constexpr uint8_t OP_MSG_FRAG = 0x0A;
 constexpr uint8_t OP_VOICE_MSG = 0x0B;
 constexpr uint8_t OP_READ = 0x0C;   // Подтверждение прочтения (msg_id 4B)
 constexpr uint8_t OP_NACK = 0x0D;   // Запрос повтора (payload: pktId 2B)
+constexpr uint8_t OP_ECHO = 0x0E;   // Эхо вместо ACK: broadcast msgId+originalFrom (12B)
+constexpr uint8_t OP_POLL = 0x0F;   // RIT: broadcast «присылайте пакеты для меня» (payload пустой)
+constexpr uint8_t OP_MSG_BATCH = 0x10;  // Packet Fusion: count(1) + [len(2)+enc]* — несколько MSG в одном пакете
+constexpr uint8_t OP_XOR_RELAY = 0x11;  // Network Coding: XOR(A,B) broadcast, meta: pktIdA/B, fromA/B, toA/B
 constexpr uint8_t OP_PONG = 0xFE;
 constexpr uint8_t OP_PING = 0xFF;
 
