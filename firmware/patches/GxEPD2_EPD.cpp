@@ -170,12 +170,16 @@ void GxEPD2_EPD::_writeCommand(uint8_t c)
   static int n = 0;
   if (n < 5) { Serial.print("[E-Ink] cmd"); Serial.println(n); n++; }
   _spi.beginTransaction(_spi_settings);
+  if (n <= 5) Serial.println("[E-Ink] postBT");
   if (_dc >= 0) digitalWrite(_dc, LOW);
   if (_cs >= 0) digitalWrite(_cs, LOW);
+  if (n <= 5) Serial.println("[E-Ink] preXfer");  // зависание здесь = _spi.transfer()
   _spi.transfer(c);
+  if (n <= 5) Serial.println("[E-Ink] postXfer");
   if (_cs >= 0) digitalWrite(_cs, HIGH);
   if (_dc >= 0) digitalWrite(_dc, HIGH);
   _spi.endTransaction();
+  if (n <= 5) Serial.println("[E-Ink] postEnd");
 }
 
 void GxEPD2_EPD::_writeData(uint8_t d)

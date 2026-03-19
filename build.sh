@@ -66,6 +66,76 @@ APK_PATH="$APP_DIR/build/app/outputs/flutter-apk/app-release.apk"
 FLUTTER_CMD="${FLUTTER_ROOT:+$FLUTTER_ROOT/bin/flutter}"
 FLUTTER_CMD="${FLUTTER_CMD:-flutter}"
 
+# --- Установка Android SDK (command-line tools) ---
+install_android_sdk() {
+    local sdk_dir="${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}"
+    [[ "$(uname -s)" == "Darwin" ]] && sdk_dir="${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}"
+    local arch="linux"
+    [[ "$(uname -s)" == "Darwin" ]] && arch="mac"
+    local url="https://dl.google.com/android/repository/commandlinetools-${arch}-14742923_latest.zip"
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    echo "  Скачивание Android command-line tools..."
+    if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
+        echo "[ОШИБКА] Нужен curl или wget для скачивания"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    if ! command -v unzip &>/dev/null; then
+        echo "[ОШИБКА] Нужен unzip для распаковки. Установите: sudo apt install unzip" 2>/dev/null || echo "  brew install unzip"
+        rm -rf "$tmpdir"
+        return 1
+    fi
+    (cd "$tmpdir" && (curl -sSLf "$url" -o cmdlinetools.zip 2>/dev/null || wget -q "$url" -O cmdlinetools.zip)) || { rm -rf "$tmpdir"; return 1; }
+    echo "  Распаковка в $sdk_dir..."
+    mkdir -p "$sdk_dir"
+    (cd "$tmpdir" && unzip -q cmdlinetools.zip)
+    if [[ -d "$tmpdir/cmdline-tools" ]]; then
+        mv "$tmpdir/cmdline-tools" "$sdk_dir/cmdline-tools-tmp"
+        mkdir -p "$sdk_dir/cmdline-tools"
+        mv "$sdk_dir/cmdline-tools-tmp" "$sdk_dir/cmdline-tools/latest"
+    else
+        mkdir -p "$sdk_dir/cmdline-tools/latest"
+        mv "$tmpdir"/* "$sdk_dir/cmdline-tools/latest/" 2>/dev/null || true
+    fi
+    rm -rf "$tmpdir"
+    export ANDROID_HOME="$sdk_dir"
+    export PATH="$sdk_dir/cmdline-tools/latest/bin:$sdk_dir/platform-tools:$PATH"
+    echo "  Установка platform-tools, build-tools, platforms..."
+    yes | "$sdk_dir/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$sdk_dir" --install "platform-tools" "build-tools;34.0.0" "platforms;android-34" 2>/dev/null || true
+    echo "  OK: $sdk_dir"
+    [[ -f "$ENV_FILE" ]] || touch "$ENV_FILE"
+    if grep -q "^ANDROID_SDK_ROOT=" "$ENV_FILE" 2>/dev/null; then
+        sed "s|^ANDROID_SDK_ROOT=.*|ANDROID_SDK_ROOT=$sdk_dir|" "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+    else
+        echo "ANDROID_SDK_ROOT=$sdk_dir" >> "$ENV_FILE"
+    fi
+}
+
+# --- Установка Flutter SDK ---
+install_flutter() {
+    local flutter_dir="${FLUTTER_ROOT:-$HOME/flutter}"
+    if [[ ! -d "$flutter_dir" ]]; then
+        if ! command -v git &>/dev/null; then
+            echo "[ОШИБКА] Git нужен для установки Flutter"
+            return 1
+        fi
+        echo "  Скачивание Flutter (git clone)..."
+        git clone --depth 1 https://github.com/flutter/flutter.git -b stable "$flutter_dir" || return 1
+    fi
+    export PATH="$flutter_dir/bin:$PATH"
+    export FLUTTER_ROOT="$flutter_dir"
+    echo "  flutter precache..."
+    "$flutter_dir/bin/flutter" precache 2>/dev/null || true
+    echo "  OK: $flutter_dir"
+    [[ -f "$ENV_FILE" ]] || touch "$ENV_FILE"
+    if grep -q "^FLUTTER_ROOT=" "$ENV_FILE" 2>/dev/null; then
+        sed "s|^FLUTTER_ROOT=.*|FLUTTER_ROOT=$flutter_dir|" "$ENV_FILE" > "$ENV_FILE.tmp" && mv "$ENV_FILE.tmp" "$ENV_FILE"
+    else
+        echo "FLUTTER_ROOT=$flutter_dir" >> "$ENV_FILE"
+    fi
+}
+
 # --- Setup (установка зависимостей) ---
 do_setup() {
     echo ""
@@ -106,24 +176,38 @@ do_setup() {
     command -v java &>/dev/null && java -version 2>&1 || echo "  Установите: sudo apt install openjdk-17-jdk" 2>/dev/null || echo "  brew install openjdk@17"
     echo ""
 
-    # 5. Flutter
-    echo -e "\033[33m[5/7] Flutter...\033[0m"
+    # 5. Android SDK (сначала — нужен для flutter doctor)
+    echo -e "\033[33m[5/7] Android SDK...\033[0m"
+    if [[ -x "$ADB" ]]; then
+        echo "  OK: $ANDROID_HOME"
+    else
+        echo "  Установка Android SDK..."
+        if install_android_sdk; then
+            ANDROID_HOME="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+            ADB="$ANDROID_HOME/platform-tools/adb"
+        else
+            echo "  Не удалось. Установите Android Studio или: export ANDROID_HOME=\$HOME/Android/Sdk"
+        fi
+    fi
+    echo ""
+
+    # 6. Flutter
+    echo -e "\033[33m[6/7] Flutter...\033[0m"
     if "$FLUTTER_CMD" --version &>/dev/null; then
         "$FLUTTER_CMD" --version
         echo "  pub get..."
         (cd "$APP_DIR" && "$FLUTTER_CMD" pub get)
         yes | "$FLUTTER_CMD" doctor --android-licenses 2>/dev/null || true
     else
-        echo "  Установите: sudo snap install flutter --classic" 2>/dev/null || echo "  brew install flutter"
-    fi
-    echo ""
-
-    # 6. Android SDK
-    echo -e "\033[33m[6/7] Android SDK...\033[0m"
-    if [[ -x "$ADB" ]]; then
-        echo "  OK: $ANDROID_HOME"
-    else
-        echo "  Установите Android Studio или: export ANDROID_HOME=$ANDROID_HOME"
+        echo "  Установка Flutter..."
+        if install_flutter; then
+            FLUTTER_CMD="$FLUTTER_ROOT/bin/flutter"
+            "$FLUTTER_CMD" --version
+            (cd "$APP_DIR" && "$FLUTTER_CMD" pub get)
+            yes | "$FLUTTER_CMD" doctor --android-licenses 2>/dev/null || true
+        else
+            echo "  Не удалось. Установите вручную: sudo snap install flutter --classic" 2>/dev/null || echo "  brew install flutter"
+        fi
     fi
     echo ""
 
