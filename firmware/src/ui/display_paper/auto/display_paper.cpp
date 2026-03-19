@@ -102,7 +102,10 @@ enum PressType { PRESS_NONE = 0, PRESS_SHORT = 1, PRESS_LONG = 2 };
 #if defined(ESP32)
 #include <esp_task_wdt.h>
 #include "../../../radio/radio.h"
-static void busyCallback(const void*) { esp_task_wdt_reset(); }
+static void busyCallback(const void*) {
+  esp_task_wdt_status_t st;
+  if (esp_task_wdt_status(NULL, &st) == ESP_OK) esp_task_wdt_reset();
+}
 // Глобальный SPI (FSPI) вместо HSPI — workaround hang в beginTransaction на ESP32-S3
 #define EINK_USE_GLOBAL_SPI 1
 #if !EINK_USE_GLOBAL_SPI
@@ -277,7 +280,7 @@ static void hibernateIfIdle() {
 #define LORA_NSS  8
 static void selectDisplaySPI() {
   radio::takeMutex(portMAX_DELAY);
-  SPI.begin(EINK_SCLK, EINK_MOSI, EINK_MOSI, EINK_CS);
+  SPI.begin(EINK_SCLK, -1, EINK_MOSI, EINK_CS);  // -1 = MISO не используется (3-wire E-Ink)
 }
 static void releaseDisplaySPI() {
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
@@ -316,7 +319,7 @@ void displayInit() {
 
 #if defined(ESP32)
 #if EINK_USE_GLOBAL_SPI
-  SPI.begin(EINK_SCLK, EINK_MOSI, EINK_MOSI, EINK_CS);
+  SPI.begin(EINK_SCLK, -1, EINK_MOSI, EINK_CS);  // -1 = MISO не используется (3-wire E-Ink)
   delay(100);
 #else
   hspi.end();

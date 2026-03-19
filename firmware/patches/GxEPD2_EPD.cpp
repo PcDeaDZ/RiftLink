@@ -116,20 +116,14 @@ void GxEPD2_EPD::_waitWhileBusy(const char* comment, uint16_t busy_time)
     delay(1); // add some margin to become active
     unsigned long startMs = millis();  // millis() overflow 49 дней vs micros() 71 мин
     unsigned long maxWaitMs = (busy_time >= 100 && busy_time <= 15000) ? (unsigned long)busy_time : 8000;
-    Serial.print("[E-Ink] wait "); Serial.println(comment ? comment : "?");
-    unsigned long lastDot = startMs;
     while (1)
     {
       if (digitalRead(_busy) != _busy_level) break;
       yield();  // allow other tasks to run
       if (_busy_callback) _busy_callback(nullptr);  // e.g. esp_task_wdt_reset()
-      if (millis() - lastDot >= 1000) { Serial.print("."); lastDot = millis(); }
       delay(1);
       if (millis() - startMs > maxWaitMs)
       {
-        Serial.print("[E-Ink] Busy Timeout");
-        if (comment && comment[0]) { Serial.print(" @ "); Serial.print(comment); }
-        Serial.println();
         // Аппаратный сброс — панель в несогласованном состоянии, иначе следующий _writeCommand зависнет
         if (_rst >= 0)
         {
@@ -147,19 +141,6 @@ void GxEPD2_EPD::_waitWhileBusy(const char* comment, uint16_t busy_time)
         break;
       }
     }
-    if (comment)
-    {
-#if !defined(DISABLE_DIAGNOSTIC_OUTPUT)
-      if (_diag_enabled)
-      {
-        unsigned long elapsed = millis() - startMs;
-        Serial.print(comment);
-        Serial.print(" : ");
-        Serial.print(elapsed);
-        Serial.println("ms");
-      }
-#endif
-    }
     (void) startMs;
   }
   else delay(busy_time);
@@ -167,26 +148,17 @@ void GxEPD2_EPD::_waitWhileBusy(const char* comment, uint16_t busy_time)
 
 void GxEPD2_EPD::_writeCommand(uint8_t c)
 {
-  static int n = 0;
-  if (n < 5) { Serial.print("[E-Ink] cmd"); Serial.println(n); n++; }
   _spi.beginTransaction(_spi_settings);
-  if (n <= 5) Serial.println("[E-Ink] postBT");
   if (_dc >= 0) digitalWrite(_dc, LOW);
   if (_cs >= 0) digitalWrite(_cs, LOW);
-  if (n <= 5) Serial.println("[E-Ink] preXfer");  // зависание здесь = _spi.transfer()
   _spi.transfer(c);
-  if (n <= 5) Serial.println("[E-Ink] postXfer");
   if (_cs >= 0) digitalWrite(_cs, HIGH);
   if (_dc >= 0) digitalWrite(_dc, HIGH);
   _spi.endTransaction();
-  if (n <= 5) Serial.println("[E-Ink] postEnd");
 }
 
 void GxEPD2_EPD::_writeData(uint8_t d)
 {
-  static int dn = 0;
-  if (dn < 3 || (dn > 0 && (dn % 1000) == 0)) { Serial.print("[E-Ink] data "); Serial.println(dn); }
-  dn++;
   _spi.beginTransaction(_spi_settings);
   if (_cs >= 0) digitalWrite(_cs, LOW);
   _spi.transfer(d);
