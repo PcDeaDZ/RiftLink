@@ -633,10 +633,17 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     case protocol::OP_HELLO:
       clock_drift::onHelloReceived(hdr.from);
       offline_queue::onNodeOnline(hdr.from);
-      if (neighbors::onHello(hdr.from, rssi)) {
-        ble::requestNeighborsNotify();
-        queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info при новом соседе
-        RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
+      {
+        int nBefore = neighbors::getCount();
+        if (neighbors::onHello(hdr.from, rssi)) {
+          if (nBefore == 0) {
+            sendHello();
+            lastHello = millis();  // Немедленный HELLO — узел с 0 соседями добавит нас сразу (асимметрия N1↔N2)
+          }
+          ble::requestNeighborsNotify();
+          queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info при новом соседе
+          RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
+        }
       }
       if (!x25519_keys::hasKeyFor(hdr.from)) { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
       break;

@@ -277,9 +277,7 @@ static void rxTask(void* arg) {
     }
     radio::setSpreadingFactor(sf);
     radio::startReceiveWithTimeout(slotMs);
-    radio::releaseMutex();
-    vTaskDelay(pdMS_TO_TICKS(slotMs));
-    if (!radio::takeMutex(pdMS_TO_TICKS(50))) continue;
+    vTaskDelay(pdMS_TO_TICKS(slotMs));  // mutex держим — drainTask не прервёт RX (пакеты не читает после соседства)
     int n = radio::receiveAsync(rxBuf, sizeof(rxBuf));
     radio::releaseMutex();
     if (n > 0) {
