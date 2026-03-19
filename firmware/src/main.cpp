@@ -406,12 +406,15 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       // len==13 и opcode MSG/TELEMETRY/GROUP_MSG/KEY_EXCHANGE — обрезанный пакет (коллизия/SF), не спамить
       // broadcast (buf[1]&0x01) MSG/GROUP_MSG/TELEMETRY с len<45 — частично обрезан (min payload 32), не спамить
       // opcode 0x0D (NACK) с len!=23 — скорее всего коррупция KEY_EXCHANGE, не спамить
+      // opcode 0x02 (ACK) с len!=25 (unicast) или len!=17 (broadcast) — коллизия/слияние пакетов
       bool truncated = (len == 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 &&
           (buf[2] == protocol::OP_MSG || buf[2] == protocol::OP_TELEMETRY || buf[2] == protocol::OP_GROUP_MSG ||
            buf[2] == protocol::OP_KEY_EXCHANGE)) ||
           (len < 45 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 && (buf[1] & 0x01) &&
           (buf[2] == protocol::OP_MSG || buf[2] == protocol::OP_TELEMETRY || buf[2] == protocol::OP_GROUP_MSG)) ||
-          (buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 && buf[2] == protocol::OP_NACK && len != 23);
+          (buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 && buf[2] == protocol::OP_NACK && len != 23) ||
+          (buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 && buf[2] == protocol::OP_ACK &&
+          len != 25 && len != 17);  // ACK: unicast 25B, broadcast 17B
 #if defined(DEBUG_PACKET_DUMP)
       if (!truncated) {
         Serial.printf("[RiftLink] Parse FAIL len=%u rssi=%d hex=", (unsigned)len, rssi);

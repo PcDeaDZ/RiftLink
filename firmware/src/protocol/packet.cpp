@@ -149,6 +149,25 @@ bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr, const uint8_
     return false;  // только v2/v2.1
   }
 
+  // Ранний выход: opcodes с фиксированной длиной — сразу отсечь коррупцию (коллизия)
+  size_t expectedFullLen = 0;
+  bool isBc = (v0 & FLAG_BROADCAST) != 0;
+  switch (hdr->opcode) {
+    case OP_ACK:
+    case OP_READ:
+      expectedFullLen = isBc ? (SYNC_LEN + 12 + 4) : (SYNC_LEN + 20 + 4);  // 17 или 25
+      break;
+    case OP_NACK:
+      expectedFullLen = SYNC_LEN + HEADER_LEN + 2;  // 23
+      break;
+    case OP_KEY_EXCHANGE:
+      expectedFullLen = isBc ? (SYNC_LEN + 12 + 32) : (SYNC_LEN + 20 + 32);  // 45 или 53
+      break;
+    default:
+      break;
+  }
+  if (expectedFullLen != 0 && pLen != expectedFullLen) return false;
+
   // HELLO: строгая длина
   if (hdr->opcode == OP_HELLO) {
     size_t expectedLen = (hasSync ? SYNC_LEN : 0) + hdrLen;
