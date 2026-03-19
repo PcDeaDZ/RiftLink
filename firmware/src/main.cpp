@@ -595,9 +595,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       }
       bool hadKey = x25519_keys::hasKeyFor(hdr.from);
       x25519_keys::onKeyExchange(hdr.from, payload);
-      if (!hadKey) {  // ответ только если ключа не было — иначе KEY_EXCHANGE storm
-        bool useSf12 = (rssi < -90) || (sf == 12);
+      bool useSf12 = (rssi < -90) || (sf == 12);
+      if (!hadKey) {
         x25519_keys::sendKeyExchange(hdr.from, useSf12, true, false);
+      } else {
+        // У нас уже есть ключ — пир мог не получить наш. Ответ с троттлом 60с.
+        x25519_keys::sendKeyExchange(hdr.from, useSf12, true, true);
       }
     } else if (hdr.opcode == protocol::OP_HELLO) {
       beacon_sync::onBeaconReceived(hdr.from);
@@ -624,10 +627,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         }
         bool hadKey = x25519_keys::hasKeyFor(hdr.from);
         x25519_keys::onKeyExchange(hdr.from, payload);
+        bool useSf12 = (rssi < -90) || (sf == 12);
         if (!hadKey) {
           ble::requestNeighborsNotify();  // приложение: обновить hasKey (ожидание ключа → готов)
-          bool useSf12 = (rssi < -90) || (sf == 12);
           x25519_keys::sendKeyExchange(hdr.from, useSf12, true, false);
+        } else {
+          x25519_keys::sendKeyExchange(hdr.from, useSf12, true, true);  // троттл 60с — пир мог не получить наш
         }
       }
       break;
