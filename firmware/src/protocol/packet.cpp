@@ -63,7 +63,7 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
 constexpr int OPCODE_OFFSET_V2 = 2;  // sync(1) + version(1)
 
 static bool isValidOpcode(uint8_t op) {
-  return (op >= 0x01 && op <= 0x11) || op == OP_PONG || op == OP_PING;
+  return (op >= 0x01 && op <= 0x12) || op == OP_PONG || op == OP_PING;
 }
 
 // Только v2 (0x20) и v2.1 (0x30) — все устройства на одной версии
@@ -207,6 +207,8 @@ size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadca
     case OP_ACK:
     case OP_READ:
       return (payloadLen == 4) ? (hdrLen + 4) : 0;
+    case OP_ACK_BATCH:
+      return (payloadLen >= 5 && payloadLen <= 33 && (payloadLen - 1) % 4 == 0) ? (hdrLen + payloadLen) : 0;
     case OP_KEY_EXCHANGE:
       return (payloadLen == 32) ? (hdrLen + 32) : 0;
     case OP_ROUTE_REQ:
@@ -217,6 +219,8 @@ size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadca
       return (payloadLen == 12) ? (HEADER_LEN_BROADCAST + 12) : 0;  // broadcast: msgId(4)+originalFrom(8)
     case OP_POLL:
       return (payloadLen == 0) ? HEADER_LEN_BROADCAST : 0;  // RIT: broadcast без payload
+    case OP_SF_BEACON:
+      return (payloadLen == 1) ? (HEADER_LEN_BROADCAST + 1) : 0;  // broadcast: mesh SF
     default:
       return 0;  // переменная длина
   }
@@ -234,6 +238,10 @@ bool getExpectedPayloadRange(uint8_t opcode, size_t* minOut, size_t* maxOut) {
     case OP_READ:
       *minOut = *maxOut = 4;
       return true;
+    case OP_ACK_BATCH:
+      *minOut = 5;   // count(1) + msgId(4)
+      *maxOut = 33;  // count(1) + msgId(4)*8
+      return true;
     case OP_KEY_EXCHANGE:
       *minOut = *maxOut = 32;
       return true;
@@ -246,6 +254,9 @@ bool getExpectedPayloadRange(uint8_t opcode, size_t* minOut, size_t* maxOut) {
       return true;
     case OP_POLL:
       *minOut = *maxOut = 0;
+      return true;
+    case OP_SF_BEACON:
+      *minOut = *maxOut = 1;  // mesh SF (7, 9, 10, 12)
       return true;
     case OP_TELEMETRY:
       *minOut = 28;  // 4 plain + crypto::OVERHEAD

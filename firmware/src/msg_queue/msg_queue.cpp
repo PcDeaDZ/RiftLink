@@ -27,7 +27,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-#define MAX_PENDING           8
+#define MAX_PENDING           12
 #define MAX_PENDING_BROADCAST 4
 #define MAX_RETRIES           4   // макс. повторов при отсутствии ACK (не вечно)
 // Paper: 2 deferred copies (sendQueue 16) — экономия слотов при heap ~10KB
@@ -424,6 +424,22 @@ bool onAckReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLe
   }
   xSemaphoreGive(s_mutex);
   return unicastCleared;
+}
+
+void onAckBatchReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLen, int rssi,
+    void (*onDelivered)(const uint8_t* from, uint32_t msgId, int rssi)) {
+  if (payloadLen < 5 || !from) return;  // count(1) + msgId(4)
+  uint8_t count = payload[0];
+  if (count == 0 || count > 8 || payloadLen < 1 + count * MSG_ID_LEN) return;
+  for (uint8_t i = 0; i < count; i++) {
+    uint32_t msgId;
+    memcpy(&msgId, payload + 1 + i * MSG_ID_LEN, MSG_ID_LEN);
+    uint8_t singlePayload[MSG_ID_LEN];
+    memcpy(singlePayload, &msgId, MSG_ID_LEN);
+    if (onAckReceived(from, singlePayload, MSG_ID_LEN) && onDelivered) {
+      onDelivered(from, msgId, rssi);
+    }
+  }
 }
 
 bool registerPendingFromFusion(const uint8_t* to, uint32_t msgId, const uint8_t* pkt, size_t pktLen, uint8_t txSf) {

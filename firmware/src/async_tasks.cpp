@@ -5,6 +5,7 @@
 #include "async_tasks.h"
 #include "log.h"
 #include "async_queues.h"
+#include "ack_coalesce/ack_coalesce.h"
 #include "send_overflow/send_overflow.h"
 #include "ui/display.h"
 #include "led/led.h"
@@ -166,6 +167,7 @@ void relayHeard(const uint8_t* from, uint32_t payloadHash) {
 void flushDeferredSends() {
   // Pull on-demand: radio scheduler тянет из send_overflow при пустой sendQueue
   // Сначала deferred send — потом ACK. SendToFront: последний добавленный впереди. ACK впереди = доставка.
+  ack_coalesce::flush();
   flushDeferredSlots(s_deferredSend, DEFERRED_SEND_SLOTS);
   flushDeferredSlots(s_deferredAck, DEFERRED_ACK_SLOTS);
 }
@@ -288,12 +290,16 @@ static void radioSchedulerTask(void* arg) {
       vTaskDelay(pdMS_TO_TICKS(5));
       continue;
     }
-    // TX: 1 пакет — единый источник (sendQueue или send_overflow). После TX — пауза ToA.
+    // TX: до 6 пакетов за цикл при SF7/9 (pipelining), 2 при SF10/11, 1 при SF12
     bool didTx = false;
-    uint32_t lastToaUs = 0;  // для паузы после TX
-    bool pushedBack = false;  // V4: вернули в очередь — не сбрасывать highSfDrained
+    uint32_t lastToaUs = 0;
+    bool pushedBack = false;
+    int drainLimit = 6;
+    for (int drainIdx = 0; drainIdx < drainLimit; drainIdx++) {
     SendQueueItem item;
-    if (send_overflow::getNextTxPacket(&item)) {
+    if (!send_overflow::getNextTxPacket(&item)) break;
+    if (drainIdx > 0 && item.txSf >= 10) { drainLimit = drainIdx + 1; }  // SF10+: только 1 доп. пакет
+    if (drainIdx >= 2 && item.txSf >= 10) break;  // SF10+ после 2-го — стоп
 #if defined(SF_FORCE_7)
         if (item.len >= 54 && item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_KEY_EXCHANGE) {
           queueDeferredSend(item.buf, item.len, item.txSf, 500 + (esp_random() % 1501));
@@ -309,6 +315,7 @@ static void radioSchedulerTask(void* arg) {
         if (item.txSf >= 10 && highSfDrained >= 2) {
           xQueueSendToFront(sendQueue, &item, 0);
           pushedBack = true;
+          break;  // не drain дальше — ждём RX
         } else {
           if (item.len >= 54 && item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_KEY_EXCHANGE) {
             queueDeferredSend(item.buf, item.len, item.txSf, 500 + (esp_random() % 1501));
@@ -331,7 +338,7 @@ static void radioSchedulerTask(void* arg) {
           }
         }
 #endif
-    }
+    }  // for drainIdx
     if (didTx && lastToaUs > 0) {
       uint32_t toaMs = (lastToaUs + 999) / 1000;
       if (toaMs > 0 && toaMs < 500) vTaskDelay(pdMS_TO_TICKS(toaMs));

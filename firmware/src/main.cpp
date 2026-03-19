@@ -38,6 +38,7 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include "bls_n/bls_n.h"
 #include "esp_now_slots/esp_now_slots.h"
 #include "packet_fusion/packet_fusion.h"
+#include "ack_coalesce/ack_coalesce.h"
 #include "network_coding/network_coding.h"
 #include "neighbors/neighbors.h"
 #include "groups/groups.h"
@@ -69,26 +70,32 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #define PENDING_REDRAW_RETRY_MS 2500  // retry смены вкладки, если дисплей не принял за 2.5с
 
 #define HELLO_INTERVAL_MS  30000  // 30с — спокойный режим (Meshtastic: position 15мин, telemetry 30мин)
-#define HELLO_INTERVAL_AGGRESSIVE_MS 18000  // 18с — discovery при 0 соседях (меньше storm, фазирование по слоту)
+#define HELLO_INTERVAL_AGGRESSIVE_MS 8000   // 8с — быстрый discovery при 0 соседях
 #define HELLO_JITTER_MS    3000   // ±3с — при 1+ соседях
-#define HELLO_JITTER_ZERO_MS 1000 // ±1с при 0 соседях (фазирование по nodeId даёт основной spread)
+#define HELLO_JITTER_ZERO_MS 500  // ±0.5с при 0 соседях — меньше разброс для быстрого discovery
 #define TELEM_INTERVAL_MS  60000
 #define GPS_LOC_INTERVAL_MS 60000  // интервал отправки локации с GPS
 #define SF_ADAPT_INTERVAL_MS 30000 // адаптивный SF по качеству связи
-#define POLL_INTERVAL_MS   8000    // RIT: «присылайте пакеты для меня» каждые 8с
+#define POLL_INTERVAL_MS   5000    // RIT: «присылайте пакеты для меня» каждые 5с (pipelining)
 
 static uint32_t lastHello = 0;
 static uint32_t lastPoll = 0;
 static uint32_t lastTelemetry = 0;
 static uint32_t lastGpsLoc = 0;
 static uint32_t lastSfAdapt = 0;
-static uint32_t s_helloCounter = 0;   // для SF12 HELLO: каждый N-й на SF12
 static uint32_t s_rxCycleCounter = 0; // для SF12 RX: каждый N-й цикл слушать SF12
 static uint32_t s_bootTime = 0;       // millis() при старте — агрессивный discovery первые 2 мин
 static bool s_nextRxSf12 = false;     // слушать SF12 после drain HELLO на SF12
 static uint8_t s_sf12BurstCount = 0;  // 2 цикла SF12 подряд каждые 30с
 static uint32_t s_lastSf12Burst = 0;
 static uint32_t s_lastKeyRetry = 0;   // retry KEY_EXCHANGE каждые 30с для соседей без ключа
+// SF beacon: mesh (1+ соседей) рассылает «мы на SF X» перебором 7,9,10,12 — новый узел узнаёт, где искать
+#define SF_BEACON_INTERVAL_MS 45000
+#define SF_BEACON_TTL_MS 120000  // новый узел использует mesh SF 2 мин после приёма
+static uint8_t s_meshSf = 0;           // 0 = cycling, иначе фикс от beacon
+static uint32_t s_meshSfReceivedAt = 0;
+static uint8_t s_meshAdaptiveSf = 7;   // текущий SF mesh при 1+ соседях
+static uint32_t lastSfBeacon = 0;
 static uint32_t s_loopCooldownUntil = 0;  // вместо delay(10) — throttle OTA и конец loop
 static uint8_t s_bootPhase = 0;           // 0=ожидание 4с, 1=готов
 static uint32_t s_bootPhaseStart = 0;
@@ -171,23 +178,43 @@ static void ucDedupAdd(const uint8_t* from, uint32_t msgId) {
   s_ucDedupIdx = (s_ucDedupIdx + 1) % UC_DEDUP_SIZE;
 }
 
+// Discovery: перебор 7,9,10,12 каждые 2с — без привязки к каналу, фаза по millis()
+static const uint8_t s_discoverySfList[] = {7, 9, 10, 12};
+#define DISCOVERY_SF_CYCLE_MS 2000
+
+/** Текущий SF для discovery (0 соседей). SF beacon → mesh SF. Иначе перебор 7,9,10,12 по 2с. */
+static uint8_t getDiscoverySf() {
+  uint32_t now = millis();
+  if (s_meshSf >= 7 && s_meshSf <= 12 && (now - s_meshSfReceivedAt) < SF_BEACON_TTL_MS) {
+    return s_meshSf;
+  }
+  s_meshSf = 0;
+  int idx = (now / DISCOVERY_SF_CYCLE_MS) % 4;
+  return s_discoverySfList[idx];
+}
+
 /** Параметры следующего RX-слота для rxTask. Вызывать из rxTask. */
 void getNextRxSlotParams(uint8_t* sfOut, uint32_t* slotMsOut) {
   bool aggressive = (millis() - s_bootTime) < 120000;
   int nNeigh = neighbors::getCount();
   uint8_t baseSf = 7;
 #if !defined(SF_FORCE_7)
+  // Discovery (0 соседей): перебор 7,9,10,12 по 2с — без привязки к каналу. SF beacon → mesh SF.
+  if (nNeigh == 0) {
+    uint8_t sf = getDiscoverySf();
+    if (sfOut) *sfOut = sf;
+    if (slotMsOut) *slotMsOut = (sf >= 12) ? 1200 : ((sf >= 10) ? 400 : (aggressive ? 600 : 1000));
+    return;
+  }
   if (s_sf12BurstCount == 0 && (millis() - s_lastSf12Burst) >= 30000) {
     s_sf12BurstCount = 2;
   }
-  if (nNeigh > 0) {
-    int avgRssi = neighbors::getAverageRssi();
-    if (avgRssi < -110) baseSf = 12;
-    else if (avgRssi < -80) baseSf = 9;
-  }
+  int avgRssi = neighbors::getAverageRssi();
+  if (avgRssi < -110) baseSf = 12;
+  else if (avgRssi < -80) baseSf = 9;
   int minRssi = neighbors::getMinRssi();
-  bool needSf10 = (nNeigh > 0 && minRssi != 0 && minRssi < -90);
-  int rxMod = aggressive ? 2 : ((nNeigh == 0) ? 3 : (nNeigh >= 6 ? 4 : (nNeigh >= 3 ? 6 : 8)));
+  bool needSf10 = (minRssi != 0 && minRssi < -90);
+  int rxMod = aggressive ? 2 : (nNeigh >= 6 ? 4 : (nNeigh >= 3 ? 6 : 8));
   uint8_t sf = 7;
   if (s_sf12BurstCount > 0) {
     sf = 12;
@@ -204,14 +231,12 @@ void getNextRxSlotParams(uint8_t* sfOut, uint32_t* slotMsOut) {
   }
   s_rxCycleCounter++;
   if (sfOut) *sfOut = sf;
-  // slotMs: SF12 ~1.1s для 54B, SF10 ~300ms, SF7 ~50ms. При 0 соседях — 1200ms.
-  uint32_t slot = (nNeigh == 0) ? 1200 : ((sf >= 12) ? 1200 : ((sf >= 10) ? 400 : 100));
+  uint32_t slot = (sf >= 12) ? 1200 : ((sf >= 10) ? 400 : 100);
   if (slotMsOut) *slotMsOut = slot;
 #else
   (void)aggressive;
   (void)nNeigh;
   if (sfOut) *sfOut = 7;
-  // При 0 соседях — 800ms (как V3/V4 1200ms), иначе 200ms. Иначе discovery почти не ловит HELLO.
   if (slotMsOut) *slotMsOut = (nNeigh == 0) ? 800 : 200;
 #endif
 }
@@ -302,21 +327,34 @@ void sendHello() {
       if (duty_cycle::canSend(toa7)) radio::send(pkt, len, 7, priority);
     }
   } else {
-    bool aggressiveHello = (millis() - s_bootTime) < 120000;
-    int mod = aggressiveHello ? 2 : 3;
-    uint8_t txSf = (s_helloCounter % mod) == 0 ? 12 : 7;
-    s_helloCounter++;
-    if (txSf == 12) {
-      uint8_t prev = radio::getSpreadingFactor();
-      radio::setSpreadingFactor(12);
-      uint32_t toa = radio::getTimeOnAir(len);
-      radio::setSpreadingFactor(prev);
-      if (!duty_cycle::canSend(toa)) txSf = 7;
-    }
+    // Discovery: перебор 7,9,10,12 — без привязки к каналу
+    uint8_t txSf = getDiscoverySf();
+    if (txSf >= 10 && !duty_cycle::canSend(radio::getTimeOnAir(len))) txSf = 7;
     radio::send(pkt, len, txSf, false);
   }
 #endif
   Serial.printf("[RiftLink] HELLO sent n=%d heap=%u\n", n, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
+/** SF beacon: mesh рассылает «мы на SF X» перебором 7,9,10,12 — новый узел (перебором) получает и переключается. */
+static void sendSfBeacon() {
+#if defined(SF_FORCE_7)
+  (void)0;
+#else
+  uint8_t meshSf = s_meshAdaptiveSf;
+  if (meshSf < 7 || meshSf > 12) meshSf = 7;
+  uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN_BROADCAST + 1];
+  size_t len = protocol::buildPacket(pkt, sizeof(pkt),
+      node::getId(), protocol::BROADCAST_ID,
+      31, protocol::OP_SF_BEACON, &meshSf, 1);
+  if (len == 0) return;
+  static const uint8_t beaconSfs[] = {7, 9, 10, 12};
+  for (int i = 0; i < 4; i++) {
+    uint8_t sf = beaconSfs[i];
+    if (sf >= 10 && !duty_cycle::canSend(radio::getTimeOnAir(len))) continue;
+    queueSend(pkt, len, sf, false);
+  }
+#endif
 }
 
 void sendPoll() {
@@ -498,7 +536,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
   // Broadcast relay только при 2+ соседях — иначе ping-pong между двумя устройствами, HELLO не проходят
   bool needRelay = (hdr.ttl > 0) && (hdr.opcode != protocol::OP_ROUTE_REQ) &&
       (hdr.opcode != protocol::OP_ROUTE_REPLY) && (hdr.opcode != protocol::OP_HELLO) &&
-      (hdr.opcode != protocol::OP_NACK) && (
+      (hdr.opcode != protocol::OP_SF_BEACON) && (hdr.opcode != protocol::OP_NACK) && (
       (!node::isForMe(hdr.to) && !node::isBroadcast(hdr.to)) ||
       ((hdr.opcode == protocol::OP_GROUP_MSG || hdr.opcode == protocol::OP_VOICE_MSG) &&
        neighbors::getCount() >= 2));
@@ -641,6 +679,16 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       }
       break;
 
+    case protocol::OP_SF_BEACON:
+      if (payloadLen >= 1 && neighbors::getCount() == 0) {
+        uint8_t meshSf = payload[0];
+        if (meshSf >= 7 && meshSf <= 12) {
+          s_meshSf = meshSf;
+          s_meshSfReceivedAt = millis();
+        }
+      }
+      break;
+
     case protocol::OP_HELLO:
       Serial.printf("[RiftLink] HELLO rx from %02X%02X rssi=%d heap=%u\n",
           hdr.from[0], hdr.from[1], rssi, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -695,17 +743,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           }
           if (protocol::isAckReq(hdr) && decLen >= off + msg_queue::MSG_ID_LEN && node::isForMe(hdr.to)) {
             memcpy(&msgId, decBuf + off, msg_queue::MSG_ID_LEN);
-            uint8_t ackPayload[msg_queue::MSG_ID_LEN];
-            memcpy(ackPayload, decBuf + off, msg_queue::MSG_ID_LEN);
-            uint8_t ackPkt[protocol::PAYLOAD_OFFSET + msg_queue::MSG_ID_LEN];
-            size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
-                node::getId(), hdr.from, 31, protocol::OP_ACK,
-                ackPayload, msg_queue::MSG_ID_LEN, false, false);
-            if (ackLen > 0) {
-              uint8_t txSf = neighbors::rssiToSfOrthogonal(hdr.from);
-              if (txSf == 0) txSf = 12;
-              queueDeferredAck(ackPkt, ackLen, txSf, 80);  // без блокировки — RX window для след. MSG
-            }
+            uint8_t txSf = neighbors::rssiToSfOrthogonal(hdr.from);
+            if (txSf == 0) txSf = 12;
+            ack_coalesce::add(hdr.from, msgId, txSf);
             // Echo Protocol: broadcast echo для Witness ACK (отправитель может услышать даже при коллизии ACK)
             uint8_t echoPayload[12];
             memcpy(echoPayload, decBuf + off, msg_queue::MSG_ID_LEN);
@@ -764,6 +804,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       if (payloadLen >= 1 && node::isForMe(hdr.to)) {
         uint8_t count = payload[0];
         if (count >= 1 && count <= 4) {
+          uint32_t ackMsgIds[4];
+          uint8_t ackCount = 0;
           size_t off = 1;
           for (uint8_t i = 0; i < count && off + 2 <= payloadLen; i++) {
             uint16_t encLen = (uint16_t)payload[off] | ((uint16_t)payload[off + 1] << 8);
@@ -782,17 +824,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
               uint32_t msgId = 0;
               memcpy(&msgId, decBuf + msgOff, msg_queue::MSG_ID_LEN);
               msgOff += msg_queue::MSG_ID_LEN;
-              uint8_t ackPayload[msg_queue::MSG_ID_LEN];
-              memcpy(ackPayload, &msgId, msg_queue::MSG_ID_LEN);
-              uint8_t ackPkt[protocol::PAYLOAD_OFFSET + msg_queue::MSG_ID_LEN];
-              size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
-                  node::getId(), hdr.from, 31, protocol::OP_ACK,
-                  ackPayload, msg_queue::MSG_ID_LEN, false, false);
-              if (ackLen > 0) {
-                uint8_t txSf = neighbors::rssiToSfOrthogonal(hdr.from);
-                if (txSf == 0) txSf = 12;
-                queueDeferredAck(ackPkt, ackLen, txSf, 80 + (i * 50));
-              }
+              if (ackCount < 4) ackMsgIds[ackCount++] = msgId;
               size_t msgLen = decLen - msgOff;
               if (msgLen < 256 && !ucDedupSeen(hdr.from, msgId)) {
                 ucDedupAdd(hdr.from, msgId);
@@ -803,6 +835,22 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
                 snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
                 queueDisplayLastMsg(fromHex, msgStrBuf);
               }
+            }
+          }
+          if (ackCount > 0) {
+            uint8_t ackBatchPayload[1 + 4 * 4];
+            ackBatchPayload[0] = ackCount;
+            for (uint8_t j = 0; j < ackCount; j++)
+              memcpy(ackBatchPayload + 1 + j * msg_queue::MSG_ID_LEN, &ackMsgIds[j], msg_queue::MSG_ID_LEN);
+            size_t ackBatchLen = 1 + ackCount * msg_queue::MSG_ID_LEN;
+            uint8_t ackPkt[protocol::PAYLOAD_OFFSET + 33];
+            size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
+                node::getId(), hdr.from, 31, protocol::OP_ACK_BATCH,
+                ackBatchPayload, ackBatchLen, false, false);
+            if (ackLen > 0) {
+              uint8_t txSf = neighbors::rssiToSfOrthogonal(hdr.from);
+              if (txSf == 0) txSf = 12;
+              queueDeferredAck(ackPkt, ackLen, txSf, 50);
             }
           }
         }
@@ -816,6 +864,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         if (msg_queue::onAckReceived(hdr.from, payload, payloadLen)) {
           ble::notifyDelivered(hdr.from, msgId, rssi);
         }
+      }
+      break;
+
+    case protocol::OP_ACK_BATCH:
+      if (payloadLen >= 5) {
+        msg_queue::onAckBatchReceived(hdr.from, payload, payloadLen, rssi, ble::notifyDelivered);
       }
       break;
 
@@ -1098,6 +1152,7 @@ static void runBootStateMachine() {
   ble::setOnSend(sendMsg);
   ble::setOnLocation(sendLocation);
   msg_queue::init();
+  ack_coalesce::init();
   mab::init();
   collision_slots::init();
   beacon_sync::init();
@@ -1216,8 +1271,13 @@ void loop() {
       if (avgRssi < -110) sf = 12;
       else if (avgRssi < -80) sf = 9;
     }
+    s_meshAdaptiveSf = sf;
     radio::setSpreadingFactor(sf);
     lastSfAdapt = millis();
+  }
+  if (nNeigh >= 1 && millis() - lastSfBeacon > SF_BEACON_INTERVAL_MS) {
+    sendSfBeacon();
+    lastSfBeacon = millis();
   }
 #endif
 

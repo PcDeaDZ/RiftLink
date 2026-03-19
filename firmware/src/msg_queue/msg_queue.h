@@ -26,6 +26,11 @@ bool enqueueGroup(uint32_t groupId, const char* text);
 // Обработка входящего ACK. from = кто прислал ACK. Возвращает true если unicast доставлен (для notifyDelivered)
 bool onAckReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLen);
 
+// Обработка ACK_BATCH: count(1) + msgId(4)* — для каждого msgId вызывает onAckReceived.
+// onDelivered вызывается для каждого доставленного msgId (для ble::notifyDelivered).
+void onAckBatchReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLen, int rssi,
+    void (*onDelivered)(const uint8_t* from, uint32_t msgId, int rssi));
+
 // RIT: при получении POLL от получателя — ускорить отправку pending для него
 void onPollReceived(const uint8_t* from);
 

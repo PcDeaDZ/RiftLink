@@ -13,7 +13,7 @@ void asyncTasksStart();
 bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf = 0, bool priority = false);
 
 /** ACK с задержкой — без блокировки packetTask, RX window для следующего MSG */
-void queueDeferredAck(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs = 80);
+void queueDeferredAck(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs = 50);
 /** Любой пакет с задержкой — MSG copy2, broadcast 2–3, KEY_EXCHANGE jitter */
 void queueDeferredSend(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs);
 /** Relay с задержкой — Managed flooding: отмена при услышанной ретрансляции */

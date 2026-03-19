@@ -28,6 +28,8 @@ constexpr uint8_t OP_ECHO = 0x0E;   // Эхо вместо ACK: broadcast msgId+
 constexpr uint8_t OP_POLL = 0x0F;   // RIT: broadcast «присылайте пакеты для меня» (payload пустой)
 constexpr uint8_t OP_MSG_BATCH = 0x10;  // Packet Fusion: count(1) + [len(2)+enc]* — несколько MSG в одном пакете
 constexpr uint8_t OP_XOR_RELAY = 0x11;  // Network Coding: XOR(A,B) broadcast, meta: pktIdA/B, fromA/B, toA/B
+constexpr uint8_t OP_SF_BEACON = 0x12;  // broadcast: payload 1B = mesh SF (7,9,10,12) — новый узел узнаёт, на каком SF искать
+constexpr uint8_t OP_ACK_BATCH = 0x13;  // unicast: count(1) + msgId(4)* — батч ACK для MSG_BATCH (pipelining)
 constexpr uint8_t OP_PONG = 0xFE;
 constexpr uint8_t OP_PING = 0xFF;
 
