@@ -35,8 +35,8 @@ static uint16_t s_pktIdCounter = 0;
 static bool s_inited = false;
 static SemaphoreHandle_t s_mutex = nullptr;
 
-// Троттлинг: не спамить KEY_EXCHANGE одному пиру — иначе забивают канал, MSG не проходят
-#define KEY_EXCHANGE_THROTTLE_MS 18000   // мин. интервал до повторной отправки тому же пиру
+// Троттлинг: не спамить KEY_EXCHANGE — иначе забивают канал, MSG не проходят
+#define KEY_EXCHANGE_THROTTLE_MS 60000   // мин. интервал инициатору (было 18с — flood)
 #define KEY_RESPONSE_THROTTLE_MS 60000  // ответ когда ключ уже был — макс. раз в 60с (пир может повторить)
 #define KEY_DEBOUNCE_MS 1500             // мин. пауза между отправками одному пиру (HELLO+KEY_EXCHANGE подряд → 1 пакет)
 struct ThrottleEntry { uint8_t peerId[protocol::NODE_ID_LEN]; uint32_t lastSend; };
@@ -193,7 +193,7 @@ void sendKeyExchange(const uint8_t* peerId, bool useSf12, bool forceSend, bool h
   uint8_t txSf = useSf12 ? 12 : 0;
   if (len > 0) {
     pkt_cache::add(peerId, pktId, pkt, len);
-    radio::send(pkt, len, txSf, useSf12);
+    radio::send(pkt, len, txSf, false);  // priority=false — не вытеснять MSG в очереди
   }
   xSemaphoreGive(s_mutex);
 }

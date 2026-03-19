@@ -29,6 +29,7 @@
 #include "version.h"
 #include "bls_n/bls_n.h"
 #include "crypto/crypto.h"
+#include "esp_now_slots/esp_now_slots.h"
 #include <mbedtls/base64.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -271,6 +272,19 @@ class CharCallbacks : public NimBLECharacteristicCallbacks {
       if (ch >= 0 && ch <= 2 && region::setChannel(ch)) {
         ble::notifyRegion(region::getCode(), region::getFreq(), region::getPower(), region::getChannel());
       }
+      return;
+    }
+    if (strcmp(cmd, "espnowChannel") == 0) {
+      int ch = doc["channel"] | doc["espnowChannel"] | -1;
+      if (ch >= 1 && ch <= 13 && esp_now_slots::setChannel((uint8_t)ch)) {
+        esp_now_slots::setAdaptive(false);
+        s_pendingInfo = true;
+      }
+      return;
+    }
+    if (strcmp(cmd, "espnowAdaptive") == 0) {
+      bool on = doc["enabled"] | doc["adaptive"] | false;
+      if (esp_now_slots::setAdaptive(on)) s_pendingInfo = true;
       return;
     }
 
@@ -631,6 +645,8 @@ void notifyInfo() {
   if (region::getChannelCount() > 0) {
     doc["channel"] = region::getChannel();
   }
+  doc["espnowChannel"] = esp_now_slots::getChannel();
+  doc["espnowAdaptive"] = esp_now_slots::isAdaptive();
   doc["version"] = RIFTLINK_VERSION;
   doc["sf"] = radio::getSpreadingFactor();
   int offlinePending = offline_queue::getPendingCount();

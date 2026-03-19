@@ -52,6 +52,7 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include "powersave/powersave.h"
 #include "async_queues.h"
 #include "async_tasks.h"
+#include "send_overflow/send_overflow.h"
 #include "led/led.h"
 #include "duty_cycle/duty_cycle.h"
 #include "pkt_cache/pkt_cache.h"
@@ -610,7 +611,10 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info при новом соседе
         RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
       }
-      if (!x25519_keys::hasKeyFor(hdr.from)) { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
+      if (!x25519_keys::hasKeyFor(hdr.from)) {
+        bool useSf12 = (rssi < -90) || (sf == 12);
+        x25519_keys::sendKeyExchange(hdr.from, useSf12);  // троттл 60с в x25519_keys
+      }
     }
     return;
   }
@@ -656,7 +660,10 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
         }
       }
-      if (!x25519_keys::hasKeyFor(hdr.from)) { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
+      if (!x25519_keys::hasKeyFor(hdr.from)) {
+        bool useSf12 = (rssi < -90) || (sf == 12);
+        x25519_keys::sendKeyExchange(hdr.from, useSf12);  // троттл 60с в x25519_keys
+      }
       break;
 
     case protocol::OP_MSG:
@@ -1142,6 +1149,7 @@ static void runBootStateMachine() {
   if (!asyncQueuesInit()) {
     RIFTLINK_LOG_ERR("[RiftLink] Async queues init FAILED\n");
   }
+  send_overflow::init();
   if (wifi::isAvailable()) {
     Serial.printf("[RiftLink] Heap before ESP-NOW: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     esp_now_slots::init();
@@ -1212,6 +1220,8 @@ void loop() {
     lastSfAdapt = millis();
   }
 #endif
+
+  esp_now_slots::tickAdaptive();
 
   gps::update();
   if (gps::isPresent() && gps::isEnabled() && gps::hasFix() &&
@@ -1286,6 +1296,30 @@ void loop() {
         }
       } else {
         Serial.println("[RiftLink] channel 0|1|2 (EU/UK only)");
+      }
+    } else if (cmd.startsWith("espnow ")) {
+      String sub = cmd.substring(7);
+      sub.trim();
+      if (sub.startsWith("channel ")) {
+        int ch = sub.substring(8).toInt();
+        if (ch >= 1 && ch <= 13 && esp_now_slots::setChannel((uint8_t)ch)) {
+          esp_now_slots::setAdaptive(false);  // ручная установка → фиксированный режим
+          Serial.printf("[RiftLink] ESP-NOW channel: %d (fixed)\n", ch);
+        } else {
+          Serial.println("[RiftLink] espnow channel 1-13");
+        }
+      } else if (sub == "adaptive" || sub == "adaptive on") {
+        if (esp_now_slots::setAdaptive(true)) {
+          Serial.println("[RiftLink] ESP-NOW adaptive on");
+        }
+      } else if (sub == "adaptive off") {
+        if (esp_now_slots::setAdaptive(false)) {
+          Serial.println("[RiftLink] ESP-NOW adaptive off (fixed)");
+        }
+      } else {
+        Serial.printf("[RiftLink] ESP-NOW channel: %u %s\n",
+            (unsigned)esp_now_slots::getChannel(),
+            esp_now_slots::isAdaptive() ? "(adaptive)" : "(fixed)");
       }
     } else if (cmd.startsWith("nickname ")) {
       String nick = cmd.substring(9);
@@ -1378,11 +1412,9 @@ void loop() {
     }
   }
 
-  // Retry KEY_EXCHANGE: каждые 25–35с (jitter!) — иначе оба узла синхронно → коллизии → deadlock
-  // Фаза по nodeId[0]: разные узлы смещены — меньше шанс одновременного TX
-  // Доп. jitter 0–3 с — ещё меньше синхронных TX при плотной сети
-  #define KEY_RETRY_BASE_MS  25000
-  #define KEY_RETRY_JITTER_MS 10000
+  // Retry KEY_EXCHANGE: каждые 45–60с — меньше flood, MSG успевают проходить
+  #define KEY_RETRY_BASE_MS  45000
+  #define KEY_RETRY_JITTER_MS 15000
   #define KEY_RETRY_EXTRA_JITTER_MS 3000
   static uint32_t s_keyRetryCooldownUntil = 0;  // без блокировки loop
   if (millis() >= s_lastKeyRetry && millis() >= s_keyRetryCooldownUntil) {

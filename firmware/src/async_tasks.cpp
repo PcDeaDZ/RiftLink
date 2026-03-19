@@ -5,6 +5,7 @@
 #include "async_tasks.h"
 #include "log.h"
 #include "async_queues.h"
+#include "send_overflow/send_overflow.h"
 #include "ui/display.h"
 #include "led/led.h"
 #include "radio/radio.h"
@@ -39,13 +40,16 @@ extern void onRadioSchedulerTxSf12(void);
 #define ACK_RESERVE_SLOTS 4   // резерв для ACK — обычные пакеты отклоняются при ≤4 свободных
 bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf, bool priority) {
   if (!sendQueue || len > PACKET_BUF_SIZE) return false;
-  if (!priority && uxQueueSpacesAvailable(sendQueue) <= ACK_RESERVE_SLOTS) return false;
+  if (!priority && uxQueueSpacesAvailable(sendQueue) <= ACK_RESERVE_SLOTS) {
+    return send_overflow::push(buf, len, txSf, false);  // fallback в send_overflow
+  }
   SendQueueItem item;
   memcpy(item.buf, buf, len);
   item.len = (uint16_t)len;
   item.txSf = (txSf >= 7 && txSf <= 12) ? txSf : 0;
   BaseType_t ok = priority ? xQueueSendToFront(sendQueue, &item, 0) : xQueueSend(sendQueue, &item, 0);
-  return ok == pdTRUE;
+  if (ok != pdTRUE) return send_overflow::push(buf, len, txSf, priority);  // fallback в send_overflow
+  return true;
 }
 
 #define DEFERRED_ACK_SLOTS 8   // broadcast: несколько соседей шлют ACK почти одновременно
@@ -160,8 +164,10 @@ void relayHeard(const uint8_t* from, uint32_t payloadHash) {
 }
 
 void flushDeferredSends() {
-  flushDeferredSlots(s_deferredAck, DEFERRED_ACK_SLOTS);
+  // Pull on-demand: radio scheduler тянет из send_overflow при пустой sendQueue
+  // Сначала deferred send — потом ACK. SendToFront: последний добавленный впереди. ACK впереди = доставка.
   flushDeferredSlots(s_deferredSend, DEFERRED_SEND_SLOTS);
+  flushDeferredSlots(s_deferredAck, DEFERRED_ACK_SLOTS);
 }
 
 void queueDisplayLastMsg(const char* fromHex, const char* text) {
@@ -282,16 +288,17 @@ static void radioSchedulerTask(void* arg) {
       vTaskDelay(pdMS_TO_TICKS(5));
       continue;
     }
-    // TX: 1 пакет, если есть в очереди
+    // TX: 1 пакет — единый источник (sendQueue или send_overflow). После TX — пауза ToA.
     bool didTx = false;
+    uint32_t lastToaUs = 0;  // для паузы после TX
     bool pushedBack = false;  // V4: вернули в очередь — не сбрасывать highSfDrained
-    if (sendQueue && uxQueueMessagesWaiting(sendQueue) > 0) {
-      SendQueueItem item;
-      if (xQueueReceive(sendQueue, &item, 0) == pdTRUE) {
+    SendQueueItem item;
+    if (send_overflow::getNextTxPacket(&item)) {
 #if defined(SF_FORCE_7)
         if (item.len >= 54 && item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_KEY_EXCHANGE) {
           queueDeferredSend(item.buf, item.len, item.txSf, 500 + (esp_random() % 1501));
         } else {
+          lastToaUs = radio::getTimeOnAir(item.len);
           radio::sendDirectInternal(item.buf, item.len);
           didTx = true;
           if (item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_MSG) {
@@ -315,6 +322,7 @@ static void radioSchedulerTask(void* arg) {
                 highSfDrained = 0;
               }
             }
+            lastToaUs = radio::getTimeOnAir(item.len);
             radio::sendDirectInternal(item.buf, item.len);
             didTx = true;
             if (item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_MSG) {
@@ -323,7 +331,10 @@ static void radioSchedulerTask(void* arg) {
           }
         }
 #endif
-      }
+    }
+    if (didTx && lastToaUs > 0) {
+      uint32_t toaMs = (lastToaUs + 999) / 1000;
+      if (toaMs > 0 && toaMs < 500) vTaskDelay(pdMS_TO_TICKS(toaMs));
     }
 #if !defined(SF_FORCE_7)
     if (!didTx && !pushedBack) highSfDrained = 0;  // очередь пуста — сброс. pushedBack — не сбрасывать

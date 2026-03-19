@@ -179,6 +179,11 @@ bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr, const uint8_
   if (payload) *payload = buf + logicalStart + hdrLen;
   if (payloadLen) *payloadLen = pl;
 
+  // Fallback: POLL (0x0F) с 32B payload — скорее KEY_EXCHANGE (0x06) с коррупцией opcode при коллизии
+  if (hdr->opcode == OP_POLL && pl == 32 && (v0 & FLAG_BROADCAST)) {
+    hdr->opcode = OP_KEY_EXCHANGE;
+  }
+
   size_t minPl, maxPl;
   if (getExpectedPayloadRange(hdr->opcode, &minPl, &maxPl)) {
     if (pl < minPl || pl > maxPl) return false;

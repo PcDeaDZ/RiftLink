@@ -8,6 +8,8 @@
 #include "node/node.h"
 #include <esp_wifi.h>
 #include <esp_now.h>
+#include <nvs.h>
+#include <nvs_flash.h>
 #include <Arduino.h>
 #include <string.h>
 
@@ -15,7 +17,12 @@
 #define RTS_CACHE_MAX 4
 #define RTS_TTL_MS 3000
 #define RTS_DEFER_OVERLAP_MS 500
-#define ESPNOW_CHANNEL 6
+#define ESPNOW_CHANNEL_DEFAULT 6
+#define ESPNOW_ADAPTIVE_CHANNELS 3   // 1, 6, 11 — неперекрывающиеся 2.4 GHz
+#define ESPNOW_ADAPTIVE_INTERVAL_MS 300000  // re-scan раз в 5 мин
+#define NVS_NAMESPACE "riftlink"
+#define NVS_KEY_ESPNOW_CH "espnow_ch"
+#define NVS_KEY_ESPNOW_ADAPTIVE "espnow_adapt"
 
 namespace esp_now_slots {
 
@@ -27,12 +34,91 @@ struct RtsEntry {
   uint32_t receivedAt;
 };
 
+static const uint8_t s_adaptiveChannels[ESPNOW_ADAPTIVE_CHANNELS] = {1, 6, 11};
+
 static RtsEntry s_rtsCache[RTS_CACHE_MAX];
 static uint8_t s_rtsCount = 0;
 static bool s_inited = false;
 static bool s_ok = false;
+static bool s_adaptive = false;
+static uint8_t s_channel = ESPNOW_CHANNEL_DEFAULT;
+static uint32_t s_lastAdaptiveScan = 0;
 
 static const uint8_t s_broadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+static bool loadAdaptive() {
+  nvs_handle h;
+  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
+  int8_t v;
+  esp_err_t err = nvs_get_i8(h, NVS_KEY_ESPNOW_ADAPTIVE, &v);
+  nvs_close(h);
+  return (err == ESP_OK && v != 0);
+}
+
+static bool saveAdaptive(bool on) {
+  nvs_handle h;
+  if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
+  esp_err_t err = nvs_set_i8(h, NVS_KEY_ESPNOW_ADAPTIVE, on ? 1 : 0);
+  nvs_commit(h);
+  nvs_close(h);
+  return (err == ESP_OK);
+}
+
+static uint8_t loadChannel() {
+  nvs_handle h;
+  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return ESPNOW_CHANNEL_DEFAULT;
+  int8_t ch;
+  esp_err_t err = nvs_get_i8(h, NVS_KEY_ESPNOW_CH, &ch);
+  nvs_close(h);
+  if (err == ESP_OK && ch >= 1 && ch <= 13) return (uint8_t)ch;
+  return ESPNOW_CHANNEL_DEFAULT;
+}
+
+static bool saveChannel(uint8_t ch) {
+  nvs_handle h;
+  if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
+  esp_err_t err = nvs_set_i8(h, NVS_KEY_ESPNOW_CH, (int8_t)ch);
+  nvs_commit(h);
+  nvs_close(h);
+  return (err == ESP_OK);
+}
+
+/** Сканировать каналы 1, 6, 11. Вернуть канал с наименьшей загрузкой (min max RSSI). */
+static uint8_t scanAndPickBestChannel() {
+  wifi_scan_config_t cfg = {};
+  cfg.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+  cfg.scan_time = {.active = {.min = 100, .max = 300}};
+  if (esp_wifi_scan_start(&cfg, true) != ESP_OK) return ESPNOW_CHANNEL_DEFAULT;
+
+  uint16_t count = 20;
+  wifi_ap_record_t ap[20];
+  esp_err_t err = esp_wifi_scan_get_ap_records(&count, ap);
+  esp_wifi_scan_stop();
+  if (err != ESP_OK || count == 0) return ESPNOW_CHANNEL_DEFAULT;
+
+  int8_t maxRssi[ESPNOW_ADAPTIVE_CHANNELS];
+  for (int i = 0; i < ESPNOW_ADAPTIVE_CHANNELS; i++) maxRssi[i] = -127;
+
+  for (uint16_t i = 0; i < count; i++) {
+    uint8_t ch = ap[i].primary;
+    for (int j = 0; j < ESPNOW_ADAPTIVE_CHANNELS; j++) {
+      if (ch == s_adaptiveChannels[j]) {
+        if (ap[i].rssi > maxRssi[j]) maxRssi[j] = ap[i].rssi;
+        break;
+      }
+    }
+  }
+
+  int bestIdx = 0;
+  int8_t bestRssi = maxRssi[0];
+  for (int i = 1; i < ESPNOW_ADAPTIVE_CHANNELS; i++) {
+    if (maxRssi[i] < bestRssi) {
+      bestRssi = maxRssi[i];
+      bestIdx = i;
+    }
+  }
+  return s_adaptiveChannels[bestIdx];
+}
 
 static void pruneRtsCache() {
   uint32_t now = millis();
@@ -63,12 +149,57 @@ static void recvCb(const esp_now_recv_info_t* recv_info, const uint8_t* data, in
   addReceivedRts(from, to, plen, txAt);
 }
 
+uint8_t getChannel() {
+  return s_channel;
+}
+
+bool isAdaptive() {
+  return s_adaptive;
+}
+
+bool setAdaptive(bool on) {
+  if (!saveAdaptive(on)) return false;
+  s_adaptive = on;
+  return true;
+}
+
+void tickAdaptive() {
+  if (!s_adaptive || !s_inited) return;
+  uint32_t now = millis();
+  if (now - s_lastAdaptiveScan < ESPNOW_ADAPTIVE_INTERVAL_MS) return;
+  s_lastAdaptiveScan = now;
+
+  uint8_t best = scanAndPickBestChannel();
+  if (best != s_channel && best >= 1 && best <= 13) {
+    setChannel(best);
+    Serial.printf("[RiftLink] ESP-NOW adaptive: channel %u\n", (unsigned)best);
+  }
+}
+
+bool setChannel(uint8_t ch) {
+  if (ch < 1 || ch > 13) return false;
+  if (!saveChannel(ch)) return false;
+  s_channel = ch;
+  if (s_inited && s_ok) {
+    esp_wifi_set_channel(s_channel, WIFI_SECOND_CHAN_NONE);
+    esp_now_del_peer(s_broadcastMac);
+    esp_now_peer_info_t peer = {};
+    memcpy(peer.peer_addr, s_broadcastMac, 6);
+    peer.channel = s_channel;
+    peer.ifidx = WIFI_IF_STA;
+    peer.encrypt = false;
+    if (esp_now_add_peer(&peer) != ESP_OK) s_ok = false;
+  }
+  return true;
+}
+
 void init() {
   if (s_inited) return;
   s_inited = true;
   memset(s_rtsCache, 0, sizeof(s_rtsCache));
   s_rtsCount = 0;
   s_ok = false;
+  s_adaptive = loadAdaptive();
 
   // esp_wifi API вместо WiFi.mode() — единообразие с wifi::init(), меньше обвязки Arduino
   esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
@@ -76,14 +207,23 @@ void init() {
   err = esp_wifi_start();
   if (err != ESP_OK) return;
   delay(200);  // дать WiFi время на запуск
-  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
+  if (s_adaptive) {
+    s_channel = scanAndPickBestChannel();
+    saveChannel(s_channel);
+    s_lastAdaptiveScan = millis();
+    Serial.printf("[RiftLink] ESP-NOW adaptive init: channel %u\n", (unsigned)s_channel);
+  } else {
+    s_channel = loadChannel();
+  }
+  esp_wifi_set_channel(s_channel, WIFI_SECOND_CHAN_NONE);
 
   err = esp_now_init();
   if (err != ESP_OK) return;
 
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, s_broadcastMac, 6);
-  peer.channel = ESPNOW_CHANNEL;
+  peer.channel = s_channel;
   peer.ifidx = WIFI_IF_STA;
   peer.encrypt = false;
   err = esp_now_add_peer(&peer);
