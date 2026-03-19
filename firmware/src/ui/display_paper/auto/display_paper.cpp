@@ -100,9 +100,14 @@ static char s_lastMsgText[64] = {0};
 enum PressType { PRESS_NONE = 0, PRESS_SHORT = 1, PRESS_LONG = 2 };
 
 #if defined(ESP32)
-static SPIClass hspi(HSPI);
 #include <esp_task_wdt.h>
+#include "../../../radio/radio.h"
 static void busyCallback(const void*) { esp_task_wdt_reset(); }
+// Глобальный SPI (FSPI) вместо HSPI — workaround hang в beginTransaction на ESP32-S3
+#define EINK_USE_GLOBAL_SPI 1
+#if !EINK_USE_GLOBAL_SPI
+static SPIClass hspi(HSPI);
+#endif
 #endif
 
 /** Определение панели как Meshtastic (einkDetect.h): RST LOW, read BUSY. LOW→FC1(V1.1), HIGH→E0213A367(V1.2) */
@@ -185,6 +190,10 @@ static uint32_t computeContentHash(int tab) {
 }
 
 static void ensureCooldownBeforeDisplay();
+#if defined(ESP32) && EINK_USE_GLOBAL_SPI
+static void selectDisplaySPI();
+static void releaseDisplaySPI();
+#endif
 
 /** Периодический reinit — только для FC1 (LCMEN2R13EFC1). BN/B73: hibernate() уже даёт _reset() при wake. */
 static void maybeDisplayReinit() {
@@ -223,6 +232,9 @@ static void doDisplayHibernate(bool wasFull) {
 
 static void doDisplay(bool partial) {
   s_panelHibernating = false;  // display() разбудит панель если была в hibernate
+#if defined(ESP32) && EINK_USE_GLOBAL_SPI
+  selectDisplaySPI();
+#endif
   if (!partial) maybeDisplayReinit();
   if (dispBN) {
     if (partial) dispBN->setPartialWindow(0, 0, dispBN->width(), dispBN->height());
@@ -238,6 +250,9 @@ static void doDisplay(bool partial) {
     dispB73->display(partial);
   }
   doDisplayHibernate(!partial);
+#if defined(ESP32) && EINK_USE_GLOBAL_SPI
+  releaseDisplaySPI();
+#endif
 }
 
 /** 30 с неактивности → hibernate (панель не потребляет). Проверяем s_panelHibernating — не вызывать повторно. */
@@ -253,6 +268,22 @@ static void hibernateIfIdle() {
   else if (dispFC1) dispFC1->epd2.hibernate();
   else if (dispB73) dispB73->epd2.hibernate();
 }
+
+#if EINK_USE_GLOBAL_SPI
+// Пины LoRa (должны совпадать с radio.cpp) — для переключения SPI после display
+#define LORA_SCK  9
+#define LORA_MISO 11
+#define LORA_MOSI 10
+#define LORA_NSS  8
+static void selectDisplaySPI() {
+  radio::takeMutex(portMAX_DELAY);
+  SPI.begin(EINK_SCLK, EINK_MOSI, EINK_MOSI, EINK_CS);
+}
+static void releaseDisplaySPI() {
+  SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
+  radio::releaseMutex();
+}
+#endif
 
 /** Аппаратный cooldown — E-Ink требует паузу между display(), иначе зависает. */
 static void ensureCooldownBeforeDisplay() {
@@ -284,9 +315,15 @@ void displayInit() {
   pinMode(EINK_RST, OUTPUT);
 
 #if defined(ESP32)
-  // Meshtastic: hspi.begin(SCLK, -1, MOSI, CS). ESP32-S3: -1→spiAttachMiso, 3-wire: MOSI=MISO
+#if EINK_USE_GLOBAL_SPI
+  SPI.begin(EINK_SCLK, EINK_MOSI, EINK_MOSI, EINK_CS);
+  delay(100);
+#else
+  hspi.end();
+  delay(10);
   hspi.begin(EINK_SCLK, EINK_MOSI, EINK_MOSI, EINK_CS);
-  delay(50);
+  delay(100);
+#endif
 #endif
 
   // RST reset как в GxEPD2
@@ -297,7 +334,7 @@ void displayInit() {
 
 #if defined(USE_EINK_FORCE_BN)
   Serial.println("[RiftLink] E-Ink init (forced BN)...");
-  dispBN = new DispBN(GxEPD2_213_BN(EINK_CS, EINK_DC, EINK_RST, EINK_BUSY, hspi));
+  dispBN = new DispBN(GxEPD2_213_BN(EINK_CS, EINK_DC, EINK_RST, EINK_BUSY, SPI));
   dispBN->epd2.setBusyCallback(busyCallback);
   dispBN->init(0, true, 20, false);
   dispBN->setRotation(3);
@@ -313,7 +350,7 @@ void displayInit() {
 #elif defined(ESP32)
   if (model == EINK_FC1) {
     Serial.println("[RiftLink] E-Ink init (FC1/LCMEN2R13EFC1 V1.1)...");
-    dispFC1 = new DispFC1(GxEPD2_213_FC1(EINK_CS, EINK_DC, EINK_RST, EINK_BUSY, hspi));
+    dispFC1 = new DispFC1(GxEPD2_213_FC1(EINK_CS, EINK_DC, EINK_RST, EINK_BUSY, SPI));
     dispFC1->epd2.setBusyCallback(busyCallback);
     dispFC1->init(0, true, 20, false);
     dispFC1->setRotation(3);
@@ -329,7 +366,7 @@ void displayInit() {
   Serial.println("[RiftLink] E-Ink FC1 init done");
   } else {
     Serial.println("[RiftLink] E-Ink init (E0213A367 V1.2)...");
-    dispB73 = new DispB73(GxEPD2_213_E0213A367(EINK_CS, EINK_DC, EINK_RST, EINK_BUSY, hspi));
+    dispB73 = new DispB73(GxEPD2_213_E0213A367(EINK_CS, EINK_DC, EINK_RST, EINK_BUSY, SPI));
     dispB73->epd2.setBusyCallback(busyCallback);
     Serial.println("[RiftLink] E-Ink epd init...");
     dispB73->init(0, true, 20, false);

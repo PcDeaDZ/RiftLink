@@ -69,7 +69,8 @@ void GxEPD2_EPD::init(uint32_t serial_diag_bitrate, bool initial, uint16_t reset
   {
     pinMode(_busy, INPUT);  // FC1: LOW=busy; E0213A367: HIGH=busy — pull зависит от панели
   }
-  _spi.begin();
+  // RiftLink: не вызываем _spi.begin() — display_paper уже делает hspi.begin(pins) до создания дисплея
+  // Повторный begin() мог вызывать SPI_PARAM_LOCK hang
 }
 
 void GxEPD2_EPD::_reset()
