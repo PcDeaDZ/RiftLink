@@ -38,6 +38,7 @@ static SemaphoreHandle_t s_mutex = nullptr;
 // Троттлинг: не спамить KEY_EXCHANGE одному пиру — иначе забивают канал, MSG не проходят
 #define KEY_EXCHANGE_THROTTLE_MS 18000   // мин. интервал до повторной отправки тому же пиру
 #define KEY_RESPONSE_THROTTLE_MS 60000  // ответ когда ключ уже был — макс. раз в 60с (пир может повторить)
+#define KEY_DEBOUNCE_MS 1500             // мин. пауза между отправками одному пиру (HELLO+KEY_EXCHANGE подряд → 1 пакет)
 struct ThrottleEntry { uint8_t peerId[protocol::NODE_ID_LEN]; uint32_t lastSend; };
 static ThrottleEntry s_throttle[4];
 static uint8_t s_throttleIdx = 0;
@@ -146,11 +147,26 @@ void sendKeyExchange(const uint8_t* peerId, bool useSf12, bool forceSend, bool h
   if (!s_inited || !peerId || node::isForMe(peerId) || node::isBroadcast(peerId) || node::isInvalidNodeId(peerId)) return;
   if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
 
+  // Ключ уже есть и это не ответ на их KEY_EXCHANGE — не захламлять радио
+  if (findPeer(peerId) >= 0 && !forceSend) {
+    xSemaphoreGive(s_mutex);
+    return;
+  }
+
+  // Debounce: HELLO и KEY_EXCHANGE приходят подряд — не слать два пакета, один уже в эфире
+  uint32_t now = millis();
+  for (int i = 0; i < 4; i++) {
+    if (memcmp(s_throttle[i].peerId, peerId, protocol::NODE_ID_LEN) == 0 &&
+        now - s_throttle[i].lastSend < KEY_DEBOUNCE_MS) {
+      xSemaphoreGive(s_mutex);
+      return;
+    }
+  }
+
   if (forceSend && !hadKeyBefore) {
-    // Первый ответ — без троттла, пир ждёт наш ключ
+    // Первый ответ — без длинного троттла, пир ждёт наш ключ
   } else {
     uint32_t throttleMs = hadKeyBefore ? KEY_RESPONSE_THROTTLE_MS : KEY_EXCHANGE_THROTTLE_MS;
-    uint32_t now = millis();
     for (int i = 0; i < 4; i++) {
       if (memcmp(s_throttle[i].peerId, peerId, protocol::NODE_ID_LEN) == 0) {
         if (now - s_throttle[i].lastSend < throttleMs) {

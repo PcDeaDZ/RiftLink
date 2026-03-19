@@ -126,7 +126,7 @@ class CharCallbacks : public NimBLECharacteristicCallbacks {
         uint8_t pubKey[32];
         if (mbedtls_base64_decode(pubKey, 32, &decLen, (const unsigned char*)pubKeyB64, strlen(pubKeyB64)) == 0 && decLen == 32) {
           x25519_keys::onKeyExchange(nodeId, pubKey);
-          x25519_keys::sendKeyExchange(nodeId);
+          x25519_keys::sendKeyExchange(nodeId, false, true);  // forceSend — отправить наш ключ пиру для завершения обмена
           s_pendingInfo = true;
         }
       }
