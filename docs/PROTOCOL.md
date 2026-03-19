@@ -1,34 +1,59 @@
-# RiftLink — спецификация протокола
+<p align="center">
+  <img src="https://img.shields.io/badge/RiftLink-Protocol-42A5F5?style=for-the-badge&logo=radio&logoColor=white" alt="RiftLink" />
+</p>
 
-Версия: 0.2 (прошивка 1.2.5)
+# 📡 RiftLink — спецификация протокола
+
+> Формат пакетов, opcodes, шифрование, BLE, Serial
+
+<p align="center">
+  <img src="https://img.shields.io/badge/spec_version-0.2-888?style=flat-square" alt="Spec" />
+  <img src="https://img.shields.io/badge/firmware-1.3.5-E7352C?style=flat-square&logo=espressif" alt="Firmware" />
+  <img src="https://img.shields.io/badge/LoRa-SX1262-00B0FF?style=flat-square&logo=lorawan" alt="LoRa" />
+  <img src="https://img.shields.io/badge/X25519-ChaCha20-4CAF50?style=flat-square" alt="Crypto" />
+</p>
 
 ---
 
-## 1. LoRa — формат пакета
+## 1. 📦 LoRa — формат пакета (v2)
 
-### 1.1 Заголовок (20 байт)
+**Формат v2** (version 0x20, с прошивки 1.2.6): Sync byte 0x5A, opcode первым, компактный broadcast (экономия 8 байт).
 
-| Байт | Поле | Описание |
-|------|------|----------|
-| 0 | version_flags | Версия (4 бита) + флаги: encrypted=0x08, compressed=0x04, ack_req=0x02 |
-| 1–8 | from | Node ID отправителя (8 байт) |
-| 9–16 | to | Node ID получателя (8 байт), 0xFF…FF = broadcast |
-| 17 | ttl | Time-to-live для роутинга (31 макс.) |
-| 18 | opcode | Код операции |
-| 19 | channel | Логический канал (0 = публичный) |
+### 1.1 Broadcast (HELLO, PING, ROUTE_REQ и т.д.)
 
-### 1.2 Payload
+```
+┌──────┬────────┬────────┬────────┬──────┬────────┬────────┐
+│ Sync │ Ver    │ Opcode │ From   │ TTL  │ Channel│Payload │
+│ 1 B  │ 1 B    │ 1 B    │ 8 B    │ 1 B  │ 1 B    │ N B    │
+└──────┴────────┴────────┴────────┴──────┴────────┴────────┘
+```
+Заголовок: **13 байт** (Sync 0x5A + Ver + Opcode + From + TTL + Channel).
+
+### 1.2 Unicast (MSG, ACK, KEY_EXCHANGE и т.д.)
+
+```
+┌──────┬────────┬────────┬────────┬────────┬──────┬────────┬────────┐
+│ Sync │ Ver    │ Opcode │ From   │ To     │ TTL  │ Channel│Payload │
+│ 1 B  │ 1 B    │ 1 B    │ 8 B    │ 8 B    │ 1 B  │ 1 B    │ N B    │
+└──────┴────────┴────────┴────────┴────────┴──────┴────────┴────────┘
+```
+Заголовок: **21 байт**.
+
+**Ver:** версия (4 bit) + флаги (encrypted, compressed, ack_req, broadcast).  
+**From/To:** Node ID (8 байт). Broadcast = 0xFF…FF.
+
+### 1.3 Payload
 
 Следует после заголовка. Для MSG — зашифрованный текст (ChaCha20-Poly1305). Для broadcast — без шифрования (опционально).
 
-### 1.3 Node ID и никнейм
+### 1.4 Node ID и никнейм
 
 - **Node ID:** 8 байт, генерируется при первом запуске, хранится в NVS. Broadcast = все 0xFF.
 - **Никнейм:** до 16 символов, опционально, хранится в NVS. Отображается в приложении вместо/вместе с ID.
 
 ---
 
-## 2. Opcodes
+## 2. 📋 Opcodes
 
 | Код | Имя | Описание |
 |-----|-----|----------|
@@ -44,12 +69,13 @@
 | 0x0A | MSG_FRAG | Фрагмент длинного сообщения |
 | 0x0B | VOICE_MSG | Голосовое сообщение (Opus, фрагменты как MSG_FRAG) |
 | 0x0C | READ | Подтверждение прочтения (payload: msg_id 4B) |
+| 0x0D | NACK | Запрос повтора (payload: pktId 2B, v2.1) |
 | 0xFE | PONG | Ответ на PING |
 | 0xFF | PING | Проверка связи (получатель отвечает PONG) |
 
 ---
 
-## 3. Шифрование
+## 3. 🔐 Шифрование
 
 - **Алгоритм:** ChaCha20-Poly1305 (libsodium)
 - **Unicast (E2E):** X25519 per-peer. KEY_EXCHANGE (32 байта pub_key) при HELLO. Shared secret = crypto_box_beforenm.
@@ -61,7 +87,7 @@
 
 ---
 
-## 4. Сжатие (LZ4)
+## 4. 🗜️ Сжатие (LZ4)
 
 - Применяется к тексту **≥50 байт** до шифрования
 - Флаг `compressed` в заголовке
@@ -69,7 +95,7 @@
 
 ---
 
-## 5. Фрагментация (MSG_FRAG)
+## 5. 📦 Фрагментация (MSG_FRAG)
 
 Для сообщений >200 байт после шифрования:
 
@@ -84,17 +110,17 @@
 
 ---
 
-## 6. ACK, READ и retransmit
+## 6. ✓ ACK, READ и retransmit
 
 - Unicast MSG с `ack_req`: первые 4 байта plaintext = msg_id
 - Получатель отправляет ACK с этим msg_id (✓✓ доставлено)
 - Получатель отправляет READ (OP_READ, payload: msg_id) при просмотре сообщения (✓✓✓ прочитано)
-- Отправитель повторяет до 3 раз при отсутствии ACK (таймаут 6 с)
-- Очередь: до 8 pending сообщений
+- Отправитель повторяет до 4 раз при отсутствии ACK (таймаут 6 с)
+- Очередь: до 8 pending unicast, до 4 broadcast; после неудачи → offline_queue (до 16 в NVS)
 
 ---
 
-## 7. BLE — JSON протокол
+## 7. 📱 BLE — JSON протокол
 
 **Сервис:** `6e400001-b5a3-f393-e0a9-e50e24dcca9e`  
 **TX (write):** `6e400002-...`  
@@ -114,7 +140,7 @@
 
 | evt | Поля | Описание |
 |-----|------|----------|
-| info | id, nickname?, region, freq, power, channel?, neighbors? | При подключении |
+| info | id, nickname?, region, freq, power, channel?, neighbors?, version? | При подключении |
 | neighbors | neighbors | Обновление списка соседей (при новом HELLO) |
 | routes | routes | Маршруты: [{dest, nextHop, hops, rssi}] для mesh-визуализации |
 | msg | from, text | Входящее сообщение |
@@ -125,7 +151,7 @@
 
 ---
 
-## 7.1 ROUTE_REQ / ROUTE_REPLY (проактивный маршрутинг)
+## 7.1 🛣️ ROUTE_REQ / ROUTE_REPLY (проактивный маршрутинг)
 
 AODV-подобный поиск маршрута:
 
@@ -136,7 +162,7 @@ AODV-подобный поиск маршрута:
 
 ---
 
-## 7.2 VOICE_MSG (голосовые сообщения)
+## 7.2 🎤 VOICE_MSG (голосовые сообщения)
 
 - **Формат:** как MSG_FRAG (msgId, part, total, data). Payload — зашифрованный Opus.
 - **Кодек:** Opus 8 kbps на телефоне.
@@ -145,7 +171,7 @@ AODV-подобный поиск маршрута:
 
 ---
 
-## 8. Serial команды
+## 8. ⌨️ Serial команды
 
 | Команда | Описание |
 |---------|----------|
@@ -157,7 +183,7 @@ AODV-подобный поиск маршрута:
 
 ---
 
-## 9. Регионы
+## 9. 🌍 Регионы
 
 | Код | Частота | Мощность | Duty cycle |
 |-----|---------|----------|------------|
@@ -171,9 +197,10 @@ AODV-подобный поиск маршрута:
 
 ---
 
-## 10. Радио
+## 10. 📻 Радио
 
 - **Модуль:** SX1262 (RadioLib)
 - **Параметры:** SF7, BW 125 kHz, CR 5
-- **Sync word:** 0x12 (приватная сеть)
+- **LoRa Sync word:** 0x12 (приватная сеть)
+- **Sync byte пакета:** 0x5A (маркер начала, поиск при сдвиге при RF-коррупции)
 - **CRC:** 2 байта

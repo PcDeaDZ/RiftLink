@@ -1,24 +1,33 @@
-# RiftLink (RL) — mesh-протокол для Heltec V3/V4
+<p align="center">
+  <img src="https://img.shields.io/badge/RiftLink-Protocol_Spec-42A5F5?style=for-the-badge&logo=radio&logoColor=white" alt="RiftLink" />
+</p>
 
-## Техническое задание и план разработки
+# 📋 RiftLink (RL) — mesh-протокол для Heltec V3/V4
 
-**Версия документа:** 0.2  
-**Дата:** 2026  
-**Платформа:** Heltec WiFi LoRa 32 V3/V4 (ESP32-S3, SX1262, OLED/BLE), Heltec V3 Paper (E-Ink 2.13")
+> **Техническое задание и план разработки**
 
-### Текущее состояние (прошивка 1.2.5)
+<p align="center">
+  <img src="https://img.shields.io/badge/doc_version-0.2-888?style=flat-square" alt="Doc" />
+  <img src="https://img.shields.io/badge/firmware-1.3.5-E7352C?style=flat-square&logo=espressif" alt="Firmware" />
+  <img src="https://img.shields.io/badge/platform-Heltec_V3%2FV4%2FPaper-00B0FF?style=flat-square&logo=lorawan" alt="Platform" />
+  <img src="https://img.shields.io/badge/ESP32--S3-SX1262-4CAF50?style=flat-square" alt="Hardware" />
+</p>
+
+---
+
+### 📌 Текущее состояние (прошивка 1.3.5)
 
 Основной функционал реализован: MSG, X25519 E2E, GROUP_MSG, офлайн-очередь, ROUTE_REQ/REPLY, VOICE_MSG, ACK/READ, LZ4, MSG_FRAG, LOCATION, TELEMETRY, OTA, регионы, invite/acceptInvite (QR). Валидация пакетов при RF-помехах. Поддержка V3 (OLED), V4 (OLED), V3 Paper (E-Ink).
 
 ---
 
-## 1. Концепция
+## 1. 💡 Концепция
 
 Собственная mesh-сеть с нуля: свой протокол, своё приложение, без привязки к Meshtastic/Meshcore. Фокус на простоте, безопасности и расширяемости.
 
 ---
 
-## 2. Цели проекта
+## 2. 🎯 Цели проекта
 
 | Цель | Описание |
 |------|----------|
@@ -30,7 +39,7 @@
 
 ---
 
-## 2.1 Чем мы лучше (конкурентные преимущества)
+## 2.1 ⭐ Чем мы лучше (конкурентные преимущества)
 
 Идеи, которых нет или слабо реализованы в Meshtastic/Meshcore:
 
@@ -92,7 +101,7 @@
 
 ---
 
-## 3. Что умеем (функциональные требования)
+## 3. ✅ Что умеем (функциональные требования)
 
 ### 3.1 Базовый функционал
 
@@ -135,7 +144,7 @@
 
 ---
 
-## 4. Архитектура
+## 4. 🏗️ Архитектура
 
 ### 4.1 Стек протокола
 
@@ -215,7 +224,10 @@ Opcodes: 0x01 MSG, 0x02 ACK, 0x03 HELLO, 0x04 ROUTE_REQ, 0x05 ROUTE_REPLY, 0x06 
 | 0x09 | GROUP_MSG | Групповое сообщение (шифр.) |
 | 0x0A | MSG_FRAG | Фрагмент длинного сообщения (шифр.) |
 | 0x0B | VOICE_MSG | Голосовое сообщение (шифр.) |
-| 0x0C–0xFE | Reserved | Для будущего |
+| 0x0C | READ | Подтверждение прочтения (payload: msg_id 4B) |
+| 0x0D | NACK | Запрос повтора (payload: pktId 2B, v2.1) |
+| 0x0E–0xFD | Reserved | Для будущего |
+| 0xFE | PONG | Ответ на PING |
 | 0xFF | PING | Служебный ping |
 
 ---
@@ -295,7 +307,7 @@ Opcodes: 0x01 MSG, 0x02 ACK, 0x03 HELLO, 0x04 ROUTE_REQ, 0x05 ROUTE_REPLY, 0x06 
 
 ---
 
-## 5. Железо (Heltec V4)
+## 5. 🔧 Железо (Heltec V4)
 
 | Компонент | Спецификация |
 |-----------|--------------|
@@ -308,7 +320,7 @@ Opcodes: 0x01 MSG, 0x02 ACK, 0x03 HELLO, 0x04 ROUTE_REQ, 0x05 ROUTE_REPLY, 0x06 
 
 ---
 
-## 6. Этапы разработки
+## 6. 📅 Этапы разработки
 
 ### Фаза 0: Подготовка (1–2 недели)
 
@@ -360,7 +372,7 @@ Opcodes: 0x01 MSG, 0x02 ACK, 0x03 HELLO, 0x04 ROUTE_REQ, 0x05 ROUTE_REPLY, 0x06 
 
 ---
 
-## 6.1 Планы на будущее
+## 6.1 🔮 Планы на будущее
 
 | Приоритет | Фича | Описание |
 |-----------|------|----------|
@@ -377,13 +389,13 @@ Opcodes: 0x01 MSG, 0x02 ACK, 0x03 HELLO, 0x04 ROUTE_REQ, 0x05 ROUTE_REPLY, 0x06 
 
 ---
 
-## 7. Стек технологий
+## 7. 🛠️ Стек технологий
 
 | Слой | Технология |
 |------|------------|
 | Прошивка | C/C++, ESP-IDF или Arduino |
 | LoRa | RadioLib или прямая работа с SX1262 |
-| Крипто | mbedTLS (X25519, ChaCha20) или Arduino Crypto |
+| Крипто | libsodium (X25519, ChaCha20-Poly1305) |
 | Сжатие | LZ4 (lz4lib) или miniz |
 | BLE | NimBLE (ESP32) |
 | **Приложение** | **Flutter** — Android, iOS, Web (PWA), Desktop |
@@ -404,7 +416,7 @@ Opcodes: 0x01 MSG, 0x02 ACK, 0x03 HELLO, 0x04 ROUTE_REQ, 0x05 ROUTE_REPLY, 0x06 
 
 ---
 
-## 8. Риски и ограничения
+## 8. ⚠️ Риски и ограничения
 
 | Риск | Митигация |
 |------|-----------|
@@ -415,7 +427,7 @@ Opcodes: 0x01 MSG, 0x02 ACK, 0x03 HELLO, 0x04 ROUTE_REQ, 0x05 ROUTE_REPLY, 0x06 
 
 ---
 
-## 8.1 Соответствие законодательству (регуляторика)
+## 8.1 ⚖️ Соответствие законодательству (регуляторика)
 
 > **Принцип:** При первом запуске пользователь выбирает регион. Прошивка автоматически применяет допустимые частоты, мощность и duty cycle. Нарушение — риск штрафов и конфискации оборудования.
 
@@ -459,7 +471,7 @@ Opcodes: 0x01 MSG, 0x02 ACK, 0x03 HELLO, 0x04 ROUTE_REQ, 0x05 ROUTE_REPLY, 0x06 
 
 ---
 
-## 9. Итоговый MVP (минимум для демо)
+## 9. 🚀 Итоговый MVP (минимум для демо)
 
 1. Два устройства обмениваются текстовыми сообщениями по LoRa
 2. **Все сообщения шифруются** (E2E, ChaCha20 или общий ключ для MVP)
@@ -468,7 +480,7 @@ Opcodes: 0x01 MSG, 0x02 ACK, 0x03 HELLO, 0x04 ROUTE_REQ, 0x05 ROUTE_REPLY, 0x06 
 
 ---
 
-## 10. Структура репозитория
+## 10. 📁 Структура репозитория
 
 ```
 dual_boot/                  # Корень проекта (RiftLink)
@@ -500,7 +512,7 @@ dual_boot/                  # Корень проекта (RiftLink)
 
 ---
 
-## 11. Идеи для расширения (фаза 3+)
+## 11. 💡 Идеи для расширения (фаза 3+)
 
 ### Шлюзы и интеграция
 

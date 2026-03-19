@@ -1,10 +1,21 @@
-# RiftLink — BLE и Serial API
+<p align="center">
+  <img src="https://img.shields.io/badge/RiftLink-API_Reference-42A5F5?style=for-the-badge&logo=radio&logoColor=white" alt="RiftLink" />
+</p>
 
-Справочник для разработчиков приложений и интеграций.
+# 📘 RiftLink — BLE и Serial API
+
+> Справочник для разработчиков приложений и интеграций
+
+<p align="center">
+  <img src="https://img.shields.io/badge/BLE-GATT-0082FC?style=flat-square&logo=bluetooth" alt="BLE" />
+  <img src="https://img.shields.io/badge/Serial-115200_8N1-888?style=flat-square" alt="Serial" />
+  <img src="https://img.shields.io/badge/JSON-UTF--8-4CAF50?style=flat-square" alt="JSON" />
+  <img src="https://img.shields.io/badge/Flutter-Dart-02569B?style=flat-square&logo=flutter" alt="Flutter" />
+</p>
 
 ---
 
-## 1. BLE GATT
+## 1. 📱 BLE GATT
 
 | Параметр | Значение |
 |----------|----------|
@@ -17,7 +28,7 @@
 
 ---
 
-## 2. Команды (приложение → устройство)
+## 2. 📤 Команды (приложение → устройство)
 
 Все команды — JSON, UTF-8, запись в TX-характеристику.
 
@@ -136,17 +147,17 @@
 
 ---
 
-## 3. События (устройство → приложение)
+## 3. 📥 События (устройство → приложение)
 
 Подписка на RX (notify). Все события — JSON.
 
 ### 3.1 info — при подключении
 
 ```json
-{"evt":"info","id":"A1B2C3D4E5F60708","nickname":"Alice","region":"EU","freq":868.1,"power":14,"channel":0,"version":"0.5.0"}
+{"evt":"info","id":"A1B2C3D4E5F60708","nickname":"Alice","region":"EU","freq":868.1,"power":14,"channel":0,"version":"1.3.5"}
 ```
 
-`nickname` — опционально. `channel` — только для EU/UK (0–2). `neighbors` — массив Node ID (hex) видимых соседей.
+`nickname` — опционально. `channel` — только для EU/UK (0–2). `neighbors` — массив Node ID (hex) видимых соседей. `version` — версия прошивки (например 1.3.5).
 
 ### 3.2 msg — входящее сообщение
 
@@ -232,7 +243,7 @@
 
 ---
 
-## 4. Serial API (115200 8N1)
+## 4. ⌨️ Serial API (115200 8N1)
 
 Команды вводятся в Serial Monitor, завершаются `\n`.
 
@@ -286,7 +297,7 @@ channel 2
 
 ---
 
-## 5. Пример (Flutter/Dart)
+## 5. 💻 Пример (Flutter/Dart)
 
 ```dart
 // Отправка broadcast
@@ -313,7 +324,7 @@ rxChar.lastValueStream.listen((value) {
 
 ---
 
-## 6. OTA Upload (PlatformIO)
+## 6. 🔄 OTA Upload (PlatformIO)
 
 После `{"cmd":"ota"}` и подключения к WiFi `RiftLink-OTA`:
 

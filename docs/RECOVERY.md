@@ -1,13 +1,27 @@
-# Восстановление Heltec WiFi LoRa 32 (V3/V4)
+<p align="center">
+  <img src="https://img.shields.io/badge/RiftLink-Recovery_Guide-42A5F5?style=for-the-badge&logo=radio&logoColor=white" alt="RiftLink" />
+</p>
 
-## Устройство не включается после прошивки
+# 🔧 Восстановление Heltec WiFi LoRa 32 (V3/V4)
 
-### 1. Определите плату
+> Инструкция при «не включается» после прошивки
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Heltec-V3%20%7C%20V4-00B0FF?style=flat-square&logo=lorawan" alt="Heltec" />
+  <img src="https://img.shields.io/badge/ESP32--S3-Bootloader-E7352C?style=flat-square&logo=espressif" alt="ESP32" />
+  <img src="https://img.shields.io/badge/esptool-Erase%20%26%20Flash-00979D?style=flat-square&logo=platformio" alt="esptool" />
+</p>
+
+---
+
+## ⚠️ Устройство не включается после прошивки
+
+### 1. 🔍 Определите плату
 
 - **V3**: ESP32-S3FN8, 8MB встроенная flash, CP2102 (USB-UART)
 - **V4**: ESP32-S3R2, 16MB внешняя flash, native USB (без CP2102)
 
-### 2. Режим загрузчика (bootloader)
+### 2. 📥 Режим загрузчика (bootloader)
 
 **V4 (native USB):** для прошивки нужно войти в bootloader:
 1. Отключите питание (USB и батарея)
@@ -18,7 +32,7 @@
 
 **V3:** обычно входит в bootloader автоматически при подключении USB.
 
-### 3. Полная очистка и перепрошивка
+### 3. 🧹 Полная очистка и перепрошивка
 
 ```powershell
 # Полная очистка flash + прошивка V3
@@ -31,7 +45,7 @@
 .\build_and_flash.ps1 -V4 -Flash -Erase
 ```
 
-### 4. Ручная очистка через esptool
+### 4. ⌨️ Ручная очистка через esptool
 
 ```powershell
 cd firmware
@@ -44,7 +58,7 @@ pio run -e heltec_v3 -t erase
 pio run -e heltec_v4_safe -t erase
 ```
 
-### 5. Если прошили не ту прошивку
+### 5. 🔄 Если прошили не ту прошивку
 
 | Плата | Прошили | Решение |
 |-------|---------|---------|
@@ -52,7 +66,7 @@ pio run -e heltec_v4_safe -t erase
 | V4 | V3 | Работает (V4 совместим) |
 | V4 | V4, не грузится | `-V4Safe -Flash -Erase` — безопасный конфиг |
 
-### 6. V4: USB не определяется
+### 6. 🔌 V4: USB не определяется
 
 - Используйте USB-C кабель с данными (не только зарядка)
 - Попробуйте другой порт USB

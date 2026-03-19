@@ -133,12 +133,17 @@ flutter run -d ios       # iOS (macOS)
 
 ## 📚 Документация
 
+<p align="center">
+  <img src="https://img.shields.io/badge/docs-4_docs-888?style=flat-square" alt="Docs" />
+  <img src="https://img.shields.io/badge/spec-Protocol_%7C_API-42A5F5?style=flat-square" alt="Spec" />
+</p>
+
 | Документ | Описание |
 |----------|----------|
-| [CUSTOM_PROTOCOL_PLAN.md](docs/CUSTOM_PROTOCOL_PLAN.md) | Архитектура, спецификация, roadmap |
-| [PROTOCOL.md](docs/PROTOCOL.md) | Формат пакетов, BLE, Serial |
-| [API.md](docs/API.md) | BLE/Serial API с примерами |
-| [RECOVERY.md](docs/RECOVERY.md) | Восстановление при «не включается» |
+| [📋 CUSTOM_PROTOCOL_PLAN.md](docs/CUSTOM_PROTOCOL_PLAN.md) | Архитектура, спецификация, roadmap |
+| [📡 PROTOCOL.md](docs/PROTOCOL.md) | Формат пакетов, opcodes, BLE, Serial |
+| [📘 API.md](docs/API.md) | BLE/Serial API с примерами |
+| [🔧 RECOVERY.md](docs/RECOVERY.md) | Восстановление при «не включается» |
 
 ---
 
