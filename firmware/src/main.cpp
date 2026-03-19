@@ -106,6 +106,43 @@ static void bcDedupAdd(const uint8_t* from, uint32_t msgId) {
 #define UC_DEDUP_SIZE 32
 struct UcDedupEntry { uint8_t from[protocol::NODE_ID_LEN]; uint32_t msgId; };
 static UcDedupEntry s_ucDedup[UC_DEDUP_SIZE];
+
+// Relay dedup + rate limit (mesh storm protection)
+#define RELAY_DEDUP_SIZE 24
+#define RELAY_RATE_MAX 3
+#define RELAY_RATE_WINDOW_MS 1000
+struct RelayDedupEntry { uint8_t from[protocol::NODE_ID_LEN]; uint32_t payloadHash; };
+static RelayDedupEntry s_relayDedup[RELAY_DEDUP_SIZE];
+static uint8_t s_relayDedupIdx = 0;
+static uint32_t s_relayRateWindowStart = 0;
+static uint8_t s_relayRateCount = 0;
+
+static uint32_t relayPayloadHash(const uint8_t* p, size_t n) {
+  uint32_t h = 5381;
+  for (size_t i = 0; i < n && i < 128; i++) h = ((h << 5) + h) + p[i];
+  return h;
+}
+static bool relayDedupSeen(const uint8_t* from, uint32_t hash) {
+  for (int i = 0; i < RELAY_DEDUP_SIZE; i++) {
+    if (memcmp(s_relayDedup[i].from, from, protocol::NODE_ID_LEN) == 0 && s_relayDedup[i].payloadHash == hash)
+      return true;
+  }
+  return false;
+}
+static void relayDedupAdd(const uint8_t* from, uint32_t hash) {
+  memcpy(s_relayDedup[s_relayDedupIdx].from, from, protocol::NODE_ID_LEN);
+  s_relayDedup[s_relayDedupIdx].payloadHash = hash;
+  s_relayDedupIdx = (s_relayDedupIdx + 1) % RELAY_DEDUP_SIZE;
+}
+static bool relayRateLimitExceeded() {
+  uint32_t now = millis();
+  if (now - s_relayRateWindowStart >= RELAY_RATE_WINDOW_MS) {
+    s_relayRateWindowStart = now;
+    s_relayRateCount = 0;
+  }
+  return s_relayRateCount >= RELAY_RATE_MAX;
+}
+static void relayRateRecord() { s_relayRateCount++; }
 static uint8_t s_ucDedupIdx = 0;
 
 static bool ucDedupSeen(const uint8_t* from, uint32_t msgId) {
@@ -410,7 +447,15 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       (!node::isForMe(hdr.to) && !node::isBroadcast(hdr.to)) ||
       ((hdr.opcode == protocol::OP_GROUP_MSG || hdr.opcode == protocol::OP_VOICE_MSG) &&
        neighbors::getCount() >= 2));
+  uint32_t relayPayloadHashVal = 0;
   if (needRelay) {
+    relayPayloadHashVal = relayPayloadHash(payload ? payload : (const uint8_t*)"", payloadLen);
+    if (relayDedupSeen(hdr.from, relayPayloadHashVal)) needRelay = false;
+    if (needRelay && relayRateLimitExceeded()) needRelay = false;
+  }
+  if (needRelay) {
+    relayDedupAdd(hdr.from, relayPayloadHashVal);
+    relayRateRecord();
     memcpy(fwdBuf, buf, len);
     size_t ttlOff;
     if (buf[0] == protocol::SYNC_BYTE && ((buf[1] & 0xF0) == 0x20 || (buf[1] & 0xF0) == 0x30)) {
