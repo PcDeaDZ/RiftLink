@@ -600,68 +600,77 @@ class _AboutDialogState extends State<_AboutDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return Dialog(
-      backgroundColor: context.palette.card,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-      insetPadding: const EdgeInsets.symmetric(horizontal: 24),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 400),
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
+    final p = context.palette;
+    return RiftDialogFrame(
+      maxWidth: 360,
+      padding: const EdgeInsets.fromLTRB(22, 20, 18, 14),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'RiftLink',
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: p.onSurface),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 12,
+              runSpacing: 4,
               children: [
-              Text('RiftLink', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: context.palette.onSurface)),
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text('${widget.l10n.tr('about_version')}: ', style: TextStyle(fontSize: 14, color: context.palette.onSurfaceVariant)),
-                  Text(_version, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: context.palette.primary)),
-                  const SizedBox(width: 16),
-                  Text('${widget.l10n.tr('about_build')}: ', style: TextStyle(fontSize: 14, color: context.palette.onSurfaceVariant)),
-                  Text(_buildNumber, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: context.palette.primary)),
-                ],
-              ),
-              const SizedBox(height: 20),
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: context.palette.surfaceVariant.withOpacity(0.5),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: context.palette.divider, width: 0.5),
+                Text.rich(
+                  TextSpan(
+                    style: TextStyle(fontSize: 13, color: p.onSurfaceVariant),
+                    children: [
+                      TextSpan(text: '${widget.l10n.tr('about_version')}: '),
+                      TextSpan(text: _version, style: TextStyle(fontWeight: FontWeight.w700, color: p.primary)),
+                    ],
+                  ),
                 ),
-                child: Text(
-                  widget.l10n.tr('about_desc'),
-                  style: TextStyle(fontSize: 14, height: 1.4, color: context.palette.onSurface),
-                  textAlign: TextAlign.center,
+                Text.rich(
+                  TextSpan(
+                    style: TextStyle(fontSize: 13, color: p.onSurfaceVariant),
+                    children: [
+                      TextSpan(text: '${widget.l10n.tr('about_build')}: '),
+                      TextSpan(text: _buildNumber, style: TextStyle(fontWeight: FontWeight.w700, color: p.primary)),
+                    ],
+                  ),
                 ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: p.surfaceVariant.withOpacity(0.45),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: p.divider.withOpacity(0.5)),
               ),
-              const SizedBox(height: 16),
-              Text(
-                widget.l10n.tr('about_legal'),
-                style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: context.palette.onSurfaceVariant),
+              child: Text(
+                widget.l10n.tr('about_desc'),
+                style: TextStyle(fontSize: 13, height: 1.35, color: p.onSurface),
                 textAlign: TextAlign.center,
               ),
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: () => Navigator.pop(context),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: context.palette.primary,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                  child: Text(widget.l10n.tr('ok')),
-                ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              widget.l10n.tr('about_legal'),
+              style: TextStyle(fontSize: 10, fontStyle: FontStyle.italic, color: p.onSurfaceVariant, height: 1.3),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 14),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                style: TextButton.styleFrom(foregroundColor: p.primary),
+                onPressed: () => Navigator.pop(context),
+                child: Text(widget.l10n.tr('ok')),
               ),
-            ],
-          ),
+            ),
+          ],
         ),
-      ),
       ),
     );
   }

@@ -16,10 +16,11 @@ class RiftLinkBle {
   BluetoothCharacteristic? _rxChar;
 
   /// Один приёмник notify + broadcast: несколько `events.listen` (чат, настройки, группы…)
-  /// получают одни и те же события. Раньше каждый `events` создавал новый `await for` на
-  /// `lastValueStream` — у потока одна подписка, второй экран не видел `info`.
+  /// получают одни и те же события. Длинные JSON склеиваются из нескольких пакетов ([onValueReceived]).
   StreamController<RiftLinkEvent>? _eventController;
   StreamSubscription<List<int>>? _rxSub;
+  /// Склейка фрагментов notify (длинный `info` / MTU): каждый chunk может быть не целым JSON.
+  final List<int> _rxAccum = [];
 
   /// Последний успешно распарсенный `evt:info` (ответ на connect/getInfo может прийти
   /// до подписки экрана на [events] — без кэша UI и «недавние» теряют данные).
@@ -148,25 +149,51 @@ class RiftLinkBle {
     if (_rxChar == null) return;
     if (_eventController != null) return;
     _eventController = StreamController<RiftLinkEvent>.broadcast();
+    _rxAccum.clear();
     await _rxChar!.setNotifyValue(true);
-    _rxSub = _rxChar!.lastValueStream.listen((value) {
-      if (value.isEmpty) return;
-      try {
-        final json = jsonDecode(utf8.decode(value)) as Map<String, dynamic>;
-        final evt = _jsonToEvent(json);
-        if (evt is RiftLinkInfoEvent) {
-          _lastInfo = evt;
-        }
-        if (evt != null && !(_eventController?.isClosed ?? true)) {
-          _eventController!.add(evt);
-        }
-      } catch (_) {}
-    });
+    _rxSub = _rxChar!.onValueReceived.listen(_feedRxChunk);
+  }
+
+  void _feedRxChunk(List<int> chunk) {
+    if (chunk.isEmpty) return;
+    _rxAccum.addAll(chunk);
+    const maxAccum = 16384;
+    if (_rxAccum.length > maxAccum) {
+      _rxAccum.clear();
+      return;
+    }
+    final String s;
+    try {
+      s = utf8.decode(_rxAccum, allowMalformed: false);
+    } catch (_) {
+      return;
+    }
+    try {
+      final decoded = jsonDecode(s);
+      if (decoded is! Map) {
+        _rxAccum.clear();
+        return;
+      }
+      final json = Map<String, dynamic>.from(decoded as Map);
+      _rxAccum.clear();
+      final evt = _jsonToEvent(json);
+      if (evt is RiftLinkInfoEvent) {
+        _lastInfo = evt;
+      }
+      if (evt != null && !(_eventController?.isClosed ?? true)) {
+        _eventController!.add(evt);
+      }
+    } on FormatException {
+      // Неполный JSON — ждём следующий фрагмент.
+    } catch (_) {
+      _rxAccum.clear();
+    }
   }
 
   void _stopRxDispatcher() {
     _rxSub?.cancel();
     _rxSub = null;
+    _rxAccum.clear();
     if (_eventController != null && !_eventController!.isClosed) {
       _eventController!.close();
     }
@@ -293,6 +320,13 @@ class RiftLinkBle {
   }
 }
 
+int _jsonInt(dynamic e) {
+  if (e == null) return 0;
+  if (e is int) return e;
+  if (e is num) return e.toInt();
+  return int.tryParse(e.toString()) ?? 0;
+}
+
 String _regionCodeOrDefault(dynamic v, [String fallback = 'EU']) {
   if (v == null) return fallback;
   final s = v.toString().trim();
@@ -307,7 +341,8 @@ String? _trimmedStringOrNull(dynamic v) {
 
 /// Парсинг одного JSON-уведомления с RX (вынесено из потока для единого диспетчера).
 RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
-  final evt = json['evt'] as String?;
+  final evtRaw = json['evt'];
+  final evt = evtRaw is String ? evtRaw : evtRaw?.toString();
   if (evt == 'msg') {
     return RiftLinkMsgEvent(
       from: json['from'] as String? ?? '',
@@ -351,14 +386,15 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     );
   }
   if (evt == 'info') {
+    try {
     final nb = json['neighbors'];
     final neighbors = nb is List ? (nb as List).map((e) => e.toString()).toList() : <String>[];
     final rssiList = json['neighborsRssi'];
-    final neighborsRssi = rssiList is List ? (rssiList as List).map((e) => (e as num).toInt()).toList() : <int>[];
+    final neighborsRssi = rssiList is List ? (rssiList as List).map(_jsonInt).toList() : <int>[];
     final hasKeyList = json['neighborsHasKey'];
     final neighborsHasKey = hasKeyList is List ? (hasKeyList as List).map((e) => e == true).toList() : <bool>[];
     final grpList = json['groups'];
-    final groups = grpList is List ? (grpList as List).map((e) => (e as num).toInt()).toList() : <int>[];
+    final groups = grpList is List ? (grpList as List).map(_jsonInt).toList() : <int>[];
     final routesList = json['routes'];
     final routes = <Map<String, dynamic>>[];
     if (routesList is List) {

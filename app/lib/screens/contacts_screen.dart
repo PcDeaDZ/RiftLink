@@ -43,47 +43,136 @@ class _ContactsScreenState extends State<ContactsScreen> {
     final idC = TextEditingController(text: raw.length > 8 ? raw.substring(0, 8) : raw);
     final nickC = TextEditingController(text: existing?.nickname ?? '');
     final l = context.l10n;
-    showAppDialog(context: context, builder: (ctx) => AlertDialog(
-      backgroundColor: context.palette.card,
-      title: Text(prefilledId != null ? l.tr('edit_contact') : l.tr('add_contact'), style: TextStyle(color: context.palette.onSurface)),
-      content: Column(mainAxisSize: MainAxisSize.min, children: [
-        TextField(controller: idC, style: TextStyle(color: context.palette.onSurface), decoration: InputDecoration(labelText: l.tr('node_id_hex'), hintText: 'A1B2C3D4'), maxLength: 8, enabled: prefilledId == null),
-        const SizedBox(height: 12),
-        TextField(controller: nickC, style: TextStyle(color: context.palette.onSurface), decoration: InputDecoration(labelText: l.tr('contact_nickname'), hintText: l.tr('contact_name_hint')), maxLength: 16),
-      ]),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: Text(l.tr('cancel'))),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(backgroundColor: context.palette.primary, foregroundColor: context.palette.card),
-          onPressed: () async {
-            final id = idC.text.trim().toUpperCase();
-            if (id.length != 8) { showAppSnackBar(context, l.tr('invalid_hex'), kind: AppSnackKind.error); return; }
-            Navigator.pop(ctx);
-            await ContactsService.add(Contact(id: id, nickname: nickC.text.trim()));
-            await _load();
-          },
-          child: Text(l.tr('save')),
+    final p = context.palette;
+    showAppDialog(
+      context: context,
+      builder: (ctx) => RiftDialogFrame(
+        maxWidth: 360,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              prefilledId != null ? l.tr('edit_contact') : l.tr('add_contact'),
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: p.onSurface,
+                  ),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: idC,
+              style: TextStyle(color: p.onSurface),
+              decoration: InputDecoration(labelText: l.tr('node_id_hex'), hintText: 'A1B2C3D4'),
+              maxLength: 8,
+              enabled: prefilledId == null,
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: nickC,
+              style: TextStyle(color: p.onSurface),
+              decoration: InputDecoration(labelText: l.tr('contact_nickname'), hintText: l.tr('contact_name_hint')),
+              maxLength: 16,
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  style: TextButton.styleFrom(
+                    foregroundColor: p.onSurfaceVariant,
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: Text(l.tr('cancel')),
+                ),
+                const SizedBox(width: 4),
+                TextButton(
+                  style: TextButton.styleFrom(
+                    foregroundColor: p.primary,
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    textStyle: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  onPressed: () async {
+                    final id = idC.text.trim().toUpperCase();
+                    if (id.length != 8) {
+                      showAppSnackBar(context, l.tr('invalid_hex'), kind: AppSnackKind.error);
+                      return;
+                    }
+                    Navigator.pop(ctx);
+                    await ContactsService.add(Contact(id: id, nickname: nickC.text.trim()));
+                    await _load();
+                  },
+                  child: Text(l.tr('save')),
+                ),
+              ],
+            ),
+          ],
         ),
-      ],
-    )).then((_) { idC.dispose(); nickC.dispose(); });
+      ),
+    ).then((_) {
+      idC.dispose();
+      nickC.dispose();
+    });
   }
 
   void _showEditDialog(Contact c) {
     final nickC = TextEditingController(text: c.nickname);
     final l = context.l10n;
-    showDialog(context: context, builder: (ctx) => AlertDialog(
-      backgroundColor: context.palette.card,
-      title: Text(l.tr('edit_contact'), style: TextStyle(color: context.palette.onSurface)),
-      content: TextField(controller: nickC, style: TextStyle(color: context.palette.onSurface), decoration: InputDecoration(labelText: l.tr('contact_nickname')), maxLength: 16, autofocus: true),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: Text(l.tr('cancel'))),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(backgroundColor: context.palette.primary, foregroundColor: context.palette.card),
-          onPressed: () async { Navigator.pop(ctx); await ContactsService.add(Contact(id: c.id, nickname: nickC.text.trim())); await _load(); },
-          child: Text(l.tr('ok')),
+    final p = context.palette;
+    showAppDialog(
+      context: context,
+      builder: (ctx) => RiftDialogFrame(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              l.tr('edit_contact'),
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: p.onSurface,
+                  ),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: nickC,
+              autofocus: true,
+              style: TextStyle(color: p.onSurface),
+              decoration: InputDecoration(labelText: l.tr('contact_nickname')),
+              maxLength: 16,
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  style: TextButton.styleFrom(foregroundColor: p.onSurfaceVariant, minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: Text(l.tr('cancel')),
+                ),
+                TextButton(
+                  style: TextButton.styleFrom(
+                    foregroundColor: p.primary,
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    textStyle: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  onPressed: () async {
+                    Navigator.pop(ctx);
+                    await ContactsService.add(Contact(id: c.id, nickname: nickC.text.trim()));
+                    await _load();
+                  },
+                  child: Text(l.tr('ok')),
+                ),
+              ],
+            ),
+          ],
         ),
-      ],
-    )).then((_) => nickC.dispose());
+      ),
+    ).then((_) => nickC.dispose());
   }
 
   Future<void> _delete(Contact c) async {

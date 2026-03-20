@@ -704,9 +704,12 @@ void notifyInfo() {
     ro["rssi"] = (int)rssi;
   }
 
-  char buf[600];
-  size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
+  // Буфер 600 обрезал большой `info` (соседи/маршруты) → невалидный JSON в приложении.
+  String payload;
+  payload.reserve(1200);
+  serializeJson(doc, payload);
+  if (payload.length() == 0) return;
+  pRxChar->setValue((uint8_t*)payload.c_str(), payload.length());
   pRxChar->notify();
 }
 

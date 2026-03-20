@@ -380,6 +380,7 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  final FocusNode _nickFocus = FocusNode();
   late final TextEditingController _nickController;
   late final TextEditingController _wifiSsidController;
   late final TextEditingController _wifiPassController;
@@ -418,8 +419,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       _batteryMv = evt.batteryMv;
     });
     final nick = evt.nickname?.trim();
-    if (nick != null && nick.isNotEmpty && _nickController.text.trim().isEmpty) {
-      _nickController.text = nick;
+    // Раньше подставляли только при пустом поле — тогда «устаревший» ник из маршрута/кэша блокировал значение с узла.
+    if (nick != null && nick.isNotEmpty && !_nickFocus.hasFocus) {
+      if (_nickController.text != nick) {
+        _nickController.text = nick;
+      }
     }
   }
 
@@ -502,6 +506,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void dispose() {
     _bleSub?.cancel();
+    _nickFocus.dispose();
     _nickController.dispose();
     _wifiSsidController.dispose();
     _wifiPassController.dispose();
@@ -579,6 +584,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   children: [
                     TextField(
                       controller: _nickController,
+                      focusNode: _nickFocus,
                       maxLength: 16,
                       style: TextStyle(color: context.palette.onSurface),
                       decoration: InputDecoration(
