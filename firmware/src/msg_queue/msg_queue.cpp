@@ -30,7 +30,7 @@
 #define MAX_PENDING           12
 #define MAX_PENDING_BROADCAST 4
 #define MAX_RETRIES           4   // макс. повторов при отсутствии ACK (не вечно)
-// Paper: 2 deferred copies (sendQueue 16) — экономия слотов при heap ~10KB
+// Paper: 2 deferred copies (radioCmdQueue 16) — экономия слотов при heap ~10KB
 #if defined(USE_EINK)
 #define BROADCAST_DEFERRED_COPIES 2
 #else
@@ -249,7 +249,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     // Unicast: только одна отправка. Повтор — только при отсутствии ACK (update), не слепые копии
     bool ok = radio::send(slot->pkt, slot->pktLen, txSf);
     if (!ok) {
-      RIFTLINK_LOG_ERR("[RiftLink] MSG sendQueue full, to %02X%02X — retry via update\n", to[0], to[1]);
+      RIFTLINK_LOG_ERR("[RiftLink] MSG radioCmdQueue full, to %02X%02X — retry via update\n", to[0], to[1]);
     }
     if (s_onUnicastSent) s_onUnicastSent(to, msgId);
     xSemaphoreGive(s_mutex);
@@ -295,7 +295,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     if (len > 0) {
       uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
       if (!radio::send(pkt, len, sf)) {
-        RIFTLINK_LOG_ERR("[RiftLink] MSG broadcast sendQueue full, drop\n");
+        RIFTLINK_LOG_ERR("[RiftLink] MSG broadcast radioCmdQueue full, drop\n");
         return false;
       }
       if (s_onBroadcastSent) s_onBroadcastSent(bcMsgId);
@@ -358,7 +358,7 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
   if (len > 0) {
     uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
     if (!radio::send(pkt, len, sf)) {
-      RIFTLINK_LOG_ERR("[RiftLink] MSG group sendQueue full, drop\n");
+      RIFTLINK_LOG_ERR("[RiftLink] MSG group radioCmdQueue full, drop\n");
       return false;
     }
     if (s_onBroadcastSent) s_onBroadcastSent(bcMsgId);
@@ -510,7 +510,7 @@ void update() {
     if (p->triggerSend) {
       p->triggerSend = false;
       uint32_t jitter = 50 + (uint32_t)(esp_random() % 100);
-      if (now - p->lastSendTime >= jitter && radio::isChannelFree()) {
+      if (now - p->lastSendTime >= jitter) {
         if (bls_n::shouldDeferTx(p->to) || esp_now_slots::shouldDeferTx(p->to)) continue;
         if (bls_n::sendRtsBeforeLora(p->to, p->pktLen)) delay(50);
         if (esp_now_slots::sendRtsBeforeLora(p->to, p->pktLen)) delay(50);
@@ -541,10 +541,6 @@ void update() {
       continue;
     }
 
-    if (!radio::isChannelFree()) {
-      p->lastSendTime = now - ackTimeout - jitter + 200;  // retry через 200 ms
-      continue;
-    }
     if (bls_n::shouldDeferTx(p->to) || esp_now_slots::shouldDeferTx(p->to)) continue;
     if (bls_n::sendRtsBeforeLora(p->to, p->pktLen)) delay(50);
     if (esp_now_slots::sendRtsBeforeLora(p->to, p->pktLen)) delay(50);

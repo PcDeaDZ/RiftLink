@@ -103,9 +103,10 @@ bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr, const uint8_
   uint8_t v0 = h[0];
   size_t hdrLen;
   bool isV2 = ((v0 & 0xF0) == 0x20 || (v0 & 0xF0) == 0x30);
+  bool hasPktId = false;
 
   if (isV2) {
-    bool hasPktId = ((v0 & 0xF0) == 0x30);
+    hasPktId = ((v0 & 0xF0) == 0x30);
     if (hasPktId) {
       // v2.1: opcode(1) + pktId(2) + from(8) + [to(8)?] + ttl(1) + channel(1)
       if (hLen < 14) return false;
@@ -161,7 +162,12 @@ bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr, const uint8_
       expectedFullLen = SYNC_LEN + HEADER_LEN + 2;  // 23
       break;
     case OP_KEY_EXCHANGE:
-      expectedFullLen = isBc ? (SYNC_LEN + 12 + 32) : (SYNC_LEN + 20 + 32);  // 45 или 53
+      // v2.1 (pktId): заголовок HEADER_LEN_*PKTID уже включает SYNC в buildPacket — не смешивать с 53 B (v2)
+      if (hasPktId) {
+        expectedFullLen = isBc ? (HEADER_LEN_BROADCAST_PKTID + 32) : (HEADER_LEN_PKTID + 32);
+      } else {
+        expectedFullLen = isBc ? (HEADER_LEN_BROADCAST + 32) : (SYNC_LEN + HEADER_LEN + 32);
+      }
       break;
     default:
       break;
@@ -189,13 +195,13 @@ bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr, const uint8_
     if (pl < minPl || pl > maxPl) return false;
   }
   bool isBroadcast = (hdr->version_flags & FLAG_BROADCAST) != 0;
-  size_t expected = getExpectedPacketLength(hdr->opcode, pl, isBroadcast);
+  size_t expected = getExpectedPacketLength(hdr->opcode, pl, isBroadcast, hasPktId);
   if (expected != 0 && pLen != expected) return false;
 
   return true;
 }
 
-size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadcast) {
+size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadcast, bool hasPktId) {
   size_t hdrLen = isBroadcast ? HEADER_LEN_BROADCAST : (SYNC_LEN + HEADER_LEN);
   switch (opcode) {
     case OP_NACK:
@@ -210,6 +216,10 @@ size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadca
     case OP_ACK_BATCH:
       return (payloadLen >= 5 && payloadLen <= 33 && (payloadLen - 1) % 4 == 0) ? (hdrLen + payloadLen) : 0;
     case OP_KEY_EXCHANGE:
+      if (hasPktId) {
+        size_t h = isBroadcast ? HEADER_LEN_BROADCAST_PKTID : HEADER_LEN_PKTID;
+        return (payloadLen == 32) ? (h + 32) : 0;
+      }
       return (payloadLen == 32) ? (hdrLen + 32) : 0;
     case OP_ROUTE_REQ:
       return (payloadLen == 21) ? (HEADER_LEN_BROADCAST + 21) : 0;  // всегда broadcast

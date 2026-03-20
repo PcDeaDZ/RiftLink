@@ -73,7 +73,15 @@ bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr,
                 const uint8_t** payload, size_t* payloadLen);
 
 /** Ожидаемая длина пакета (pLen) для opcode. 0 = неизвестно/переменная. */
-size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadcast);
+size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadcast, bool hasPktId = false);
+
+/** Полный размер KEY_EXCHANGE в эфире (как в buildPacket): v2.1 unicast = HEADER_LEN_PKTID+32 (55 B). */
+constexpr inline size_t keyExchangeTotalLen(bool hasPktId, bool isBroadcast) {
+  if (hasPktId) {
+    return isBroadcast ? (HEADER_LEN_BROADCAST_PKTID + 32) : (HEADER_LEN_PKTID + 32);
+  }
+  return isBroadcast ? (HEADER_LEN_BROADCAST + 32) : (SYNC_LEN + HEADER_LEN + 32);
+}
 
 /** Min/max payload для opcode. true если opcode известен. */
 bool getExpectedPayloadRange(uint8_t opcode, size_t* minOut, size_t* maxOut);

@@ -16,7 +16,10 @@
 #include "wifi/wifi.h"
 #include "ota/ota.h"
 #include "powersave/powersave.h"
+#include "radio/radio.h"
+#include "async_tasks.h"
 #include "telemetry/telemetry.h"
+#include <freertos/FreeRTOS.h>
 #include "version.h"
 #include <cstring>
 #include <cstdio>
@@ -193,7 +196,7 @@ static uint32_t computeContentHash(int tab) {
 
 static void ensureCooldownBeforeDisplay();
 #if defined(ESP32) && EINK_USE_GLOBAL_SPI
-static void selectDisplaySPI();
+static bool selectDisplaySPI();
 static void releaseDisplaySPI();
 #endif
 
@@ -235,7 +238,7 @@ static void doDisplayHibernate(bool wasFull) {
 static void doDisplay(bool partial) {
   s_panelHibernating = false;  // display() разбудит панель если была в hibernate
 #if defined(ESP32) && EINK_USE_GLOBAL_SPI
-  selectDisplaySPI();
+  if (!selectDisplaySPI()) return;  // нет mutex — не рисуем на чужом SPI
 #endif
   if (!partial) maybeDisplayReinit();
   if (dispBN) {
@@ -277,17 +280,52 @@ static void hibernateIfIdle() {
 #define LORA_MISO 11
 #define LORA_MOSI 10
 #define LORA_NSS  8
-static void selectDisplaySPI() {
-  radio::takeMutex(portMAX_DELAY);
+static bool s_einkSpiRadioLocked = false;
+/** true — сессия с radioScheduler (семафоры granted/done); иначе только legacy mutex. */
+static bool s_einkDisplaySpiSessionActive = false;
+
+static bool selectDisplaySPI() {
+  s_einkSpiRadioLocked = false;
+  s_einkDisplaySpiSessionActive = false;
+#if defined(USE_EINK)
+  // Сначала пауза радио в планировщике (standby), затем один takeMutex на время SPI E-Ink.
+  if (asyncRequestDisplaySpiSession(pdMS_TO_TICKS(5000))) {
+    if (!radio::takeMutex(pdMS_TO_TICKS(5000))) {
+      asyncSignalDisplaySpiSessionDone();
+      Serial.println("[RiftLink] E-Ink SPI: radio mutex timeout after pause, skip reconfig");
+      return false;
+    }
+    s_einkSpiRadioLocked = true;
+    s_einkDisplaySpiSessionActive = true;
+  } else
+#endif
+  {
+    // Legacy: семафоры не созданы или до asyncTasksStart — один takeMutex как раньше.
+    if (!radio::takeMutex(pdMS_TO_TICKS(5000))) {
+      Serial.println("[RiftLink] E-Ink SPI: radio mutex timeout, skip reconfig");
+      return false;
+    }
+    s_einkSpiRadioLocked = true;
+  }
   SPI.end();  // иначе begin() не переконфигурирует пины (ESP32 Arduino)
   delay(5);
   SPI.begin(EINK_SCLK, -1, EINK_MOSI, EINK_CS);  // -1 = MISO не используется (3-wire E-Ink)
+  return true;
 }
 static void releaseDisplaySPI() {
   SPI.end();
   delay(5);
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
-  radio::releaseMutex();
+  if (s_einkSpiRadioLocked) {
+    radio::releaseMutex();
+    s_einkSpiRadioLocked = false;
+  }
+#if defined(USE_EINK)
+  if (s_einkDisplaySpiSessionActive) {
+    s_einkDisplaySpiSessionActive = false;
+    asyncSignalDisplaySpiSessionDone();
+  }
+#endif
 }
 #endif
 

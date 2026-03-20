@@ -25,6 +25,9 @@ bool send(const uint8_t* to, const uint8_t* data, size_t dataLen);
 bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, size_t payloadLen,
                 uint8_t* out, size_t outMaxLen, size_t* outLen);
 
+/** Явный ранний init (необязательно): иначе поднимется при первом send/onFragment */
 void init();
+/** Освободить незавершённые reassembly-буферы и сбросить состояние (после deinit снова lazy-init) */
+void deinit();
 
 }  // namespace voice_frag

@@ -1,9 +1,11 @@
 /**
- * send_overflow — буфер при полной sendQueue.
+ * send_overflow — буфер при полной radioCmdQueue (Tx) или при отказе queueSend.
  * Pull on-demand, приоритеты для ACK.
  */
 
 #include "send_overflow.h"
+#include "radio/radio.h"
+#include "duty_cycle/duty_cycle.h"
 #include <Arduino.h>
 #include <string.h>
 #include <freertos/FreeRTOS.h>
@@ -96,9 +98,36 @@ bool pop(SendQueueItem* item) {
   return true;
 }
 
+void drainApplyCommandsFromRadioQueue(void) {
+  RadioCmd cmd;
+  for (;;) {
+    if (!radioCmdQueue) return;
+    if (xQueuePeek(radioCmdQueue, &cmd, 0) != pdTRUE) return;
+    if (cmd.type == RadioCmdType::Tx) return;
+    if (xQueueReceive(radioCmdQueue, &cmd, 0) != pdTRUE) return;
+    if (cmd.type == RadioCmdType::ApplyRegion) {
+      float f = (float)cmd.u.region.freqHz / 1000000.0f;
+      radio::applyRegion(f, (int)cmd.u.region.power);
+      duty_cycle::reset();
+    } else if (cmd.type == RadioCmdType::ApplySf) {
+      radio::setSpreadingFactor(cmd.u.spread.sf);
+    }
+  }
+}
+
 bool getNextTxPacket(SendQueueItem* item) {
   if (!item) return false;
-  if (sendQueue && xQueueReceive(sendQueue, item, 0) == pdTRUE) return true;
+  drainApplyCommandsFromRadioQueue();
+  RadioCmd cmd;
+  if (radioCmdQueue && xQueueReceive(radioCmdQueue, &cmd, 0) == pdTRUE) {
+    if (cmd.type == RadioCmdType::Tx) {
+      memcpy(item->buf, cmd.u.tx.buf, cmd.u.tx.len);
+      item->len = cmd.u.tx.len;
+      item->txSf = cmd.u.tx.txSf;
+      return true;
+    }
+    xQueueSendToFront(radioCmdQueue, &cmd, 0);
+  }
   return pop(item);
 }
 

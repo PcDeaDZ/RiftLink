@@ -12,12 +12,22 @@
 #include <RadioLib.h>
 #include <SPI.h>
 #include <esp_random.h>
+#include <nvs.h>
 #include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <stdio.h>
 
 static bool s_asyncMode = false;
+
+static inline void radioSendReason(char* buf, size_t buflen, const char* msg) {
+  if (buf && buflen > 0) {
+    snprintf(buf, buflen, "%s", msg ? msg : "?");
+  }
+}
 static SemaphoreHandle_t s_radioMutex = nullptr;
+/** Планировщик/loop в окне RX (чип слушает эфир) — CAD не должен делать standby поверх RX. */
+static std::atomic<bool> s_rxListenActive{false};
 
 // Heltec WiFi LoRa 32 V3/V4 pins (Meshtastic variant.h)
 #define LORA_NSS   8
@@ -53,7 +63,31 @@ static Module* mod = nullptr;
 static std::atomic<uint8_t> s_cadBusyCount{0};  // BEB: растёт при busy/NACK/undelivered, сброс при успешной TX
 static std::atomic<uint32_t> s_lastCongestionTime{0};  // для decay BEB
 static SX1262* lora = nullptr;
-static uint8_t s_currentSf = LORA_SF;
+/** Логический mesh SF (NVS, HELLO, txSf=0). Отдельно от физического SF чипа при TX с rssiToSf. */
+static uint8_t s_meshSf = LORA_SF;
+/** Текущий SF на SX1262 — чтобы не дёргать SPI без нужды. */
+static uint8_t s_hwSf = LORA_SF;
+static const char* NVS_NAMESPACE = "riftlink";
+static const char* NVS_KEY_SF = "lora_sf";
+
+static uint8_t loadSfFromNvs() {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return LORA_SF;
+  uint8_t sf = LORA_SF;
+  esp_err_t err = nvs_get_u8(h, NVS_KEY_SF, &sf);
+  nvs_close(h);
+  if (err != ESP_OK || sf < 7 || sf > 12) return LORA_SF;
+  return sf;
+}
+
+static void saveSfToNvs(uint8_t sf) {
+  if (sf < 7 || sf > 12) return;
+  nvs_handle_t h;
+  if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+  nvs_set_u8(h, NVS_KEY_SF, sf);
+  nvs_commit(h);
+  nvs_close(h);
+}
 
 namespace radio {
 
@@ -83,7 +117,8 @@ bool init() {
   int power = region::getPower();
 
   // Preamble 16 (как Meshtastic) — больше времени на синхронизацию RX, меньше потерь при «просыпании»
-  int16_t st = lora->begin(freq, LORA_BW, LORA_SF, LORA_CR, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, power, 16, TCXO_VOLTAGE, false);
+  uint8_t initSf = loadSfFromNvs();
+  int16_t st = lora->begin(freq, LORA_BW, initSf, LORA_CR, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, power, 16, TCXO_VOLTAGE, false);
   if (st != RADIOLIB_ERR_NONE) {
     Serial.printf("[RiftLink] Radio init failed: code=%d (проверьте антенну и питание)\n", st);
     return false;
@@ -95,6 +130,8 @@ bool init() {
 
   lora->setCRC(2);  // CRC 2 bytes
   lora->setSyncWord(0x12);  // Private network
+  s_meshSf = initSf;
+  s_hwSf = initSf;
   s_radioMutex = xSemaphoreCreateMutex();
   if (!s_radioMutex) return false;
   return true;
@@ -109,6 +146,15 @@ void releaseMutex() {
   if (s_radioMutex) xSemaphoreGive(s_radioMutex);
 }
 
+void setRxListenActive(bool on) {
+  s_rxListenActive.store(on, std::memory_order_relaxed);
+}
+
+void standbyChipUnderMutex() {
+  if (!lora) return;
+  lora->standby();
+}
+
 uint32_t getTimeOnAir(size_t len) {
   if (!lora) return 0;
   return (uint32_t)lora->getTimeOnAir(len);
@@ -116,6 +162,8 @@ uint32_t getTimeOnAir(size_t len) {
 
 bool isChannelFree() {
   if (!lora) return true;
+  // Не трогать SX1262, пока планировщик/loop в окне RX (иначе standby ломает приём).
+  if (s_rxListenActive.load(std::memory_order_relaxed)) return false;
   if (!takeMutex(pdMS_TO_TICKS(50))) return false;  // не блокировать надолго
   lora->standby();
   int16_t cad = lora->scanChannel();
@@ -131,8 +179,11 @@ void notifyCongestion() {
 
 void setAsyncMode(bool on) { s_asyncMode = on; }
 
-bool sendDirectInternal(const uint8_t* data, size_t len) {
-  if (!lora || len > RADIOLIB_SX126X_MAX_PACKET_LENGTH) return false;
+bool sendDirectInternal(const uint8_t* data, size_t len, char* reasonBuf, size_t reasonLen) {
+  if (!lora || len > RADIOLIB_SX126X_MAX_PACKET_LENGTH) {
+    radioSendReason(reasonBuf, reasonLen, !lora ? "no_lora" : "pkt_too_long");
+    return false;
+  }
 
   // BEB decay: без congestion N с → уменьшить CW
   uint32_t now = (uint32_t)millis();
@@ -145,6 +196,7 @@ bool sendDirectInternal(const uint8_t* data, size_t len) {
   uint32_t toa = getTimeOnAir(len);
   if (!duty_cycle::canSend(toa)) {
     Serial.println("[RiftLink] Duty cycle limit (EU 1%) — TX skipped, попробуйте позже");
+    radioSendReason(reasonBuf, reasonLen, "duty_cycle");
     return false;
   }
 
@@ -165,6 +217,7 @@ bool sendDirectInternal(const uint8_t* data, size_t len) {
       uint32_t backoff = (esp_random() % cw) * CAD_SLOT_TIME_MS;
       if (backoff > 0) {
         queueDeferredSend(data, len, getSpreadingFactor(), backoff);
+        radioSendReason(reasonBuf, reasonLen, "cad_defer");
         return false;
       }
     }
@@ -180,6 +233,9 @@ bool sendDirectInternal(const uint8_t* data, size_t len) {
     }
     if (st != RADIOLIB_ERR_NONE) {
       Serial.printf("[RiftLink] TX failed: %d\n", st);
+      if (reasonBuf && reasonLen > 0) {
+        snprintf(reasonBuf, reasonLen, "tx_err_%d", (int)st);
+      }
       return false;
     }
   }
@@ -188,25 +244,22 @@ bool sendDirectInternal(const uint8_t* data, size_t len) {
   return true;
 }
 
-bool sendDirect(const uint8_t* data, size_t len) {
-  if (!takeMutex(pdMS_TO_TICKS(500))) return false;
-  bool ok = sendDirectInternal(data, len);
-  releaseMutex();
-  return ok;
+bool send(const uint8_t* data, size_t len, uint8_t txSf, bool priority, char* reasonBuf, size_t reasonLen) {
+  // txSf: 7–12 — SF пакета; 0 — mesh SF. Весь TX только через radioCmdQueue → radioSchedulerTask (один владелец LoRa).
+  uint8_t sfForPkt = (txSf >= 7 && txSf <= 12) ? txSf : getSpreadingFactor();
+  if (reasonBuf && reasonLen > 0) {
+    reasonBuf[0] = '\0';
+  }
+  if (!s_asyncMode || !radioCmdQueue) {
+    radioSendReason(reasonBuf, reasonLen, !radioCmdQueue ? "no_tx_queue" : "no_async");
+    return false;
+  }
+  return queueSend(data, len, sfForPkt, priority, reasonBuf, reasonLen);
 }
 
-bool send(const uint8_t* data, size_t len, uint8_t txSf, bool priority) {
-  if (s_asyncMode && sendQueue) {
-    return queueSend(data, len, txSf, priority);
-  }
-  if (txSf >= 7 && txSf <= 12) {
-    uint8_t prev = getSpreadingFactor();
-    setSpreadingFactor(txSf);
-    bool ok = sendDirect(data, len);
-    setSpreadingFactor(prev);
-    return ok;
-  }
-  return sendDirect(data, len);
+bool sendDirect(const uint8_t* data, size_t len, char* reasonBuf, size_t reasonLen) {
+  // Алиас приоритетного enqueue — тот же путь, что radio::send (без обхода через mutex/прямой SPI).
+  return send(data, len, 0, true, reasonBuf, reasonLen);
 }
 
 int receive(uint8_t* buf, size_t maxLen) {
@@ -255,14 +308,43 @@ void applyRegion(float freq, int power) {
   lora->setOutputPower(power);
 }
 
+void requestApplyRegion(float freq, int power) {
+  if (!radioCmdQueue) return;
+  RadioCmd cmd;
+  cmd.type = RadioCmdType::ApplyRegion;
+  cmd.priority = false;
+  cmd.u.region.freqHz = (uint32_t)(freq * 1000000.0f + 0.5f);
+  cmd.u.region.power = power;
+  (void)xQueueSend(radioCmdQueue, &cmd, 0);
+}
+
 void setSpreadingFactor(uint8_t sf) {
-  if (!lora || sf < 5 || sf > 12) return;
+  if (!lora || sf < 7 || sf > 12) return;
+  if (sf == s_meshSf && sf == s_hwSf) return;
   lora->setSpreadingFactor(sf);
-  s_currentSf = sf;
+  s_meshSf = sf;
+  s_hwSf = sf;
+  saveSfToNvs(sf);
+}
+
+void applyHardwareSpreadingFactor(uint8_t sf) {
+  if (!lora || sf < 7 || sf > 12) return;
+  if (sf == s_hwSf) return;
+  lora->setSpreadingFactor(sf);
+  s_hwSf = sf;
+}
+
+void requestSpreadingFactor(uint8_t sf) {
+  if (sf < 7 || sf > 12 || !radioCmdQueue) return;
+  RadioCmd cmd;
+  cmd.type = RadioCmdType::ApplySf;
+  cmd.priority = false;
+  cmd.u.spread.sf = sf;
+  (void)xQueueSend(radioCmdQueue, &cmd, 0);
 }
 
 uint8_t getSpreadingFactor() {
-  return s_currentSf;
+  return s_meshSf;
 }
 
 }  // namespace radio

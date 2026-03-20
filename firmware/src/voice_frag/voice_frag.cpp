@@ -36,12 +36,28 @@ static VoiceSlot s_slots[VOICE_REASSEMBLE_MAX];
 static uint32_t s_msgIdCounter = 0;
 static bool s_inited = false;
 
-namespace voice_frag {
-
-void init() {
+static void lazyInit() {
+  if (s_inited) return;
   memset(s_slots, 0, sizeof(s_slots));
   s_msgIdCounter = (uint32_t)esp_random();
   s_inited = true;
+}
+
+namespace voice_frag {
+
+void init() {
+  lazyInit();
+}
+
+void deinit() {
+  for (int i = 0; i < VOICE_REASSEMBLE_MAX; i++) {
+    if (s_slots[i].buf) {
+      free(s_slots[i].buf);
+      s_slots[i].buf = nullptr;
+    }
+    s_slots[i].inUse = false;
+  }
+  s_inited = false;
 }
 
 static VoiceSlot* findSlot(uint32_t msgId, const uint8_t* from) {
@@ -67,8 +83,8 @@ static VoiceSlot* findFreeSlot() {
 }
 
 bool send(const uint8_t* to, const uint8_t* data, size_t dataLen) {
-  if (!s_inited || dataLen == 0 || dataLen > MAX_VOICE_PLAIN ||
-      node::isBroadcast(to)) return false;
+  lazyInit();
+  if (dataLen == 0 || dataLen > MAX_VOICE_PLAIN || node::isBroadcast(to)) return false;
 
   uint8_t encBuf[MAX_VOICE_PLAIN + 1024 + crypto::OVERHEAD];
   size_t encLen = sizeof(encBuf);
@@ -101,7 +117,8 @@ bool send(const uint8_t* to, const uint8_t* data, size_t dataLen) {
 
 bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, size_t payloadLen,
                 uint8_t* out, size_t outMaxLen, size_t* outLen) {
-  if (!s_inited || payloadLen < FRAG_HEADER_LEN || !out || !outLen) return false;
+  lazyInit();
+  if (payloadLen < FRAG_HEADER_LEN || !out || !outLen) return false;
   *outLen = 0;
 
   uint32_t msgId;

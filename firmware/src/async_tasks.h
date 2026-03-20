@@ -6,11 +6,29 @@
 #pragma once
 
 #include <Arduino.h>
+#include <freertos/FreeRTOS.h>
+
+/** Очереди + задачи + async radio/display — по первому использованию (экономия heap на старте). */
+bool asyncInfraEnsure();
 
 void asyncTasksStart();
+/** Для Paper / отладки: задача `radioSchedulerTask` (nullptr до asyncTasksStart). */
+TaskHandle_t asyncGetRadioSchedulerTaskHandle(void);
 
-/** txSf: 0 = baseSf, 7–12 = per-neighbor SF. priority=true → xQueueSendToFront */
-bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf = 0, bool priority = false);
+#if defined(USE_EINK)
+/**
+ * Paper (EINK_USE_GLOBAL_SPI): запрос паузы радио — планировщик в standby, затем семафор «разрешено».
+ * После `true` вызвать `radio::takeMutex` и SPI; в конце `releaseMutex` + `asyncSignalDisplaySpiSessionDone`.
+ * Если семафоры не созданы — возвращает `false` (вызывающий делает один `takeMutex` как раньше).
+ */
+bool asyncRequestDisplaySpiSession(TickType_t timeoutTicks);
+void asyncSignalDisplaySpiSessionDone(void);
+#endif
+
+/** txSf: 0 = baseSf, 7–12 = per-neighbor SF. priority=true → xQueueSendToFront.
+ *  При отказе: reasonBuf — короткая причина (async / очередь / overflow). */
+bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf = 0, bool priority = false,
+    char* reasonBuf = nullptr, size_t reasonLen = 0);
 
 /** ACK с задержкой — без блокировки packetTask, RX window для следующего MSG */
 void queueDeferredAck(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs = 50);
@@ -21,7 +39,7 @@ void queueDeferredRelay(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t d
     const uint8_t* from, uint32_t payloadHash);
 /** Уведомить: услышали ретрансляцию (from+hash) — отменить наш pending relay */
 void relayHeard(const uint8_t* from, uint32_t payloadHash);
-/** Переносит готовые deferred ACK/send в sendQueue. Вызывается из radioSchedulerTask. */
+/** Переносит готовые deferred ACK/send в radioCmdQueue (RadioCmd::Tx). Вызывается из radioSchedulerTask. */
 void flushDeferredSends();
 
 /** Поставить CMD_SET_LAST_MSG в displayQueue */

@@ -321,6 +321,25 @@ void test_opcode_key_exchange_roundtrip() {
   TEST_ASSERT_EQUAL_UINT8_ARRAY(key, pl, 32);
 }
 
+void test_opcode_key_exchange_pktid_roundtrip() {
+  uint8_t buf[128];
+  uint8_t key[32];
+  for (int i = 0; i < 32; i++) key[i] = (uint8_t)(i * 7);
+  size_t len = protocol::buildPacket(buf, sizeof(buf),
+      s_from, s_to, 1, protocol::OP_KEY_EXCHANGE,
+      key, 32, false, false, false, 0, 42);
+  TEST_ASSERT_EQUAL(protocol::HEADER_LEN_PKTID + 32, len);
+  protocol::PacketHeader hdr;
+  const uint8_t* pl = nullptr;
+  size_t plLen = 0;
+  bool ok = protocol::parsePacket(buf, len, &hdr, &pl, &plLen);
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL(protocol::OP_KEY_EXCHANGE, hdr.opcode);
+  TEST_ASSERT_EQUAL(42, hdr.pktId);
+  TEST_ASSERT_EQUAL(32, plLen);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(key, pl, 32);
+}
+
 void test_opcode_route_req_broadcast() {
   uint8_t buf[64];
   uint8_t routePl[21];
@@ -744,6 +763,8 @@ void test_get_expected_packet_length_extended() {
   TEST_ASSERT_EQUAL(protocol::HEADER_LEN_BROADCAST + 12, v);
   v = protocol::getExpectedPacketLength(protocol::OP_KEY_EXCHANGE, 32, false);
   TEST_ASSERT_EQUAL(protocol::SYNC_LEN + protocol::HEADER_LEN + 32, v);
+  v = protocol::getExpectedPacketLength(protocol::OP_KEY_EXCHANGE, 32, false, true);
+  TEST_ASSERT_EQUAL(protocol::HEADER_LEN_PKTID + 32, v);
 }
 
 void test_scenario_route_req_always_broadcast() {
@@ -795,6 +816,7 @@ int main(int argc, char** argv) {
   RUN_TEST(test_edge_get_expected_payload_range);
   RUN_TEST(test_edge_multiple_packets_parse_first_only);
   RUN_TEST(test_opcode_key_exchange_roundtrip);
+  RUN_TEST(test_opcode_key_exchange_pktid_roundtrip);
   RUN_TEST(test_opcode_route_req_broadcast);
   RUN_TEST(test_opcode_route_reply_unicast);
   RUN_TEST(test_opcode_ping_pong_roundtrip);

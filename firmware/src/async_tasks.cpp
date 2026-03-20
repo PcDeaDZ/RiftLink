@@ -11,6 +11,7 @@
 #include "led/led.h"
 #include "radio/radio.h"
 #include "protocol/packet.h"
+#include <freertos/semphr.h>
 #include "crypto/crypto.h"
 #include "powersave/powersave.h"
 #include <Arduino.h>
@@ -18,8 +19,16 @@
 #include <freertos/task.h>
 #include <esp_heap_caps.h>
 #include <string.h>
+#include <stdio.h>
+#include <atomic>
 
 extern void getNextRxSlotParams(uint8_t* sfOut, uint32_t* slotMsOut);
+
+static inline void queueSendReason(char* buf, size_t buflen, const char* msg) {
+  if (buf && buflen > 0) {
+    snprintf(buf, buflen, "%s", msg ? msg : "?");
+  }
+}
 
 #define DISPLAY_HEARTBEAT_MS 10000  // лог раз в 10 с — проверить, что displayTask жив
 
@@ -35,21 +44,83 @@ extern void getNextRxSlotParams(uint8_t* sfOut, uint32_t* slotMsOut);
 
 // Forward — реализация в main.cpp (async)
 extern void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf);
+/** HELLO: только из планировщика (main.cpp). */
+extern void mainDrainHelloFromScheduler(void);
+/** Текущий mesh SF (main.cpp) — для powersave RX в radioSchedulerTask. */
+extern uint8_t getDiscoverySf(void);
 /** V4: после TX на SF12 — следующий RX слот на SF12. Вызывать из radioSchedulerTask. */
 extern void onRadioSchedulerTxSf12(void);
 
-#define ACK_RESERVE_SLOTS 4   // резерв для ACK — обычные пакеты отклоняются при ≤4 свободных
-bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf, bool priority) {
-  if (!sendQueue || len > PACKET_BUF_SIZE) return false;
-  if (!priority && uxQueueSpacesAvailable(sendQueue) <= ACK_RESERVE_SLOTS) {
-    return send_overflow::push(buf, len, txSf, false);  // fallback в send_overflow
+// Очереди + таски: обычно поднимаются в boot (main runBootStateMachine); иначе — при первом queueSend.
+static bool s_asyncInfraReady = false;
+static SemaphoreHandle_t s_asyncInfraMux = nullptr;
+
+bool asyncInfraEnsure() {
+  if (s_asyncInfraReady) return true;
+  if (!s_asyncInfraMux) {
+    s_asyncInfraMux = xSemaphoreCreateMutex();
+    if (!s_asyncInfraMux) return false;
   }
-  SendQueueItem item;
-  memcpy(item.buf, buf, len);
-  item.len = (uint16_t)len;
-  item.txSf = (txSf >= 7 && txSf <= 12) ? txSf : 0;
-  BaseType_t ok = priority ? xQueueSendToFront(sendQueue, &item, 0) : xQueueSend(sendQueue, &item, 0);
-  if (ok != pdTRUE) return send_overflow::push(buf, len, txSf, priority);  // fallback в send_overflow
+  if (xSemaphoreTake(s_asyncInfraMux, portMAX_DELAY) != pdTRUE) return false;
+  if (s_asyncInfraReady) {
+    xSemaphoreGive(s_asyncInfraMux);
+    return true;
+  }
+  if (!asyncQueuesInit()) {
+    RIFTLINK_LOG_ERR("[RiftLink] Async queues init FAILED (lazy)\n");
+    xSemaphoreGive(s_asyncInfraMux);
+    return false;
+  }
+  asyncTasksStart();
+  radio::setAsyncMode(true);
+  displaySetButtonPolledExternally(true);
+  s_asyncInfraReady = true;
+  Serial.printf("[RiftLink] Async infra OK, heap=%u\n",
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  xSemaphoreGive(s_asyncInfraMux);
+  return true;
+}
+
+#define ACK_RESERVE_SLOTS 4   // резерв для ACK — обычные пакеты отклоняются при ≤4 свободных
+bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf, bool priority,
+    char* reasonBuf, size_t reasonLen) {
+  if (!asyncInfraEnsure()) {
+    queueSendReason(reasonBuf, reasonLen, "async_infra");
+    return false;
+  }
+  if (!radioCmdQueue) {
+    queueSendReason(reasonBuf, reasonLen, "no_send_queue");
+    return false;
+  }
+  if (len > PACKET_BUF_SIZE) {
+    queueSendReason(reasonBuf, reasonLen, "pkt_oversize");
+    return false;
+  }
+  // txSf: 7–12 от radio::send (SF этого пакета; иначе там подставлен getSpreadingFactor()).
+  uint8_t fixedSf = txSf;
+  if (fixedSf < 7 || fixedSf > 12) fixedSf = radio::getSpreadingFactor();
+  if (fixedSf < 7 || fixedSf > 12) fixedSf = 7;
+  if (!priority && uxQueueSpacesAvailable(radioCmdQueue) <= ACK_RESERVE_SLOTS) {
+    if (send_overflow::push(buf, len, fixedSf, false)) {
+      return true;
+    }
+    queueSendReason(reasonBuf, reasonLen, "overflow_norm_full");
+    return false;
+  }
+  RadioCmd rcmd;
+  rcmd.type = RadioCmdType::Tx;
+  rcmd.priority = priority;
+  memcpy(rcmd.u.tx.buf, buf, len);
+  rcmd.u.tx.len = (uint16_t)len;
+  rcmd.u.tx.txSf = fixedSf;
+  BaseType_t ok = priority ? xQueueSendToFront(radioCmdQueue, &rcmd, 0) : xQueueSend(radioCmdQueue, &rcmd, 0);
+  if (ok != pdTRUE) {
+    if (send_overflow::push(buf, len, fixedSf, priority)) {
+      return true;
+    }
+    queueSendReason(reasonBuf, reasonLen, priority ? "sendq_pri_ovfl_full" : "sendq_ovfl_full");
+    return false;
+  }
   return true;
 }
 
@@ -84,7 +155,7 @@ static bool relayHeardCheckAndRemove(const uint8_t* from, uint32_t hash) {
 }
 
 static void flushDeferredSlots(DeferredSlot* slots, int n) {
-  if (!sendQueue) return;
+  if (!radioCmdQueue) return;
   uint32_t now = millis();
   for (int i = 0; i < n; i++) {
     if (slots[i].used && slots[i].sendAfter <= now) {
@@ -92,11 +163,14 @@ static void flushDeferredSlots(DeferredSlot* slots, int n) {
         slots[i].used = false;
         continue;
       }
-      SendQueueItem item;
-      memcpy(item.buf, slots[i].buf, slots[i].len);
-      item.len = slots[i].len;
-      item.txSf = slots[i].txSf;
-      if (xQueueSendToFront(sendQueue, &item, 0) == pdTRUE) {
+      RadioCmd rcmd;
+      rcmd.type = RadioCmdType::Tx;
+      rcmd.priority = true;
+      memcpy(rcmd.u.tx.buf, slots[i].buf, slots[i].len);
+      rcmd.u.tx.len = slots[i].len;
+      uint8_t fixedSf = radio::getSpreadingFactor();
+      rcmd.u.tx.txSf = (fixedSf >= 7 && fixedSf <= 12) ? fixedSf : 7;
+      if (xQueueSendToFront(radioCmdQueue, &rcmd, 0) == pdTRUE) {
         slots[i].used = false;
       }
     }
@@ -104,6 +178,7 @@ static void flushDeferredSlots(DeferredSlot* slots, int n) {
 }
 
 void queueDeferredAck(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs) {
+  (void)asyncInfraEnsure();
   uint32_t sendAfter = millis() + delayMs;
   for (int i = 0; i < DEFERRED_ACK_SLOTS; i++) {
     if (!s_deferredAck[i].used) {
@@ -120,6 +195,7 @@ void queueDeferredAck(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t del
 }
 
 void queueDeferredSend(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs) {
+  (void)asyncInfraEnsure();
   uint32_t sendAfter = millis() + delayMs;
   for (int i = 0; i < DEFERRED_SEND_SLOTS; i++) {
     if (!s_deferredSend[i].used) {
@@ -133,12 +209,13 @@ void queueDeferredSend(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t de
     }
   }
   if (!queueSend(pkt, len, txSf, true)) {
-    RIFTLINK_LOG_ERR("[RiftLink] deferred fallback sendQueue full, drop copy\n");
+    RIFTLINK_LOG_ERR("[RiftLink] deferred fallback radioCmdQueue full, drop copy\n");
   }
 }
 
 void queueDeferredRelay(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs,
     const uint8_t* from, uint32_t payloadHash) {
+  (void)asyncInfraEnsure();
   uint32_t sendAfter = millis() + delayMs;
   for (int i = 0; i < DEFERRED_SEND_SLOTS; i++) {
     if (!s_deferredSend[i].used) {
@@ -154,7 +231,7 @@ void queueDeferredRelay(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t d
     }
   }
   if (!queueSend(pkt, len, txSf, true)) {
-    RIFTLINK_LOG_ERR("[RiftLink] deferred relay fallback sendQueue full, drop\n");
+    RIFTLINK_LOG_ERR("[RiftLink] deferred relay fallback radioCmdQueue full, drop\n");
   }
 }
 
@@ -165,7 +242,8 @@ void relayHeard(const uint8_t* from, uint32_t payloadHash) {
 }
 
 void flushDeferredSends() {
-  // Pull on-demand: radio scheduler тянет из send_overflow при пустой sendQueue
+  if (!s_asyncInfraReady) return;
+  // Pull on-demand: radio scheduler тянет из send_overflow при пустой/недоступной radioCmdQueue для Tx
   // Сначала deferred send — потом ACK. SendToFront: последний добавленный впереди. ACK впереди = доставка.
   ack_coalesce::flush();
   flushDeferredSlots(s_deferredSend, DEFERRED_SEND_SLOTS);
@@ -173,6 +251,7 @@ void flushDeferredSends() {
 }
 
 void queueDisplayLastMsg(const char* fromHex, const char* text) {
+  (void)asyncInfraEnsure();
   if (!displayQueue) {
     displaySetLastMsg(fromHex, text);
     return;
@@ -188,6 +267,7 @@ void queueDisplayLastMsg(const char* fromHex, const char* text) {
 }
 
 void queueDisplayRedraw(uint8_t screen, bool priority) {
+  (void)asyncInfraEnsure();
   if (!displayQueue) {
     displayShowScreen(screen);
     return;
@@ -214,6 +294,7 @@ void queueDisplayRequestInfoRedraw() {
 }
 
 void queueDisplayLongPress(uint8_t screen) {
+  (void)asyncInfraEnsure();
   if (!displayQueue) {
     displayOnLongPress(screen);
     return;
@@ -233,6 +314,7 @@ void queueDisplayLongPress(uint8_t screen) {
 }
 
 void queueDisplayLedBlink() {
+  (void)asyncInfraEnsure();
   if (!displayQueue) {
     ledBlink(20);
     return;
@@ -244,6 +326,7 @@ void queueDisplayLedBlink() {
 }
 
 void queueDisplayWake() {
+  (void)asyncInfraEnsure();
   if (!displayQueue) {
     displayWake();
     displayShowScreen(displayGetCurrentScreen());
@@ -271,25 +354,140 @@ static void packetTask(void* arg) {
 #define RADIO_SCHEDULER_STACK 4096
 #define RADIO_SCHEDULER_PRIO 4
 
+static TaskHandle_t s_radioSchedulerTaskHandle = nullptr;
+
+TaskHandle_t asyncGetRadioSchedulerTaskHandle(void) {
+  return s_radioSchedulerTaskHandle;
+}
+
+#if defined(USE_EINK)
+static SemaphoreHandle_t s_displaySpiGranted = nullptr;
+static SemaphoreHandle_t s_displaySpiDone = nullptr;
+static std::atomic<bool> s_displaySpiRequested{false};
+
+bool asyncRequestDisplaySpiSession(TickType_t timeoutTicks) {
+  if (!s_displaySpiGranted || !s_displaySpiDone) {
+    return false;  // вызывающий делает один takeMutex (legacy)
+  }
+  s_displaySpiRequested.store(true, std::memory_order_release);
+  TaskHandle_t h = s_radioSchedulerTaskHandle;
+  if (h) xTaskNotifyGive(h);
+  if (xSemaphoreTake(s_displaySpiGranted, timeoutTicks) != pdTRUE) {
+    s_displaySpiRequested.store(false, std::memory_order_release);
+    return false;
+  }
+  return true;
+}
+
+void asyncSignalDisplaySpiSessionDone(void) {
+  if (s_displaySpiDone) xSemaphoreGive(s_displaySpiDone);
+}
+#endif
+
+static TickType_t s_packetRxDropLogTick = 0;
+
+/** Доставка RX из планировщика в packetTask или прямой handlePacket (общая логика normal + powersave RX). */
+static void deliverRxToPacketQueue(uint8_t* rxBuf, int n, int rssi, uint8_t sf) {
+  if (n <= 0) return;
+  if (packetQueue) {
+    PacketQueueItem pitem;
+    if ((size_t)n <= sizeof(pitem.buf)) {
+      memcpy(pitem.buf, rxBuf, (size_t)n);
+      pitem.len = (uint16_t)n;
+      pitem.rssi = (int8_t)rssi;
+      pitem.sf = sf;
+      bool isHello = (n == 13 && rxBuf[0] == protocol::SYNC_BYTE && rxBuf[2] == protocol::OP_HELLO);
+      auto tryEnqueueSpill = [&]() {
+        bool added = false;
+        PacketQueueItem discarded;
+        if (xQueueReceive(packetQueue, &discarded, 0) != pdTRUE) return false;
+        bool frontWasHello = (discarded.len == 13 && discarded.buf[0] == protocol::SYNC_BYTE &&
+            discarded.buf[2] == protocol::OP_HELLO);
+        if (isHello) {
+          added = (xQueueSendToFront(packetQueue, &pitem, 0) == pdTRUE);
+        } else if (frontWasHello) {
+          added = (xQueueSend(packetQueue, &pitem, 0) == pdTRUE);
+        }
+        if (!added) (void)xQueueSendToFront(packetQueue, &discarded, 0);
+        return added;
+      };
+      BaseType_t ok = isHello ? xQueueSendToFront(packetQueue, &pitem, pdMS_TO_TICKS(30))
+                              : xQueueSend(packetQueue, &pitem, pdMS_TO_TICKS(30));
+      if (ok != pdTRUE && !tryEnqueueSpill()) {
+        TickType_t t = xTaskGetTickCount();
+        if (t - s_packetRxDropLogTick >= pdMS_TO_TICKS(5000)) {
+          s_packetRxDropLogTick = t;
+          RIFTLINK_LOG_ERR("[RiftLink] packetQueue full, drop\n");
+        }
+      }
+    }
+  } else {
+    handlePacket(rxBuf, (size_t)n, rssi, sf);
+  }
+}
+
 /** Radio scheduler: один владелец радио, чередует RX и TX. Нет конкуренции drain vs rx. */
 static void radioSchedulerTask(void* arg) {
   static uint8_t rxBuf[protocol::SYNC_LEN + protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
-  static TickType_t lastPacketQueueDropLog = 0;
   static uint32_t lastRxAliveLog = 0;
 #if !defined(SF_FORCE_7)
   static int highSfDrained = 0;  // счётчик подряд отправленных SF10+ — макс 2, иначе RX не успевает
 #endif
   vTaskDelay(pdMS_TO_TICKS(500));  // дать setup завершиться
   for (;;) {
+    flushDeferredSends();
+    mainDrainHelloFromScheduler();
+#if defined(USE_EINK)
+    if (s_displaySpiGranted && s_displaySpiDone &&
+        s_displaySpiRequested.load(std::memory_order_acquire)) {
+      if (radio::takeMutex(pdMS_TO_TICKS(200)) == pdTRUE) {
+        s_displaySpiRequested.store(false, std::memory_order_release);
+        send_overflow::drainApplyCommandsFromRadioQueue();
+        radio::setRxListenActive(false);
+        radio::standbyChipUnderMutex();
+        radio::releaseMutex();
+        xSemaphoreGive(s_displaySpiGranted);
+        if (xSemaphoreTake(s_displaySpiDone, pdMS_TO_TICKS(120000)) != pdTRUE) {
+          RIFTLINK_LOG_ERR("[RiftLink] E-Ink SPI: session end timeout (scheduler)\n");
+        }
+      }
+    }
+#endif
     if (powersave::canSleep()) {
+      if (radio::takeMutex(pdMS_TO_TICKS(100)) == pdTRUE) {
+        send_overflow::drainApplyCommandsFromRadioQueue();
+        uint8_t dsf = getDiscoverySf();
+        radio::applyHardwareSpreadingFactor(dsf);
+        radio::startReceiveWithTimeout(1000);
+        radio::setRxListenActive(true);
+        radio::releaseMutex();
+        powersave::lightSleepWake();
+        int n = 0;
+        if (radio::takeMutex(pdMS_TO_TICKS(200)) == pdTRUE) {
+          n = radio::receiveAsync(rxBuf, sizeof(rxBuf));
+          radio::setRxListenActive(false);
+          radio::releaseMutex();
+          uint32_t nowPs = millis();
+          if (nowPs - lastRxAliveLog >= RX_ALIVE_LOG_INTERVAL_MS) {
+            lastRxAliveLog = nowPs;
+            Serial.printf("[RiftLink] RX alive heap=%u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+          }
+          if (n > 0) {
+            int rssi = radio::getLastRssi();
+            deliverRxToPacketQueue(rxBuf, n, rssi, dsf);
+          }
+        } else {
+          radio::setRxListenActive(false);
+        }
+      }
       vTaskDelay(pdMS_TO_TICKS(100));
       continue;
     }
-    flushDeferredSends();
     if (radio::takeMutex(pdMS_TO_TICKS(200)) != pdTRUE) {
       vTaskDelay(pdMS_TO_TICKS(5));
       continue;
     }
+    send_overflow::drainApplyCommandsFromRadioQueue();
     // TX: до 6 пакетов за цикл при SF7/9 (pipelining), 2 при SF10/11, 1 при SF12
     bool didTx = false;
     uint32_t lastToaUs = 0;
@@ -301,40 +499,39 @@ static void radioSchedulerTask(void* arg) {
     if (drainIdx > 0 && item.txSf >= 10) { drainLimit = drainIdx + 1; }  // SF10+: только 1 доп. пакет
     if (drainIdx >= 2 && item.txSf >= 10) break;  // SF10+ после 2-го — стоп
 #if defined(SF_FORCE_7)
-        if (item.len >= 54 && item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_KEY_EXCHANGE) {
-          queueDeferredSend(item.buf, item.len, item.txSf, 500 + (esp_random() % 1501));
+        // KEY_EXCHANGE раньше откладывали на 0.5–2 с — на столе это давало поздний TX и лишние коллизии с HELLO.
+        lastToaUs = radio::getTimeOnAir(item.len);
+        radio::sendDirectInternal(item.buf, item.len);
+        didTx = true;
+        if (item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_MSG) {
+          vTaskDelay(pdMS_TO_TICKS(60));
+        }
+#else
+        if (item.txSf >= 10 && highSfDrained >= 2) {
+          RadioCmd rcmd;
+          rcmd.type = RadioCmdType::Tx;
+          rcmd.priority = true;
+          memcpy(rcmd.u.tx.buf, item.buf, item.len);
+          rcmd.u.tx.len = (uint16_t)item.len;
+          rcmd.u.tx.txSf = item.txSf;
+          xQueueSendToFront(radioCmdQueue, &rcmd, 0);
+          pushedBack = true;
+          break;  // не drain дальше — ждём RX
         } else {
+          if (item.txSf >= 7 && item.txSf <= 12) {
+            radio::applyHardwareSpreadingFactor(item.txSf);
+            if (item.txSf >= 10) {
+              highSfDrained++;
+              onRadioSchedulerTxSf12();
+            } else {
+              highSfDrained = 0;
+            }
+          }
           lastToaUs = radio::getTimeOnAir(item.len);
           radio::sendDirectInternal(item.buf, item.len);
           didTx = true;
           if (item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_MSG) {
             vTaskDelay(pdMS_TO_TICKS(60));
-          }
-        }
-#else
-        if (item.txSf >= 10 && highSfDrained >= 2) {
-          xQueueSendToFront(sendQueue, &item, 0);
-          pushedBack = true;
-          break;  // не drain дальше — ждём RX
-        } else {
-          if (item.len >= 54 && item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_KEY_EXCHANGE) {
-            queueDeferredSend(item.buf, item.len, item.txSf, 500 + (esp_random() % 1501));
-          } else {
-            if (item.txSf >= 7 && item.txSf <= 12) {
-              radio::setSpreadingFactor(item.txSf);
-              if (item.txSf >= 10) {
-                highSfDrained++;
-                onRadioSchedulerTxSf12();
-              } else {
-                highSfDrained = 0;
-              }
-            }
-            lastToaUs = radio::getTimeOnAir(item.len);
-            radio::sendDirectInternal(item.buf, item.len);
-            didTx = true;
-            if (item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_MSG) {
-              vTaskDelay(pdMS_TO_TICKS(60));
-            }
           }
         }
 #endif
@@ -346,14 +543,22 @@ static void radioSchedulerTask(void* arg) {
 #if !defined(SF_FORCE_7)
     if (!didTx && !pushedBack) highSfDrained = 0;  // очередь пуста — сброс. pushedBack — не сбрасывать
 #endif
-    // RX: основной режим
+    // RX: mutex не держим на vTaskDelay — иначе E-Ink/CAD/msg_queue залипают на сотни мс.
     uint8_t sf;
     uint32_t slotMs;
     getNextRxSlotParams(&sf, &slotMs);
-    radio::setSpreadingFactor(sf);
+    radio::applyHardwareSpreadingFactor(sf);
     radio::startReceiveWithTimeout(slotMs);
+    radio::setRxListenActive(true);
+    radio::releaseMutex();
     vTaskDelay(pdMS_TO_TICKS(slotMs));
+    if (radio::takeMutex(pdMS_TO_TICKS(800)) != pdTRUE) {
+      radio::setRxListenActive(false);
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
     int n = radio::receiveAsync(rxBuf, sizeof(rxBuf));
+    radio::setRxListenActive(false);
     radio::releaseMutex();
     uint32_t now = millis();
     if (now - lastRxAliveLog >= RX_ALIVE_LOG_INTERVAL_MS) {
@@ -362,42 +567,7 @@ static void radioSchedulerTask(void* arg) {
     }
     if (n > 0) {
       int rssi = radio::getLastRssi();
-      if (packetQueue) {
-        UBaseType_t qCap = uxQueueSpacesAvailable(packetQueue) + uxQueueMessagesWaiting(packetQueue);
-        UBaseType_t qLen = uxQueueMessagesWaiting(packetQueue);
-        bool isHello = (n == 13 && rxBuf[0] == protocol::SYNC_BYTE && rxBuf[2] == protocol::OP_HELLO);
-        if (!(isHello && qLen >= (qCap * 3 / 4))) {
-          PacketQueueItem pitem;
-          if ((size_t)n <= sizeof(pitem.buf)) {
-            memcpy(pitem.buf, rxBuf, (size_t)n);
-            pitem.len = (uint16_t)n;
-            pitem.rssi = (int8_t)rssi;
-            pitem.sf = sf;
-            if (xQueueSend(packetQueue, &pitem, pdMS_TO_TICKS(30)) != pdTRUE) {
-              bool added = false;
-              PacketQueueItem discarded;
-              if (xQueueReceive(packetQueue, &discarded, 0) == pdTRUE) {
-                bool wasHello = (discarded.len == 13 && discarded.buf[0] == protocol::SYNC_BYTE &&
-                    discarded.buf[2] == protocol::OP_HELLO);
-                if (wasHello) {
-                  added = (xQueueSend(packetQueue, &pitem, 0) == pdTRUE);
-                } else {
-                  xQueueSendToFront(packetQueue, &discarded, 0);
-                }
-              }
-              if (!added) {
-                TickType_t t = xTaskGetTickCount();
-                if (t - lastPacketQueueDropLog >= pdMS_TO_TICKS(5000)) {
-                  lastPacketQueueDropLog = t;
-                  RIFTLINK_LOG_ERR("[RiftLink] packetQueue full, drop\n");
-                }
-              }
-            }
-          }
-        }
-      } else {
-        handlePacket(rxBuf, (size_t)n, rssi, sf);
-      }
+      deliverRxToPacketQueue(rxBuf, n, rssi, sf);
     }
   }
 }
@@ -446,6 +616,12 @@ static void displayTask(void* arg) {
 }
 
 void asyncTasksStart() {
+  static bool s_asyncTasksStarted = false;
+  if (s_asyncTasksStarted) return;
+#if defined(USE_EINK)
+  if (!s_displaySpiGranted) s_displaySpiGranted = xSemaphoreCreateBinary();
+  if (!s_displaySpiDone) s_displaySpiDone = xSemaphoreCreateBinary();
+#endif
 #if defined(USE_EINK)
   // Paper: displayTask на ядре 0 — e-ink display() блокирует ~600ms
   // packetTask и rxTask на ядре 1 — не блокируются e-ink, обрабатывают пакеты без задержек
@@ -461,12 +637,15 @@ void asyncTasksStart() {
   if (okPacket == pdFAIL) {
     RIFTLINK_LOG_ERR("[RiftLink] packetTask create FAIL — loop будет обрабатывать packetQueue\n");
   }
-  BaseType_t okRx = xTaskCreatePinnedToCore(radioSchedulerTask, "radio", RADIO_SCHEDULER_STACK, nullptr, RADIO_SCHEDULER_PRIO, nullptr, 1);
+  BaseType_t okRx = xTaskCreatePinnedToCore(radioSchedulerTask, "radio", RADIO_SCHEDULER_STACK, nullptr, RADIO_SCHEDULER_PRIO,
+      &s_radioSchedulerTaskHandle, 1);
 #else
   xTaskCreate(packetTask, "packet", PACKET_TASK_STACK, nullptr, PACKET_TASK_PRIO_EINK, nullptr);
-  BaseType_t okRx = xTaskCreate(radioSchedulerTask, "radio", RADIO_SCHEDULER_STACK, nullptr, RADIO_SCHEDULER_PRIO, nullptr);
+  BaseType_t okRx = xTaskCreate(radioSchedulerTask, "radio", RADIO_SCHEDULER_STACK, nullptr, RADIO_SCHEDULER_PRIO,
+      &s_radioSchedulerTaskHandle);
 #endif
   if (okRx == pdFAIL) {
     RIFTLINK_LOG_ERR("[RiftLink] radioSchedulerTask create FAIL\n");
   }
+  s_asyncTasksStarted = true;
 }

@@ -45,5 +45,5 @@ void displayWake();
 void displayWakeRequest();
 /** Дисплей в слипе? */
 bool displayIsSleeping();
-/** Вызвать при asyncTasksStart — кнопка опрашивается в loopTask */
+/** Вызвать при поднятии async infra (lazy: asyncInfraEnsure) — кнопка в displayTask */
 void displaySetButtonPolledExternally(bool on);

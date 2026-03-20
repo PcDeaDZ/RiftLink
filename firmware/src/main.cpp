@@ -6,6 +6,8 @@
  */
 
 #include <Arduino.h>
+#include <stdio.h>
+#include <string.h>
 #include <esp_random.h>
 
 // Fallback: loopTask stack — build_flags -DARDUINO_LOOP_STACK_SIZE может не применяться к framework
@@ -18,6 +20,9 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include <esp_err.h>
 #include <esp_heap_caps.h>
 #include <esp_event.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <atomic>
 
 #include "radio/radio.h"
 #include "protocol/packet.h"
@@ -73,29 +78,37 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #define HELLO_INTERVAL_AGGRESSIVE_MS 8000   // 8с — быстрый discovery при 0 соседях
 #define HELLO_JITTER_MS    3000   // ±3с — при 1+ соседях
 #define HELLO_JITTER_ZERO_MS 500  // ±0.5с при 0 соседях — меньше разброс для быстрого discovery
+/** Минимум между попытками HELLO в эфир: loop (core 0) и handlePacket/packetTask (core 1) без mutex → иначе пачки «HELLO sent» и коллизии. */
+#define HELLO_MIN_AIR_GAP_MS 1800
+/** После drop (очередь/CAD) не долбить sendHello каждые ~10 ms */
+#define HELLO_DROP_RETRY_MS 350
+static uint32_t s_lastHelloAirMs = 0;
+static uint32_t s_nextHelloAfterDropMs = 0;
+/** HELLO «сразу при первом соседе» — только из loop(), не из packetTask (TX только через очередь). */
+static std::atomic<bool> s_pendingDiscoveryHello{false};
+/** HELLO в эфир только из radioSchedulerTask (loop лишь ставит флаг). */
+static std::atomic<bool> s_helloScheduled{false};
+static inline void scheduleHelloTx() {
+  s_helloScheduled.store(true, std::memory_order_release);
+}
 #define TELEM_INTERVAL_MS  60000
 #define GPS_LOC_INTERVAL_MS 60000  // интервал отправки локации с GPS
 #define SF_ADAPT_INTERVAL_MS 30000 // адаптивный SF по качеству связи
 #define POLL_INTERVAL_MS   5000    // RIT: «присылайте пакеты для меня» каждые 5с (pipelining)
 
 static uint32_t lastHello = 0;
+/** Абсолютное время следующего HELLO — джиттер задаётся один раз на период (не каждый проход loop). */
+static uint32_t s_nextHelloDueMs = 0;
+static int s_helloPlannerLastN = -999;
 static uint32_t lastPoll = 0;
 static uint32_t lastTelemetry = 0;
 static uint32_t lastGpsLoc = 0;
-static uint32_t lastSfAdapt = 0;
-static uint32_t s_rxCycleCounter = 0; // для SF12 RX: каждый N-й цикл слушать SF12
+static uint32_t s_zeroNeighSince = 0;  // для HELLO backoff при 0 соседях: 8s -> 15s -> 30s
+static uint32_t s_oneNeighSince = 0;   // bootstrap при 1 соседе: HELLO чаще первые 2 минуты
 static uint32_t s_bootTime = 0;       // millis() при старте — агрессивный discovery первые 2 мин
-static bool s_nextRxSf12 = false;     // слушать SF12 после drain HELLO на SF12
-static uint8_t s_sf12BurstCount = 0;  // 2 цикла SF12 подряд каждые 30с
-static uint32_t s_lastSf12Burst = 0;
 static uint32_t s_lastKeyRetry = 0;   // retry KEY_EXCHANGE каждые 30с для соседей без ключа
-// SF beacon: mesh (1+ соседей) рассылает «мы на SF X» перебором 7,9,10,12 — новый узел узнаёт, где искать
-#define SF_BEACON_INTERVAL_MS 45000
-#define SF_BEACON_TTL_MS 120000  // новый узел использует mesh SF 2 мин после приёма
-static uint8_t s_meshSf = 0;           // 0 = cycling, иначе фикс от beacon
-static uint32_t s_meshSfReceivedAt = 0;
-static uint8_t s_meshAdaptiveSf = 7;   // текущий SF mesh при 1+ соседях
-static uint32_t lastSfBeacon = 0;
+// Фиксированный SF: задаётся пользователем через BLE-команду "sf", значение по умолчанию = 7.
+static const uint8_t SF_DEFAULT = 7;
 static uint32_t s_loopCooldownUntil = 0;  // вместо delay(10) — throttle OTA и конец loop
 static uint8_t s_bootPhase = 0;           // 0=ожидание 4с, 1=готов
 static uint32_t s_bootPhaseStart = 0;
@@ -178,64 +191,27 @@ static void ucDedupAdd(const uint8_t* from, uint32_t msgId) {
   s_ucDedupIdx = (s_ucDedupIdx + 1) % UC_DEDUP_SIZE;
 }
 
-// Discovery: перебор 7,9,10,12 каждые 2с — без привязки к каналу, фаза по millis()
-static const uint8_t s_discoverySfList[] = {7, 9, 10, 12};
-#define DISCOVERY_SF_CYCLE_MS 2000
-
-/** Текущий SF для discovery (0 соседей). SF beacon → mesh SF. Иначе перебор 7,9,10,12 по 2с. */
-static uint8_t getDiscoverySf() {
-  uint32_t now = millis();
-  if (s_meshSf >= 7 && s_meshSf <= 12 && (now - s_meshSfReceivedAt) < SF_BEACON_TTL_MS) {
-    return s_meshSf;
-  }
-  s_meshSf = 0;
-  int idx = (now / DISCOVERY_SF_CYCLE_MS) % 4;
-  return s_discoverySfList[idx];
+/** Текущий фиксированный SF (общий для discovery и mesh). Вызывается из radioSchedulerTask. */
+uint8_t getDiscoverySf() {
+  uint8_t sf = radio::getSpreadingFactor();
+  if (sf < 7 || sf > 12) sf = SF_DEFAULT;
+  return sf;
 }
 
 /** Параметры следующего RX-слота для rxTask. Вызывать из rxTask. */
 void getNextRxSlotParams(uint8_t* sfOut, uint32_t* slotMsOut) {
-  bool aggressive = (millis() - s_bootTime) < 120000;
   int nNeigh = neighbors::getCount();
-  uint8_t baseSf = 7;
 #if !defined(SF_FORCE_7)
-  // Discovery (0 соседей): перебор 7,9,10,12 по 2с — без привязки к каналу. SF beacon → mesh SF.
-  if (nNeigh == 0) {
-    uint8_t sf = getDiscoverySf();
-    if (sfOut) *sfOut = sf;
-    if (slotMsOut) *slotMsOut = (sf >= 12) ? 1200 : ((sf >= 10) ? 400 : (aggressive ? 600 : 1000));
-    return;
-  }
-  if (s_sf12BurstCount == 0 && (millis() - s_lastSf12Burst) >= 30000) {
-    s_sf12BurstCount = 2;
-  }
-  int avgRssi = neighbors::getAverageRssi();
-  if (avgRssi < -110) baseSf = 12;
-  else if (avgRssi < -80) baseSf = 9;
-  int minRssi = neighbors::getMinRssi();
-  bool needSf10 = (minRssi != 0 && minRssi < -90);
-  int rxMod = aggressive ? 2 : (nNeigh >= 6 ? 4 : (nNeigh >= 3 ? 6 : 8));
-  uint8_t sf = 7;
-  if (s_sf12BurstCount > 0) {
-    sf = 12;
-    s_sf12BurstCount--;
-    if (s_sf12BurstCount == 0) s_lastSf12Burst = millis();
-  } else if (s_nextRxSf12) {
-    sf = 12;
-    s_nextRxSf12 = false;
-  } else {
-    int mod = s_rxCycleCounter % rxMod;
-    if (mod == 0) sf = 12;
-    else if (needSf10 && mod == 1) sf = 10;
-    else sf = baseSf;
-  }
-  s_rxCycleCounter++;
+  uint8_t sf = getDiscoverySf();
   if (sfOut) *sfOut = sf;
-  uint32_t slot = (sf >= 12) ? 1200 : ((sf >= 10) ? 400 : 100);
+  uint32_t slot = (sf >= 12) ? 1200 : ((sf >= 10) ? 400 : 120);
+  // SF7–9: базовый слот 120 ms — при плотном TX/очереди легко не поймать HELLO (2 мин OFF в neighbors).
+  // При 0–1 соседе слушаем дольше — лучше перекрытие с периодом HELLO партнёра без раздувания слота при SF12.
+  if (nNeigh <= 1 && sf < 10 && slot < 400) {
+    slot = 400;
+  }
   if (slotMsOut) *slotMsOut = slot;
 #else
-  (void)aggressive;
-  (void)nNeigh;
   if (sfOut) *sfOut = 7;
   if (slotMsOut) *slotMsOut = (nNeigh == 0) ? 800 : 200;
 #endif
@@ -292,69 +268,120 @@ static void pollButtonAndQueue() {
   }
 }
 
-void sendHello() {
+struct HelloPlan {
+  uint32_t intervalMs;
+  uint32_t jitterMs;
+  uint32_t phaseOffset;
+};
+
+/** Параметры периода HELLO (должны совпадать с логикой в loop до вызова sendHello). */
+static HelloPlan computeHelloPlan() {
+  HelloPlan p;
+  p.intervalMs = HELLO_INTERVAL_MS;
+  p.jitterMs = HELLO_JITTER_MS;
+  p.phaseOffset = 0;
+  int nNeigh = neighbors::getCount();
+  if (nNeigh == 0) {
+    uint32_t zeroElapsed = (s_zeroNeighSince == 0) ? 0 : (millis() - s_zeroNeighSince);
+    if (zeroElapsed >= 300000) p.intervalMs = 30000;
+    else if (zeroElapsed >= 120000) p.intervalMs = 15000;
+    else p.intervalMs = HELLO_INTERVAL_AGGRESSIVE_MS;
+    p.jitterMs = HELLO_JITTER_ZERO_MS;
+    p.phaseOffset = beacon_sync::getSlotFor(node::getId()) * 400u;
+  } else if (nNeigh == 1) {
+    uint32_t oneElapsed = (s_oneNeighSince == 0) ? 0 : (millis() - s_oneNeighSince);
+    p.intervalMs = (oneElapsed < 120000) ? HELLO_INTERVAL_AGGRESSIVE_MS : HELLO_INTERVAL_MS;
+  } else if (nNeigh >= 6) {
+    p.intervalMs = 24000;
+  }
+  return p;
+}
+
+static void armNextHelloDeadlineAfterSuccessfulSend() {
+  HelloPlan pl = computeHelloPlan();
+  int32_t jitter = (int32_t)(esp_random() % (pl.jitterMs * 2)) - (int32_t)pl.jitterMs;
+  int64_t due = (int64_t)millis() + (int64_t)pl.intervalMs + (int64_t)pl.phaseOffset + (int64_t)jitter;
+  if (due < 0) due = 0;
+  s_nextHelloDueMs = (uint32_t)due;
+}
+
+/** CAD отложил TX в queueDeferredSend — для HELLO это не «drop». */
+static bool helloTxReasonIsCadDefer(const char* sepReason) {
+  return sepReason && strstr(sepReason, "cad_defer") != nullptr;
+}
+
+/** @return true если пакет ушёл в radio (или в очередь TX), false если слишком рано после предыдущего HELLO */
+static bool sendHello() {
+  uint32_t now = millis();
+  // Дедлайн уже наступил, но ждём retry после drop — сдвинуть due, иначе loop долбит sendHello каждый тик без лога.
+  if (now < s_nextHelloAfterDropMs) {
+    s_nextHelloDueMs = s_nextHelloAfterDropMs;
+    return false;
+  }
+  // Минимум между реальными HELLO в эфире; иначе due «в прошлом», sendHello вызывается бесконечно и молча
+  // возвращает false — пользователь видит «HELLO перестали», хотя просто AIR_GAP.
+  if (s_lastHelloAirMs != 0 && (now - s_lastHelloAirMs) < HELLO_MIN_AIR_GAP_MS) {
+    s_nextHelloDueMs = s_lastHelloAirMs + HELLO_MIN_AIR_GAP_MS;
+    return false;
+  }
   uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID,
       31, protocol::OP_HELLO, nullptr, 0);
-  if (len == 0) return;
+  if (len == 0) return false;
 
   int n = neighbors::getCount();
   bool manyNeighbors = (n >= 6);
-  bool priority = manyNeighbors;  // HELLO в начало очереди при 6+ соседях
+  // Bootstrap: при 0/1 соседе HELLO должен проходить в эфир приоритетно,
+  // иначе узлы могут "видеть" друг друга только в одну сторону.
+  bool priority = manyNeighbors || (n <= 1);
 
+  char helloWhy[56] = {0};
+  bool helloSent = false;
 #if defined(SF_FORCE_7)
   (void)manyNeighbors;
-  radio::send(pkt, len, 7, priority);
+  helloSent = radio::send(pkt, len, 7, priority, helloWhy, sizeof helloWhy);
 #else
   if (n > 0) {
-    int minRssi = neighbors::getMinRssi();
-    uint8_t txSf = neighbors::rssiToSf(minRssi);
-    if (txSf >= 10) {
-      uint8_t prev = radio::getSpreadingFactor();
-      radio::setSpreadingFactor(txSf);
-      uint32_t toa = radio::getTimeOnAir(len);
-      radio::setSpreadingFactor(prev);
-      if (!duty_cycle::canSend(toa)) txSf = neighbors::rssiToSf(-85);
-    }
-    if (radio::send(pkt, len, txSf, priority)) {}
-    // Двойной HELLO при 6+ соседях: SF12 + SF7 — дальние и близкие слышат
-    if (manyNeighbors && txSf != 7) {
-      uint8_t prev = radio::getSpreadingFactor();
-      radio::setSpreadingFactor(7);
-      uint32_t toa7 = radio::getTimeOnAir(len);
-      radio::setSpreadingFactor(prev);
-      if (duty_cycle::canSend(toa7)) radio::send(pkt, len, 7, priority);
-    }
-  } else {
-    // Discovery: перебор 7,9,10,12 — без привязки к каналу
     uint8_t txSf = getDiscoverySf();
-    if (txSf >= 10 && !duty_cycle::canSend(radio::getTimeOnAir(len))) txSf = 7;
-    radio::send(pkt, len, txSf, false);
+    helloSent = radio::send(pkt, len, txSf, priority, helloWhy, sizeof helloWhy);
+    (void)manyNeighbors;
+  } else {
+    // Discovery и mesh работают на едином фиксированном SF.
+    uint8_t txSf = getDiscoverySf();
+    helloSent = radio::send(pkt, len, txSf, priority, helloWhy, sizeof helloWhy);
   }
 #endif
-  Serial.printf("[RiftLink] HELLO sent n=%d heap=%u\n", n, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  bool viaCadDefer = false;
+  if (!helloSent && helloTxReasonIsCadDefer(helloWhy)) {
+    helloSent = true;
+    viaCadDefer = true;
+  }
+  if (helloSent) {
+    const char* tag = viaCadDefer ? " (deferred/CAD)" : "";
+    Serial.printf("[RiftLink] HELLO sent%s n=%d heap=%u\n", tag,
+        n, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  } else {
+    Serial.printf("[RiftLink] HELLO drop why=%s n=%d heap=%u\n",
+        helloWhy[0] ? helloWhy : "unknown",
+        n, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  }
+  if (helloSent) {
+    s_lastHelloAirMs = millis();
+    s_nextHelloAfterDropMs = 0;
+    return true;
+  }
+  // drop: lastHello в loop не сдвигаем; короткая пауза перед следующей попыткой
+  s_nextHelloAfterDropMs = now + HELLO_DROP_RETRY_MS;
+  return false;
 }
 
-/** SF beacon: mesh рассылает «мы на SF X» перебором 7,9,10,12 — новый узел (перебором) получает и переключается. */
-static void sendSfBeacon() {
-#if defined(SF_FORCE_7)
-  (void)0;
-#else
-  uint8_t meshSf = s_meshAdaptiveSf;
-  if (meshSf < 7 || meshSf > 12) meshSf = 7;
-  uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN_BROADCAST + 1];
-  size_t len = protocol::buildPacket(pkt, sizeof(pkt),
-      node::getId(), protocol::BROADCAST_ID,
-      31, protocol::OP_SF_BEACON, &meshSf, 1);
-  if (len == 0) return;
-  static const uint8_t beaconSfs[] = {7, 9, 10, 12};
-  for (int i = 0; i < 4; i++) {
-    uint8_t sf = beaconSfs[i];
-    if (sf >= 10 && !duty_cycle::canSend(radio::getTimeOnAir(len))) continue;
-    queueSend(pkt, len, sf, false);
-  }
-#endif
+/** Только из `radioSchedulerTask` — снимает флаг и выполняет одну попытку HELLO. */
+void mainDrainHelloFromScheduler(void) {
+  if (!s_helloScheduled.exchange(false, std::memory_order_acq_rel)) return;
+  if (!sendHello()) return;
+  lastHello = millis();
+  armNextHelloDeadlineAfterSuccessfulSend();
 }
 
 void sendPoll() {
@@ -362,9 +389,7 @@ void sendPoll() {
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_POLL, nullptr, 0);
   if (len == 0) return;
-  uint8_t txSf = neighbors::getCount() > 0
-      ? neighbors::rssiToSf(neighbors::getMinRssi()) : 12;
-  if (txSf == 0) txSf = 12;
+  uint8_t txSf = getDiscoverySf();
   radio::send(pkt, len, txSf, false);
 }
 
@@ -441,6 +466,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     } else if (len == 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 &&
                buf[2] == protocol::OP_KEY_EXCHANGE && !(buf[1] & 0x01)) {
       // Обрезанный KEY_EXCHANGE (коллизия/half-duplex) — извлечь from, добавить в соседи
+      RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE truncated len=13 (v2) — нет 32 B pubkey, onKeyExchange не вызывается\n");
       radio::notifyCongestion();  // коллизия → BEB увеличит CW
       uint8_t from[protocol::NODE_ID_LEN];
       memcpy(from, buf + 3, protocol::NODE_ID_LEN);
@@ -450,9 +476,24 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       return;
     } else if (len >= 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x30 &&
                !(buf[1] & 0x01)) {
+      // v2.1 unicast: полный KEY по длине, но parsePacket не прошёл — не путать с обрезком (раньше уходили в NACK без лога)
+      if (buf[2] == protocol::OP_KEY_EXCHANGE &&
+          len >= protocol::keyExchangeTotalLen(true, false)) {
+        uint16_t pktId = (uint16_t)buf[3] | ((uint16_t)buf[4] << 8);
+        RIFTLINK_LOG_ERR(
+            "[RiftLink] KEY_EXCHANGE full len=%u pktId=%u parse FAILED — onKeyExchange не вызывается (битая рама/CRC?)\n",
+            (unsigned)len, (unsigned)pktId);
+        radio::notifyCongestion();
+        return;
+      }
       // v2.1 с pktId — обрезанный пакет (13 B = sync+ver+opcode+pktId+from), отправить NACK для retransmit
       radio::notifyCongestion();  // коллизия → BEB
       uint16_t pktId = (uint16_t)buf[3] | ((uint16_t)buf[4] << 8);
+      if (buf[2] == protocol::OP_KEY_EXCHANGE &&
+          len < protocol::keyExchangeTotalLen(true, false)) {
+        RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE truncated len=%u pktId=%u — ждём NACK/retransmit; onKeyExchange не вызывается\n",
+            (unsigned)len, (unsigned)pktId);
+      }
       uint8_t from[protocol::NODE_ID_LEN];
       memcpy(from, buf + 5, protocol::NODE_ID_LEN);
       if (!node::isBroadcast(from) && !node::isInvalidNodeId(from) &&
@@ -492,11 +533,20 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         Serial.println();
       }
 #endif
+      if (len > 13 && buf[0] == protocol::SYNC_BYTE && buf[2] == protocol::OP_KEY_EXCHANGE) {
+        bool v21 = (buf[1] & 0xF0) == 0x30;
+        size_t need = protocol::keyExchangeTotalLen(v21, (buf[1] & 0x01) != 0);
+        if (len < need) {
+          RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE incomplete len=%u (need %u) — parse/отбрасывание; onKeyExchange не вызывается\n",
+              (unsigned)len, (unsigned)need);
+        }
+      }
       return;
     }
   }
 
 #if defined(DEBUG_PACKET_DUMP)
+  // Только успешный parsePacket: HELLO=13 B, KEY v2.1=55 B. Если в эфире только len=13 — полный KEY до парсера не дошёл (коллизия/очередь/не принят).
   Serial.printf("[PKT] len=%u rssi=%d sf=%u hex=", (unsigned)len, rssi, sf);
   for (size_t i = 0; i < len && i < 64; i++) Serial.printf("%02X", buf[i]);
   if (len > 64) Serial.print("...");
@@ -633,13 +683,16 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
       }
       bool hadKey = x25519_keys::hasKeyFor(hdr.from);
+      RIFTLINK_LOG_EVENT("[RiftLink] KEY_EXCHANGE rx parsed payload=%u from %02X%02X (→ onKeyExchange)\n",
+          (unsigned)payloadLen, hdr.from[0], hdr.from[1]);
       x25519_keys::onKeyExchange(hdr.from, payload);
-      bool useSf12 = (rssi < -90) || (sf == 12);
-      if (!hadKey) {
-        x25519_keys::sendKeyExchange(hdr.from, useSf12, true, false);
-      } else {
-        // У нас уже есть ключ — пир мог не получить наш. Ответ с троттлом 60с.
-        x25519_keys::sendKeyExchange(hdr.from, useSf12, true, true);
+      if (x25519_keys::hasKeyFor(hdr.from)) {
+        if (!hadKey) {
+          x25519_keys::sendKeyExchange(hdr.from, true, false, "key_rx");
+        } else {
+          // У нас уже есть ключ — пир мог не получить наш. Ответ с троттлом 60с.
+          x25519_keys::sendKeyExchange(hdr.from, true, true, "key_rx");
+        }
       }
     } else if (hdr.opcode == protocol::OP_HELLO) {
       beacon_sync::onBeaconReceived(hdr.from);
@@ -650,8 +703,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
       }
       if (!x25519_keys::hasKeyFor(hdr.from)) {
-        bool useSf12 = (rssi < -90) || (sf == 12);
-        x25519_keys::sendKeyExchange(hdr.from, useSf12);  // троттл 60с в x25519_keys
+        x25519_keys::sendKeyExchange(hdr.from, false, false, "hello_fwd");  // троттл 60с в x25519_keys
       }
     }
     return;
@@ -668,25 +720,22 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
         }
         bool hadKey = x25519_keys::hasKeyFor(hdr.from);
+        RIFTLINK_LOG_EVENT("[RiftLink] KEY_EXCHANGE rx parsed payload=%u from %02X%02X (→ onKeyExchange)\n",
+            (unsigned)payloadLen, hdr.from[0], hdr.from[1]);
         x25519_keys::onKeyExchange(hdr.from, payload);
-        bool useSf12 = (rssi < -90) || (sf == 12);
-        if (!hadKey) {
-          ble::requestNeighborsNotify();  // приложение: обновить hasKey (ожидание ключа → готов)
-          x25519_keys::sendKeyExchange(hdr.from, useSf12, true, false);
-        } else {
-          x25519_keys::sendKeyExchange(hdr.from, useSf12, true, true);  // троттл 60с — пир мог не получить наш
+        if (x25519_keys::hasKeyFor(hdr.from)) {
+          if (!hadKey) {
+            ble::requestNeighborsNotify();  // приложение: обновить hasKey (ожидание ключа → готов)
+            x25519_keys::sendKeyExchange(hdr.from, true, false, "key_rx");
+          } else {
+            x25519_keys::sendKeyExchange(hdr.from, true, true, "key_rx");  // троттл 60с — пир мог не получить наш
+          }
         }
       }
       break;
 
     case protocol::OP_SF_BEACON:
-      if (payloadLen >= 1 && neighbors::getCount() == 0) {
-        uint8_t meshSf = payload[0];
-        if (meshSf >= 7 && meshSf <= 12) {
-          s_meshSf = meshSf;
-          s_meshSfReceivedAt = millis();
-        }
-      }
+      // SF beacon не используется в режиме фиксированного SF.
       break;
 
     case protocol::OP_HELLO:
@@ -700,8 +749,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           Serial.printf("[RiftLink] Discovery: new neighbor %02X%02X heap=%u\n",
               hdr.from[0], hdr.from[1], (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
           if (nBefore == 0) {
-            sendHello();
-            lastHello = millis();  // Немедленный HELLO — узел с 0 соседями добавит нас сразу (асимметрия N1↔N2)
+            // Не вызывать sendHello() здесь (packetTask) — только очередь TX из loop
+            // и долго держит s_radioMutex — radioScheduler в это время ждёт mutex → «мертвый» mesh, loop залипает.
+            s_pendingDiscoveryHello.store(true, std::memory_order_release);
           }
           ble::requestNeighborsNotify();
           queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info при новом соседе
@@ -709,8 +759,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         }
       }
       if (!x25519_keys::hasKeyFor(hdr.from)) {
-        bool useSf12 = (rssi < -90) || (sf == 12);
-        x25519_keys::sendKeyExchange(hdr.from, useSf12);  // троттл 60с в x25519_keys
+        x25519_keys::sendKeyExchange(hdr.from, false, false, "hello");  // троттл 60с в x25519_keys
       }
       break;
 
@@ -720,7 +769,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           size_t decLen = 0;
           if (!crypto::decryptFrom(hdr.from, payload, payloadLen, decBuf, &decLen) || decLen >= 256) {
             RIFTLINK_LOG_ERR("[RiftLink] Decrypt FAILED (from %02X%02X — no key?)\n", hdr.from[0], hdr.from[1]);
-            if (!x25519_keys::hasKeyFor(hdr.from)) { bool useSf12 = (rssi < -90) || (sf == 12); x25519_keys::sendKeyExchange(hdr.from, useSf12); }
+            if (!x25519_keys::hasKeyFor(hdr.from)) {
+              x25519_keys::sendKeyExchange(hdr.from, false, false, "msg_no_key");
+            }
             break;
           }
           if (protocol::isCompressed(hdr)) {
@@ -927,7 +978,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(hdr.from));
           if (txSf == 0) txSf = 12;
           if (!radio::send(pongPkt, pongLen, txSf, true)) {
-            queueDeferredSend(pongPkt, pongLen, txSf, 50);  // fallback при полной sendQueue
+            queueDeferredSend(pongPkt, pongLen, txSf, 50);  // fallback при полной radioCmdQueue
           }
         }
       }
@@ -1046,7 +1097,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 
 /** Callback из radioSchedulerTask: после TX на SF12 — следующий RX слот на SF12 (V4). */
 void onRadioSchedulerTxSf12(void) {
-  s_nextRxSf12 = true;
+  // Фиксированный SF: отдельный "подхват SF12 после TX" не нужен.
 }
 
 #if defined(USE_EINK)
@@ -1095,13 +1146,11 @@ void setup() {
   }
 #if defined(USE_EINK)
   wifi::init();  // Paper: до displayInit (макс. heap), при OOM — WiFi/OTA отключены
-  Serial.printf("[RiftLink] Heap after wifi::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 #endif
+  Serial.printf("[RiftLink] Heap after wifi::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   locale::init();
   displayInit();
-#if defined(USE_EINK)
   Serial.printf("[RiftLink] Heap after displayInit: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-#endif
   displayShowBootScreen();
   s_bootPhase = BOOT_PHASE_WAIT_4S;
   s_bootPhaseStart = millis();
@@ -1128,6 +1177,7 @@ static void runBootStateMachine() {
   x25519_keys::init();
 #if !defined(USE_EINK)
   wifi::init();  // OLED: после crypto
+  Serial.printf("[RiftLink] Heap after wifi::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 #endif
   if (!radio::init()) {
     RIFTLINK_LOG_ERR("[RiftLink] Radio init FAILED\n");
@@ -1137,18 +1187,14 @@ static void runBootStateMachine() {
     displayText(0, 10, locale::getForDisplay("radio_ok"));
     displayShow();
   }
-#if defined(USE_EINK)
   Serial.printf("[RiftLink] Heap after radio::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-#endif
   if (!region::isSet()) {
     displayShowRegionPicker();
   }
   if (!ble::init()) {
     RIFTLINK_LOG_ERR("[RiftLink] BLE init FAILED — устройство не будет видно в скане\n");
   }
-#if defined(USE_EINK)
   Serial.printf("[RiftLink] Heap after ble::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-#endif
   ble::setOnSend(sendMsg);
   ble::setOnLocation(sendLocation);
   msg_queue::init();
@@ -1166,9 +1212,7 @@ static void runBootStateMachine() {
     return msg_queue::registerPendingFromFusion(to, msgId, pkt, pktLen, txSf);
   });
   network_coding::init();
-#if defined(USE_EINK)
   Serial.printf("[RiftLink] Heap after packet_fusion+network_coding: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-#endif
   msg_queue::setOnUnicastSent([](const uint8_t* to, uint32_t msgId) { ble::notifySent(to, msgId); });
   msg_queue::setOnUnicastUndelivered([](const uint8_t* to, uint32_t msgId) {
     radio::notifyCongestion();
@@ -1177,48 +1221,37 @@ static void runBootStateMachine() {
   msg_queue::setOnBroadcastSent([](uint32_t msgId) { ble::notifySent(protocol::BROADCAST_ID, msgId); });
   msg_queue::setOnBroadcastDelivery([](uint32_t msgId, int d, int t) { ble::notifyBroadcastDelivery(msgId, d, t); });
   frag::init();
-#if defined(USE_EINK)
   Serial.printf("[RiftLink] Heap after frag::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-#endif
   telemetry::init();
   neighbors::init();
-#if defined(USE_EINK)
   Serial.printf("[RiftLink] Heap after neighbors::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-#endif
   pkt_cache::init();
   groups::init();
   offline_queue::init();
   routing::init();
-#if defined(USE_EINK)
   Serial.printf("[RiftLink] Heap after routing::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-#endif
-  voice_frag::init();
-#if defined(USE_EINK)
-  Serial.printf("[RiftLink] Heap after voice_frag::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-#endif
+  // voice_frag: lazy-init при первом VOICE_MSG (send / onFragment); deinit() при необходимости освободит слоты
   powersave::init();
-  // Очереди, затем WiFi/ESP-NOW до async tasks — event loop WiFi нужен heap (~4KB task)
-#if defined(USE_EINK)
-  Serial.printf("[RiftLink] Heap before asyncQueues: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-#endif
-  if (!asyncQueuesInit()) {
-    RIFTLINK_LOG_ERR("[RiftLink] Async queues init FAILED\n");
-  }
+  // Очереди + packet/display/radio tasks — сразу после send_overflow (V3/V4/Paper): иначе первый TX/NACK на
+  // обрезанный KEY вызывал asyncInfraEnsure() в середине discovery (heap «прыгал», окно RX терялось).
+  Serial.printf("[RiftLink] Heap before WiFi (async infra starting): %u\n",
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   send_overflow::init();
+  Serial.printf("[RiftLink] Heap after send_overflow::init: %u\n",
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  if (!asyncInfraEnsure()) {
+    RIFTLINK_LOG_ERR("[RiftLink] Async infra init FAILED at boot\n");
+  }
   if (wifi::isAvailable()) {
     Serial.printf("[RiftLink] Heap before ESP-NOW: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     esp_now_slots::init();
+    Serial.printf("[RiftLink] Heap after esp_now_slots::init: %u\n",
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     if (wifi::hasCredentials()) wifi::connect();
   }
   gps::init();
-  if (packetQueue && sendQueue && displayQueue) {
-    radio::setAsyncMode(true);
-    displaySetButtonPolledExternally(true);
-    asyncTasksStart();  // radioSchedulerTask = RX + drain в одном таске
-  }
   displayShowScreenForceFull(0);
   s_bootTime = millis();
-  s_lastSf12Burst = millis();
   s_lastKeyRetry = millis() + (node::getId()[0] % 16) * 500;
 }
 
@@ -1227,12 +1260,34 @@ void loop() {
     runBootStateMachine();
     return;
   }
+
+  // HELLO: сначала смена плана по числу соседей — до pending discovery. Иначе pending делает
+  // sendHello+armNextHelloDeadline (~+8с), а блок ниже перезаписывал s_nextHelloDueMs=millis() и во втором
+  // sendHello в том же проходе срабатывал HELLO_MIN_AIR_GAP без лога («HELLO один раз и тишина»).
+  int nNeigh = neighbors::getCount();
+  if (nNeigh == 0) {
+    if (s_zeroNeighSince == 0) s_zeroNeighSince = millis();
+    s_oneNeighSince = 0;
+  } else if (nNeigh == 1) {
+    s_zeroNeighSince = 0;
+    if (s_oneNeighSince == 0) s_oneNeighSince = millis();
+  } else {
+    s_zeroNeighSince = 0;  // появился сосед — сбросить backoff
+    s_oneNeighSince = 0;
+  }
+  if (nNeigh != s_helloPlannerLastN) {
+    s_helloPlannerLastN = nNeigh;
+    s_nextHelloDueMs = millis();
+  }
+
+  // Отложенный discovery HELLO (см. OP_HELLO в handlePacket) — постановка в radioSchedulerTask.
+  if (s_pendingDiscoveryHello.exchange(false, std::memory_order_acq_rel)) {
+    scheduleHelloTx();
+  }
   if (millis() < s_loopCooldownUntil) {
     vTaskDelay(pdMS_TO_TICKS(1));
     return;
   }
-  bool aggressive = (millis() - s_bootTime) < 120000;  // первые 2 мин — агрессивный discovery
-
   if (ota::isActive()) {
     ota::update();
     pollButtonAndQueue();
@@ -1241,19 +1296,15 @@ void loop() {
     return;
   }
 
-  // HELLO: 0 сосед — 18с (aggressive discovery); 1+ сосед — 30с; 6+ — 24с (меньше спама)
+  // HELLO: 0 сосед — backoff 8с -> 15с -> 30с; 1+ сосед — 30с; 6+ — 24с (меньше спама)
   // Фазирование по слоту (beacon_sync): при 0 соседях каждый узел смещён на свой слот — меньше storm
-  int nNeigh = neighbors::getCount();
-  uint32_t helloInterval = (nNeigh == 0 && aggressive) ? HELLO_INTERVAL_AGGRESSIVE_MS
-      : ((nNeigh == 0) ? HELLO_INTERVAL_AGGRESSIVE_MS : (nNeigh >= 6 ? 24000 : HELLO_INTERVAL_MS));
-  uint32_t jitterMs = (nNeigh == 0) ? HELLO_JITTER_ZERO_MS : HELLO_JITTER_MS;
-  uint32_t jitter = (esp_random() % (jitterMs * 2)) - (int32_t)jitterMs;
-  uint32_t phaseOffset = (nNeigh == 0) ? (beacon_sync::getSlotFor(node::getId()) * 400u) : 0;
-  if (millis() - lastHello > (helloInterval + (int32_t)jitter + phaseOffset)) {
-    sendHello();
-    lastHello = millis();
+  // Дедлайн следующего HELLO + один джиттер на период. Раньше: новый esp_random() каждый проход loop
+  // → при millis()-lastHello чуть выше минимума ~1/6 попыток каждые 10 ms проходили → шторм «HELLO sent».
+  if ((int32_t)(millis() - s_nextHelloDueMs) >= 0) {
+    scheduleHelloTx();
   }
-  if (millis() - lastPoll > POLL_INTERVAL_MS) {
+  // POLL нужен в mesh. При 0 соседях он только зашумляет эфир и мешает discovery на SF12.
+  if (nNeigh > 1 && millis() - lastPoll > POLL_INTERVAL_MS) {
     sendPoll();
     lastPoll = millis();
   }
@@ -1262,24 +1313,7 @@ void loop() {
     lastTelemetry = millis();
   }
 
-  // Адаптивный SF: по среднему RSSI соседей — SF7 (хорошая связь), SF9 (средняя), SF12 (слабая)
-#if !defined(SF_FORCE_7)
-  if (millis() - lastSfAdapt > SF_ADAPT_INTERVAL_MS) {
-    int avgRssi = neighbors::getAverageRssi();
-    uint8_t sf = 7;
-    if (neighbors::getCount() > 0) {
-      if (avgRssi < -110) sf = 12;
-      else if (avgRssi < -80) sf = 9;
-    }
-    s_meshAdaptiveSf = sf;
-    radio::setSpreadingFactor(sf);
-    lastSfAdapt = millis();
-  }
-  if (nNeigh >= 1 && millis() - lastSfBeacon > SF_BEACON_INTERVAL_MS) {
-    sendSfBeacon();
-    lastSfBeacon = millis();
-  }
-#endif
+  // SF фиксированный: не меняем автоматически и не шлём SF beacon.
 
   esp_now_slots::tickAdaptive();
 
@@ -1464,11 +1498,16 @@ void loop() {
 
   pollButtonAndQueue();  // drain в radioSchedulerTask — loop не блокируется
 
-  // Fallback: loop помогает drain packetQueue если packetTask не успевает (V3/V4/Paper)
+  // Fallback: loop помогает drain packetQueue если packetTask не успевает (V3/V4/Paper).
+  // Раньше: до 8× handlePacket подряд — при burst (HELLO/KEY) итерация loop занимала сотни мс,
+  // кнопки и Serial не опрашивались; RX alive в radioSchedulerTask шёл отдельной задачей → «зависание UI».
   if (packetQueue && uxQueueMessagesWaiting(packetQueue) > 8) {
     PacketQueueItem pitem;
-    for (int i = 0; i < 8 && xQueueReceive(packetQueue, &pitem, 0) == pdTRUE; i++) {
+    constexpr int kLoopDrainMax = 2;
+    for (int i = 0; i < kLoopDrainMax && xQueueReceive(packetQueue, &pitem, 0) == pdTRUE; i++) {
       handlePacket(pitem.buf, pitem.len, (int)pitem.rssi, pitem.sf);
+      pollButtonAndQueue();
+      vTaskDelay(1);  // yield: packetTask, displayTask, BLE
     }
   }
 
@@ -1485,38 +1524,14 @@ void loop() {
     for (int i = 0; i < n; i++) {
       uint8_t peerId[protocol::NODE_ID_LEN];
       if (neighbors::getId(i, peerId) && !x25519_keys::hasKeyFor(peerId)) {
-        x25519_keys::sendKeyExchange(peerId, true);
+        x25519_keys::sendKeyExchange(peerId, false, false, "retry");
         s_keyRetryCooldownUntil = millis() + 800 + (esp_random() % 400);  // 0.8–1.2 с, без delay()
         break;
       }
     }
   }
 
-  // RX: powersave — loop (держим mutex, rxTask при canSleep не трогает радио); иначе — rxTask
-  int n = 0;
-  if (powersave::canSleep()) {
-    if (radio::takeMutex(pdMS_TO_TICKS(100))) {
-      radio::setSpreadingFactor(7);
-      radio::startReceiveWithTimeout(1000);
-      n = powersave::sleepUntilPacketOrTimeout(rxBuf, sizeof(rxBuf));  // sleep + receiveAsync внутри
-      radio::releaseMutex();
-    }
-    if (n > 0) {
-      int rssi = radio::getLastRssi();
-      if (packetQueue) {
-        PacketQueueItem item;
-        if ((size_t)n <= sizeof(item.buf)) {
-          memcpy(item.buf, rxBuf, (size_t)n);
-          item.len = (uint16_t)n;
-          item.rssi = (int8_t)rssi;
-          item.sf = 7;
-          xQueueSend(packetQueue, &item, pdMS_TO_TICKS(30));
-        }
-      } else {
-        handlePacket(rxBuf, (size_t)n, rssi, 7);
-      }
-    }
-  }
+  // RX и powersave RX — только в radioSchedulerTask (loop без radio::takeMutex).
 
   ble::update();
   msg_queue::update();

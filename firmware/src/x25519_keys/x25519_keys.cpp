@@ -41,7 +41,16 @@ static SemaphoreHandle_t s_mutex = nullptr;
 #define KEY_DEBOUNCE_MS 1500             // мин. пауза между отправками одному пиру (HELLO+KEY_EXCHANGE подряд → 1 пакет)
 struct ThrottleEntry { uint8_t peerId[protocol::NODE_ID_LEN]; uint32_t lastSend; };
 static ThrottleEntry s_throttle[4];
-static uint8_t s_throttleIdx = 0;
+
+/** Слот троттла по хэшу peerId — не round-robin: иначе 4 чужие TX затирают lastSend и дебаунс HELLO+KEY ломается */
+static int throttleSlotForPeer(const uint8_t* peerId) {
+  uint32_t h = 2166136261u;
+  for (int i = 0; i < protocol::NODE_ID_LEN; i++) {
+    h ^= peerId[i];
+    h *= 16777619u;
+  }
+  return (int)(h % 4);
+}
 
 namespace x25519_keys {
 
@@ -109,13 +118,37 @@ static int findFreeSlot() {
 }
 
 void onKeyExchange(const uint8_t* peerId, const uint8_t* theirPubKey) {
-  if (!s_inited || !peerId || !theirPubKey || node::isForMe(peerId) || node::isInvalidNodeId(peerId)) return;
-  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
+  if (!s_inited) {
+    RIFTLINK_LOG_ERR("[RiftLink] X25519 onKeyExchange skip: keys not inited\n");
+    return;
+  }
+  if (!peerId || !theirPubKey) {
+    RIFTLINK_LOG_ERR("[RiftLink] X25519 onKeyExchange skip: null peer/payload\n");
+    return;
+  }
+  if (node::isForMe(peerId)) {
+    return;  // эхо своего KEY — без шума
+  }
+  if (node::isInvalidNodeId(peerId)) {
+    RIFTLINK_LOG_ERR("[RiftLink] X25519 onKeyExchange skip: invalid node id\n");
+    return;
+  }
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
+    RIFTLINK_LOG_ERR("[RiftLink] X25519 onKeyExchange: mutex timeout peer=%02X%02X\n",
+        peerId[0], peerId[1]);
+    return;
+  }
 
   int idx = findPeer(peerId);
   if (idx < 0) idx = findFreeSlot();
 
-  if (crypto_box_beforenm(s_peers[idx].sharedKey, theirPubKey, s_secKey) != 0) return;
+  if (crypto_box_beforenm(s_peers[idx].sharedKey, theirPubKey, s_secKey) != 0) {
+    xSemaphoreGive(s_mutex);
+    // Частая причина «нет строки X25519 key»: мусор в 32 B после обрезанного KEY в эфире (см. NACK/retransmit)
+    RIFTLINK_LOG_ERR("[RiftLink] X25519 crypto_box_beforenm FAILED peer=%02X%02X pub32=%02X%02X...\n",
+        peerId[0], peerId[1], theirPubKey[0], theirPubKey[1]);
+    return;
+  }
 
   memcpy(s_peers[idx].peerId, peerId, protocol::NODE_ID_LEN);
   s_peers[idx].timestamp = millis();
@@ -143,7 +176,7 @@ bool getKeyFor(const uint8_t* peerId, uint8_t* keyOut) {
   return ok;
 }
 
-void sendKeyExchange(const uint8_t* peerId, bool useSf12, bool forceSend, bool hadKeyBefore) {
+void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, const char* reason) {
   if (!s_inited || !peerId || node::isForMe(peerId) || node::isBroadcast(peerId) || node::isInvalidNodeId(peerId)) return;
   if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
 
@@ -178,24 +211,34 @@ void sendKeyExchange(const uint8_t* peerId, bool useSf12, bool forceSend, bool h
     }
   }
 
-  RIFTLINK_LOG_EVENT("[RiftLink] Sending KEY_EXCHANGE to %02X%02X\n", peerId[0], peerId[1]);
-
-  // Записать в throttle
-  memcpy(s_throttle[s_throttleIdx].peerId, peerId, protocol::NODE_ID_LEN);
-  s_throttle[s_throttleIdx].lastSend = millis();
-  s_throttleIdx = (s_throttleIdx + 1) % 4;
-
+  // Записать в throttle и снять копию ключа под мьютексом; radio::send() — сеть/очереди/другие мьютексы — только после Give.
+  int tslot = throttleSlotForPeer(peerId);
+  memcpy(s_throttle[tslot].peerId, peerId, protocol::NODE_ID_LEN);
+  s_throttle[tslot].lastSend = millis();
   uint16_t pktId = ++s_pktIdCounter;
+  uint8_t pubCopy[X25519_PUBKEY_LEN];
+  memcpy(pubCopy, s_pubKey, X25519_PUBKEY_LEN);
+  xSemaphoreGive(s_mutex);
+
+  if (reason && reason[0]) {
+    RIFTLINK_LOG_EVENT("[RiftLink] Sending KEY_EXCHANGE (%s) to %02X%02X\n", reason, peerId[0], peerId[1]);
+  } else {
+    RIFTLINK_LOG_EVENT("[RiftLink] Sending KEY_EXCHANGE to %02X%02X\n", peerId[0], peerId[1]);
+  }
   uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN_PKTID + X25519_PUBKEY_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), peerId, 31, protocol::OP_KEY_EXCHANGE,
-      s_pubKey, X25519_PUBKEY_LEN, false, false, false, protocol::CHANNEL_DEFAULT, pktId);
-  uint8_t txSf = useSf12 ? 12 : 0;
+      pubCopy, X25519_PUBKEY_LEN, false, false, false, protocol::CHANNEL_DEFAULT, pktId);
+  // Всегда текущий mesh SF (txSf=0) — без отдельного SF12 для KEY при фиксированном SF в настройках.
   if (len > 0) {
     pkt_cache::add(peerId, pktId, pkt, len);
-    radio::send(pkt, len, txSf, false);  // priority=false — не вытеснять MSG в очереди
+    char reason[40];
+    // priority: не теряться за ACK/очередью — иначе «Sending KEY_EXCHANGE» без фактического TX и залипания.
+    if (!radio::send(pkt, len, 0, true, reason, sizeof(reason))) {
+      RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE tx NOT queued (%s) to %02X%02X pktId=%u\n",
+          reason[0] ? reason : "?", peerId[0], peerId[1], (unsigned)pktId);
+    }
   }
-  xSemaphoreGive(s_mutex);
 }
 
 }  // namespace x25519_keys

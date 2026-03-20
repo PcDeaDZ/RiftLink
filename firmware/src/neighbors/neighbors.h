@@ -11,7 +11,8 @@
 #include "protocol/packet.h"
 
 #define NEIGHBORS_MAX 16  // 10+ узлов — без вытеснения
-#define NEIGHBOR_TIMEOUT_MS 120000  // 2 мин — узел считается офлайн (HELLO каждые 10с)
+// HELLO у 1 соседа после «прогрева» может быть до 30 с + jitter; мало окно RX — запас против ложного OFF.
+#define NEIGHBOR_TIMEOUT_MS 180000  // 3 мин без пакетов от узла — офлайн
 
 namespace neighbors {
 

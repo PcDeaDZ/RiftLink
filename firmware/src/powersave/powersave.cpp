@@ -50,10 +50,7 @@ bool canSleep() {
 #endif
 }
 
-int sleepUntilPacketOrTimeout(uint8_t* buf, size_t maxLen) {
-  if (!buf || maxLen == 0) return -1;
-
-  // Пробуждение по DIO1 (packet), кнопке (GPIO0) или таймеру
+void lightSleepWake() {
   gpio_wakeup_enable((gpio_num_t)DIO1_GPIO, GPIO_INTR_HIGH_LEVEL);
   gpio_wakeup_enable((gpio_num_t)0, GPIO_INTR_LOW_LEVEL);  // USER_SW — active low
   esp_sleep_enable_gpio_wakeup();
@@ -61,9 +58,6 @@ int sleepUntilPacketOrTimeout(uint8_t* buf, size_t maxLen) {
   esp_light_sleep_start();
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
-
-  // Проверяем, пришёл ли пакет (DIO1 мог сработать)
-  return radio::receiveAsync(buf, maxLen);
 }
 
 }  // namespace powersave

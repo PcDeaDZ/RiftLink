@@ -10,7 +10,6 @@
 
 #include "region.h"
 #include "radio/radio.h"
-#include "duty_cycle/duty_cycle.h"
 #include <Arduino.h>
 #include <nvs.h>
 #include <nvs_flash.h>
@@ -103,8 +102,7 @@ bool setRegion(const char* code) {
       }
 
       float freq = getFreqForPreset(s_current);
-      radio::applyRegion(freq, s_current.power);
-      duty_cycle::reset();
+      radio::requestApplyRegion(freq, s_current.power);
       Serial.printf("[RiftLink] Region: %s, %.1f MHz, %d dBm\n",
           s_current.code, freq, s_current.power);
       return true;
@@ -146,8 +144,7 @@ bool setChannel(int ch) {
   }
 
   float freq = EU_CHANNELS[ch];
-  radio::applyRegion(freq, s_current.power);
-  duty_cycle::reset();
+  radio::requestApplyRegion(freq, s_current.power);
   Serial.printf("[RiftLink] Channel: %d (%.1f MHz)\n", ch, freq);
   return true;
 }

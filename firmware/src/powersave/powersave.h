@@ -21,13 +21,9 @@ void setEnabled(bool on);
 bool canSleep();
 
 /**
- * Сон до приёма пакета или таймаута.
- * Перед вызовом radio должен быть в RX (startReceiveWithTimeout).
- * @param buf буфер для пакета
- * @param maxLen размер буфера
- * @return >0 длина пакета, 0 таймаут, <0 ошибка
+ * Только light sleep (без SPI). Перед вызовом: startReceive уже выполнен, mutex радио отпущен.
  */
-int sleepUntilPacketOrTimeout(uint8_t* buf, size_t maxLen);
+void lightSleepWake();
 
 /** Макс. время сна в мкс (1 сек) */
 constexpr uint64_t SLEEP_TIMEOUT_US = 1000000;

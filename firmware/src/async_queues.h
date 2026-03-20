@@ -18,13 +18,35 @@ struct PacketQueueItem {
   uint8_t buf[PACKET_BUF_SIZE];
   uint16_t len;
   int8_t rssi;  // RSSI на момент приёма — radio может быть перезаписан до обработки
-  uint8_t sf;   // SF на момент приёма (7–12) — для KEY_EXCHANGE useSf12
+  uint8_t sf;   // SF на момент приёма (7–12)
 };
 
 struct SendQueueItem {
   uint8_t buf[PACKET_BUF_SIZE];
   size_t len;
   uint8_t txSf;  // 0 = текущий baseSf, 7–12 = принудительный SF (per-neighbor)
+};
+
+/** Единая очередь команд радио (актор): TX + отложенное применение региона/SF. */
+enum class RadioCmdType : uint8_t { Tx = 0, ApplyRegion = 1, ApplySf = 2 };
+
+struct RadioCmd {
+  RadioCmdType type;
+  bool priority;  // только для Tx (очередь в начало)
+  union {
+    struct {
+      uint8_t buf[PACKET_BUF_SIZE];
+      uint16_t len;
+      uint8_t txSf;
+    } tx;
+    struct {
+      uint32_t freqHz;
+      int32_t power;
+    } region;
+    struct {
+      uint8_t sf;
+    } spread;
+  } u;
 };
 
 // Команды отображения
@@ -43,7 +65,7 @@ struct DisplayQueueItem {
 };
 
 extern QueueHandle_t packetQueue;
-extern QueueHandle_t sendQueue;
+extern QueueHandle_t radioCmdQueue;  // RadioCmd: TX + ApplyRegion + ApplySf
 extern QueueHandle_t displayQueue;
 
 bool asyncQueuesInit();

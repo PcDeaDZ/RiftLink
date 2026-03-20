@@ -189,7 +189,7 @@ class CharCallbacks : public NimBLECharacteristicCallbacks {
         uint8_t pubKey[32];
         if (mbedtls_base64_decode(pubKey, 32, &decLen, (const unsigned char*)pubKeyB64, strlen(pubKeyB64)) == 0 && decLen == 32) {
           x25519_keys::onKeyExchange(nodeId, pubKey);
-          x25519_keys::sendKeyExchange(nodeId, false, true);  // forceSend — отправить наш ключ пиру для завершения обмена
+          x25519_keys::sendKeyExchange(nodeId, true, false, "ble");  // forceSend — отправить наш ключ пиру для завершения обмена
           s_pendingInfo = true;
         }
       }
@@ -271,6 +271,14 @@ class CharCallbacks : public NimBLECharacteristicCallbacks {
       int ch = doc["channel"] | -1;
       if (ch >= 0 && ch <= 2 && region::setChannel(ch)) {
         ble::notifyRegion(region::getCode(), region::getFreq(), region::getPower(), region::getChannel());
+      }
+      return;
+    }
+    if (strcmp(cmd, "sf") == 0 || strcmp(cmd, "loraSf") == 0) {
+      int sf = doc["sf"] | doc["value"] | -1;
+      if (sf >= 7 && sf <= 12) {
+        radio::requestSpreadingFactor((uint8_t)sf);
+        s_pendingInfo = true;
       }
       return;
     }
