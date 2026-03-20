@@ -424,11 +424,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   void _applyNodeIdFromDeviceName() {
     final dev = widget.ble.device;
     if (dev == null || _nodeId.isNotEmpty) return;
-    final name = dev.platformName.isNotEmpty ? dev.platformName : dev.advName;
-    final match = RegExp(r'RL-([0-9A-Fa-f]{8})').firstMatch(name);
-    if (match != null && mounted) {
-      setState(() => _nodeId = match.group(1)!.toUpperCase());
-    }
+    final hint = RiftLinkBle.nodeIdHintFromDevice(dev);
+    if (hint != null && mounted) setState(() => _nodeId = hint);
   }
   void _sendLangToFirmware() { if (widget.ble.isConnected) widget.ble.setLang(AppLocalizations.currentLocale.languageCode); }
 
@@ -698,7 +695,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   void _onInfoEvent(RiftLinkInfoEvent evt) {
     final bleDev = widget.ble.device;
     if (bleDev != null) _currentBleRemoteId = bleDev.remoteId.toString();
-    final resolvedId = evt.id.isNotEmpty ? evt.id : _nodeId;
+    var resolvedId = evt.id.isNotEmpty ? evt.id : _nodeId;
+    if (resolvedId.isEmpty) {
+      resolvedId = RiftLinkBle.nodeIdHintFromDevice(bleDev) ?? '';
+    }
+    if (resolvedId.isEmpty && bleDev != null) {
+      resolvedId = bleDev.remoteId.toString();
+    }
     setState(() {
       if (resolvedId.isNotEmpty) _nodeId = resolvedId;
       _nickname = evt.nickname?.isNotEmpty == true ? evt.nickname : null;
@@ -709,7 +712,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       _groups = _filterUserGroups(evt.groups);
       if (_group > 0 && !_groups.contains(_group)) _group = 0;
     });
-    if (bleDev != null && resolvedId.isNotEmpty) {
+    if (bleDev != null) {
       RecentDevicesService.addOrUpdate(
         remoteId: bleDev.remoteId.toString(),
         nodeId: resolvedId,

@@ -61,6 +61,14 @@ class RiftLinkBle {
     await FlutterBluePlus.stopScan();
   }
 
+  /// Короткий ID из имени BLE (`RL-XXXXXXXX`) — пока нет полного `evt.info.id`.
+  static String? nodeIdHintFromDevice(BluetoothDevice? dev) {
+    if (dev == null) return null;
+    final name = dev.platformName.isNotEmpty ? dev.platformName : dev.advName;
+    final m = RegExp(r'RL-([0-9A-Fa-f]{8})').firstMatch(name);
+    return m != null ? m.group(1)!.toUpperCase() : null;
+  }
+
   Future<bool> _sendCmd(Map<String, dynamic> payload) async {
     if (_txChar == null || !isConnected) return false;
     try {
