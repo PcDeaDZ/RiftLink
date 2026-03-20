@@ -419,7 +419,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       freq: (json['freq'] as num?)?.toDouble() ?? 868.0,
       power: (json['power'] as num?)?.toInt() ?? 14,
       channel: (json['channel'] as num?)?.toInt(),
-      version: json['version'] as String?,
+      version: json['version']?.toString(),
       neighbors: neighbors,
       neighborsRssi: neighborsRssi,
       neighborsHasKey: neighborsHasKey,
@@ -433,6 +433,9 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       gpsFix: json['gpsFix'] == true,
       powersave: json['powersave'] == true,
     );
+    } catch (_) {
+      return null;
+    }
   }
   if (evt == 'routes') {
     final routesList = json['routes'];
@@ -455,7 +458,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
   if (evt == 'groups') {
     final grpList = json['groups'];
     return RiftLinkGroupsEvent(
-      groups: grpList is List ? (grpList as List).map((e) => (e as num).toInt()).toList() : <int>[],
+      groups: grpList is List ? (grpList as List).map(_jsonInt).toList() : <int>[],
     );
   }
   if (evt == 'telemetry') {
@@ -496,7 +499,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
   if (evt == 'neighbors') {
     final list = json['neighbors'];
     final rssiList = json['rssi'];
-    final rssi = rssiList is List ? (rssiList as List).map((e) => (e as num).toInt()).toList() : <int>[];
+    final rssi = rssiList is List ? (rssiList as List).map(_jsonInt).toList() : <int>[];
     final hasKeyList = json['hasKey'];
     final hasKey = hasKeyList is List ? (hasKeyList as List).map((e) => e == true).toList() : <bool>[];
     return RiftLinkNeighborsEvent(

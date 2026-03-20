@@ -297,23 +297,6 @@ class _GroupsScreenState extends State<GroupsScreen> {
                               textAlign: TextAlign.center,
                               style: TextStyle(color: context.palette.onSurfaceVariant.withOpacity(0.92), fontSize: 13, height: 1.3),
                             ),
-                            const SizedBox(height: 16),
-                            FilledButton.tonal(
-                              onPressed: widget.ble.isConnected ? _showAddSheet : null,
-                              style: FilledButton.styleFrom(
-                                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                                visualDensity: VisualDensity.compact,
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(Icons.add, size: 18),
-                                  const SizedBox(width: 6),
-                                  Text(l.tr('add_group'), style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-                                ],
-                              ),
-                            ),
                           ],
                         ),
                       ),

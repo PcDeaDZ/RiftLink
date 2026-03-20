@@ -25,6 +25,7 @@ import '../theme/app_theme.dart';
 import '../mesh_constants.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/app_snackbar.dart';
+import '../widgets/app_popover_menu.dart';
 import '../widgets/rift_dialogs.dart';
 
 List<int> _filterUserGroups(List<int> raw) =>
@@ -1276,8 +1277,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     FocusScope.of(context).unfocus();
     final value = await Navigator.push<String>(
       context,
-      _PopoverMenuRoute(
-        builder: (ctx) => _AppMenuPopover(l: l),
+      AppPopoverMenuRoute<String>(
+        toolbarHeight: 44,
+        child: _AppMenuPopover(l: l),
       ),
     );
     if (value != null && mounted) _onMenuSelected(value);
@@ -1974,46 +1976,6 @@ class _PingDialogContentState extends State<_PingDialogContent> {
       ),
     );
   }
-}
-
-/// Маршрут в стиле Telegram — всплывающее меню сверху справа
-class _PopoverMenuRoute<T> extends PageRouteBuilder<T> {
-  final WidgetBuilder builder;
-
-  _PopoverMenuRoute({required this.builder})
-      : super(
-          opaque: false,
-          barrierColor: Colors.black38,
-          barrierDismissible: true,
-          pageBuilder: (context, animation, secondaryAnimation) => builder(context),
-          transitionsBuilder: (context, animation, secondaryAnimation, child) {
-            return Stack(
-              children: [
-                Positioned.fill(
-                  child: GestureDetector(
-                    onTap: () => Navigator.pop(context),
-                    behavior: HitTestBehavior.opaque,
-                    child: Container(color: Colors.transparent),
-                  ),
-                ),
-                Align(
-                  alignment: Alignment.topRight,
-                  child: Padding(
-                    padding: const EdgeInsets.only(top: 56, right: 12),
-                    child: FadeTransition(
-                      opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
-                      child: ScaleTransition(
-                        scale: Tween<double>(begin: 0.9, end: 1.0).animate(CurvedAnimation(parent: animation, curve: Curves.easeOut)),
-                        alignment: Alignment.topRight,
-                        child: child,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            );
-          },
-        );
 }
 
 /// Popover меню в стиле Telegram — компактная карточка сверху справа.

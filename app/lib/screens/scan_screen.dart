@@ -15,6 +15,7 @@ import '../locale_notifier.dart';
 import '../theme/theme_notifier.dart';
 import '../recent_devices/recent_devices_service.dart';
 import '../widgets/rift_dialogs.dart';
+import '../widgets/app_popover_menu.dart';
 import 'chat_screen.dart';
 import 'debug_screen.dart';
 
@@ -244,6 +245,28 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
 
   void _showThemePicker() => showThemeModeSheet(context);
 
+  Future<void> _showScanMenu(AppLocalizations l10n) async {
+    FocusScope.of(context).unfocus();
+    final v = await Navigator.push<String>(
+      context,
+      AppPopoverMenuRoute<String>(
+        child: _ScanMenuPopover(l10n: l10n),
+      ),
+    );
+    if (!mounted || v == null) return;
+    switch (v) {
+      case 'theme':
+        _showThemePicker();
+        break;
+      case 'lang':
+        _showLangPicker();
+        break;
+      case 'about':
+        _showAbout();
+        break;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
@@ -261,54 +284,10 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
           child: Text(l10n.tr('app_title')),
         ),
         actions: [
-          PopupMenuButton<String>(
+          IconButton(
             icon: const Icon(Icons.more_vert),
             tooltip: l10n.tr('menu_tools'),
-            onSelected: (v) {
-              switch (v) {
-                case 'theme':
-                  _showThemePicker();
-                  break;
-                case 'lang':
-                  _showLangPicker();
-                  break;
-                case 'about':
-                  _showAbout();
-                  break;
-              }
-            },
-            itemBuilder: (ctx) => [
-              PopupMenuItem(
-                value: 'theme',
-                child: Row(
-                  children: [
-                    const Icon(Icons.dark_mode_outlined, size: 18),
-                    const SizedBox(width: 10),
-                    Text(l10n.tr('theme')),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'lang',
-                child: Row(
-                  children: [
-                    const Icon(Icons.language, size: 18),
-                    const SizedBox(width: 10),
-                    Text(l10n.tr('lang')),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'about',
-                child: Row(
-                  children: [
-                    const Icon(Icons.info_outline_rounded, size: 18),
-                    const SizedBox(width: 10),
-                    Text(l10n.tr('about')),
-                  ],
-                ),
-              ),
-            ],
+            onPressed: () => _showScanMenu(l10n),
           ),
         ],
       ),
@@ -569,6 +548,61 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Меню «три точки» в том же стиле, что и в [ChatScreen].
+class _ScanMenuPopover extends StatelessWidget {
+  final AppLocalizations l10n;
+
+  const _ScanMenuPopover({required this.l10n});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        constraints: const BoxConstraints(minWidth: 200, maxWidth: 280),
+        decoration: BoxDecoration(
+          color: context.palette.card,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: context.palette.divider, width: 0.5),
+          boxShadow: [
+            BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 16, offset: const Offset(0, 4)),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _item(context, Icons.dark_mode_outlined, l10n.tr('theme'), 'theme'),
+              _item(context, Icons.language, l10n.tr('lang'), 'lang'),
+              _item(context, Icons.info_outline_rounded, l10n.tr('about'), 'about'),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _item(BuildContext context, IconData icon, String label, String id) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => Navigator.pop(context, id),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          child: Row(
+            children: [
+              Icon(icon, size: 22, color: context.palette.onSurface),
+              const SizedBox(width: 14),
+              Text(label, style: TextStyle(fontSize: 15, color: context.palette.onSurface)),
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -379,7 +379,7 @@ class SettingsScreen extends StatefulWidget {
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
-class _SettingsScreenState extends State<SettingsScreen> {
+class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObserver {
   final FocusNode _nickFocus = FocusNode();
   late final TextEditingController _nickController;
   late final TextEditingController _wifiSsidController;
@@ -430,6 +430,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // Сразу подставляем кэш info — иначе первый кадр пустой, а didUpdateWidget (тема и т.д.) затирал бы данные из BLE.
     final li = widget.ble.lastInfo;
     _nodeIdLive = (li != null && li.id.isNotEmpty) ? li.id : widget.nodeId;
@@ -492,6 +493,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed && mounted && widget.ble.isConnected) {
+      final c = widget.ble.lastInfo;
+      if (c != null) _applyRiftLinkInfo(c);
+      widget.ble.getInfo();
+    }
+  }
+
+  @override
   void didUpdateWidget(covariant SettingsScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     // Не затираем поля из widget при каждом rebuild (тема и т.д.) — иначе сбрасываются данные, уже пришедшие по BLE.
@@ -505,6 +516,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _bleSub?.cancel();
     _nickFocus.dispose();
     _nickController.dispose();
