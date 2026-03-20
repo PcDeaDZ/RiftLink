@@ -23,6 +23,7 @@
 #include "offline_queue/offline_queue.h"
 #include "voice_frag/voice_frag.h"
 #include "gps/gps.h"
+#include "telemetry/telemetry.h"
 #include "selftest/selftest.h"
 #include "ui/display.h"
 #include "async_tasks.h"
@@ -657,6 +658,8 @@ void notifyInfo() {
   doc["espnowAdaptive"] = esp_now_slots::isAdaptive();
   doc["version"] = RIFTLINK_VERSION;
   doc["sf"] = radio::getSpreadingFactor();
+  uint16_t batteryMv = telemetry::readBatteryMv();
+  if (batteryMv > 0) doc["batteryMv"] = batteryMv;
   int offlinePending = offline_queue::getPendingCount();
   if (offlinePending > 0) doc["offlinePending"] = offlinePending;
   doc["gpsPresent"] = gps::isPresent();

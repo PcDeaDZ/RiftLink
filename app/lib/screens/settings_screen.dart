@@ -396,77 +396,106 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _powersave;
   late bool _meshAnimationEnabled;
   int? _offlinePending;
+  int? _batteryMv;
 
   /// Актуальный ID (обновляется по evt info, пока открыты настройки).
   late String _nodeIdLive;
   StreamSubscription<RiftLinkEvent>? _bleSub;
 
-  void _syncFromWidget() {
-    _region = widget.region;
-    _channel = widget.channel;
-    _sf = widget.sf;
-    _gpsPresent = widget.gpsPresent;
-    _gpsEnabled = widget.gpsEnabled;
-    _gpsFix = widget.gpsFix;
-    _powersave = widget.powersave;
-    _meshAnimationEnabled = widget.meshAnimationEnabled;
-    _offlinePending = widget.offlinePending;
+  /// Единая точка: evt info и кэш [RiftLinkBle.lastInfo] (до подписки на поток данные уже могли прийти).
+  void _applyRiftLinkInfo(RiftLinkInfoEvent evt) {
+    if (!mounted) return;
+    setState(() {
+      if (evt.id.isNotEmpty) _nodeIdLive = evt.id;
+      _region = evt.region;
+      _channel = evt.channel;
+      _sf = evt.sf;
+      _gpsPresent = evt.gpsPresent;
+      _gpsEnabled = evt.gpsEnabled;
+      _gpsFix = evt.gpsFix;
+      _powersave = evt.powersave;
+      _offlinePending = evt.offlinePending;
+      _batteryMv = evt.batteryMv;
+    });
+    final nick = evt.nickname?.trim();
+    if (nick != null && nick.isNotEmpty && _nickController.text.trim().isEmpty) {
+      _nickController.text = nick;
+    }
   }
 
   @override
   void initState() {
     super.initState();
-    _nodeIdLive = widget.nodeId;
-    _syncFromWidget();
-    _nickController = TextEditingController(text: widget.nickname ?? '');
+    // Сразу подставляем кэш info — иначе первый кадр пустой, а didUpdateWidget (тема и т.д.) затирал бы данные из BLE.
+    final li = widget.ble.lastInfo;
+    _nodeIdLive = (li != null && li.id.isNotEmpty) ? li.id : widget.nodeId;
+    _region = li?.region ?? widget.region;
+    _channel = li?.channel ?? widget.channel;
+    _sf = li?.sf ?? widget.sf;
+    _gpsPresent = li?.gpsPresent ?? widget.gpsPresent;
+    _gpsEnabled = li?.gpsEnabled ?? widget.gpsEnabled;
+    _gpsFix = li?.gpsFix ?? widget.gpsFix;
+    _powersave = li?.powersave ?? widget.powersave;
+    _offlinePending = li?.offlinePending ?? widget.offlinePending;
+    _batteryMv = li?.batteryMv ?? widget.batteryMv;
+    _meshAnimationEnabled = widget.meshAnimationEnabled;
+    final nick0 = (li?.nickname != null && li!.nickname!.trim().isNotEmpty)
+        ? li.nickname!.trim()
+        : (widget.nickname ?? '');
+    _nickController = TextEditingController(text: nick0);
     _wifiSsidController = TextEditingController();
     _wifiPassController = TextEditingController();
     _inviteIdController = TextEditingController();
     _inviteKeyController = TextEditingController();
     _inviteChannelKeyController = TextEditingController();
 
-    _bleSub = widget.ble.events.listen((evt) {
-      if (!mounted) return;
-      if (evt is RiftLinkInfoEvent) {
-        setState(() {
-          if (evt.id.isNotEmpty) _nodeIdLive = evt.id;
-          _region = evt.region;
-          _channel = evt.channel;
-          _sf = evt.sf;
-          _gpsPresent = evt.gpsPresent;
-          _gpsEnabled = evt.gpsEnabled;
-          _gpsFix = evt.gpsFix;
-          _powersave = evt.powersave;
-          _offlinePending = evt.offlinePending;
-        });
-        final nick = evt.nickname?.trim();
-        if (nick != null && nick.isNotEmpty && _nickController.text.trim().isEmpty) {
-          _nickController.text = nick;
-        }
-      } else if (evt is RiftLinkRegionEvent) {
-        setState(() {
-          _region = evt.region;
-          _channel = evt.channel;
-        });
-      } else if (evt is RiftLinkGpsEvent) {
-        setState(() {
-          _gpsPresent = evt.present;
-          _gpsEnabled = evt.enabled;
-          _gpsFix = evt.hasFix;
-        });
-      }
-    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (widget.ble.isConnected) widget.ble.getInfo();
+      if (!mounted) return;
+      _bleSub?.cancel();
+      _bleSub = widget.ble.events.listen((evt) {
+        if (!mounted) return;
+        if (evt is RiftLinkInfoEvent) {
+          _applyRiftLinkInfo(evt);
+        } else if (evt is RiftLinkRegionEvent) {
+          setState(() {
+            _region = evt.region;
+            _channel = evt.channel;
+          });
+        } else if (evt is RiftLinkGpsEvent) {
+          setState(() {
+            _gpsPresent = evt.present;
+            _gpsEnabled = evt.enabled;
+            _gpsFix = evt.hasFix;
+          });
+        }
+      });
+      if (!widget.ble.isConnected) return;
+      void pull() {
+        if (!mounted) return;
+        final cached = widget.ble.lastInfo;
+        if (cached != null) _applyRiftLinkInfo(cached);
+        widget.ble.getInfo();
+      }
+
+      pull();
+      Future<void>.delayed(const Duration(milliseconds: 320), () {
+        if (mounted && widget.ble.isConnected) pull();
+      });
+      Future<void>.delayed(const Duration(milliseconds: 900), () {
+        if (mounted && widget.ble.isConnected) widget.ble.getInfo();
+      });
     });
   }
 
   @override
   void didUpdateWidget(covariant SettingsScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
-    _syncFromWidget();
+    // Не затираем поля из widget при каждом rebuild (тема и т.д.) — иначе сбрасываются данные, уже пришедшие по BLE.
+    if (oldWidget.meshAnimationEnabled != widget.meshAnimationEnabled) {
+      setState(() => _meshAnimationEnabled = widget.meshAnimationEnabled);
+    }
     if (oldWidget.nodeId != widget.nodeId && widget.nodeId.isNotEmpty) {
-      _nodeIdLive = widget.nodeId;
+      setState(() => _nodeIdLive = widget.nodeId);
     }
   }
 
@@ -1064,7 +1093,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               ),
               if ((_offlinePending != null && _offlinePending! > 0) ||
-                  (widget.batteryMv != null && widget.batteryMv! > 0)) ...[
+                  (_batteryMv != null && _batteryMv! > 0)) ...[
                 const SizedBox(height: 12),
                 _SettingsCard(
                   title: l.tr('other'),
@@ -1080,12 +1109,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             style: TextStyle(color: context.palette.onSurface),
                           ),
                         ),
-                      if (widget.batteryMv != null && widget.batteryMv! > 0)
+                      if (_batteryMv != null && _batteryMv! > 0)
                         ListTile(
                           contentPadding: EdgeInsets.zero,
                           leading: Icon(Icons.battery_charging_full, color: context.palette.onSurfaceVariant),
                           title: Text(
-                            '${(widget.batteryMv! / 1000).toStringAsFixed(2)} V',
+                            '${(_batteryMv! / 1000).toStringAsFixed(2)} V',
                             style: TextStyle(color: context.palette.onSurface),
                           ),
                         ),

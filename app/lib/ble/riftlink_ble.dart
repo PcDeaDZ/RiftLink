@@ -61,6 +61,16 @@ class RiftLinkBle {
     await FlutterBluePlus.stopScan();
   }
 
+  /// Нормализация BLE remoteId (MAC / UUID) для сравнения между экранами и версиями FBP.
+  static String normalizeBleRemoteId(String s) =>
+      s.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+
+  static bool remoteIdsMatch(String a, String b) {
+    final na = normalizeBleRemoteId(a);
+    final nb = normalizeBleRemoteId(b);
+    return na.isNotEmpty && na == nb;
+  }
+
   /// Короткий ID из имени BLE (`RL-XXXXXXXX`) — пока нет полного `evt.info.id`.
   static String? nodeIdHintFromDevice(BluetoothDevice? dev) {
     if (dev == null) return null;
@@ -283,6 +293,18 @@ class RiftLinkBle {
   }
 }
 
+String _regionCodeOrDefault(dynamic v, [String fallback = 'EU']) {
+  if (v == null) return fallback;
+  final s = v.toString().trim();
+  return s.isEmpty ? fallback : s;
+}
+
+String? _trimmedStringOrNull(dynamic v) {
+  if (v == null) return null;
+  final s = v.toString().trim();
+  return s.isEmpty ? null : s;
+}
+
 /// Парсинг одного JSON-уведомления с RX (вынесено из потока для единого диспетчера).
 RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
   final evt = json['evt'] as String?;
@@ -341,12 +363,13 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     final routes = <Map<String, dynamic>>[];
     if (routesList is List) {
       for (final r in routesList) {
-        if (r is Map<String, dynamic>) {
+        if (r is Map) {
+          final m = Map<String, dynamic>.from(r as Map);
           routes.add({
-            'dest': r['dest'] as String? ?? '',
-            'nextHop': r['nextHop'] as String? ?? '',
-            'hops': (r['hops'] as num?)?.toInt() ?? 0,
-            'rssi': (r['rssi'] as num?)?.toInt() ?? 0,
+            'dest': m['dest'] as String? ?? '',
+            'nextHop': m['nextHop'] as String? ?? '',
+            'hops': (m['hops'] as num?)?.toInt() ?? 0,
+            'rssi': (m['rssi'] as num?)?.toInt() ?? 0,
           });
         }
       }
@@ -355,8 +378,8 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     final idStr = idRaw == null ? '' : idRaw.toString();
     return RiftLinkInfoEvent(
       id: idStr,
-      nickname: json['nickname'] as String?,
-      region: json['region'] as String? ?? 'EU',
+      nickname: _trimmedStringOrNull(json['nickname']),
+      region: _regionCodeOrDefault(json['region']),
       freq: (json['freq'] as num?)?.toDouble() ?? 868.0,
       power: (json['power'] as num?)?.toInt() ?? 14,
       channel: (json['channel'] as num?)?.toInt(),
@@ -368,6 +391,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       routes: routes,
       sf: (json['sf'] as num?)?.toInt(),
       offlinePending: (json['offlinePending'] as num?)?.toInt(),
+      batteryMv: (json['batteryMv'] as num?)?.toInt() ?? (json['battery'] as num?)?.toInt(),
       gpsPresent: json['gpsPresent'] == true,
       gpsEnabled: json['gpsEnabled'] == true,
       gpsFix: json['gpsFix'] == true,
@@ -379,12 +403,13 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     final routes = <Map<String, dynamic>>[];
     if (routesList is List) {
       for (final r in routesList) {
-        if (r is Map<String, dynamic>) {
+        if (r is Map) {
+          final m = Map<String, dynamic>.from(r as Map);
           routes.add({
-            'dest': r['dest'] as String? ?? '',
-            'nextHop': r['nextHop'] as String? ?? '',
-            'hops': (r['hops'] as num?)?.toInt() ?? 0,
-            'rssi': (r['rssi'] as num?)?.toInt() ?? 0,
+            'dest': m['dest'] as String? ?? '',
+            'nextHop': m['nextHop'] as String? ?? '',
+            'hops': (m['hops'] as num?)?.toInt() ?? 0,
+            'rssi': (m['rssi'] as num?)?.toInt() ?? 0,
           });
         }
       }
@@ -419,7 +444,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
   }
   if (evt == 'region') {
     return RiftLinkRegionEvent(
-      region: json['region'] as String? ?? 'EU',
+      region: _regionCodeOrDefault(json['region']),
       freq: (json['freq'] as num?)?.toDouble() ?? 868.0,
       power: (json['power'] as num?)?.toInt() ?? 14,
       channel: (json['channel'] as num?)?.toInt(),
@@ -554,6 +579,7 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
   final List<Map<String, dynamic>> routes;
   final int? sf;
   final int? offlinePending;
+  final int? batteryMv;
   final bool gpsPresent;
   final bool gpsEnabled;
   final bool gpsFix;
@@ -573,6 +599,7 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
     this.routes = const [],
     this.sf,
     this.offlinePending,
+    this.batteryMv,
     this.gpsPresent = false,
     this.gpsEnabled = false,
     this.gpsFix = false,

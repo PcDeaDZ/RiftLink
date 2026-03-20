@@ -1,4 +1,5 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../theme/app_theme.dart';
@@ -13,6 +14,7 @@ import '../l10n/app_localizations.dart';
 import '../locale_notifier.dart';
 import '../theme/theme_notifier.dart';
 import '../recent_devices/recent_devices_service.dart';
+import '../widgets/rift_dialogs.dart';
 import 'chat_screen.dart';
 import 'debug_screen.dart';
 
@@ -126,13 +128,12 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
       }
       await RiftLinkBle.stopScan();
       await Future<void>.delayed(const Duration(milliseconds: 800));
-      final norm = (String s) => s.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
       _scanSub = FlutterBluePlus.scanResults.listen((results) {
         if (!mounted) return;
         final found = results.where(RiftLinkBle.isRiftLink).toList();
         for (final r in found) {
           final rStr = r.device.remoteId.toString();
-          final match = connectToRemoteId != null && (rStr == connectToRemoteId || norm(rStr) == norm(connectToRemoteId!));
+          final match = connectToRemoteId != null && RiftLinkBle.remoteIdsMatch(rStr, connectToRemoteId!);
           if (match) {
             _scanSub?.cancel();
             _scanSub = null;
@@ -185,6 +186,9 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
       final ok = await _ble.connect(device);
       if (!mounted) return;
       if (ok) {
+        final rid = device.remoteId.toString();
+        final nodeKey = RiftLinkBle.nodeIdHintFromDevice(device) ?? rid;
+        unawaited(RecentDevicesService.addOrUpdate(remoteId: rid, nodeId: nodeKey, nickname: null));
         Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => ChatScreen(ble: _ble)));
       } else {
         setState(() { _error = context.l10n.tr('ble_no_service'); _connectingToRemoteId = null; _connectingToDeviceName = null; });
@@ -204,16 +208,14 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
 
   Future<void> _confirmForgetDevice(RecentDevice d) async {
     final l10n = context.l10n;
-    final confirm = await showAppDialog<bool>(
+    final confirm = await showRiftConfirmDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(l10n.tr('forget_device'), style: TextStyle(color: context.palette.onSurface)),
-        content: Text(l10n.tr('forget_device_confirm', {'name': d.displayName}), style: TextStyle(color: context.palette.onSurface)),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(l10n.tr('cancel'))),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(l10n.tr('delete'), style: TextStyle(color: context.palette.error))),
-        ],
-      ),
+      title: l10n.tr('forget_device'),
+      message: l10n.tr('forget_device_confirm', {'name': d.displayName}),
+      cancelText: l10n.tr('cancel'),
+      confirmText: l10n.tr('delete'),
+      danger: true,
+      icon: Icons.delete_outline_rounded,
     );
     if (confirm == true && mounted) {
       await RecentDevicesService.remove(d.remoteId);
@@ -259,20 +261,54 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
           child: Text(l10n.tr('app_title')),
         ),
         actions: [
-          IconButton(
-            onPressed: _showThemePicker,
-            icon: const Icon(Icons.dark_mode_outlined),
-            tooltip: l10n.tr('theme'),
-          ),
-          IconButton(onPressed: _showLangPicker, icon: const Icon(Icons.language), tooltip: l10n.tr('lang')),
-          IconButton(
-            onPressed: () => showAppDialog(
-              context: context,
-              builder: (ctx) => _AboutDialog(l10n: AppLocalizations(AppLocalizations.currentLocale)),
-            ),
-            icon: const Icon(Icons.info_outline),
-            tooltip: l10n.tr('about'),
-            splashRadius: 24,
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
+            tooltip: l10n.tr('menu_tools'),
+            onSelected: (v) {
+              switch (v) {
+                case 'theme':
+                  _showThemePicker();
+                  break;
+                case 'lang':
+                  _showLangPicker();
+                  break;
+                case 'about':
+                  _showAbout();
+                  break;
+              }
+            },
+            itemBuilder: (ctx) => [
+              PopupMenuItem(
+                value: 'theme',
+                child: Row(
+                  children: [
+                    const Icon(Icons.dark_mode_outlined, size: 18),
+                    const SizedBox(width: 10),
+                    Text(l10n.tr('theme')),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'lang',
+                child: Row(
+                  children: [
+                    const Icon(Icons.language, size: 18),
+                    const SizedBox(width: 10),
+                    Text(l10n.tr('lang')),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'about',
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline_rounded, size: 18),
+                    const SizedBox(width: 10),
+                    Text(l10n.tr('about')),
+                  ],
+                ),
+              ),
+            ],
           ),
         ],
       ),

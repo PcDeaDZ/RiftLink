@@ -20,6 +20,9 @@ class _MapScreenState extends State<MapScreen> {
   final Map<String, _NL> _nodes = {};
   StreamSubscription? _sub;
   LatLng? _myLocation;
+  bool _centerOnSelf = false;
+  /// Счётчик: без MapController `initialCenter` не обновляется; при каждом запросе геолокации пересоздаём [FlutterMap].
+  int _mapRecenterEpoch = 0;
 
   @override
   void initState() {
@@ -39,7 +42,9 @@ class _MapScreenState extends State<MapScreen> {
     if (_myLocation != null) points.add(_myLocation!);
 
     var center = const LatLng(55.7558, 37.6173);
-    if (points.isNotEmpty) {
+    if (_centerOnSelf && _myLocation != null) {
+      center = _myLocation!;
+    } else if (points.isNotEmpty) {
       double sLat = 0, sLon = 0;
       for (final p in points) { sLat += p.latitude; sLon += p.longitude; }
       center = LatLng(sLat / points.length, sLon / points.length);
@@ -52,7 +57,14 @@ class _MapScreenState extends State<MapScreen> {
         leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context)),
         actions: [
           IconButton(icon: const Icon(Icons.my_location), tooltip: context.l10n.tr('map_my_location'), onPressed: () async {
-            try { final pos = await Geolocator.getCurrentPosition(); setState(() => _myLocation = LatLng(pos.latitude, pos.longitude)); } catch (_) {}
+            try {
+              final pos = await Geolocator.getCurrentPosition();
+              setState(() {
+                _myLocation = LatLng(pos.latitude, pos.longitude);
+                _centerOnSelf = true;
+                _mapRecenterEpoch++;
+              });
+            } catch (_) {}
           }),
         ],
       ),
@@ -60,6 +72,8 @@ class _MapScreenState extends State<MapScreen> {
         child: Material(
           color: Colors.transparent,
           child: FlutterMap(
+        // `initialCenter` / zoom применяются только при создании виджета; epoch гарантирует пересоздание даже при совпадающих координатах.
+        key: ValueKey('map_${_mapRecenterEpoch}_${_myLocation?.latitude}_${_myLocation?.longitude}'),
         options: MapOptions(initialCenter: center, initialZoom: points.isEmpty ? 10 : 14),
         children: [
           TileLayer(urlTemplate: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}'),

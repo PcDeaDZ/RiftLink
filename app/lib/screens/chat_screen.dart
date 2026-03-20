@@ -25,6 +25,7 @@ import '../theme/app_theme.dart';
 import '../mesh_constants.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/app_snackbar.dart';
+import '../widgets/rift_dialogs.dart';
 
 List<int> _filterUserGroups(List<int> raw) =>
     raw.where((g) => g != kMeshBroadcastGroupId).toList();
@@ -208,6 +209,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         if (mounted && ok) {
           _currentBleRemoteId = remoteId;
           _listenConnectionState();
+          _listenEvents(); // новый BLE-поток после connect(), иначе самотест/ping/info не приходят
           widget.ble.getInfo();
           setState(() => _reconnecting = false);
           _showSnack(l.tr('reconnect_ok'), backgroundColor: context.palette.success);
@@ -229,7 +231,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     if (!widget.ble.isConnected) return;
     _recentDevices = await RecentDevicesService.load();
     final currentRemoteId = widget.ble.device?.remoteId.toString();
-    final others = _recentDevices.where((d) => d.remoteId != currentRemoteId).toList();
+    final others = _recentDevices
+        .where((d) => currentRemoteId == null || !RiftLinkBle.remoteIdsMatch(d.remoteId, currentRemoteId))
+        .toList();
     final l = context.l10n;
     FocusScope.of(context).unfocus();
     final value = await showAppModalBottomSheet<String>(
@@ -286,16 +290,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
   Future<void> _confirmForgetAndPop(BuildContext ctx, RecentDevice d) async {
     final l = context.l10n;
-    final confirm = await showAppDialog<bool>(
+    final confirm = await showRiftConfirmDialog(
       context: ctx,
-      builder: (c) => AlertDialog(
-        title: Text(l.tr('forget_device'), style: TextStyle(color: context.palette.onSurface)),
-        content: Text(l.tr('forget_device_confirm', {'name': d.displayName}), style: TextStyle(color: context.palette.onSurface)),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(c, false), child: Text(l.tr('cancel'))),
-          TextButton(onPressed: () => Navigator.pop(c, true), child: Text(l.tr('delete'), style: TextStyle(color: context.palette.error))),
-        ],
-      ),
+      title: l.tr('forget_device'),
+      message: l.tr('forget_device_confirm', {'name': d.displayName}),
+      cancelText: l.tr('cancel'),
+      confirmText: l.tr('delete'),
+      danger: true,
+      icon: Icons.delete_outline_rounded,
     );
     if (confirm == true && mounted) {
       await RecentDevicesService.remove(d.remoteId);
@@ -323,30 +325,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   Future<void> _switchToDevice(String remoteId) async {
     _intentionalDisconnect = true;
     final l = context.l10n;
-    final dev = _recentDevices.where((d) => d.remoteId == remoteId).firstOrNull;
+    final dev = _recentDevices.where((d) => RiftLinkBle.remoteIdsMatch(d.remoteId, remoteId)).firstOrNull;
     final name = dev?.displayName ?? remoteId;
     _showSnack(l.tr('connecting_to', {'name': name}));
     await widget.ble.disconnect();
     await RiftLinkBle.stopScan();
-    await Future<void>.delayed(const Duration(milliseconds: 500));
+    // Как на ScanScreen: стек BLE после disconnect + FBP требует, чтобы цель была в scan до connect().
+    // BluetoothDevice.fromId без свежего скана часто не подключается ко «второму» узлу.
+    await Future<void>.delayed(const Duration(milliseconds: 800));
 
-    // Сначала пробуем прямое подключение по remoteId (устройство уже было в recent)
-    try {
-      final device = BluetoothDevice.fromId(remoteId);
-      final ok = await widget.ble.connect(device);
-      if (mounted && ok) {
-        _intentionalDisconnect = false;
-        _currentBleRemoteId = remoteId;
-        _listenConnectionState();
-        setState(_resetStateUntilInfo);
-        _applyNodeIdFromDeviceName();
-        widget.ble.getInfo();
-        _showSnack(l.tr('reconnect_ok'), backgroundColor: context.palette.success);
-        return;
-      }
-    } catch (_) {}
-
-    // Прямое подключение не сработало — сканируем
     if (!mounted) return;
     StreamSubscription? scanSub;
     final foundCompleter = Completer<BluetoothDevice?>();
@@ -354,7 +341,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       if (foundCompleter.isCompleted) return;
       final r = results.where(RiftLinkBle.isRiftLink).toList();
       for (final r0 in r) {
-        if (r0.device.remoteId.toString() == remoteId) {
+        if (RiftLinkBle.remoteIdsMatch(r0.device.remoteId.toString(), remoteId)) {
           scanSub?.cancel();
           RiftLinkBle.stopScan();
           if (!foundCompleter.isCompleted) foundCompleter.complete(r0.device);
@@ -362,7 +349,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         }
       }
     });
-    const scanDuration = Duration(seconds: 10);
+    const scanDuration = Duration(seconds: 12);
     try {
       await RiftLinkBle.startScan(timeout: scanDuration);
       await Future.any([
@@ -382,8 +369,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       final ok = await widget.ble.connect(found);
       if (mounted && ok) {
         _intentionalDisconnect = false;
-        _currentBleRemoteId = remoteId;
+        _currentBleRemoteId = found.remoteId.toString();
         _listenConnectionState();
+        _listenEvents(); // переподписка: RiftLinkBle.events — новый broadcast после reconnect
         setState(_resetStateUntilInfo);
         _applyNodeIdFromDeviceName();
         widget.ble.getInfo();
@@ -588,9 +576,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
             }
 
             return Container(
-              decoration: const BoxDecoration(
+              decoration: BoxDecoration(
                 color: context.palette.card,
-                borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
               ),
               child: SizedBox(
                 height: maxH,
@@ -709,6 +697,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       _offlinePending = evt.offlinePending; _gpsPresent = evt.gpsPresent; _gpsEnabled = evt.gpsEnabled;
       _gpsFix = evt.gpsFix; _powersave = evt.powersave; _neighbors = evt.neighbors;
       _neighborsRssi = evt.neighborsRssi; _neighborsHasKey = evt.neighborsHasKey; _routes = evt.routes;
+      if (evt.batteryMv != null && evt.batteryMv! > 0) _batteryMv = evt.batteryMv;
       _groups = _filterUserGroups(evt.groups);
       if (_group > 0 && !_groups.contains(_group)) _group = 0;
     });
@@ -804,8 +793,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       else if (evt is RiftLinkGpsEvent) { setState(() { _gpsPresent = evt.present; _gpsEnabled = evt.enabled; _gpsFix = evt.hasFix; }); }
       else if (evt is RiftLinkInviteEvent) { _showInviteDialog(evt.id, evt.pubKey, evt.channelKey); }
       else if (evt is RiftLinkSelftestEvent) {
-        final ok = evt.radioOk && evt.displayOk;
-        _showSnack('Selftest: ${evt.radioOk ? "✓" : "✗"} радио, ${evt.displayOk ? "✓" : "✗"} дисплей. ${evt.batteryMv}mV', backgroundColor: ok ? null : context.palette.error);
+        if (mounted) _showSelftestDialog(evt);
         if (evt.batteryMv > 0) setState(() => _batteryMv = evt.batteryMv);
       } else if (evt is RiftLinkVoiceEvent) {
         _voiceChunks[evt.from] ??= {};
@@ -976,9 +964,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
       builder: (ctx) => Container(
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           color: context.palette.card,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
         ),
         child: SafeArea(
           child: Column(
@@ -1021,6 +1009,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       duration: duration,
       margin: kSnackBarMarginChat,
     );
+  }
+
+  Future<void> _showSelftestDialog(RiftLinkSelftestEvent evt) async {
+    await showRiftSelftestDialog(context, evt);
   }
 
   Color _batteryColorForMv(int mv) {
@@ -1087,17 +1079,63 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
   void _showAddContactDialog(String id) {
     final nc = TextEditingController(text: _contactNicknames[id] ?? '');
-    showAppDialog(context: context, builder: (ctx) => AlertDialog(
-      title: Text(context.l10n.tr('add_contact'), style: TextStyle(color: context.palette.onSurface)),
-      content: TextField(controller: nc, decoration: InputDecoration(labelText: context.l10n.tr('contact_nickname')), maxLength: 16, autofocus: true),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: Text(context.l10n.tr('cancel'))),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(backgroundColor: context.palette.primary, foregroundColor: Colors.white),
-          onPressed: () async { final nick = nc.text.trim(); Navigator.pop(ctx); await ContactsService.add(Contact(id: id, nickname: nick)); await _loadContactNicknames(); if (mounted) _showSnack(context.l10n.tr('contact_added')); },
-          child: Text(context.l10n.tr('save')),
-        ),
-      ],
+    final p = context.palette;
+    final l = context.l10n;
+    showAppDialog(context: context, builder: (ctx) => RiftDialogFrame(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            l.tr('add_contact'),
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: p.onSurface,
+                ),
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: nc,
+            decoration: InputDecoration(labelText: l.tr('contact_nickname')),
+            maxLength: 16,
+            autofocus: true,
+          ),
+          const SizedBox(height: 6),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton(
+                style: TextButton.styleFrom(
+                  foregroundColor: p.onSurfaceVariant,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                onPressed: () => Navigator.pop(ctx),
+                child: Text(l.tr('cancel')),
+              ),
+              const SizedBox(width: 4),
+              TextButton(
+                style: TextButton.styleFrom(
+                  foregroundColor: p.primary,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  textStyle: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                onPressed: () async {
+                  final nick = nc.text.trim();
+                  Navigator.pop(ctx);
+                  await ContactsService.add(Contact(id: id, nickname: nick));
+                  await _loadContactNicknames();
+                  if (mounted) _showSnack(l.tr('contact_added'));
+                },
+                child: Text(l.tr('save')),
+              ),
+            ],
+          ),
+        ],
+      ),
     )).then((_) => nc.dispose());
   }
 
@@ -1105,40 +1143,122 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     final map = <String, String>{'id': id, 'pubKey': pubKey};
     if (channelKey != null && channelKey.isNotEmpty) map['channelKey'] = channelKey;
     final data = jsonEncode(map);
-    showAppDialog(context: context, builder: (ctx) => AlertDialog(
-      title: Text(context.l10n.tr('invite_created'), style: TextStyle(color: context.palette.onSurface)),
-      content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('ID: $id', style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: context.palette.onSurface)),
-        const SizedBox(height: 8),
-        Text('PubKey: ${pubKey.length > 40 ? '${pubKey.substring(0, 40)}…' : pubKey}', style: TextStyle(fontFamily: 'monospace', fontSize: 11, color: context.palette.onSurface)),
-        const SizedBox(height: 16),
-        ElevatedButton.icon(
-          style: ElevatedButton.styleFrom(backgroundColor: context.palette.primary, foregroundColor: Colors.white),
-          onPressed: () { Clipboard.setData(ClipboardData(text: data)); _showSnack(context.l10n.tr('copied')); },
-          icon: const Icon(Icons.copy, size: 18), label: Text(context.l10n.tr('copy')),
+    final p = context.palette;
+    final l = context.l10n;
+    showAppDialog(
+      context: context,
+      builder: (ctx) => RiftDialogFrame(
+        maxWidth: 360,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              l.tr('invite_created'),
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: p.onSurface,
+                  ),
+            ),
+            const SizedBox(height: 12),
+            ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.36),
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('ID: $id', style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: p.onSurface)),
+                    const SizedBox(height: 8),
+                    Text(
+                      'PubKey: ${pubKey.length > 40 ? '${pubKey.substring(0, 40)}…' : pubKey}',
+                      style: TextStyle(fontFamily: 'monospace', fontSize: 11, color: p.onSurface),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.tonalIcon(
+              style: FilledButton.styleFrom(
+                foregroundColor: p.primary,
+                backgroundColor: p.primary.withOpacity(0.12),
+                padding: const EdgeInsets.symmetric(vertical: 12),
+              ),
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: data));
+                _showSnack(l.tr('copied'));
+              },
+              icon: const Icon(Icons.copy_rounded, size: 20),
+              label: Text(l.tr('copy')),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                style: TextButton.styleFrom(foregroundColor: p.primary),
+                onPressed: () => Navigator.pop(ctx),
+                child: Text(l.tr('ok')),
+              ),
+            ),
+          ],
         ),
-      ])),
-      actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: Text(context.l10n.tr('ok')))],
-    ));
+      ),
+    );
   }
 
   void _showOtaDialog(String ip, String ssid, String password) {
-    showAppDialog(context: context, builder: (ctx) => AlertDialog(
-      title: Text('OTA', style: TextStyle(color: context.palette.onSurface)),
-      content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(context.l10n.tr('ota_connect'), style: TextStyle(color: context.palette.onSurface)),
-        const SizedBox(height: 8),
-        Text('SSID: $ssid', style: TextStyle(fontWeight: FontWeight.bold, color: context.palette.onSurface)),
-        Text('Pass: $password', style: TextStyle(color: context.palette.onSurface)),
-        const SizedBox(height: 12),
-        Text(context.l10n.tr('ota_then'), style: TextStyle(color: context.palette.onSurface)),
-        const SizedBox(height: 4),
-        SelectableText('cd firmware\npio run -t upload -e heltec_v3_ota', style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: context.palette.onSurface)),
-        const SizedBox(height: 8),
-        Text('IP: $ip', style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 12)),
-      ])),
-      actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: Text(context.l10n.tr('ok')))],
-    ));
+    final p = context.palette;
+    final l = context.l10n;
+    showAppDialog(
+      context: context,
+      builder: (ctx) => RiftDialogFrame(
+        maxWidth: 360,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'OTA',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: p.onSurface,
+                  ),
+            ),
+            const SizedBox(height: 12),
+            ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.42),
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(l.tr('ota_connect'), style: TextStyle(color: p.onSurface, fontSize: 14)),
+                    const SizedBox(height: 8),
+                    Text('SSID: $ssid', style: TextStyle(fontWeight: FontWeight.w700, color: p.onSurface)),
+                    Text('Pass: $password', style: TextStyle(color: p.onSurface)),
+                    const SizedBox(height: 12),
+                    Text(l.tr('ota_then'), style: TextStyle(color: p.onSurface)),
+                    const SizedBox(height: 4),
+                    SelectableText(
+                      'cd firmware\npio run -t upload -e heltec_v3_ota',
+                      style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: p.onSurface),
+                    ),
+                    const SizedBox(height: 8),
+                    Text('IP: $ip', style: TextStyle(color: p.onSurfaceVariant, fontSize: 12)),
+                  ],
+                ),
+              ),
+            ),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                style: TextButton.styleFrom(foregroundColor: p.primary),
+                onPressed: () => Navigator.pop(ctx),
+                child: Text(l.tr('ok')),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   // ── Build ──
@@ -1193,6 +1313,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         break;
       case 'selftest':
         _runSelftestFromToolsMenu();
+        break;
+      case 'send_location':
+        if (widget.ble.isConnected) {
+          _sendLocation();
+        } else {
+          _showSnack(context.l10n.tr('connect_first'));
+        }
         break;
       case 'settings':
         if (widget.ble.isConnected) {
@@ -1268,58 +1395,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         foregroundColor: context.palette.onSurface,
         elevation: 0,
         actions: [
-          Center(
-            child: Padding(
-              padding: const EdgeInsets.only(right: 4),
-              child: Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: widget.ble.isConnected ? _showRecipientPickerSheet : null,
-                  borderRadius: BorderRadius.circular(8),
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.42),
-                    child: Container(
-                      height: 30,
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: (_group > 0 || _unicastTo != null) ? context.palette.primary.withOpacity(0.12) : context.palette.onSurface.withOpacity(0.04),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                          color: (_group > 0 || _unicastTo != null) ? context.palette.primary.withOpacity(0.35) : context.palette.onSurfaceVariant.withOpacity(0.2),
-                          width: 0.5,
-                        ),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            _group > 0 ? Icons.group : (_unicastTo != null ? Icons.person : Icons.public),
-                            size: 14,
-                            color: (_group > 0 || _unicastTo != null) ? context.palette.primary : context.palette.onSurfaceVariant,
-                          ),
-                          const SizedBox(width: 4),
-                          Flexible(
-                            child: Text(
-                              _recipientPillLabel(l),
-                              style: TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                                color: (_group > 0 || _unicastTo != null) ? context.palette.primary : context.palette.onSurfaceVariant,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          Icon(Icons.arrow_drop_down, size: 18, color: (_group > 0 || _unicastTo != null) ? context.palette.primary : context.palette.onSurfaceVariant),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
           IconButton(
             icon: const Icon(Icons.more_vert),
             tooltip: l.tr('settings'),
@@ -1359,7 +1434,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                 child: ListenableBuilder(
                   listenable: _meshAnimationEnabled && _meshAnimController != null ? _meshAnimController! : const AlwaysStoppedAnimation(0),
                   builder: (_, __) => CustomPaint(
-                    painter: MeshBackgroundPainter(progress: _meshAnimController?.value ?? 0, animated: _meshAnimationEnabled),
+                    painter: MeshBackgroundPainter(
+                      progress: _meshAnimController?.value ?? 0,
+                      animated: _meshAnimationEnabled,
+                      palette: context.palette,
+                    ),
                   ),
                 ),
               ),
@@ -1459,8 +1538,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
                   Padding(
-                    padding: const EdgeInsets.only(left: 2),
-                    child: _inputIcon(Icons.location_on, widget.ble.isConnected && !_locationLoading ? _sendLocation : null, loading: _locationLoading, tooltip: l.tr('location')),
+                    padding: const EdgeInsets.only(left: 4),
+                    child: _inputIcon(
+                      _group > 0 ? Icons.group_outlined : (_unicastTo != null ? Icons.person_outline : Icons.public),
+                      widget.ble.isConnected ? _showRecipientPickerSheet : null,
+                      tooltip: '${l.tr('to')} ${_recipientPillLabel(l)}',
+                      iconColor: (_group > 0 || _unicastTo != null) ? context.palette.primary : null,
+                    ),
                   ),
                   Expanded(
                     child: AnimatedSwitcher(
@@ -1611,37 +1695,39 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
   // ── Компактные иконки в строке ввода (как в мессенджерах) ──
 
-  Widget _inputIcon(IconData icon, VoidCallback? onTap, {bool loading = false, bool active = false, String? tooltip, String? badge}) {
+  Widget _inputIcon(IconData icon, VoidCallback? onTap, {bool loading = false, bool active = false, String? tooltip, String? badge, Color? iconColor}) {
     final enabled = onTap != null;
+    final defaultIconColor = enabled ? context.palette.onSurfaceVariant : context.palette.divider;
+    final resolvedColor = loading
+        ? context.palette.primary
+        : (active ? context.palette.error : (iconColor ?? defaultIconColor));
+    final core = SizedBox(
+      width: 40,
+      height: 40,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          if (loading)
+            SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: context.palette.primary))
+          else
+            Icon(icon, size: 22, color: resolvedColor),
+          if (badge != null && badge.isNotEmpty)
+            Positioned(
+              right: 0,
+              top: 0,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                decoration: BoxDecoration(color: context.palette.primary, borderRadius: BorderRadius.circular(8)),
+                child: Text(badge, style: TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.w600)),
+              ),
+            ),
+        ],
+      ),
+    );
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: onTap,
-      child: Tooltip(
-        message: tooltip ?? '',
-        child: SizedBox(
-          width: 40,
-          height: 40,
-          child: Stack(
-            alignment: Alignment.center,
-            children: [
-              if (loading)
-                SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: context.palette.primary))
-              else
-                Icon(icon, size: 24, color: active ? context.palette.error : (enabled ? context.palette.onSurfaceVariant : context.palette.divider)),
-              if (badge != null && badge.isNotEmpty)
-                Positioned(
-                  right: 0,
-                  top: 0,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                    decoration: BoxDecoration(color: context.palette.primary, borderRadius: BorderRadius.circular(8)),
-                    child: Text(badge, style: TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.w600)),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ),
+      child: (tooltip != null && tooltip.isNotEmpty) ? Tooltip(message: tooltip!, child: core) : core,
     );
   }
 
@@ -1931,7 +2017,7 @@ class _PopoverMenuRoute<T> extends PageRouteBuilder<T> {
 }
 
 /// Popover меню в стиле Telegram — компактная карточка сверху справа.
-/// Второй уровень «Инструменты»: карта, mesh, ping, самотест (OTA — в настройках, блок Wi‑Fi и OTA).
+/// Второй уровень «Инструменты»: карта, геолокация в mesh, топология, ping, самотест.
 class _AppMenuPopover extends StatefulWidget {
   final AppLocalizations l;
 
@@ -2059,6 +2145,7 @@ class _AppMenuPopoverState extends State<_AppMenuPopover> {
         ),
         Divider(height: 1, color: context.palette.divider),
         _popoverItem(context, Icons.map, l.tr('map'), 'map'),
+        _popoverItem(context, Icons.location_on, l.tr('location'), 'send_location'),
         _popoverItem(context, Icons.hub, l.tr('mesh_topology'), 'mesh'),
         _popoverItem(context, Icons.radar, l.tr('ping'), 'ping'),
         _popoverItem(context, Icons.health_and_safety, l.tr('selftest'), 'selftest'),

@@ -5,6 +5,7 @@ import '../l10n/app_localizations.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/app_snackbar.dart';
 import '../theme/app_theme.dart';
+import '../widgets/rift_dialogs.dart';
 
 class ContactsScreen extends StatefulWidget {
   final List<String> neighbors;
@@ -25,13 +26,22 @@ class _ContactsScreenState extends State<ContactsScreen> {
   Future<void> _load() async {
     setState(() => _loading = true);
     final list = await ContactsService.load();
+    list.sort((a, b) {
+      final an = a.nickname.trim().toLowerCase();
+      final bn = b.nickname.trim().toLowerCase();
+      if (an.isNotEmpty && bn.isNotEmpty) return an.compareTo(bn);
+      if (an.isNotEmpty) return -1;
+      if (bn.isNotEmpty) return 1;
+      return a.id.compareTo(b.id);
+    });
     if (mounted) setState(() { _contacts = list; _loading = false; });
   }
 
   void _showAddDialog({String? prefilledId}) {
     final raw = prefilledId?.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase() ?? '';
+    final existing = raw.isNotEmpty ? _contacts.where((c) => c.id == raw).firstOrNull : null;
     final idC = TextEditingController(text: raw.length > 8 ? raw.substring(0, 8) : raw);
-    final nickC = TextEditingController();
+    final nickC = TextEditingController(text: existing?.nickname ?? '');
     final l = context.l10n;
     showAppDialog(context: context, builder: (ctx) => AlertDialog(
       backgroundColor: context.palette.card,
@@ -78,59 +88,90 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
   Future<void> _delete(Contact c) async {
     final l = context.l10n;
-    final ok = await showAppDialog<bool>(context: context, builder: (ctx) => AlertDialog(
-      backgroundColor: context.palette.card,
-      title: Text(l.tr('delete_contact'), style: TextStyle(color: context.palette.onSurface)),
-      content: Text('${c.nickname.isNotEmpty ? "${c.nickname} " : ""}(${c.id})', style: TextStyle(color: context.palette.onSurface)),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(l.tr('cancel'))),
-        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFD32F2F), foregroundColor: context.palette.card), onPressed: () => Navigator.pop(ctx, true), child: Text(l.tr('delete'))),
-      ],
-    ));
+    final ok = await showRiftConfirmDialog(
+      context: context,
+      title: l.tr('delete_contact'),
+      message: '${c.nickname.isNotEmpty ? "${c.nickname} " : ""}(${c.id})',
+      cancelText: l.tr('cancel'),
+      confirmText: l.tr('delete'),
+      danger: true,
+      icon: Icons.person_remove_outlined,
+    );
     if (ok == true) { await ContactsService.remove(c.id); await _load(); }
   }
 
   @override
   Widget build(BuildContext context) {
     final l = context.l10n;
-    final body = MeshBackgroundWrapper(
-      child: Material(
+    final inner = Material(
         color: Colors.transparent,
         child: _loading
             ? Center(child: CircularProgressIndicator(color: context.palette.primary))
             : Column(
                 children: [
                   if (widget.neighbors.isNotEmpty)
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: context.palette.primary.withOpacity(0.06),
-                        border: Border(bottom: BorderSide(color: context.palette.divider)),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(l.tr('add_from_neighbors'), style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: context.palette.onSurface)),
-                          const SizedBox(height: 8),
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 4,
-                            children: widget.neighbors.map((id) {
-                              final shortId = id.length > 8 ? id.substring(0, 8) : id;
-                              final existing = _contacts.where((c) => c.id == shortId).firstOrNull;
-                              return ActionChip(
-                                backgroundColor: context.palette.card,
-                                side: BorderSide(color: context.palette.divider),
-                                label: Text(
-                                  existing != null && existing.nickname.isNotEmpty ? '${existing.nickname} ($shortId)' : shortId,
-                                  style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: context.palette.onSurface),
+                    Padding(
+                      padding: EdgeInsets.fromLTRB(widget.embedded ? 12 : 0, widget.embedded ? 4 : 0, widget.embedded ? 12 : 0, widget.embedded ? 10 : 0),
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+                        decoration: BoxDecoration(
+                          color: widget.embedded ? context.palette.card : context.palette.primary.withOpacity(0.06),
+                          borderRadius: BorderRadius.circular(widget.embedded ? 18 : 0),
+                          border: widget.embedded
+                              ? Border.all(color: context.palette.divider.withOpacity(0.7))
+                              : null,
+                          boxShadow: widget.embedded
+                              ? [
+                                  BoxShadow(
+                                    color: context.palette.primary.withOpacity(0.06),
+                                    blurRadius: 18,
+                                    offset: const Offset(0, 6),
+                                  ),
+                                ]
+                              : null,
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Icon(Icons.hub_outlined, size: 20, color: context.palette.primary),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    l.tr('add_from_neighbors'),
+                                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: context.palette.onSurface),
+                                  ),
                                 ),
-                                onPressed: () => _showAddDialog(prefilledId: shortId),
-                              );
-                            }).toList(),
-                          ),
-                        ],
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: widget.neighbors.map((id) {
+                                final shortId = id.length > 8 ? id.substring(0, 8) : id;
+                                final existing = _contacts.where((c) => c.id == shortId).firstOrNull;
+                                return Material(
+                                  color: context.palette.surfaceVariant.withOpacity(0.75),
+                                  borderRadius: BorderRadius.circular(12),
+                                  child: InkWell(
+                                    borderRadius: BorderRadius.circular(12),
+                                    onTap: () => _showAddDialog(prefilledId: shortId),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                      child: Text(
+                                        existing != null && existing.nickname.isNotEmpty ? '${existing.nickname} · $shortId' : shortId,
+                                        style: TextStyle(fontFamily: 'monospace', fontSize: 12.5, fontWeight: FontWeight.w500, color: context.palette.onSurface),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   Expanded(
@@ -154,31 +195,72 @@ class _ContactsScreenState extends State<ContactsScreen> {
                               ],
                             ),
                           )
-                        : ListView.separated(
+                        : ListView.builder(
+                            padding: EdgeInsets.fromLTRB(widget.embedded ? 12 : 0, 4, widget.embedded ? 12 : 0, 88),
                             itemCount: _contacts.length,
-                            separatorBuilder: (_, __) => Divider(height: 1, indent: 72, color: context.palette.divider),
                             itemBuilder: (_, i) {
                               final c = _contacts[i];
-                              return ListTile(
-                                leading: CircleAvatar(
-                                  backgroundColor: context.palette.primary.withOpacity(0.15),
-                                  child: Text(
-                                    (c.nickname.isNotEmpty ? c.nickname[0] : c.id[0]).toUpperCase(),
-                                    style: TextStyle(color: context.palette.primary, fontWeight: FontWeight.w600),
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 10),
+                                child: Material(
+                                  color: context.palette.card,
+                                  elevation: 0,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(18),
+                                    side: BorderSide(color: context.palette.divider.withOpacity(0.65)),
+                                  ),
+                                  clipBehavior: Clip.antiAlias,
+                                  child: InkWell(
+                                    onTap: () => _showEditDialog(c),
+                                    onLongPress: () => _delete(c),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                                      child: Row(
+                                        children: [
+                                          CircleAvatar(
+                                            radius: 22,
+                                            backgroundColor: context.palette.primary.withOpacity(0.14),
+                                            child: Text(
+                                              (c.nickname.isNotEmpty ? c.nickname[0] : c.id[0]).toUpperCase(),
+                                              style: TextStyle(color: context.palette.primary, fontWeight: FontWeight.w700, fontSize: 18),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 14),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  c.nickname.isNotEmpty ? c.nickname : c.id,
+                                                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: context.palette.onSurface),
+                                                ),
+                                                const SizedBox(height: 4),
+                                                Text(
+                                                  c.id,
+                                                  style: TextStyle(
+                                                    fontFamily: 'monospace',
+                                                    fontSize: 12.5,
+                                                    letterSpacing: 0.2,
+                                                    color: context.palette.onSurfaceVariant.withOpacity(0.95),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          Icon(Icons.chevron_right_rounded, color: context.palette.onSurfaceVariant.withOpacity(0.4)),
+                                        ],
+                                      ),
+                                    ),
                                   ),
                                 ),
-                                title: Text(c.nickname.isNotEmpty ? c.nickname : c.id, style: TextStyle(color: context.palette.onSurface)),
-                                subtitle: Text(c.id, style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: context.palette.onSurfaceVariant.withOpacity(0.9))),
-                                onTap: () => _showEditDialog(c),
-                                onLongPress: () => _delete(c),
                               );
                             },
                           ),
                   ),
                 ],
               ),
-      ),
     );
+    final body = widget.embedded ? inner : MeshBackgroundWrapper(child: inner);
 
     final fab = FloatingActionButton(
       backgroundColor: context.palette.primary,
@@ -190,7 +272,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
     if (widget.embedded) {
       return Scaffold(
-        backgroundColor: context.palette.surface,
+        backgroundColor: Colors.transparent,
         body: body,
         floatingActionButton: fab,
       );

@@ -44,7 +44,8 @@ Thumbs.db
 .env
 .env.local
 secrets/
-.cursor/*
+# Cursor (локальные правила и настройки — не в репозитории)
+.cursor/
 
 # Планы и анализы из разговоров (не для репозитория)
 docs/plans/
