@@ -7,3 +7,6 @@ CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=20480
 # WiFi: больше слотов в event queue — "failed to post WiFi event=2 ret=259" (STA_START)
 # После изменения: pio run -t fullclean && pio run
 CONFIG_ESP_SYSTEM_EVENT_QUEUE_SIZE=64
+
+# packetTask 16K: при фрагментированном internal DRAM — стек в PSRAM (async_tasks xTaskCreateWithCaps)
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y

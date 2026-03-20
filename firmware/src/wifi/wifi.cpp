@@ -18,10 +18,19 @@ namespace wifi {
 static bool s_inited = false;
 static bool s_available = false;
 
+/** Меньше буферов, чем WIFI_INIT_CONFIG_DEFAULT — ниже требование к contiguous internal RAM
+ *  (после тяжёлого бутa esp_wifi_init иначе даёт ESP_ERR_NO_MEM). ESP-NOW/STA остаются рабочими.
+ *  OLED: init вызывается сразу после BLE — если всё ещё NO_MEM, ещё сильнее ужать (см. IDF min). */
+static void applyLowFootprintWifiConfig(wifi_init_config_t* cfg) {
+  cfg->static_rx_buf_num = 5;    // default 10
+  cfg->dynamic_rx_buf_num = 10;  // default 32
+  cfg->mgmt_sbuf_num = 10;       // default 32
+}
+
 bool init() {
   if (s_inited) return s_available;
-  s_inited = true;
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  applyLowFootprintWifiConfig(&cfg);
   esp_err_t err = esp_wifi_init(&cfg);
   if (err != ESP_OK) {
     Serial.printf("[RiftLink] WiFi init failed: %s (0x%x) — OTA/ESP-NOW отключены\n",
@@ -29,6 +38,7 @@ bool init() {
     s_available = false;
     return false;
   }
+  s_inited = true;
   esp_wifi_set_mode(WIFI_MODE_NULL);
   s_available = true;
   return true;

@@ -14,14 +14,16 @@ static constexpr size_t PACKET_QUEUE_LEN =
 #if defined(USE_EINK)
     32;   // Paper: ~16KB heap; 64+WiFi давало OOM (ret=101)
 #else
-    64;   // V3/V4: discovery burst — HELLO, KEY_EXCHANGE, MSG
+    // OLED: после Wi-Fi largest free block часто <16K — 64/48 съедают heap и мешают xTaskCreate(packet).
+    // 32/32: меньше фрагментации; burst HELLO/KEY — см. send_overflow и ACK reserve.
+    32;
 #endif
 // Paper: экономия RAM. V3/V4: после lazy-init TX burst (KEY+HELLO) — 32 давало частые drop у HELLO.
 static constexpr size_t SEND_QUEUE_LEN =
 #if defined(USE_EINK)
     32;
 #else
-    48;
+    32;
 #endif
 static constexpr size_t DISPLAY_QUEUE_LEN = 12;  // burst HELLO → много Info redraw; coalesce в displayTask
 
@@ -30,14 +32,15 @@ static bool tryCreateQueues(size_t pktLen, size_t sendLen, size_t dispLen) {
   if (radioCmdQueue) { vQueueDelete(radioCmdQueue); radioCmdQueue = nullptr; }
   if (displayQueue) { vQueueDelete(displayQueue); displayQueue = nullptr; }
 
+  // Сначала маленькая displayQueue — оставляет больший contiguous блок под крупные packet/send.
+  displayQueue = xQueueCreate(dispLen, sizeof(DisplayQueueItem));
   packetQueue = xQueueCreate(pktLen, sizeof(PacketQueueItem));
   radioCmdQueue = xQueueCreate(sendLen, sizeof(RadioCmd));
-  displayQueue = xQueueCreate(dispLen, sizeof(DisplayQueueItem));
 
   if (!packetQueue || !radioCmdQueue || !displayQueue) {
+    if (displayQueue) vQueueDelete(displayQueue);
     if (packetQueue) vQueueDelete(packetQueue);
     if (radioCmdQueue) vQueueDelete(radioCmdQueue);
-    if (displayQueue) vQueueDelete(displayQueue);
     packetQueue = radioCmdQueue = displayQueue = nullptr;
     return false;
   }

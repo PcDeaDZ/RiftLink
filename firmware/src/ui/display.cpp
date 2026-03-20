@@ -113,8 +113,9 @@ void displayInit() {
 
   Wire.begin(SDA_PIN, SCL_PIN);
   disp = new Adafruit_SSD1306(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
-  if (!disp->begin(SSD1306_SWITCHCAPVCC, 0x3C, true, true)) {
-    disp->begin(SSD1306_SWITCHCAPVCC, 0x3D, true, true);
+  // false = не вызывать Wire.begin() из SSD1306 (уже инициализировали) — иначе W "Bus already started"
+  if (!disp->begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false)) {
+    disp->begin(SSD1306_SWITCHCAPVCC, 0x3D, true, false);
   }
   disp->clearDisplay();
   disp->setTextColor(SSD1306_WHITE);

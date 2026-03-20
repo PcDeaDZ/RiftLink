@@ -14,13 +14,14 @@
 
 #define FRAG_REASSEMBLE_MAX  4       // макс. собираемых сообщений одновременно
 #define FRAG_TIMEOUT_MS      60000  // таймаут неполного сообщения
+/** Раньше malloc(4096) на слот — теперь фиксированный пул в BSS. */
+#define FRAG_SLOT_BUF 4096
 
 struct ReassembleSlot {
   uint32_t msgId;
   uint8_t from[protocol::NODE_ID_LEN];
   uint8_t to[protocol::NODE_ID_LEN];
-  uint8_t* buf;
-  size_t bufSize;
+  uint8_t storage[FRAG_SLOT_BUF];
   uint8_t partsReceived;
   uint8_t partsTotal;
   uint32_t lastTime;
@@ -54,7 +55,6 @@ static ReassembleSlot* findFreeSlot() {
   for (int i = 0; i < FRAG_REASSEMBLE_MAX; i++) {
     if (!s_slots[i].inUse) return &s_slots[i];
     if (now - s_slots[i].lastTime > FRAG_TIMEOUT_MS) {
-      if (s_slots[i].buf) { free(s_slots[i].buf); s_slots[i].buf = nullptr; }
       s_slots[i].inUse = false;
       return &s_slots[i];
     }
@@ -126,11 +126,6 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
   if (!slot) {
     slot = findFreeSlot();
     if (!slot) return false;
-    if (!slot->buf) {
-      slot->buf = (uint8_t*)malloc(4096);
-      slot->bufSize = 4096;
-    }
-    if (!slot->buf) return false;
     slot->msgId = msgId;
     memcpy(slot->from, from, protocol::NODE_ID_LEN);
     memcpy(slot->to, to, protocol::NODE_ID_LEN);
@@ -138,15 +133,15 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
     slot->partsReceived = 0;
     slot->compressed = compressed;
     slot->inUse = true;
-    memset(slot->buf, 0, (size_t)total * FRAG_DATA_MAX);
+    memset(slot->storage, 0, (size_t)total * FRAG_DATA_MAX);
   }
   if (slot->partsTotal != total) return false;
 
   size_t offset = (part - 1) * FRAG_DATA_MAX;
   size_t chunkLen = payloadLen - FRAG_HEADER_LEN;
-  if (offset + chunkLen > slot->bufSize) return false;
+  if (offset + chunkLen > sizeof(slot->storage)) return false;
 
-  memcpy(slot->buf + offset, payload + FRAG_HEADER_LEN, chunkLen);
+  memcpy(slot->storage + offset, payload + FRAG_HEADER_LEN, chunkLen);
   slot->partsReceived++;
   slot->lastTime = millis();
 
@@ -155,10 +150,8 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
   size_t encLen = (slot->partsTotal - 1) * FRAG_DATA_MAX + chunkLen;
   uint8_t decBuf[MAX_MSG_PLAIN + 512];
   size_t decLen = 0;
-  if (!crypto::decryptFrom(slot->from, slot->buf, encLen, decBuf, &decLen)) {
+  if (!crypto::decryptFrom(slot->from, slot->storage, encLen, decBuf, &decLen)) {
     slot->inUse = false;
-    free(slot->buf);
-    slot->buf = nullptr;
     return false;
   }
 
@@ -175,15 +168,11 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
 
   if (plainLen > outMaxLen) {
     slot->inUse = false;
-    free(slot->buf);
-    slot->buf = nullptr;
     return false;
   }
   memcpy(out, plain, plainLen);
   *outLen = plainLen;
   slot->inUse = false;
-  free(slot->buf);
-  slot->buf = nullptr;
   return true;
 }
 

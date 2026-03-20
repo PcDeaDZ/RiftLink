@@ -21,7 +21,10 @@ constexpr size_t MAX_FRAGMENTS = 160;       // 30KB / 194
 /** Отправка голоса (unicast). data = Opus, plainLen ≤ MAX_VOICE_PLAIN */
 bool send(const uint8_t* to, const uint8_t* data, size_t dataLen);
 
-/** Обработка входящего фрагмента VOICE_MSG. Возвращает true если собрано */
+/**
+ * Обработка входящего фрагмента VOICE_MSG. Возвращает true если собрано.
+ * Сборка: статический пул буферов на слот (BSS), без malloc на фрагмент.
+ */
 bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, size_t payloadLen,
                 uint8_t* out, size_t outMaxLen, size_t* outLen);
 

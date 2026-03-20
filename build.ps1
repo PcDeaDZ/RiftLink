@@ -1,6 +1,13 @@
 ﻿# RiftLink — ультимативный менеджер (setup + build + flash + APK)
 # Использование: .\build.ps1  или  .\build.ps1 -Setup  или  .\build.ps1 -Flash -V4
 # Пути: .env.local (FLUTTER_ROOT, ANDROID_SDK_ROOT)
+# После правок этого файла: .\scripts\fix_encoding.ps1 (UTF-8 BOM, CRLF — см. README.md)
+#
+# Отладка Android (ADB):
+#   .\build.ps1 -AdbHelp      — как включить USB-отладку, flutter logs, logcat
+#   .\build.ps1 -AdbDevices   — список устройств (adb devices)
+#   .\build.ps1 -AdbLogs      — логи Flutter/Dart (flutter logs; -DeviceId — номер или serial)
+#   .\build.ps1 -AdbLogcat    — полный системный лог (adb logcat; -DeviceId — опционально)
 
 param(
     [switch]$Setup,     # Установка зависимостей (Python, PlatformIO, Flutter, Android SDK)
@@ -16,9 +23,13 @@ param(
     [switch]$V4,
     [switch]$App,
     [switch]$InstallApk,
+    [switch]$AdbHelp,    # Справка: отладка по USB, логи приложения
+    [switch]$AdbDevices, # adb devices
+    [switch]$AdbLogs,     # flutter logs
+    [switch]$AdbLogcat,   # adb logcat
     [string]$Port = "",
     [string]$BuildEnv = "",
-    [string]$DeviceId = ""   # ID устройства adb для -InstallApk
+    [string]$DeviceId = ""   # ID устройства adb: номер из списка, serial; для -InstallApk, -AdbLogs, -AdbLogcat
 )
 
 # UTF-8 для русского языка (без BOM)
@@ -141,6 +152,7 @@ function Invoke-Setup {
     Write-Host "Сборка: .\build.ps1 -V4" -ForegroundColor Cyan
     Write-Host "Прошивка: .\build.ps1 -V4 -Flash" -ForegroundColor Cyan
     Write-Host "APK: .\build.ps1 -App -InstallApk" -ForegroundColor Cyan
+    Write-Host 'ADB: .\build.ps1 -AdbHelp' -ForegroundColor Cyan
     Write-Host ""
 }
 
@@ -239,6 +251,108 @@ function Get-AdbDevices {
     return $devs
 }
 
+# Разрешение -DeviceId: номер 1..N из adb или serial (для flutter logs / logcat)
+function Resolve-AdbDeviceTarget {
+    param([string]$DeviceId = "")
+    $devs = @(Get-AdbDevices)
+    if ($devs.Count -eq 0) { return $null }
+    $raw = $DeviceId.Trim()
+    if (-not $raw) {
+        if ($devs.Count -eq 1) { return $devs[0] }
+        return $null
+    }
+    $idx = -1
+    if ([int]::TryParse($raw, [ref]$idx) -and $idx -ge 1 -and $idx -le $devs.Count) {
+        return $devs[$idx - 1]
+    }
+    if ($devs -contains $raw) { return $raw }
+    return $null
+}
+
+function Show-AdbDebugHelp {
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "  RiftLink — отладка приложения (ADB)" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host 'На телефоне:'
+    Write-Host '  1) Настройки -> О телефоне — много раз нажмите «Номер сборки», пока не включится режим разработчика.'
+    Write-Host '  2) Настройки -> Для разработчиков — включите «Отладка по USB».'
+    Write-Host '  3) Подключите USB, режим USB: передача файлов (MTP), при запросе — «Разрешить отладку».'
+    Write-Host ""
+    Write-Host 'На ПК (platform-tools: adb в ANDROID_HOME\platform-tools):'
+    Write-Host '  .\build.ps1 -AdbDevices   — список устройств (должно быть «device», не unauthorized).'
+    Write-Host '  .\build.ps1 -AdbLogs      — логи Dart/Flutter (из каталога app).'
+    Write-Host '  .\build.ps1 -AdbLogcat    — полный системный журнал (adb logcat).'
+    Write-Host '  Несколько устройств: -DeviceId 1 или -DeviceId serial (из adb devices).'
+    Write-Host ""
+    Write-Host 'Без провода (Android 11+): Для разработчиков -> Беспроводная отладка;'
+    Write-Host '  adb pair IP:PORT  ->  adb connect IP:PORT  ->  .\build.ps1 -AdbDevices'
+    Write-Host ""
+}
+
+function Invoke-AdbLogsCli {
+    if (-not (Test-Path $Adb)) {
+        Write-Host "[ОШИБКА] ADB не найден. Укажите ANDROID_SDK_ROOT в .env.local или установите SDK." -ForegroundColor Red
+        return $false
+    }
+    $devs = @(Get-AdbDevices)
+    if ($devs.Count -eq 0) {
+        Write-Host '[ОШИБКА] Нет устройств. Включите отладку по USB и подтвердите на телефоне: .\build.ps1 -AdbDevices' -ForegroundColor Red
+        return $false
+    }
+    $target = Resolve-AdbDeviceTarget -DeviceId $DeviceId
+    if (-not $target) {
+        if ($DeviceId.Trim()) {
+            Write-Host ('[ОШИБКА] -DeviceId: укажите номер 1-' + $devs.Count + ' или serial.') -ForegroundColor Red
+            & $Adb devices 2>&1 | ForEach-Object { Write-Host "  $_" }
+            return $false
+        }
+        Write-Host ""
+        Write-Host 'Несколько устройств — укажите: .\build.ps1 -AdbLogs -DeviceId 1' -ForegroundColor Yellow
+        & $Adb devices 2>&1 | ForEach-Object { Write-Host "  $_" }
+        for ($i = 0; $i -lt $devs.Count; $i++) { Write-Host "  $($i+1). $($devs[$i])" }
+        return $false
+    }
+    Write-Host ('[RiftLink] flutter logs -d ' + $target + ' (остановка: Ctrl+C)') -ForegroundColor Cyan
+    Push-Location $AppDir
+    try {
+        if ($Flutter -ne "flutter") { & $Flutter logs -d $target } else { flutter logs -d $target }
+        return $LASTEXITCODE -eq 0
+    } finally {
+        Pop-Location
+    }
+}
+
+function Invoke-AdbLogcatCli {
+    if (-not (Test-Path $Adb)) {
+        Write-Host "[ОШИБКА] ADB не найден. ANDROID_HOME=$env:ANDROID_HOME" -ForegroundColor Red
+        return $false
+    }
+    $devs = @(Get-AdbDevices)
+    if ($devs.Count -eq 0) {
+        Write-Host '[ОШИБКА] Нет устройств. .\build.ps1 -AdbDevices' -ForegroundColor Red
+        return $false
+    }
+    $target = Resolve-AdbDeviceTarget -DeviceId $DeviceId
+    if (-not $target -and $DeviceId.Trim()) {
+        Write-Host ('[ОШИБКА] -DeviceId: номер 1-' + $devs.Count + ' или serial.') -ForegroundColor Red
+        & $Adb devices 2>&1 | ForEach-Object { Write-Host "  $_" }
+        return $false
+    }
+    if (-not $target) {
+        if ($devs.Count -gt 1) {
+            Write-Host '[ОШИБКА] Несколько устройств — укажите: .\build.ps1 -AdbLogcat -DeviceId 1' -ForegroundColor Red
+            for ($i = 0; $i -lt $devs.Count; $i++) { Write-Host "  $($i+1). $($devs[$i])" }
+            return $false
+        }
+        $target = $devs[0]
+    }
+    Write-Host ('[RiftLink] adb -s ' + $target + ' logcat (остановка: Ctrl+C)') -ForegroundColor Cyan
+    & $Adb -s $target logcat
+    return $LASTEXITCODE -eq 0
+}
+
 function Show-Menu {
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Cyan
@@ -259,6 +373,7 @@ function Show-Menu {
     Write-Host "  Окружение:"
     Write-Host "    8. Setup — установка зависимостей (Python, PlatformIO, Flutter, Android)"
     Write-Host "    9. Обновление из репозитория (перезапись локальных изменений)"
+    Write-Host "   10. Отладка приложения (ADB: справка, flutter logs, logcat)"
     Write-Host ""
     Write-Host "    0. Выход"
     Write-Host ""
@@ -414,6 +529,24 @@ if ($Setup) {
 if ($Update) {
     if (Invoke-Update) { exit 0 } else { exit 1 }
 }
+if ($AdbHelp) {
+    Show-AdbDebugHelp
+    exit 0
+}
+if ($AdbDevices) {
+    if (-not (Test-Path $Adb)) {
+        Write-Host "[ОШИБКА] ADB не найден. ANDROID_HOME=$env:ANDROID_HOME" -ForegroundColor Red
+        exit 1
+    }
+    & $Adb devices
+    exit 0
+}
+if ($AdbLogs) {
+    if (Invoke-AdbLogsCli) { exit 0 } else { exit 1 }
+}
+if ($AdbLogcat) {
+    if (Invoke-AdbLogcatCli) { exit 0 } else { exit 1 }
+}
 # Монитор порта (просмотр вывода устройства)
 if ($Monitor -and -not $Flash -and -not $App -and -not $InstallApk -and -not $All -and $BuildEnv -eq "") {
     $ports = @(Get-SerialPorts)
@@ -435,7 +568,7 @@ if ($Monitor -and -not $Flash -and -not $App -and -not $InstallApk -and -not $Al
         }
     }
     if ($monitorPort) {
-        Write-Host "[RiftLink] Монитор $monitorPort (Ctrl+C — выход)" -ForegroundColor Cyan
+        Write-Host ('[RiftLink] Монитор ' + $monitorPort + ' (остановка: Ctrl+C)') -ForegroundColor Cyan
         try {
             Push-Location $FirmwareDir
             pio device monitor --port $monitorPort
@@ -684,6 +817,24 @@ while ($true) {
         }
         "8" { Invoke-Setup }
         "9" { Invoke-Update | Out-Null }
+        "10" {
+            Write-Host ""
+            Write-Host "  Отладка приложения (ADB):" -ForegroundColor Cyan
+            Write-Host "    1. Справка (USB-отладка, логи, Wi-Fi)"
+            Write-Host "    2. flutter logs (логи Dart/Flutter)"
+            Write-Host "    3. adb logcat (полный журнал)"
+            Write-Host "    4. adb devices"
+            Write-Host "    0. Назад"
+            $sub = Read-Host "Выберите"
+            switch ($sub) {
+                "1" { Show-AdbDebugHelp }
+                "2" { Invoke-AdbLogsCli | Out-Null }
+                "3" { Invoke-AdbLogcatCli | Out-Null }
+                "4" {
+                    if (Test-Path $Adb) { & $Adb devices } else { Write-Host "[ОШИБКА] ADB не найден. ANDROID_HOME=$env:ANDROID_HOME" -ForegroundColor Red }
+                }
+            }
+        }
         "0" { exit 0 }
         default { Write-Host "Неверный выбор." -ForegroundColor Yellow }
     }

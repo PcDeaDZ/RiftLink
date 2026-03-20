@@ -9,6 +9,7 @@ import '../widgets/mesh_background.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../ble/riftlink_ble.dart';
+import '../ble/riftlink_ble_scope.dart';
 import '../app_navigator.dart';
 import '../l10n/app_localizations.dart';
 import '../locale_notifier.dart';
@@ -38,7 +39,7 @@ String _formatBleError(BuildContext context, Object e) {
 }
 
 class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
-  final RiftLinkBle _ble = RiftLinkBle();
+  RiftLinkBle get _ble => RiftLinkBleScope.of(context);
   bool _scanning = false;
   bool _meshAnimationEnabled = true;
   AnimationController? _meshAnimController;

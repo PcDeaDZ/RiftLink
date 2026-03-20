@@ -3,6 +3,8 @@
 
 import 'dart:async';
 import 'dart:convert';
+
+import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 class RiftLinkBle {
@@ -17,10 +19,16 @@ class RiftLinkBle {
 
   /// Один приёмник notify + broadcast: несколько `events.listen` (чат, настройки, группы…)
   /// получают одни и те же события. Длинные JSON склеиваются из нескольких пакетов ([onValueReceived]).
-  StreamController<RiftLinkEvent>? _eventController;
-  StreamSubscription<List<int>>? _rxSub;
+  ///
+  /// Поток живёт всё время жизни [RiftLinkBle]: при отключении RX не закрывается — иначе подписка,
+  /// созданная до connect() или до повторного connect(), остаётся на [Stream.empty] / закрытом stream.
+  final StreamController<RiftLinkEvent> _eventBus = StreamController<RiftLinkEvent>.broadcast();
+  StreamSubscription<OnCharacteristicReceivedEvent>? _rxSub;
   /// Склейка фрагментов notify (длинный `info` / MTU): каждый chunk может быть не целым JSON.
   final List<int> _rxAccum = [];
+  DateTime? _lastInfoRequestAt;
+  Timer? _queuedInfoTimer;
+  bool _hasQueuedInfoRequest = false;
 
   /// Последний успешно распарсенный `evt:info` (ответ на connect/getInfo может прийти
   /// до подписки экрана на [events] — без кэша UI и «недавние» теряют данные).
@@ -124,18 +132,56 @@ class RiftLinkBle {
       await disconnect();
       return false;
     }
+    if (!kIsWeb) {
+      try {
+        await dev.requestMtu(517);
+      } catch (_) {}
+    }
     await _startRxDispatcher();
-    getInfo();
+    getInfo(force: true);
     getGroups();
     getRoutes();
     return true;
   }
 
-  /// Запросить info (evt "info")
-  Future<bool> getInfo() async => _sendCmd({'cmd': 'info'});
+  /// Запросить info (evt "info"). Централизованный throttle, чтобы экраны не спамили устройству.
+  Future<bool> getInfo({bool force = false}) async {
+    if (!isConnected) return false;
+    if (force) {
+      _queuedInfoTimer?.cancel();
+      _queuedInfoTimer = null;
+      _hasQueuedInfoRequest = false;
+      _lastInfoRequestAt = DateTime.now();
+      return _sendCmd({'cmd': 'info'});
+    }
+
+    const minGap = Duration(milliseconds: 700);
+    final now = DateTime.now();
+    final last = _lastInfoRequestAt;
+    if (last == null || now.difference(last) >= minGap) {
+      _lastInfoRequestAt = now;
+      return _sendCmd({'cmd': 'info'});
+    }
+
+    if (_hasQueuedInfoRequest) return true;
+    _hasQueuedInfoRequest = true;
+    final wait = minGap - now.difference(last);
+    _queuedInfoTimer?.cancel();
+    _queuedInfoTimer = Timer(wait, () async {
+      _hasQueuedInfoRequest = false;
+      if (!isConnected) return;
+      _lastInfoRequestAt = DateTime.now();
+      await _sendCmd({'cmd': 'info'});
+    });
+    return true;
+  }
 
   Future<void> disconnect() async {
     _lastInfo = null;
+    _queuedInfoTimer?.cancel();
+    _queuedInfoTimer = null;
+    _hasQueuedInfoRequest = false;
+    _lastInfoRequestAt = null;
     _stopRxDispatcher();
     if (_device != null) {
       await _device!.disconnect();
@@ -146,12 +192,39 @@ class RiftLinkBle {
   }
 
   Future<void> _startRxDispatcher() async {
-    if (_rxChar == null) return;
-    if (_eventController != null) return;
-    _eventController = StreamController<RiftLinkEvent>.broadcast();
+    if (_rxChar == null || _device == null) return;
+    // Не используем [_rxChar.onValueReceived]: в FBP фильтр сравнивает primaryServiceUuid события
+    // с полем у объекта из discovery — при null vs не-null (типично на Android) все notify отсекаются.
+    _rxSub?.cancel();
+    _rxSub = null;
     _rxAccum.clear();
-    await _rxChar!.setNotifyValue(true);
-    _rxSub = _rxChar!.onValueReceived.listen(_feedRxChunk);
+
+    final devId = _device!.remoteId;
+    final rx = _rxChar!;
+
+    if (!kIsWeb) {
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+    }
+
+    // Подписка до setNotifyValue: иначе первые notify после включения CCCD могут прийти до listen().
+    _rxSub = FlutterBluePlus.events.onCharacteristicReceived.listen(
+      (OnCharacteristicReceivedEvent event) {
+        // Не отбрасывать полезную нагрузку, если платформа пометила success=false.
+        if (event.error != null && event.value.isEmpty) return;
+        final c = event.characteristic;
+        if (!RiftLinkBle.remoteIdsMatch(c.remoteId.str, devId.str)) return;
+        if (c.characteristicUuid != rx.characteristicUuid) return;
+        _feedRxChunk(event.value);
+      },
+      onError: (Object e, StackTrace _) {
+        assert(() {
+          debugPrint('RiftLinkBle: onCharacteristicReceived error $e');
+          return true;
+        }());
+      },
+    );
+
+    await rx.setNotifyValue(true);
   }
 
   void _feedRxChunk(List<int> chunk) {
@@ -162,31 +235,86 @@ class RiftLinkBle {
       _rxAccum.clear();
       return;
     }
-    final String s;
+    _drainRxAccum();
+  }
+
+  void _emitParsedJson(Map<String, dynamic> json) {
+    RiftLinkEvent? evt;
     try {
-      s = utf8.decode(_rxAccum, allowMalformed: false);
-    } catch (_) {
+      evt = _jsonToEvent(json);
+    } catch (e, _) {
+      assert(() {
+        debugPrint('RiftLinkBle: _jsonToEvent: $e');
+        return true;
+      }());
       return;
     }
-    try {
-      final decoded = jsonDecode(s);
-      if (decoded is! Map) {
+    if (evt is RiftLinkInfoEvent) {
+      _lastInfo = evt;
+    }
+    if (evt != null && !_eventBus.isClosed) {
+      _eventBus.add(evt);
+    }
+  }
+
+  /// Разбор RX: сначала один целый JSON (основной путь), иначе — несколько объектов подряд.
+  /// Разбор по скобкам оставлен как запасной; он может ошибаться на `\"`/`\\` внутри строк.
+  void _drainRxAccum() {
+    for (var iter = 0; iter < 32; iter++) {
+      final s = _decodeUtf8OrNull(_rxAccum);
+      if (s == null) return;
+
+      final i0 = s.indexOf('{');
+      if (i0 < 0) {
         _rxAccum.clear();
         return;
       }
-      final json = Map<String, dynamic>.from(decoded as Map);
-      _rxAccum.clear();
-      final evt = _jsonToEvent(json);
-      if (evt is RiftLinkInfoEvent) {
-        _lastInfo = evt;
+      if (i0 > 0) {
+        _rxAccum
+          ..clear()
+          ..addAll(utf8.encode(s.substring(i0)));
+        continue;
       }
-      if (evt != null && !(_eventController?.isClosed ?? true)) {
-        _eventController!.add(evt);
+
+      final t = s;
+      // Один полный объект в буфере (самый частый случай).
+      try {
+        final decoded = jsonDecode(t);
+        if (decoded is Map) {
+          _emitParsedJson(Map<String, dynamic>.from(decoded as Map));
+          _rxAccum.clear();
+          return;
+        }
+      } catch (_) {
+        // Неполный JSON или несколько объектов подряд — ниже.
       }
-    } on FormatException {
-      // Неполный JSON — ждём следующий фрагмент.
-    } catch (_) {
-      _rxAccum.clear();
+
+      final objs = _extractTopLevelJsonObjects(s);
+      if (objs.objects.isEmpty) {
+        if (_rxAccum.length > 4096) {
+          final lastBrace = s.lastIndexOf('{');
+          if (lastBrace > 0) {
+            _rxAccum
+              ..clear()
+              ..addAll(utf8.encode(s.substring(lastBrace)));
+          } else {
+            _rxAccum.clear();
+          }
+        }
+        return;
+      }
+      for (final raw in objs.objects) {
+        try {
+          final decoded = jsonDecode(raw);
+          if (decoded is! Map) continue;
+          _emitParsedJson(Map<String, dynamic>.from(decoded as Map));
+        } catch (_) {}
+      }
+      final tailBytes = utf8.encode(objs.tail);
+      _rxAccum
+        ..clear()
+        ..addAll(tailBytes);
+      if (tailBytes.isEmpty) return;
     }
   }
 
@@ -194,10 +322,6 @@ class RiftLinkBle {
     _rxSub?.cancel();
     _rxSub = null;
     _rxAccum.clear();
-    if (_eventController != null && !_eventController!.isClosed) {
-      _eventController!.close();
-    }
-    _eventController = null;
   }
 
   /// Отправка геолокации (broadcast)
@@ -311,13 +435,8 @@ class RiftLinkBle {
     return _sendCmd(payload);
   }
 
-  /// Все подписчики получают один и тот же поток (см. [_startRxDispatcher]).
-  Stream<RiftLinkEvent> get events {
-    if (_rxChar == null || _eventController == null) {
-      return const Stream.empty();
-    }
-    return _eventController!.stream;
-  }
+  /// Все подписчики получают один и тот же поток (см. [_eventBus]).
+  Stream<RiftLinkEvent> get events => _eventBus.stream;
 }
 
 int _jsonInt(dynamic e) {
@@ -325,6 +444,26 @@ int _jsonInt(dynamic e) {
   if (e is int) return e;
   if (e is num) return e.toInt();
   return int.tryParse(e.toString()) ?? 0;
+}
+
+double _jsonDouble(dynamic v, [double fallback = 868.0]) {
+  if (v == null) return fallback;
+  if (v is num) return v.toDouble();
+  return double.tryParse(v.toString()) ?? fallback;
+}
+
+int _jsonIntDefault(dynamic v, int d) {
+  if (v == null) return d;
+  if (v is int) return v;
+  if (v is num) return v.toInt();
+  return int.tryParse(v.toString()) ?? d;
+}
+
+int? _jsonIntNullable(dynamic v) {
+  if (v == null) return null;
+  if (v is int) return v;
+  if (v is num) return v.toInt();
+  return int.tryParse(v.toString());
 }
 
 String _regionCodeOrDefault(dynamic v, [String fallback = 'EU']) {
@@ -337,6 +476,59 @@ String? _trimmedStringOrNull(dynamic v) {
   if (v == null) return null;
   final s = v.toString().trim();
   return s.isEmpty ? null : s;
+}
+
+String? _decodeUtf8OrNull(List<int> bytes) {
+  try {
+    return utf8.decode(bytes, allowMalformed: false);
+  } catch (_) {
+    return null;
+  }
+}
+
+({List<String> objects, String tail}) _extractTopLevelJsonObjects(String s) {
+  final out = <String>[];
+  var inStr = false;
+  var esc = false;
+  var depth = 0;
+  int? start;
+  var lastConsumed = 0;
+
+  for (var i = 0; i < s.length; i++) {
+    final ch = s.codeUnitAt(i);
+    if (inStr) {
+      if (esc) {
+        esc = false;
+        continue;
+      }
+      if (ch == 0x5C) {
+        esc = true;
+      } else if (ch == 0x22) {
+        inStr = false;
+      }
+      continue;
+    }
+    if (ch == 0x22) {
+      inStr = true;
+      continue;
+    }
+    if (ch == 0x7B) {
+      if (depth == 0) start = i;
+      depth++;
+      continue;
+    }
+    if (ch == 0x7D && depth > 0) {
+      depth--;
+      if (depth == 0 && start != null) {
+        out.add(s.substring(start, i + 1));
+        lastConsumed = i + 1;
+        start = null;
+      }
+    }
+  }
+
+  final tail = lastConsumed > 0 ? s.substring(lastConsumed) : s;
+  return (objects: out, tail: tail);
 }
 
 /// Парсинг одного JSON-уведомления с RX (вынесено из потока для единого диспетчера).
@@ -386,13 +578,14 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     );
   }
   if (evt == 'info') {
-    try {
     final nb = json['neighbors'];
     final neighbors = nb is List ? (nb as List).map((e) => e.toString()).toList() : <String>[];
     final rssiList = json['neighborsRssi'];
     final neighborsRssi = rssiList is List ? (rssiList as List).map(_jsonInt).toList() : <int>[];
     final hasKeyList = json['neighborsHasKey'];
-    final neighborsHasKey = hasKeyList is List ? (hasKeyList as List).map((e) => e == true).toList() : <bool>[];
+    final neighborsHasKey = hasKeyList is List
+        ? (hasKeyList as List).map((e) => e == true || e == 1).toList()
+        : <bool>[];
     final grpList = json['groups'];
     final groups = grpList is List ? (grpList as List).map(_jsonInt).toList() : <int>[];
     final routesList = json['routes'];
@@ -402,10 +595,10 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
         if (r is Map) {
           final m = Map<String, dynamic>.from(r as Map);
           routes.add({
-            'dest': m['dest'] as String? ?? '',
-            'nextHop': m['nextHop'] as String? ?? '',
-            'hops': (m['hops'] as num?)?.toInt() ?? 0,
-            'rssi': (m['rssi'] as num?)?.toInt() ?? 0,
+            'dest': m['dest']?.toString() ?? '',
+            'nextHop': m['nextHop']?.toString() ?? '',
+            'hops': _jsonIntDefault(m['hops'], 0),
+            'rssi': _jsonIntDefault(m['rssi'], 0),
           });
         }
       }
@@ -415,27 +608,29 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     return RiftLinkInfoEvent(
       id: idStr,
       nickname: _trimmedStringOrNull(json['nickname']),
+      /// Прошивка опускает ключи, если значение «пустое» (см. ble.cpp notifyInfo):
+      /// без флагов приложение затирало UI при null из отсутствующего поля.
+      hasNicknameField: json.containsKey('nickname'),
+      hasChannelField: json.containsKey('channel'),
+      hasOfflinePendingField: json.containsKey('offlinePending'),
       region: _regionCodeOrDefault(json['region']),
-      freq: (json['freq'] as num?)?.toDouble() ?? 868.0,
-      power: (json['power'] as num?)?.toInt() ?? 14,
-      channel: (json['channel'] as num?)?.toInt(),
+      freq: _jsonDouble(json['freq']),
+      power: _jsonIntDefault(json['power'], 14),
+      channel: _jsonIntNullable(json['channel']),
       version: json['version']?.toString(),
       neighbors: neighbors,
       neighborsRssi: neighborsRssi,
       neighborsHasKey: neighborsHasKey,
       groups: groups,
       routes: routes,
-      sf: (json['sf'] as num?)?.toInt(),
-      offlinePending: (json['offlinePending'] as num?)?.toInt(),
-      batteryMv: (json['batteryMv'] as num?)?.toInt() ?? (json['battery'] as num?)?.toInt(),
-      gpsPresent: json['gpsPresent'] == true,
-      gpsEnabled: json['gpsEnabled'] == true,
-      gpsFix: json['gpsFix'] == true,
-      powersave: json['powersave'] == true,
+      sf: _jsonIntNullable(json['sf']),
+      offlinePending: _jsonIntNullable(json['offlinePending']),
+      batteryMv: _jsonIntNullable(json['batteryMv']) ?? _jsonIntNullable(json['battery']),
+      gpsPresent: json['gpsPresent'] == true || json['gpsPresent'] == 1,
+      gpsEnabled: json['gpsEnabled'] == true || json['gpsEnabled'] == 1,
+      gpsFix: json['gpsFix'] == true || json['gpsFix'] == 1,
+      powersave: json['powersave'] == true || json['powersave'] == 1,
     );
-    } catch (_) {
-      return null;
-    }
   }
   if (evt == 'routes') {
     final routesList = json['routes'];
@@ -606,6 +801,12 @@ class RiftLinkBroadcastDeliveryEvent extends RiftLinkEvent {
 class RiftLinkInfoEvent extends RiftLinkEvent {
   final String id;
   final String? nickname;
+  /// Ключ `nickname` есть в JSON (прошивка не шлёт ключ, если ник пустой).
+  final bool hasNicknameField;
+  /// Ключ `channel` есть в JSON (для RU/US и т.д. может отсутствовать).
+  final bool hasChannelField;
+  /// Ключ `offlinePending` есть в JSON (прошивка не шлёт, если 0).
+  final bool hasOfflinePendingField;
   final String region;
   final double freq;
   final int power;
@@ -626,6 +827,9 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
   RiftLinkInfoEvent({
     required this.id,
     this.nickname,
+    this.hasNicknameField = false,
+    this.hasChannelField = false,
+    this.hasOfflinePendingField = false,
     this.region = 'EU',
     this.freq = 868.0,
     this.power = 14,

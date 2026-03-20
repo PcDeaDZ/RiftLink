@@ -38,7 +38,11 @@ class _MeshScreenState extends State<MeshScreen> {
     _routes = List.from(widget.routes);
     _sub = widget.ble.events.listen((evt) {
       if (!mounted) return;
-      if (evt is RiftLinkRoutesEvent) setState(() => _routes = evt.routes);
+      if (evt is RiftLinkRoutesEvent) {
+        setState(() => _routes = evt.routes);
+      } else if (evt is RiftLinkInfoEvent) {
+        setState(() => _routes = evt.routes);
+      }
     });
     widget.ble.getRoutes();
   }

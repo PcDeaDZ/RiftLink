@@ -2,6 +2,8 @@
  * ESP-NOW Slot Negotiation — 50–250 м
  * Slot negotiation через ESP-NOW без LoRa.
  * Формат RTS совместим с BLS-N: company 0x524C, "RTS", from(4), to(4), len(2), txAt(4).
+ *
+ * Сборка с -DRIFTLINK_DISABLE_ESP_NOW: без esp_now_* (нет RTS/слотов по Wi‑Fi), остальной код без изменений.
  */
 
 #pragma once
@@ -11,6 +13,20 @@
 #include "protocol/packet.h"
 
 namespace esp_now_slots {
+
+#if defined(RIFTLINK_DISABLE_ESP_NOW)
+
+inline void init() {}
+inline uint8_t getChannel() { return 6; }
+inline bool setChannel(uint8_t) { return false; }
+inline bool isAdaptive() { return false; }
+inline bool setAdaptive(bool) { return false; }
+inline void tickAdaptive() {}
+inline bool sendRtsBeforeLora(const uint8_t*, size_t) { return false; }
+inline bool shouldDeferTx(const uint8_t*) { return false; }
+inline void addReceivedRts(const uint8_t*, const uint8_t*, uint16_t, uint32_t) {}
+
+#else
 
 void init();
 /** Текущий WiFi канал ESP-NOW (1–13). По умолчанию 6. */
@@ -31,5 +47,7 @@ bool shouldDeferTx(const uint8_t* to);
 
 /** Добавить полученный RTS в кэш (вызов из ESP-NOW recv callback). */
 void addReceivedRts(const uint8_t* from, const uint8_t* to, uint16_t len, uint32_t txAt);
+
+#endif
 
 }  // namespace esp_now_slots

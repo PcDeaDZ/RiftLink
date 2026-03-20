@@ -5,6 +5,9 @@
  */
 
 #include "bls_n.h"
+
+#if !defined(RIFTLINK_DISABLE_BLS_N)
+
 #include "ble/ble.h"
 #include "node/node.h"
 #include <NimBLEDevice.h>
@@ -116,3 +119,5 @@ bool shouldDeferTx(const uint8_t* to) {
 }
 
 }  // namespace bls_n
+
+#endif /* !RIFTLINK_DISABLE_BLS_N */

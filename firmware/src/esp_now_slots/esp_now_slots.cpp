@@ -5,6 +5,11 @@
  */
 
 #include "esp_now_slots.h"
+
+#if defined(RIFTLINK_DISABLE_ESP_NOW)
+// Заглушки в esp_now_slots.h — без esp_now.h / esp_wifi в этом TU.
+#else
+
 #include "node/node.h"
 #include <esp_wifi.h>
 #include <esp_now.h>
@@ -295,3 +300,5 @@ bool shouldDeferTx(const uint8_t* to) {
 }
 
 }  // namespace esp_now_slots
+
+#endif /* !RIFTLINK_DISABLE_ESP_NOW */

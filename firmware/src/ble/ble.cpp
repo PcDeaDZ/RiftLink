@@ -5,6 +5,8 @@
 
 #include "ble.h"
 #include <string.h>
+#include <string_view>
+#include <new>
 #include <NimBLEDevice.h>
 #include <ArduinoJson.h>
 #include "protocol/packet.h"
@@ -39,6 +41,22 @@
 #define CHAR_TX_UUID        "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  // write from app
 #define CHAR_RX_UUID        "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  // notify to app
 #define DEVICE_NAME         "RiftLink"
+/**
+ * Один JSON на запись в GATT TX / одно notify: ≤ BLE_ATT_MAX_JSON_BYTES.
+ * NimBLE: BLE_ATT_ATTR_MAX_LEN и CONFIG_NIMBLE_CPP_ATT_VALUE_INIT_LENGTH — макс. 512 байт на значение атрибута.
+ * Поэтому «512» — не произвольный порог, а потолок стека BLE.
+ *
+ * Оценка voice: {"cmd":"voice","to":"HH...","chunk":n,"total":t,"data":"<b64>"} — оболочка ~85–95 B,
+ * на base64 остаётся ~417 B → сырой Opus ≤ ~312 B на чанк (см. BLE_VOICE_CHUNK_RAW_MAX).
+ *
+ * ArduinoJson 7.4+: JsonDocument без фиксированной ёмкости; при переполнении — doc.overflowed().
+ */
+static constexpr size_t BLE_ATT_MAX_JSON_BYTES = 512;
+/** Сырой Opus на один BLE-чанк voice (вход/выход), чтобы весь JSON уместился в 512 B. */
+static constexpr size_t BLE_VOICE_CHUNK_RAW_MAX = 300;
+static constexpr size_t BLE_VOICE_CHUNK_B64_BUF = 400;  // ceil(300/3)*4
+static constexpr size_t kBleJsonProtocolMaxBytes = BLE_ATT_MAX_JSON_BYTES;
+static_assert(kBleJsonProtocolMaxBytes == 512, "согласовано с BLE_ATT_ATTR_MAX_LEN");
 
 static NimBLEServer* pServer = nullptr;
 static NimBLECharacteristic* pRxChar = nullptr;
@@ -75,6 +93,11 @@ static size_t s_voiceBufLen = 0;
 static int s_voiceChunkTotal = -1;
 static uint8_t s_voiceTo[protocol::NODE_ID_LEN];
 
+#ifndef BLE_LOG_TX_JSON
+#define BLE_LOG_TX_JSON 1
+#endif
+
+#if !defined(RIFTLINK_DISABLE_BLS_N)
 // BLS-N: BLE scan для приёма RTS при подключённом телефоне
 static bool s_blsScanActive = false;
 static bool s_blsScanEnded = false;
@@ -82,12 +105,53 @@ static uint32_t s_blsScanLastStart = 0;
 #define BLS_SCAN_DURATION_SEC 15
 #define BLS_SCAN_RESTART_DELAY_MS 500
 
+/** Manufacturer Specific Data (AD type 0xFF), индекс как у NimBLE getManufacturerData(index) — без std::string. */
+static bool bleAdvGetMfgData(const uint8_t* pl, size_t plLen, uint8_t index,
+                             const uint8_t** outData, size_t* outLen) {
+  constexpr uint8_t kMfgType = 0xFF;
+  size_t off = 0;
+  uint8_t seen = 0;
+  while (plLen - off > 2) {
+    const uint8_t L = pl[off];
+    const size_t remaining = plLen - off;
+    if (L >= remaining) return false;
+    const uint8_t type = pl[off + 1];
+    if (type == kMfgType) {
+      if (seen == index) {
+        if (L > 1) {
+          *outData = pl + off + 2;
+          *outLen = (size_t)L - 1;
+          return true;
+        }
+        return false;
+      }
+      seen++;
+    }
+    off += 1 + L;
+  }
+  return false;
+}
+#endif /* !RIFTLINK_DISABLE_BLS_N */
+
+static void notifyJsonToApp(const char* payload, size_t len) {
+  if (!pRxChar || !s_connected || !payload || len == 0) return;
+#if BLE_LOG_TX_JSON
+  Serial.print("[BLE->APP] ");
+  Serial.write((const uint8_t*)payload, len);
+  Serial.println();
+#endif
+  pRxChar->setValue((uint8_t*)payload, len);
+  pRxChar->notify();
+}
+
+#if !defined(RIFTLINK_DISABLE_BLS_N)
 class BlsScanCallbacks : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice* advertisedDevice) override {
     if (!advertisedDevice->haveManufacturerData()) return;
-    std::string mfr = advertisedDevice->getManufacturerData();
-    if (mfr.size() < 19) return;
-    const uint8_t* d = (const uint8_t*)mfr.data();
+    const auto& pl = advertisedDevice->getPayload();
+    const uint8_t* d = nullptr;
+    size_t mfrLen = 0;
+    if (!bleAdvGetMfgData(pl.data(), pl.size(), 0, &d, &mfrLen) || mfrLen < 19) return;
     if (d[0] != 0x4C || d[1] != 0x52) return;  // company ID 0x524C little-endian
     if (d[2] != 0x52 || d[3] != 0x54 || d[4] != 0x53) return;  // "RTS"
     uint8_t from4[4], to4[4];
@@ -106,6 +170,7 @@ class BlsScanCallbacks : public NimBLEScanCallbacks {
 };
 
 static BlsScanCallbacks s_blsScanCallbacks;
+#endif /* !RIFTLINK_DISABLE_BLS_N */
 
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
@@ -115,12 +180,14 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
   void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
     s_connected = false;
+#if !defined(RIFTLINK_DISABLE_BLS_N)
     s_blsScanEnded = true;
     NimBLEScan* pScan = NimBLEDevice::getScan();
     if (pScan && pScan->isScanning()) {
       pScan->stop();
       s_blsScanActive = false;
     }
+#endif
     vTaskDelay(pdMS_TO_TICKS(50));  // дать стеку освободить соединение
     NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
     if (!pAdv->isAdvertising()) {
@@ -130,15 +197,40 @@ class ServerCallbacks : public NimBLEServerCallbacks {
   }
 };
 
-class CharCallbacks : public NimBLECharacteristicCallbacks {
-  void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
-    std::string val = pCharacteristic->getValue();
-    if (val.length() == 0) return;
-    if (val.length() > 512) return;  // защита от переполнения, длинные — через фрагментацию
+static void bleHandleTxJson(const uint8_t* val, uint16_t len);
 
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, val.c_str());
-    if (err) return;
+/**
+ * TX GATT: NimBLE вызывает writeEvent с буфером записи — парсим JSON по указателю,
+ * без getValue()/std::string и без копии NimBLEAttValue (deepCopy/realloc в библиотеке).
+ */
+class RiftTxCharacteristic : public NimBLECharacteristic {
+ public:
+  RiftTxCharacteristic(const NimBLEUUID& uuid, uint32_t properties, uint16_t maxLen, NimBLEService* pService)
+      : NimBLECharacteristic(uuid, static_cast<uint16_t>(properties), maxLen, pService) {}
+
+ protected:
+  void writeEvent(const uint8_t* val, uint16_t len, NimBLEConnInfo& connInfo) override {
+    (void)connInfo;
+    setValue(val, len);
+    bleHandleTxJson(val, len);
+  }
+};
+
+/** Большой evt info — раньше String::reserve(1200); теперь BSS, без heap. */
+static constexpr size_t NOTIFY_INFO_JSON_CAP = 1280;
+static char s_notifyInfoPayload[NOTIFY_INFO_JSON_CAP];
+
+alignas(RiftTxCharacteristic) static uint8_t s_riftTxCharMem[sizeof(RiftTxCharacteristic)];
+static bool s_riftTxCharConstructed = false;
+
+static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
+  if (len == 0) return;
+  if (len > BLE_ATT_MAX_JSON_BYTES) return;  // см. BLE_ATT_MAX_JSON_BYTES — лимит атрибута GATT
+
+  JsonDocument doc;
+  const std::string_view jsonSv(reinterpret_cast<const char*>(val), len);
+  DeserializationError err = deserializeJson(doc, jsonSv);
+  if (err) return;
 
     const char* cmd = doc["cmd"];
     if (!cmd) return;
@@ -414,6 +506,7 @@ class CharCallbacks : public NimBLECharacteristicCallbacks {
       int chunk = doc["chunk"] | -1;
       int total = doc["total"] | -1;
       if (!toStr || strlen(toStr) < 8 || !dataStr || chunk < 0 || total <= 0) return;
+      if (strlen(dataStr) > BLE_VOICE_CHUNK_B64_BUF) return;  // иначе не влезает в 512 B одной записи
 
       memset(s_voiceTo, 0, protocol::NODE_ID_LEN);
       int n = (strlen(toStr) >= 16) ? 8 : 4;
@@ -444,8 +537,9 @@ class CharCallbacks : public NimBLECharacteristicCallbacks {
       }
       return;
     }
-  }
-};
+}
+
+static ServerCallbacks s_bleServerCallbacks;
 
 namespace ble {
 
@@ -458,12 +552,15 @@ bool init() {
   NimBLEDevice::setPower(ESP_PWR_LVL_P3);  // P3 вместо P9 — меньше ток, стабильнее при connect
 
   pServer = NimBLEDevice::createServer();
-  pServer->setCallbacks(new ServerCallbacks());
+  pServer->setCallbacks(&s_bleServerCallbacks);
 
   NimBLEService* pService = pServer->createService(SERVICE_UUID);
 
-  NimBLECharacteristic* pTxChar = pService->createCharacteristic(CHAR_TX_UUID, NIMBLE_PROPERTY::WRITE_NR);
-  pTxChar->setCallbacks(new CharCallbacks());
+  if (!s_riftTxCharConstructed) {
+    new (s_riftTxCharMem) RiftTxCharacteristic(NimBLEUUID(CHAR_TX_UUID), NIMBLE_PROPERTY::WRITE_NR, BLE_ATT_ATTR_MAX_LEN, pService);
+    s_riftTxCharConstructed = true;
+  }
+  pService->addCharacteristic(reinterpret_cast<RiftTxCharacteristic*>(s_riftTxCharMem));
 
   pRxChar = pService->createCharacteristic(CHAR_RX_UUID, NIMBLE_PROPERTY::NOTIFY);
   pService->start();
@@ -523,8 +620,7 @@ void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, 
 
   char buf[400];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi) {
@@ -540,8 +636,7 @@ void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi) {
 
   char buf[80];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyRead(const uint8_t* from, uint32_t msgId, int rssi) {
@@ -557,8 +652,7 @@ void notifyRead(const uint8_t* from, uint32_t msgId, int rssi) {
 
   char buf[80];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifySent(const uint8_t* to, uint32_t msgId) {
@@ -573,8 +667,7 @@ void notifySent(const uint8_t* to, uint32_t msgId) {
 
   char buf[80];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyUndelivered(const uint8_t* to, uint32_t msgId) {
@@ -589,8 +682,7 @@ void notifyUndelivered(const uint8_t* to, uint32_t msgId) {
 
   char buf[80];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyBroadcastDelivery(uint32_t msgId, int delivered, int total) {
@@ -608,8 +700,7 @@ void notifyBroadcastDelivery(uint32_t msgId, int delivered, int total) {
 
   char buf[80];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyLocation(const uint8_t* from, float lat, float lon, int16_t alt, int rssi) {
@@ -627,8 +718,7 @@ void notifyLocation(const uint8_t* from, float lat, float lon, int16_t alt, int 
 
   char buf[200];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyTelemetry(const uint8_t* from, uint16_t batteryMv, uint16_t heapKb, int rssi) {
@@ -705,12 +795,9 @@ void notifyInfo() {
   }
 
   // Буфер 600 обрезал большой `info` (соседи/маршруты) → невалидный JSON в приложении.
-  String payload;
-  payload.reserve(1200);
-  serializeJson(doc, payload);
-  if (payload.length() == 0) return;
-  pRxChar->setValue((uint8_t*)payload.c_str(), payload.length());
-  pRxChar->notify();
+  size_t plen = serializeJson(doc, s_notifyInfoPayload, sizeof(s_notifyInfoPayload));
+  if (plen == 0) return;
+  notifyJsonToApp(s_notifyInfoPayload, plen);
 }
 
 void notifyInvite() {
@@ -746,8 +833,7 @@ void notifyInvite() {
 
   char buf[200];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyRoutes() {
@@ -773,8 +859,7 @@ void notifyRoutes() {
   }
   char buf[400];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyGroups() {
@@ -790,8 +875,7 @@ void notifyGroups() {
 
   char buf[120];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void requestNeighborsNotify() {
@@ -819,8 +903,7 @@ void notifyNeighbors() {
 
   char buf[320];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyOta(const char* ip, const char* ssid, const char* password) {
@@ -834,8 +917,7 @@ void notifyOta(const char* ip, const char* ssid, const char* password) {
 
   char buf[200];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyWifi(bool connected, const char* ssid, const char* ip) {
@@ -849,8 +931,7 @@ void notifyWifi(bool connected, const char* ssid, const char* ip) {
 
   char buf[150];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyRegion(const char* code, float freq, int power, int channel) {
@@ -865,8 +946,7 @@ void notifyRegion(const char* code, float freq, int power, int channel) {
 
   char buf[120];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyGps(bool present, bool enabled, bool hasFix, int rx, int tx, int en) {
@@ -883,8 +963,7 @@ void notifyGps(bool present, bool enabled, bool hasFix, int rx, int tx, int en) 
 
   char buf[120];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyError(const char* code, const char* msg) {
@@ -897,8 +976,7 @@ void notifyError(const char* code, const char* msg) {
 
   char buf[200];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyPong(const uint8_t* from, int rssi) {
@@ -913,8 +991,7 @@ void notifyPong(const uint8_t* from, int rssi) {
 
   char buf[80];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t heapFree) {
@@ -929,15 +1006,13 @@ void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t h
 
   char buf[120];
   size_t len = serializeJson(doc, buf);
-  pRxChar->setValue((uint8_t*)buf, len);
-  pRxChar->notify();
+  notifyJsonToApp(buf, len);
 }
 
 void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen) {
   if (!pRxChar || !s_connected || !data) return;
 
-  const size_t CHUNK_RAW = 384;
-  const size_t CHUNK_B64 = 512;
+  const size_t CHUNK_RAW = BLE_VOICE_CHUNK_RAW_MAX;
   size_t totalChunks = (dataLen + CHUNK_RAW - 1) / CHUNK_RAW;
 
   char fromHex[17] = {0};
@@ -948,9 +1023,10 @@ void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen) {
     size_t chunkLen = dataLen - off;
     if (chunkLen > CHUNK_RAW) chunkLen = CHUNK_RAW;
 
-    unsigned char b64[CHUNK_B64];
+    unsigned char b64[BLE_VOICE_CHUNK_B64_BUF + 1];
     size_t olen;
-    if (mbedtls_base64_encode(b64, sizeof(b64), &olen, data + off, chunkLen) != 0) break;
+    if (mbedtls_base64_encode(b64, sizeof(b64) - 1, &olen, data + off, chunkLen) != 0) break;
+    if (olen < sizeof(b64)) b64[olen] = '\0';
 
     JsonDocument doc;
     doc["evt"] = "voice";
@@ -959,11 +1035,10 @@ void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen) {
     doc["total"] = (int)totalChunks;
     doc["data"] = (const char*)b64;
 
-    char buf[600];
+    char buf[BLE_ATT_MAX_JSON_BYTES + 1];
     size_t len = serializeJson(doc, buf);
-    if (len < sizeof(buf)) {
-      pRxChar->setValue((uint8_t*)buf, len);
-      pRxChar->notify();
+    if (len > 0 && len <= BLE_ATT_MAX_JSON_BYTES) {
+      notifyJsonToApp(buf, len);
     }
   }
 }
@@ -1011,6 +1086,7 @@ void update() {
       selftest::Result r;
       selftest::run(&r);
       notifySelftest(r.radioOk, r.displayOk, r.batteryMv, r.heapFree);
+      return;
     }
     if (s_pendingGroupSend) {
       s_pendingGroupSend = false;
@@ -1027,7 +1103,7 @@ void update() {
 
   // BLS-N: при подключённом телефоне — BLE scan для приёма RTS от соседей
   // Paper: отключено — BLE scan вызывает Malloc failed при heap ~10KB (много advertisers)
-#if !defined(USE_EINK)
+#if !defined(USE_EINK) && !defined(RIFTLINK_DISABLE_BLS_N)
   if (s_connected) {
     NimBLEScan* pScan = NimBLEDevice::getScan();
     if (pScan && !pScan->isScanning() && !s_blsScanActive) {
@@ -1046,7 +1122,7 @@ void update() {
       }
     }
   }
-#endif  // !USE_EINK
+#endif  // !USE_EINK && !RIFTLINK_DISABLE_BLS_N
 }
 
 bool isConnected() { return s_connected; }

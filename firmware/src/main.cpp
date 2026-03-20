@@ -58,6 +58,7 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include "powersave/powersave.h"
 #include "async_queues.h"
 #include "async_tasks.h"
+#include "memory_diag/memory_diag.h"
 #include "send_overflow/send_overflow.h"
 #include "led/led.h"
 #include "duty_cycle/duty_cycle.h"
@@ -1145,10 +1146,13 @@ void setup() {
     RIFTLINK_LOG_ERR("[RiftLink] NVS init FAILED: %s (0x%x) — настройки не сохранятся\n",
         esp_err_to_name(nvs), (unsigned)nvs);
   }
+  // Paper: Wi‑Fi до display — максимум heap для esp_wifi_init.
+  // OLED: Wi‑Fi **не** здесь: esp_wifi_init до NimBLE на ESP32‑S3 давал **зависание** в ble::init()
+  // (лог обрывался на "[BLE] Init..."). См. wifi::init после BLE в runBootStateMachine.
 #if defined(USE_EINK)
-  wifi::init();  // Paper: до displayInit (макс. heap), при OOM — WiFi/OTA отключены
-#endif
+  wifi::init();
   Serial.printf("[RiftLink] Heap after wifi::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
   locale::init();
   displayInit();
   Serial.printf("[RiftLink] Heap after displayInit: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -1176,10 +1180,6 @@ static void runBootStateMachine() {
   region::init();
   crypto::init();
   x25519_keys::init();
-#if !defined(USE_EINK)
-  wifi::init();  // OLED: после crypto
-  Serial.printf("[RiftLink] Heap after wifi::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-#endif
   if (!radio::init()) {
     RIFTLINK_LOG_ERR("[RiftLink] Radio init FAILED\n");
     displayText(0, 10, locale::getForDisplay("radio_fail"));
@@ -1196,6 +1196,16 @@ static void runBootStateMachine() {
     RIFTLINK_LOG_ERR("[RiftLink] BLE init FAILED — устройство не будет видно в скане\n");
   }
   Serial.printf("[RiftLink] Heap after ble::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  memoryDiagLog("ble");
+#if !defined(USE_EINK)
+  // Wi‑Fi сразу после BLE: до msg_queue/routing иначе фрагментация → largest ~7KB и ESP_ERR_NO_MEM.
+  // Ранний esp_wifi до NimBLE на S3 по-прежнему НЕ делаем (зависание в NimBLEDevice::init).
+  Serial.printf("[RiftLink] Heap before wifi::init (OLED): free=%u largest=%u\n",
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  wifi::init();
+  Serial.printf("[RiftLink] Heap after wifi::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+#endif
   ble::setOnSend(sendMsg);
   ble::setOnLocation(sendLocation);
   msg_queue::init();
@@ -1235,14 +1245,16 @@ static void runBootStateMachine() {
   powersave::init();
   // Очереди + packet/display/radio tasks — сразу после send_overflow (V3/V4/Paper): иначе первый TX/NACK на
   // обрезанный KEY вызывал asyncInfraEnsure() в середине discovery (heap «прыгал», окно RX терялось).
-  Serial.printf("[RiftLink] Heap before WiFi (async infra starting): %u\n",
-      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   send_overflow::init();
   Serial.printf("[RiftLink] Heap after send_overflow::init: %u\n",
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  Serial.printf("[RiftLink] Heap before async infra: %u\n",
       (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   if (!asyncInfraEnsure()) {
     RIFTLINK_LOG_ERR("[RiftLink] Async infra init FAILED at boot\n");
   }
+  memoryDiagLog("async_infra");
+  asyncMemoryDiagLogStacks();
   if (wifi::isAvailable()) {
     Serial.printf("[RiftLink] Heap before ESP-NOW: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     esp_now_slots::init();
@@ -1250,6 +1262,7 @@ static void runBootStateMachine() {
         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     if (wifi::hasCredentials()) wifi::connect();
   }
+  memoryDiagLog("boot_done");
   gps::init();
   displayShowScreenForceFull(0);
   s_bootTime = millis();

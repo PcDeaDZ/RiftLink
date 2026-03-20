@@ -45,7 +45,11 @@ class _GroupsScreenState extends State<GroupsScreen> {
     super.initState();
     _groups = _normalizeGroups(widget.initialGroups);
     _sub = widget.ble.events.listen((evt) {
-      if (evt is RiftLinkGroupsEvent && mounted) {
+      if (!mounted) return;
+      // Ответ на getGroups — и поле groups в evt:info (как в чате), иначе список не обновлялся без отдельного notify.
+      if (evt is RiftLinkGroupsEvent) {
+        setState(() => _groups = _normalizeGroups(evt.groups));
+      } else if (evt is RiftLinkInfoEvent) {
         setState(() => _groups = _normalizeGroups(evt.groups));
       }
     });

@@ -18,6 +18,14 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_heap_caps.h>
+/** xTaskCreateWithCaps объявлен в ESP-IDF здесь, не в esp_task.h (Arduino 3 / IDF 5.x). */
+#if __has_include("freertos/idf_additions.h")
+#include "freertos/idf_additions.h"
+#define RIFTLINK_HAVE_TASK_CREATE_WITH_CAPS 1
+#elif __has_include(<freertos/idf_additions.h>)
+#include <freertos/idf_additions.h>
+#define RIFTLINK_HAVE_TASK_CREATE_WITH_CAPS 1
+#endif
 #include <string.h>
 #include <stdio.h>
 #include <atomic>
@@ -32,7 +40,13 @@ static inline void queueSendReason(char* buf, size_t buflen, const char* msg) {
 
 #define DISPLAY_HEARTBEAT_MS 10000  // лог раз в 10 с — проверить, что displayTask жив
 
+// OLED: после Wi-Fi + очередей (64/48) в internal heap не хватает места под стек 32K+8K+4K — xTaskCreate(packet) даёт FAIL.
+// Watermark на V4 при 32K был ~31K «свободно» (фактически байты/запас) — 16K достаточно для handlePacket.
+#if defined(USE_EINK)
 #define PACKET_TASK_STACK 32768
+#else
+#define PACKET_TASK_STACK 16384
+#endif
 #define DISPLAY_TASK_STACK 8192   // 12KB — create FAIL (heap), 8KB — минимум для создания
 #define PACKET_TASK_PRIO 2
 #define DISPLAY_TASK_PRIO 1
@@ -354,10 +368,26 @@ static void packetTask(void* arg) {
 #define RADIO_SCHEDULER_STACK 4096
 #define RADIO_SCHEDULER_PRIO 4
 
+static TaskHandle_t s_packetTaskHandle = nullptr;
+static TaskHandle_t s_displayTaskHandle = nullptr;
 static TaskHandle_t s_radioSchedulerTaskHandle = nullptr;
 
 TaskHandle_t asyncGetRadioSchedulerTaskHandle(void) {
   return s_radioSchedulerTaskHandle;
+}
+
+void asyncMemoryDiagLogStacks(void) {
+  // uxTaskGetStackHighWaterMark: минимум неиспользованного стека за всё время. На ESP32-Arduino размер в xTaskCreate — байты;
+  // возвращаемое значение на практике сопоставимо с байтами неиспользованного хвоста (см. alloc ниже). 0 = нет задачи / overflow.
+  unsigned wd = s_displayTaskHandle ? (unsigned)uxTaskGetStackHighWaterMark(s_displayTaskHandle) : 0U;
+  unsigned wp = s_packetTaskHandle ? (unsigned)uxTaskGetStackHighWaterMark(s_packetTaskHandle) : 0U;
+  unsigned wr = s_radioSchedulerTaskHandle ? (unsigned)uxTaskGetStackHighWaterMark(s_radioSchedulerTaskHandle) : 0U;
+  Serial.printf("[RiftLink] Task stack high-water (unused / alloc B): display=%u/%u packet=%u/%u radio=%u/%u\n",
+      wd, (unsigned)DISPLAY_TASK_STACK, wp, (unsigned)PACKET_TASK_STACK, wr, (unsigned)RADIO_SCHEDULER_STACK);
+  if (!s_packetTaskHandle) {
+    RIFTLINK_LOG_ERR("[RiftLink] packetTask не создан — xTaskCreate FAIL? Нужен heap под стек %u B (см. PACKET_TASK_STACK)\n",
+        (unsigned)PACKET_TASK_STACK);
+  }
 }
 
 #if defined(USE_EINK)
@@ -615,6 +645,32 @@ static void displayTask(void* arg) {
   }
 }
 
+#if !defined(USE_EINK)
+/**
+ * OLED: packetTask — самый большой стек; при PSRAM сначала стек в SPIRAM (не ест contiguous internal),
+ * иначе после BLE/Wi‑Fi часто largest < 16K и xTaskCreate падает.
+ * Нужен CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY в sdkconfig (у Heltec V4 с PSRAM обычно включён).
+ */
+static BaseType_t createPacketTaskOled() {
+#if defined(RIFTLINK_HAVE_TASK_CREATE_WITH_CAPS)
+  const size_t psramTot = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+  if (psramTot > 0) {
+    BaseType_t ok = xTaskCreateWithCaps(packetTask, "packet", PACKET_TASK_STACK, nullptr,
+        (UBaseType_t)PACKET_TASK_PRIO_EINK, &s_packetTaskHandle,
+        (UBaseType_t)MALLOC_CAP_SPIRAM);
+    if (ok == pdPASS) {
+      Serial.printf("[RiftLink] packetTask: стек в SPIRAM (internal largest=%u)\n",
+          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+      return ok;
+    }
+    Serial.printf("[RiftLink] packetTask: SPIRAM stack не удался — fallback internal (largest=%u)\n",
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  }
+#endif
+  return xTaskCreate(packetTask, "packet", PACKET_TASK_STACK, nullptr, PACKET_TASK_PRIO_EINK, &s_packetTaskHandle);
+}
+#endif
+
 void asyncTasksStart() {
   static bool s_asyncTasksStarted = false;
   if (s_asyncTasksStarted) return;
@@ -623,24 +679,30 @@ void asyncTasksStart() {
   if (!s_displaySpiDone) s_displaySpiDone = xSemaphoreCreateBinary();
 #endif
 #if defined(USE_EINK)
-  // Paper: displayTask на ядре 0 — e-ink display() блокирует ~600ms
-  // packetTask и rxTask на ядре 1 — не блокируются e-ink, обрабатывают пакеты без задержек
-  BaseType_t okDisplay = xTaskCreatePinnedToCore(displayTask, "display", DISPLAY_TASK_STACK, nullptr, DISPLAY_TASK_PRIO, nullptr, 0);
+  // Paper: packet/radio раньше display — крупный стек packet первым при фрагментированном heap.
+  // displayTask на ядре 0 — e-ink display() блокирует ~600ms; packet/rx на ядре 1.
+  BaseType_t okPacket = xTaskCreatePinnedToCore(packetTask, "packet", PACKET_TASK_STACK, nullptr, PACKET_TASK_PRIO_EINK,
+      &s_packetTaskHandle, 1);
+  if (okPacket == pdFAIL) {
+    RIFTLINK_LOG_ERR("[RiftLink] packetTask create FAIL — loop будет обрабатывать packetQueue\n");
+  }
+  BaseType_t okDisplay = xTaskCreatePinnedToCore(displayTask, "display", DISPLAY_TASK_STACK, nullptr, DISPLAY_TASK_PRIO,
+      &s_displayTaskHandle, 0);
 #else
-  BaseType_t okDisplay = xTaskCreate(displayTask, "display", DISPLAY_TASK_STACK, nullptr, DISPLAY_TASK_PRIO, nullptr);
+  BaseType_t okPacket = createPacketTaskOled();
+  if (okPacket == pdFAIL) {
+    RIFTLINK_LOG_ERR("[RiftLink] packetTask create FAIL (need %u) — loop будет обрабатывать packetQueue\n",
+        (unsigned)PACKET_TASK_STACK);
+  }
+  BaseType_t okDisplay = xTaskCreate(displayTask, "display", DISPLAY_TASK_STACK, nullptr, DISPLAY_TASK_PRIO, &s_displayTaskHandle);
 #endif
   if (okDisplay == pdFAIL) {
     RIFTLINK_LOG_ERR("[RiftLink] displayTask create FAIL (need %u)\n", (unsigned)DISPLAY_TASK_STACK);
   }
 #if defined(USE_EINK)
-  BaseType_t okPacket = xTaskCreatePinnedToCore(packetTask, "packet", PACKET_TASK_STACK, nullptr, PACKET_TASK_PRIO_EINK, nullptr, 1);
-  if (okPacket == pdFAIL) {
-    RIFTLINK_LOG_ERR("[RiftLink] packetTask create FAIL — loop будет обрабатывать packetQueue\n");
-  }
   BaseType_t okRx = xTaskCreatePinnedToCore(radioSchedulerTask, "radio", RADIO_SCHEDULER_STACK, nullptr, RADIO_SCHEDULER_PRIO,
       &s_radioSchedulerTaskHandle, 1);
 #else
-  xTaskCreate(packetTask, "packet", PACKET_TASK_STACK, nullptr, PACKET_TASK_PRIO_EINK, nullptr);
   BaseType_t okRx = xTaskCreate(radioSchedulerTask, "radio", RADIO_SCHEDULER_STACK, nullptr, RADIO_SCHEDULER_PRIO,
       &s_radioSchedulerTaskHandle);
 #endif

@@ -15,6 +15,9 @@ void asyncTasksStart();
 /** Для Paper / отладки: задача `radioSchedulerTask` (nullptr до asyncTasksStart). */
 TaskHandle_t asyncGetRadioSchedulerTaskHandle(void);
 
+/** Фаза 0: watermark стеков display/packet/radio (слова FreeRTOS, чем больше — тем больше запас). */
+void asyncMemoryDiagLogStacks(void);
+
 #if defined(USE_EINK)
 /**
  * Paper (EINK_USE_GLOBAL_SPI): запрос паузы радио — планировщик в standby, затем семафор «разрешено».

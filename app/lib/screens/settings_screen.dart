@@ -402,27 +402,34 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
   /// Актуальный ID (обновляется по evt info, пока открыты настройки).
   late String _nodeIdLive;
   StreamSubscription<RiftLinkEvent>? _bleSub;
+  Timer? _infoRetryTimer;
+  bool _infoReceivedSinceOpen = false;
 
   /// Единая точка: evt info и кэш [RiftLinkBle.lastInfo] (до подписки на поток данные уже могли прийти).
   void _applyRiftLinkInfo(RiftLinkInfoEvent evt) {
     if (!mounted) return;
+    _infoReceivedSinceOpen = true;
+    _infoRetryTimer?.cancel();
+    _infoRetryTimer = null;
     setState(() {
       if (evt.id.isNotEmpty) _nodeIdLive = evt.id;
       _region = evt.region;
-      _channel = evt.channel;
+      if (evt.hasChannelField) _channel = evt.channel;
       _sf = evt.sf;
       _gpsPresent = evt.gpsPresent;
       _gpsEnabled = evt.gpsEnabled;
       _gpsFix = evt.gpsFix;
       _powersave = evt.powersave;
-      _offlinePending = evt.offlinePending;
-      _batteryMv = evt.batteryMv;
+      if (evt.hasOfflinePendingField) _offlinePending = evt.offlinePending;
+      if (evt.batteryMv != null && evt.batteryMv! > 0) _batteryMv = evt.batteryMv;
     });
-    final nick = evt.nickname?.trim();
-    // Раньше подставляли только при пустом поле — тогда «устаревший» ник из маршрута/кэша блокировал значение с узла.
-    if (nick != null && nick.isNotEmpty && !_nickFocus.hasFocus) {
-      if (_nickController.text != nick) {
-        _nickController.text = nick;
+    // Ключ nickname в JSON может отсутствовать (прошивка) — не перезаписываем поле из «пустого» evt.
+    if (evt.hasNicknameField) {
+      final nick = evt.nickname?.trim();
+      if (nick != null && nick.isNotEmpty && !_nickFocus.hasFocus) {
+        if (_nickController.text != nick) {
+          _nickController.text = nick;
+        }
       }
     }
   }
@@ -454,40 +461,36 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     _inviteKeyController = TextEditingController();
     _inviteChannelKeyController = TextEditingController();
 
+    // Подписка сразу: broadcast не буферизует — до первого кадра уже могут прийти notify.
+    _bleSub?.cancel();
+    _bleSub = widget.ble.events.listen((evt) {
+      if (!mounted) return;
+      if (evt is RiftLinkInfoEvent) {
+        _applyRiftLinkInfo(evt);
+      } else if (evt is RiftLinkRegionEvent) {
+        setState(() {
+          _region = evt.region;
+          _channel = evt.channel;
+        });
+      } else if (evt is RiftLinkGpsEvent) {
+        setState(() {
+          _gpsPresent = evt.present;
+          _gpsEnabled = evt.enabled;
+          _gpsFix = evt.hasFix;
+        });
+      }
+    });
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _bleSub?.cancel();
-      _bleSub = widget.ble.events.listen((evt) {
-        if (!mounted) return;
-        if (evt is RiftLinkInfoEvent) {
-          _applyRiftLinkInfo(evt);
-        } else if (evt is RiftLinkRegionEvent) {
-          setState(() {
-            _region = evt.region;
-            _channel = evt.channel;
-          });
-        } else if (evt is RiftLinkGpsEvent) {
-          setState(() {
-            _gpsPresent = evt.present;
-            _gpsEnabled = evt.enabled;
-            _gpsFix = evt.hasFix;
-          });
-        }
-      });
       if (!widget.ble.isConnected) return;
-      void pull() {
-        if (!mounted) return;
-        final cached = widget.ble.lastInfo;
-        if (cached != null) _applyRiftLinkInfo(cached);
+      final cached = widget.ble.lastInfo;
+      if (cached != null) _applyRiftLinkInfo(cached);
+      widget.ble.getInfo();
+      _infoRetryTimer?.cancel();
+      _infoRetryTimer = Timer(const Duration(milliseconds: 700), () {
+        if (!mounted || !widget.ble.isConnected || _infoReceivedSinceOpen) return;
         widget.ble.getInfo();
-      }
-
-      pull();
-      Future<void>.delayed(const Duration(milliseconds: 320), () {
-        if (mounted && widget.ble.isConnected) pull();
-      });
-      Future<void>.delayed(const Duration(milliseconds: 900), () {
-        if (mounted && widget.ble.isConnected) widget.ble.getInfo();
       });
     });
   }
@@ -518,6 +521,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _bleSub?.cancel();
+    _infoRetryTimer?.cancel();
     _nickFocus.dispose();
     _nickController.dispose();
     _wifiSsidController.dispose();

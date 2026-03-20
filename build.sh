@@ -6,6 +6,12 @@ export LANG="${LANG:-en_US.UTF-8}"
 export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 # Использование: ./build.sh  или  ./build.sh --setup  или  ./build.sh --flash --v4
 # Пути: .env.local (FLUTTER_ROOT, ANDROID_SDK_ROOT)
+#
+# Отладка Android (ADB):
+#   ./build.sh --adb-help      — как включить USB-отладку, flutter logs, logcat
+#   ./build.sh --adb-devices   — список устройств (adb devices)
+#   ./build.sh --adb-logs      — логи Flutter/Dart (flutter logs; --device — номер или serial)
+#   ./build.sh --adb-logcat    — полный системный лог (adb logcat; --device — опционально)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FIRMWARE_DIR="$SCRIPT_DIR/firmware"
@@ -36,6 +42,10 @@ INSTALL_APK=0
 PORT=""
 ENV=""
 DEVICE_ID=""
+ADB_HELP=0
+ADB_DEVICES=0
+ADB_LOGS=0
+ADB_LOGCAT=0
 
 # Парсинг
 while [[ $# -gt 0 ]]; do
@@ -49,6 +59,10 @@ while [[ $# -gt 0 ]]; do
         --erase)     ERASE=1; shift ;;
         --app)       APP_ONLY=1; shift ;;
         --install)   INSTALL_APK=1; shift ;;
+        --adb-help)    ADB_HELP=1; shift ;;
+        --adb-devices) ADB_DEVICES=1; shift ;;
+        --adb-logs)    ADB_LOGS=1; shift ;;
+        --adb-logcat)  ADB_LOGCAT=1; shift ;;
         --port)      PORT="$2"; shift 2 ;;
         --device)    DEVICE_ID="$2"; shift 2 ;;
         --v3)        ENV="heltec_v3"; shift ;;
@@ -221,6 +235,7 @@ do_setup() {
     echo "  Сборка: ./build.sh --v4"
     echo "  Прошивка: ./build.sh --v4 --flash"
     echo "  APK: ./build.sh --app --install"
+    echo "  ADB: ./build.sh --adb-help"
     echo "  Обновление репо: ./update.sh   (перезапись локальных изменений)"
     echo ""
 }
@@ -266,6 +281,88 @@ get_adb_devices() {
     "$ADB" devices 2>/dev/null | awk '$2=="device" || $2=="unauthorized" {print $1}'
 }
 
+# Разрешение --device: номер 1..N из adb или serial (0 = успех, 1 = ошибка, 2 = нужен выбор при нескольких)
+resolve_adb_target() {
+    local raw="${1:-}"
+    [[ -x "$ADB" ]] || return 1
+    local devs=()
+    while IFS= read -r d; do [[ -n "$d" ]] && devs+=("$d"); done < <(get_adb_devices)
+    [[ ${#devs[@]} -eq 0 ]] && return 1
+    if [[ -z "$raw" ]]; then
+        [[ ${#devs[@]} -eq 1 ]] && { echo "${devs[0]}"; return 0; }
+        return 2
+    fi
+    if [[ "$raw" =~ ^[0-9]+$ ]]; then
+        local idx=$((raw - 1))
+        [[ $idx -ge 0 && $idx -lt ${#devs[@]} ]] && { echo "${devs[$idx]}"; return 0; }
+    fi
+    for d in "${devs[@]}"; do [[ "$d" == "$raw" ]] && { echo "$d"; return 0; }; done
+    return 1
+}
+
+show_adb_help() {
+    echo ""
+    echo -e "\033[36m========================================"
+    echo "  RiftLink — отладка приложения (ADB)"
+    echo -e "========================================\033[0m"
+    echo ""
+    echo "На телефоне:"
+    echo "  1) Настройки → О телефоне — много раз «Номер сборки», пока не включится режим разработчика."
+    echo "  2) Настройки → Для разработчиков — включите «Отладка по USB»."
+    echo "  3) Подключите USB, режим USB: передача файлов (MTP), при запросе — «Разрешить отладку»."
+    echo ""
+    echo "На ПК (platform-tools: adb в \$ANDROID_HOME/platform-tools):"
+    echo "  ./build.sh --adb-devices   — список устройств (должно быть «device», не unauthorized)."
+    echo "  ./build.sh --adb-logs      — логи Dart/Flutter (из каталога app)."
+    echo "  ./build.sh --adb-logcat    — полный системный журнал (adb logcat)."
+    echo "  Несколько устройств: --device 1 или --device <serial>."
+    echo ""
+    echo "Без провода (Android 11+): Для разработчиков → Беспроводная отладка;"
+    echo "  adb pair IP:PORT  →  adb connect IP:PORT  →  ./build.sh --adb-devices"
+    echo ""
+}
+
+adb_logs_cli() {
+    [[ -x "$ADB" ]] || { echo -e "\033[31m[ОШИБКА] ADB не найден. Укажите ANDROID_SDK_ROOT в .env.local.\033[0m"; return 1; }
+    local target rc
+    target=$(resolve_adb_target "$DEVICE_ID")
+    rc=$?
+    if [[ $rc -eq 2 ]]; then
+        echo -e "\033[33mНесколько устройств — укажите: ./build.sh --adb-logs --device 1\033[0m"
+        "$ADB" devices 2>/dev/null
+        local devs=()
+        while IFS= read -r d; do [[ -n "$d" ]] && devs+=("$d"); done < <(get_adb_devices)
+        for i in "${!devs[@]}"; do echo "  $((i+1)). ${devs[$i]}"; done
+        return 1
+    fi
+    if [[ $rc -ne 0 || -z "$target" ]]; then
+        echo -e "\033[31m[ОШИБКА] Нет устройств или неверный --device. ./build.sh --adb-devices\033[0m"
+        return 1
+    fi
+    echo -e "\033[36m[RiftLink] flutter logs -d $target (Ctrl+C — выход)\033[0m"
+    (cd "$APP_DIR" && "$FLUTTER_CMD" logs -d "$target")
+}
+
+adb_logcat_cli() {
+    [[ -x "$ADB" ]] || { echo -e "\033[31m[ОШИБКА] ADB не найден. ANDROID_HOME=$ANDROID_HOME\033[0m"; return 1; }
+    local target rc
+    target=$(resolve_adb_target "$DEVICE_ID")
+    rc=$?
+    if [[ $rc -eq 2 ]]; then
+        echo -e "\033[31m[ОШИБКА] Несколько устройств — ./build.sh --adb-logcat --device 1\033[0m"
+        local devs=()
+        while IFS= read -r d; do [[ -n "$d" ]] && devs+=("$d"); done < <(get_adb_devices)
+        for i in "${!devs[@]}"; do echo "  $((i+1)). ${devs[$i]}"; done
+        return 1
+    fi
+    if [[ $rc -ne 0 || -z "$target" ]]; then
+        echo -e "\033[31m[ОШИБКА] Нет устройств или неверный --device.\033[0m"
+        return 1
+    fi
+    echo -e "\033[36m[RiftLink] adb -s $target logcat (Ctrl+C — выход)\033[0m"
+    "$ADB" -s "$target" logcat
+}
+
 show_menu() {
     echo ""
     echo -e "\033[36m========================================"
@@ -286,6 +383,7 @@ show_menu() {
     echo "  Окружение:"
     echo "    8. Setup — установка зависимостей (Python, PlatformIO, Flutter, Android)"
     echo "    9. Обновление из репозитория (перезапись локальных изменений)"
+    echo "   10. Отладка приложения (ADB: справка, flutter logs, logcat)"
     echo ""
     echo "    0. Выход"
     echo ""
@@ -376,6 +474,23 @@ if [[ $SETUP -eq 1 ]]; then
 fi
 if [[ $UPDATE -eq 1 ]]; then
     do_update
+    exit $?
+fi
+if [[ $ADB_HELP -eq 1 ]]; then
+    show_adb_help
+    exit 0
+fi
+if [[ $ADB_DEVICES -eq 1 ]]; then
+    [[ -x "$ADB" ]] || { echo -e "\033[31m[ОШИБКА] ADB не найден. ANDROID_HOME=$ANDROID_HOME\033[0m"; exit 1; }
+    "$ADB" devices
+    exit 0
+fi
+if [[ $ADB_LOGS -eq 1 ]]; then
+    adb_logs_cli
+    exit $?
+fi
+if [[ $ADB_LOGCAT -eq 1 ]]; then
+    adb_logcat_cli
     exit $?
 fi
 # Монитор порта (просмотр вывода устройства)
@@ -586,6 +701,25 @@ while true; do
         7) build_apk && install_apk ;;
         8) do_setup ;;
         9) do_update ;;
+        10)
+            echo ""
+            echo -e "\033[36m  Отладка приложения (ADB):\033[0m"
+            echo "    1. Справка (USB-отладка, логи, Wi‑Fi)"
+            echo "    2. flutter logs (логи Dart/Flutter)"
+            echo "    3. adb logcat (полный журнал)"
+            echo "    4. adb devices"
+            echo "    0. Назад"
+            read -r -p "Выберите: " sub
+            case $sub in
+                1) show_adb_help ;;
+                2) adb_logs_cli ;;
+                3) adb_logcat_cli ;;
+                4)
+                    if [[ -x "$ADB" ]]; then "$ADB" devices
+                    else echo -e "\033[31m[ОШИБКА] ADB не найден. ANDROID_HOME=$ANDROID_HOME\033[0m"; fi
+                    ;;
+            esac
+            ;;
         0) exit 0 ;;
         *) echo "Неверный выбор." ;;
     esac

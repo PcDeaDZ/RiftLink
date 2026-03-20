@@ -109,9 +109,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         final cachedInfo = widget.ble.lastInfo;
         if (cachedInfo != null) _onInfoEvent(cachedInfo);
         if (mounted && widget.ble.isConnected) widget.ble.getInfo();
-        Future.delayed(const Duration(milliseconds: 200), () {
-          if (mounted && widget.ble.isConnected) widget.ble.getInfo();
-        });
+        if (cachedInfo == null) {
+          Future.delayed(const Duration(milliseconds: 450), () {
+            if (mounted && widget.ble.isConnected && widget.ble.lastInfo == null) {
+              widget.ble.getInfo();
+            }
+          });
+        }
       }
     });
     _ttlTimer = Timer.periodic(const Duration(minutes: 1), (_) {
@@ -693,9 +697,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     }
     setState(() {
       if (resolvedId.isNotEmpty) _nodeId = resolvedId;
-      _nickname = evt.nickname?.isNotEmpty == true ? evt.nickname : null;
-      _region = evt.region; _channel = evt.channel; _version = evt.version; _sf = evt.sf;
-      _offlinePending = evt.offlinePending; _gpsPresent = evt.gpsPresent; _gpsEnabled = evt.gpsEnabled;
+      // Прошивка опускает ключ nickname, если пусто — не затираем прошлый ник в UI.
+      if (evt.hasNicknameField) {
+        _nickname = evt.nickname?.isNotEmpty == true ? evt.nickname : null;
+      }
+      _region = evt.region;
+      if (evt.hasChannelField) _channel = evt.channel;
+      _version = evt.version; _sf = evt.sf;
+      if (evt.hasOfflinePendingField) _offlinePending = evt.offlinePending;
+      _gpsPresent = evt.gpsPresent; _gpsEnabled = evt.gpsEnabled;
       _gpsFix = evt.gpsFix; _powersave = evt.powersave; _neighbors = evt.neighbors;
       _neighborsRssi = evt.neighborsRssi; _neighborsHasKey = evt.neighborsHasKey; _routes = evt.routes;
       if (evt.batteryMv != null && evt.batteryMv! > 0) _batteryMv = evt.batteryMv;
@@ -796,7 +806,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       else if (evt is RiftLinkSelftestEvent) {
         if (mounted) _showSelftestDialog(evt);
         if (evt.batteryMv > 0) setState(() => _batteryMv = evt.batteryMv);
-      } else if (evt is RiftLinkVoiceEvent) {
+      }       else if (evt is RiftLinkVoiceEvent) {
         _voiceChunks[evt.from] ??= {};
         _voiceChunks[evt.from]![evt.chunk] = evt.data;
         final chunks = _voiceChunks[evt.from]!;
@@ -817,6 +827,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         }
       }
     });
+    final li = widget.ble.lastInfo;
+    if (li != null && mounted) _onInfoEvent(li);
   }
 
   void _scrollToBottom() {
@@ -902,7 +914,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       final ttl = _voiceTtlMinutes;
       List<int> payload = bytes;
       if (ttl > 0) payload = [0xFF, ttl, ...bytes];
-      const chunkSize = 384;
+      // Согласовано с прошивкой: BLE_ATT_MAX_JSON_BYTES=512, один JSON на write; сырой чанк ≤300 B → base64 ≤400.
+      const chunkSize = 300;
       final chunks = <String>[];
       for (var i = 0; i < payload.length; i += chunkSize) { chunks.add(base64Encode(payload.sublist(i, (i + chunkSize < payload.length) ? i + chunkSize : payload.length))); }
       final ok = await widget.ble.sendVoice(to: to, chunks: chunks);
