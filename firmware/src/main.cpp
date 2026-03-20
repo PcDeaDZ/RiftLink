@@ -1022,7 +1022,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         }
         uint32_t groupId;
         memcpy(&groupId, decBuf, GROUP_ID_LEN);
-        if (!groups::isInGroup(groupId)) break;
+        // GROUP_ALL — служебный id широковещательных сообщений; не хранится в списке подписок
+        if (groupId != groups::GROUP_ALL && !groups::isInGroup(groupId)) break;
         const char* msg;
         size_t msgLen;
         if (decLen >= GROUP_ID_LEN + msg_queue::MSG_ID_LEN) {

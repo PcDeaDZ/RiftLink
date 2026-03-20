@@ -30,9 +30,26 @@ void init() {
     }
     nvs_close(h);
   }
-  if (s_count == 0) {
-    s_groups[0] = GROUP_ALL;
-    s_count = 1;
+  // Раньше при пустом NVS подмешивали GROUP_ALL (1) — в UI это выглядело как «лишняя» группа.
+  // Приём broadcast (groupId==GROUP_ALL) не требует записи в NVS (см. main.cpp OP_GROUP_MSG).
+  int dst = 0;
+  for (int i = 0; i < s_count; i++) {
+    if (s_groups[i] != GROUP_ALL) {
+      s_groups[dst++] = s_groups[i];
+    }
+  }
+  if (dst != s_count) {
+    s_count = dst;
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+      if (s_count > 0) {
+        nvs_set_blob(h, NVS_KEY_GROUPS, s_groups, s_count * sizeof(uint32_t));
+      } else {
+        nvs_erase_key(h, NVS_KEY_GROUPS);
+      }
+      nvs_commit(h);
+      nvs_close(h);
+    }
   }
   s_inited = true;
 }
@@ -46,6 +63,7 @@ bool isInGroup(uint32_t groupId) {
 }
 
 bool addGroup(uint32_t groupId) {
+  if (groupId == GROUP_ALL) return false;  // зарезервировано под mesh broadcast
   if (isInGroup(groupId)) return true;
   if (s_count >= MAX_GROUPS) return false;
 

@@ -44,6 +44,7 @@ Thumbs.db
 .env
 .env.local
 secrets/
+.cursor/
 
 # Планы и анализы из разговоров (не для репозитория)
 docs/plans/

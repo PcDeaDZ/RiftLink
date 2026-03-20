@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ui' show FontFeature;
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/scheduler.dart';
@@ -15,14 +16,18 @@ import '../app_navigator.dart';
 import '../l10n/app_localizations.dart';
 import 'map_screen.dart';
 import 'mesh_screen.dart';
-import 'contacts_screen.dart';
-import 'groups_screen.dart';
+import 'contacts_groups_hub_screen.dart';
 import 'settings_screen.dart';
 import 'scan_screen.dart';
 import '../locale_notifier.dart';
 
 import '../theme/app_theme.dart';
+import '../mesh_constants.dart';
 import '../widgets/mesh_background.dart';
+import '../widgets/app_snackbar.dart';
+
+List<int> _filterUserGroups(List<int> raw) =>
+    raw.where((g) => g != kMeshBroadcastGroupId).toList();
 
 class ChatScreen extends StatefulWidget {
   final RiftLinkBle ble;
@@ -38,7 +43,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   StreamSubscription? _sub;
   String _nodeId = '';
   String? _nickname;
-  String _region = 'EU';
+  /// Пусто, пока не пришёл evt info (избегаем ложного EU в настройках).
+  String _region = '';
   int? _channel;
   String? _version;
   int? _sf;
@@ -98,6 +104,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         _currentBleRemoteId = widget.ble.device?.remoteId.toString();
         _listenConnectionState();
         _applyNodeIdFromDeviceName();
+        final cachedInfo = widget.ble.lastInfo;
+        if (cachedInfo != null) _onInfoEvent(cachedInfo);
+        if (mounted && widget.ble.isConnected) widget.ble.getInfo();
         Future.delayed(const Duration(milliseconds: 200), () {
           if (mounted && widget.ble.isConnected) widget.ble.getInfo();
         });
@@ -201,7 +210,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           _listenConnectionState();
           widget.ble.getInfo();
           setState(() => _reconnecting = false);
-          _showSnack(l.tr('reconnect_ok'), backgroundColor: AppColors.success);
+          _showSnack(l.tr('reconnect_ok'), backgroundColor: context.palette.success);
           return;
         }
       } catch (_) {}
@@ -225,7 +234,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     FocusScope.of(context).unfocus();
     final value = await showAppModalBottomSheet<String>(
       context: context,
-      backgroundColor: AppColors.card,
+      backgroundColor: context.palette.card,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       builder: (ctx) => SafeArea(
         child: Column(
@@ -233,12 +242,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           children: [
             Padding(
               padding: const EdgeInsets.all(16),
-              child: Text(l.tr('switch_node'), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
+              child: Text(l.tr('switch_node'), style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: context.palette.onSurface)),
             ),
             ...others.map((d) => _buildSwitchItem(ctx, d)),
             ListTile(
-              leading: const Icon(Icons.link_off, color: AppColors.error),
-              title: Text(l.tr('disconnect'), style: const TextStyle(color: AppColors.error, fontWeight: FontWeight.w500)),
+              leading: Icon(Icons.link_off, color: context.palette.error),
+              title: Text(l.tr('disconnect'), style: TextStyle(color: context.palette.error, fontWeight: FontWeight.w500)),
               onTap: () => Navigator.pop(ctx, 'disconnect'),
             ),
             const SizedBox(height: 8),
@@ -255,18 +264,18 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       mainAxisSize: MainAxisSize.min,
       children: [
         ListTile(
-          leading: const Icon(Icons.bluetooth, color: AppColors.primary),
-          title: Text(d.displayName, style: const TextStyle(color: AppColors.onSurface, fontWeight: FontWeight.w500)),
-          subtitle: d.displayName != d.nodeId ? Text(d.nodeId, style: const TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant, fontFamily: 'monospace')) : null,
+          leading: Icon(Icons.bluetooth, color: context.palette.primary),
+          title: Text(d.displayName, style: TextStyle(color: context.palette.onSurface, fontWeight: FontWeight.w500)),
+          subtitle: d.displayName != d.nodeId ? Text(d.nodeId, style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant, fontFamily: 'monospace')) : null,
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               IconButton(
-                icon: const Icon(Icons.delete_outline, size: 20, color: AppColors.onSurfaceVariant),
+                icon: Icon(Icons.delete_outline, size: 20, color: context.palette.onSurfaceVariant),
                 tooltip: l.tr('forget_device'),
                 onPressed: () => _confirmForgetAndPop(ctx, d),
               ),
-              const Icon(Icons.chevron_right, color: AppColors.onSurfaceVariant),
+              Icon(Icons.chevron_right, color: context.palette.onSurfaceVariant),
             ],
           ),
           onTap: () => Navigator.pop(ctx, 'switch:${d.remoteId}'),
@@ -280,11 +289,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     final confirm = await showAppDialog<bool>(
       context: ctx,
       builder: (c) => AlertDialog(
-        title: Text(l.tr('forget_device'), style: const TextStyle(color: AppColors.onSurface)),
-        content: Text(l.tr('forget_device_confirm', {'name': d.displayName}), style: const TextStyle(color: AppColors.onSurface)),
+        title: Text(l.tr('forget_device'), style: TextStyle(color: context.palette.onSurface)),
+        content: Text(l.tr('forget_device_confirm', {'name': d.displayName}), style: TextStyle(color: context.palette.onSurface)),
         actions: [
           TextButton(onPressed: () => Navigator.pop(c, false), child: Text(l.tr('cancel'))),
-          TextButton(onPressed: () => Navigator.pop(c, true), child: Text(l.tr('delete'), style: const TextStyle(color: AppColors.error))),
+          TextButton(onPressed: () => Navigator.pop(c, true), child: Text(l.tr('delete'), style: TextStyle(color: context.palette.error))),
         ],
       ),
     );
@@ -329,8 +338,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         _intentionalDisconnect = false;
         _currentBleRemoteId = remoteId;
         _listenConnectionState();
+        setState(_resetStateUntilInfo);
+        _applyNodeIdFromDeviceName();
         widget.ble.getInfo();
-        _showSnack(l.tr('reconnect_ok'), backgroundColor: AppColors.success);
+        _showSnack(l.tr('reconnect_ok'), backgroundColor: context.palette.success);
         return;
       }
     } catch (_) {}
@@ -373,19 +384,42 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         _intentionalDisconnect = false;
         _currentBleRemoteId = remoteId;
         _listenConnectionState();
+        setState(_resetStateUntilInfo);
+        _applyNodeIdFromDeviceName();
         widget.ble.getInfo();
-        _showSnack(l.tr('reconnect_ok'), backgroundColor: AppColors.success);
+        _showSnack(l.tr('reconnect_ok'), backgroundColor: context.palette.success);
       } else {
         _intentionalDisconnect = false;
-        _showSnack(l.tr('ble_no_service'), backgroundColor: AppColors.error);
+        _showSnack(l.tr('ble_no_service'), backgroundColor: context.palette.error);
       }
     } else {
       _intentionalDisconnect = false;
-      _showSnack(l.tr('ble_timeout'), backgroundColor: AppColors.error);
+      _showSnack(l.tr('ble_timeout'), backgroundColor: context.palette.error);
     }
   }
 
   void _onLocaleChanged() { if (mounted) _sendLangToFirmware(); }
+
+  /// После смены BLE-узла сбрасываем кэш, пока не придёт свежий evt info (иначе в UI «залипает» EU и старый SF).
+  void _resetStateUntilInfo() {
+    _region = '';
+    _channel = null;
+    _sf = null;
+    _version = null;
+    _nodeId = '';
+    _nickname = null;
+    _offlinePending = null;
+    _neighbors = [];
+    _neighborsRssi = [];
+    _neighborsHasKey = [];
+    _routes = [];
+    _groups = [];
+    _gpsPresent = false;
+    _gpsEnabled = false;
+    _gpsFix = false;
+    _powersave = false;
+    _batteryMv = null;
+  }
 
   void _applyNodeIdFromDeviceName() {
     final dev = widget.ble.device;
@@ -401,7 +435,254 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   Future<void> _loadContactNicknames() async {
     final contacts = await ContactsService.load();
     if (!mounted) return;
-    setState(() { _contactNicknames = {for (var c in contacts) c.id: c.nickname}; });
+    setState(() {
+      final m = <String, String>{};
+      for (final c in contacts) {
+        m[c.id] = c.nickname;
+        if (c.id.length >= 8) {
+          m[c.id.substring(0, 8).toUpperCase()] = c.nickname;
+        }
+      }
+      _contactNicknames = m;
+    });
+  }
+
+  String? _nicknameForId(String id) {
+    final n = _contactNicknames[id];
+    if (n != null && n.isNotEmpty) return n;
+    final short = id.length >= 8 ? id.substring(0, 8).toUpperCase() : id.toUpperCase();
+    final n2 = _contactNicknames[short];
+    if (n2 != null && n2.isNotEmpty) return n2;
+    return null;
+  }
+
+  String _normId8(String id) =>
+      id.length >= 8 ? id.substring(0, 8).toUpperCase() : id.toUpperCase();
+
+  String _recipientPillLabel(AppLocalizations l) {
+    if (_group > 0) return 'G$_group';
+    if (_unicastTo != null) {
+      final id = _unicastTo!;
+      final nick = _nicknameForId(id);
+      if (nick != null) return nick;
+      return _normId8(id);
+    }
+    return 'BC';
+  }
+
+  bool _matchesRecipientQuery(String query, Iterable<String> fields) {
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) return true;
+    for (final f in fields) {
+      if (f.toLowerCase().contains(q)) return true;
+    }
+    return false;
+  }
+
+  Future<void> _showRecipientPickerSheet() async {
+    if (!widget.ble.isConnected) return;
+    FocusScope.of(context).unfocus();
+    final l = context.l10n;
+    final contacts = await ContactsService.load();
+    if (!mounted) return;
+    final neighborNorm = _neighbors.map(_normId8).toSet();
+    final contactsOnly = contacts.where((c) => !neighborNorm.contains(_normId8(c.id))).toList();
+
+    await showAppModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final searchCtrl = TextEditingController();
+        var query = '';
+        final maxH = MediaQuery.of(context).size.height * 0.62;
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            void apply(void Function() fn) {
+              fn();
+              setModalState(() {});
+            }
+
+            bool rowMatch(String id, String? nick, List<String> extra) {
+              return _matchesRecipientQuery(query, [id, if (nick != null && nick.isNotEmpty) nick, ...extra]);
+            }
+
+            final bcLabel = l.tr('broadcast');
+            final showBc = _matchesRecipientQuery(query, [bcLabel, 'bc', 'broadcast']);
+
+            final groupTiles = <Widget>[];
+            for (final gid in _groups) {
+              final title = '${l.tr('group')} $gid';
+              if (!rowMatch('', null, [title, 'g$gid', '$gid'])) continue;
+              final sel = _group == gid && _unicastTo == null;
+              groupTiles.add(
+                ListTile(
+                  leading: Icon(Icons.group, color: sel ? context.palette.primary : context.palette.onSurfaceVariant),
+                  title: Text(title, style: TextStyle(fontWeight: sel ? FontWeight.w600 : FontWeight.normal, color: context.palette.onSurface)),
+                  trailing: sel ? Icon(Icons.check, color: context.palette.primary, size: 20) : null,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    setState(() {
+                      _unicastTo = null;
+                      _group = gid;
+                    });
+                  },
+                ),
+              );
+            }
+
+            final neighTiles = <Widget>[];
+            for (var i = 0; i < _neighbors.length; i++) {
+              final id = _neighbors[i];
+              final rssi = i < _neighborsRssi.length ? _neighborsRssi[i] : 0;
+              final hasKey = i < _neighborsHasKey.length ? _neighborsHasKey[i] : true;
+              final nick = _nicknameForId(id);
+              if (!rowMatch(id, nick, [if (rssi != 0) '$rssi'])) continue;
+              final sel = _unicastTo == id && _group == 0;
+              final title = nick ?? _normId8(id);
+              final sub = nick != null ? Text(id, style: TextStyle(fontSize: 12, fontFamily: 'monospace', color: context.palette.onSurfaceVariant)) : null;
+              neighTiles.add(
+                ListTile(
+                  leading: Icon(Icons.person_outline, color: hasKey ? (sel ? context.palette.primary : context.palette.onSurfaceVariant) : context.palette.onSurfaceVariant.withOpacity(0.45)),
+                  title: Text(
+                    hasKey ? title : '$title — ${l.tr('waiting_key')}',
+                    style: TextStyle(fontWeight: sel ? FontWeight.w600 : FontWeight.normal, color: context.palette.onSurface),
+                  ),
+                  subtitle: sub,
+                  trailing: sel ? Icon(Icons.check, color: context.palette.primary, size: 20) : (rssi != 0 ? Text('$rssi dBm', style: TextStyle(fontSize: 11, color: context.palette.onSurfaceVariant)) : null),
+                  onTap: () {
+                    if (!hasKey) {
+                      _showSnack(l.tr('waiting_key'));
+                      return;
+                    }
+                    Navigator.pop(ctx);
+                    setState(() {
+                      _unicastTo = _unicastTo == id ? null : id;
+                      _group = 0;
+                    });
+                  },
+                  onLongPress: hasKey ? () => _showAddContactDialog(id) : null,
+                ),
+              );
+            }
+
+            final extraTiles = <Widget>[];
+            for (final c in contactsOnly) {
+              final id = c.id.length >= 8 ? c.id.substring(0, 8).toUpperCase() : c.id.toUpperCase();
+              final nick = c.nickname.trim().isNotEmpty ? c.nickname : null;
+              if (!rowMatch(id, nick, [id])) continue;
+              final sel = _unicastTo != null && _normId8(_unicastTo!) == id && _group == 0;
+              extraTiles.add(
+                ListTile(
+                  leading: Icon(Icons.bookmark_outline, color: sel ? context.palette.primary : context.palette.onSurfaceVariant),
+                  title: Text(nick ?? id, style: TextStyle(fontWeight: sel ? FontWeight.w600 : FontWeight.normal, color: context.palette.onSurface)),
+                  subtitle: nick != null ? Text(id, style: TextStyle(fontSize: 12, fontFamily: 'monospace', color: context.palette.onSurfaceVariant)) : null,
+                  trailing: sel ? Icon(Icons.check, color: context.palette.primary, size: 20) : null,
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    setState(() {
+                      _unicastTo = id;
+                      _group = 0;
+                    });
+                  },
+                  onLongPress: () => _showAddContactDialog(id),
+                ),
+              );
+            }
+
+            return Container(
+              decoration: const BoxDecoration(
+                color: context.palette.card,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+              ),
+              child: SizedBox(
+                height: maxH,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(l.tr('recipient_title'), style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: context.palette.onSurface)),
+                        ),
+                        IconButton(icon: Icon(Icons.close), onPressed: () => Navigator.pop(ctx), color: context.palette.onSurfaceVariant),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                    child: TextField(
+                      controller: searchCtrl,
+                      onChanged: (v) => apply(() => query = v),
+                      style: TextStyle(color: context.palette.onSurface),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        prefixIcon: Icon(Icons.search, color: context.palette.onSurfaceVariant, size: 22),
+                        hintText: l.tr('recipient_search_hint'),
+                        hintStyle: TextStyle(color: context.palette.onSurfaceVariant),
+                        filled: true,
+                        fillColor: context.palette.surfaceVariant.withOpacity(0.5),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: ListView(
+                      children: [
+                        if (showBc)
+                          ListTile(
+                            leading: Icon(Icons.public, color: _unicastTo == null && _group == 0 ? context.palette.primary : context.palette.onSurfaceVariant),
+                            title: Text(bcLabel, style: TextStyle(fontWeight: _unicastTo == null && _group == 0 ? FontWeight.w600 : FontWeight.normal, color: context.palette.onSurface)),
+                            trailing: _unicastTo == null && _group == 0 ? Icon(Icons.check, color: context.palette.primary, size: 20) : null,
+                            onTap: () {
+                              Navigator.pop(ctx);
+                              setState(() {
+                                _unicastTo = null;
+                                _group = 0;
+                              });
+                            },
+                          ),
+                        if (groupTiles.isNotEmpty) ...[
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                            child: Text(l.tr('groups').toUpperCase(), style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: context.palette.onSurfaceVariant)),
+                          ),
+                          ...groupTiles,
+                        ],
+                        if (neighTiles.isNotEmpty) ...[
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                            child: Text(l.tr('neighbors').toUpperCase(), style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: context.palette.onSurfaceVariant)),
+                          ),
+                          ...neighTiles,
+                        ],
+                        if (extraTiles.isNotEmpty) ...[
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                            child: Text(l.tr('saved_contacts').toUpperCase(), style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: context.palette.onSurfaceVariant)),
+                          ),
+                          ...extraTiles,
+                        ],
+                        if (!showBc && groupTiles.isEmpty && neighTiles.isEmpty && extraTiles.isEmpty)
+                          Padding(
+                            padding: const EdgeInsets.all(24),
+                            child: Text(l.tr('recipient_no_match'), textAlign: TextAlign.center, style: TextStyle(color: context.palette.onSurfaceVariant)),
+                          ),
+                      ],
+                    ),
+                  ),
+                  SizedBox(height: MediaQuery.of(ctx).padding.bottom + 8),
+                ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   void _sendReadForUnread() {
@@ -411,6 +692,29 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         final key = '${m.from}_${m.msgId}';
         if (!_readSent.contains(key)) { _readSent.add(key); widget.ble.sendRead(from: m.from, msgId: m.msgId!); }
       }
+    }
+  }
+
+  void _onInfoEvent(RiftLinkInfoEvent evt) {
+    final bleDev = widget.ble.device;
+    if (bleDev != null) _currentBleRemoteId = bleDev.remoteId.toString();
+    final resolvedId = evt.id.isNotEmpty ? evt.id : _nodeId;
+    setState(() {
+      if (resolvedId.isNotEmpty) _nodeId = resolvedId;
+      _nickname = evt.nickname?.isNotEmpty == true ? evt.nickname : null;
+      _region = evt.region; _channel = evt.channel; _version = evt.version; _sf = evt.sf;
+      _offlinePending = evt.offlinePending; _gpsPresent = evt.gpsPresent; _gpsEnabled = evt.gpsEnabled;
+      _gpsFix = evt.gpsFix; _powersave = evt.powersave; _neighbors = evt.neighbors;
+      _neighborsRssi = evt.neighborsRssi; _neighborsHasKey = evt.neighborsHasKey; _routes = evt.routes;
+      _groups = _filterUserGroups(evt.groups);
+      if (_group > 0 && !_groups.contains(_group)) _group = 0;
+    });
+    if (bleDev != null && resolvedId.isNotEmpty) {
+      RecentDevicesService.addOrUpdate(
+        remoteId: bleDev.remoteId.toString(),
+        nodeId: resolvedId,
+        nickname: evt.nickname?.isNotEmpty == true ? evt.nickname : null,
+      );
     }
   }
 
@@ -467,25 +771,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           }
         });
       } else if (evt is RiftLinkInfoEvent) {
-        final bleDev = widget.ble.device;
-        if (bleDev != null) _currentBleRemoteId = bleDev.remoteId.toString();
-        setState(() {
-          if (evt.id.isNotEmpty) _nodeId = evt.id;
-          _nickname = evt.nickname?.isNotEmpty == true ? evt.nickname : null;
-          _region = evt.region; _channel = evt.channel; _version = evt.version; _sf = evt.sf;
-          _offlinePending = evt.offlinePending; _gpsPresent = evt.gpsPresent; _gpsEnabled = evt.gpsEnabled;
-          _gpsFix = evt.gpsFix; _powersave = evt.powersave; _neighbors = evt.neighbors;
-          _neighborsRssi = evt.neighborsRssi; _neighborsHasKey = evt.neighborsHasKey; _routes = evt.routes; _groups = evt.groups;
-        });
-        if (bleDev != null && evt.id.isNotEmpty) {
-          RecentDevicesService.addOrUpdate(
-            remoteId: bleDev.remoteId.toString(),
-            nodeId: evt.id,
-            nickname: evt.nickname?.isNotEmpty == true ? evt.nickname : null,
-          );
-        }
+        _onInfoEvent(evt);
       } else if (evt is RiftLinkRoutesEvent) { setState(() => _routes = evt.routes); }
-      else if (evt is RiftLinkGroupsEvent) { setState(() => _groups = evt.groups); }
+      else if (evt is RiftLinkGroupsEvent) {
+        setState(() {
+          _groups = _filterUserGroups(evt.groups);
+          if (_group > 0 && !_groups.contains(_group)) _group = 0;
+        });
+      }
       else if (evt is RiftLinkTelemetryEvent) {
         setState(() {
           if (evt.from == _nodeId && evt.batteryMv > 0) _batteryMv = evt.batteryMv;
@@ -501,15 +794,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       else if (evt is RiftLinkPongEvent) {
         final fromNorm = evt.from.length >= 8 ? evt.from.substring(0, 8).toUpperCase() : evt.from.toUpperCase();
         _pendingPings.remove(fromNorm);
-        _showSnack('✓ ${context.l10n.tr('link_ok', {'from': evt.from})}', backgroundColor: AppColors.success, duration: const Duration(seconds: 4));
+        _showSnack('✓ ${context.l10n.tr('link_ok', {'from': evt.from})}', backgroundColor: context.palette.success, duration: const Duration(seconds: 4));
       }
-      else if (evt is RiftLinkErrorEvent) { _showSnack('${context.l10n.tr('error')}: ${evt.msg}', backgroundColor: AppColors.error); }
+      else if (evt is RiftLinkErrorEvent) { _showSnack('${context.l10n.tr('error')}: ${evt.msg}', backgroundColor: context.palette.error); }
       else if (evt is RiftLinkWifiEvent) { _showSnack(evt.connected ? 'WiFi: ${evt.ssid} — ${evt.ip}' : 'WiFi: не подключено'); }
       else if (evt is RiftLinkGpsEvent) { setState(() { _gpsPresent = evt.present; _gpsEnabled = evt.enabled; _gpsFix = evt.hasFix; }); }
       else if (evt is RiftLinkInviteEvent) { _showInviteDialog(evt.id, evt.pubKey, evt.channelKey); }
       else if (evt is RiftLinkSelftestEvent) {
         final ok = evt.radioOk && evt.displayOk;
-        _showSnack('Selftest: ${evt.radioOk ? "✓" : "✗"} радио, ${evt.displayOk ? "✓" : "✗"} дисплей. ${evt.batteryMv}mV', backgroundColor: ok ? null : AppColors.error);
+        _showSnack('Selftest: ${evt.radioOk ? "✓" : "✗"} радио, ${evt.displayOk ? "✓" : "✗"} дисплей. ${evt.batteryMv}mV', backgroundColor: ok ? null : context.palette.error);
         if (evt.batteryMv > 0) setState(() => _batteryMv = evt.batteryMv);
       } else if (evt is RiftLinkVoiceEvent) {
         _voiceChunks[evt.from] ??= {};
@@ -555,28 +848,23 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     await widget.ble.send(text: text, to: _unicastTo, group: _group > 0 ? _group : null, ttlMinutes: ttlMinutes);
   }
 
-  void _showTtlSendMenu() {
+  Future<void> _showTtlSendMenu() async {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
+    final v = await _pickTtlMinutes();
+    if (v != null && mounted) _send(ttlMinutes: v);
+  }
+
+  Future<int?> _pickTtlMinutes() async {
+    if (!mounted) return null;
+    final l = context.l10n;
     FocusScope.of(context).unfocus();
     HapticFeedback.mediumImpact();
-    showDialog<void>(
+    return showAppModalBottomSheet<int>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.card,
-        title: Text(context.l10n.tr('ttl_title'), style: const TextStyle(color: AppColors.onSurface)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            for (final v in [0, 1, 5, 10])
-              ListTile(
-                title: Text(v == 0 ? context.l10n.tr('ttl_none') : '${v}m', style: const TextStyle(fontSize: 16, color: AppColors.onSurface)),
-                onTap: () { Navigator.pop(ctx); _send(ttlMinutes: v); },
-              ),
-          ],
-        ),
-      ),
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => _TtlPickerSheet(l: l),
     );
   }
 
@@ -686,7 +974,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       isScrollControlled: true,
       builder: (ctx) => Container(
         decoration: const BoxDecoration(
-          color: AppColors.card,
+          color: context.palette.card,
           borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
         ),
         child: SafeArea(
@@ -696,13 +984,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
             children: [
               Padding(
                 padding: const EdgeInsets.all(16),
-                child: Text(context.l10n.tr('send_voice'), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
+                child: Text(context.l10n.tr('send_voice'), style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: context.palette.onSurface)),
               ),
               ..._neighbors.map((id) {
-                final label = _contactNicknames[id]?.isNotEmpty == true ? '${_contactNicknames[id]} ($id)' : id;
-                return ListTile(title: Text(label, style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: AppColors.onSurface)), onTap: () => Navigator.pop(ctx, id));
+                final nick = _nicknameForId(id);
+                return ListTile(
+                  title: Text(nick ?? id, style: TextStyle(fontSize: 15, color: context.palette.onSurface)),
+                  subtitle: nick != null ? Text(id, style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: context.palette.onSurfaceVariant)) : null,
+                  onTap: () => Navigator.pop(ctx, id),
+                );
               }),
-              ListTile(title: Text(context.l10n.tr('cancel'), style: const TextStyle(color: AppColors.onSurfaceVariant)), onTap: () => Navigator.pop(ctx)),
+              ListTile(title: Text(context.l10n.tr('cancel'), style: TextStyle(color: context.palette.onSurfaceVariant)), onTap: () => Navigator.pop(ctx)),
             ],
           ),
         ),
@@ -710,49 +1002,60 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     );
   }
 
-  Future<int?> _pickVoiceTtlDialog() async {
-    FocusScope.of(context).unfocus();
-    HapticFeedback.mediumImpact();
-    return showAppDialog<int>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.card,
-        title: Text(context.l10n.tr('ttl_title'), style: const TextStyle(color: AppColors.onSurface)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            for (final v in [0, 1, 5, 10])
-              ListTile(
-                title: Text(v == 0 ? context.l10n.tr('ttl_none') : '${v}m', style: const TextStyle(fontSize: 16, color: AppColors.onSurface)),
-                onTap: () => Navigator.pop(ctx, v),
-              ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: Text(context.l10n.tr('cancel'), style: const TextStyle(color: AppColors.onSurfaceVariant)),
+  Future<int?> _pickVoiceTtlDialog() => _pickTtlMinutes();
+
+  void _showSnack(String text, {Color? backgroundColor, Duration duration = const Duration(seconds: 3)}) {
+    var kind = AppSnackKind.neutral;
+    if (backgroundColor == context.palette.error) {
+      kind = AppSnackKind.error;
+    } else if (backgroundColor == context.palette.success) {
+      kind = AppSnackKind.success;
+    }
+    showAppSnackBar(
+      context,
+      text,
+      kind: kind,
+      duration: duration,
+      margin: kSnackBarMarginChat,
+    );
+  }
+
+  Color _batteryColorForMv(int mv) {
+    final v = mv / 1000.0;
+    if (v >= 3.75) return context.palette.success;
+    if (v >= 3.45) return const Color(0xFFFFB300);
+    return context.palette.error;
+  }
+
+  Widget _buildBatteryBadge() {
+    final mv = _batteryMv;
+    if (mv == null || mv <= 0) return const SizedBox.shrink();
+    final color = _batteryColorForMv(mv);
+    final vStr = (mv / 1000.0).toStringAsFixed(2);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.14),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withOpacity(0.35), width: 0.5),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.battery_std, size: 15, color: color),
+          const SizedBox(width: 4),
+          Text(
+            '$vStr V',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: color,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
           ),
         ],
       ),
     );
-  }
-
-  void _showSnack(String text, {Color? backgroundColor, Duration duration = const Duration(seconds: 3)}) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(text),
-      backgroundColor: backgroundColor,
-      duration: duration,
-      behavior: SnackBarBehavior.floating,
-      margin: const EdgeInsets.only(bottom: 100, left: 16, right: 16),
-    ));
-  }
-
-  Future<void> _startOta() async {
-    if (!widget.ble.isConnected) return;
-    final ok = await widget.ble.sendOta();
-    if (mounted) _showSnack(ok ? context.l10n.tr('ota_started') : context.l10n.tr('ota_failed'));
   }
 
   void _showPingDialog({String? prefilledId}) {
@@ -771,7 +1074,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           Future.delayed(const Duration(seconds: 20), () {
             if (!mounted) return;
             if (_pendingPings.remove(idNorm)) {
-              _showSnack(context.l10n.tr('ping_timeout', {'id': id}), backgroundColor: AppColors.error, duration: const Duration(seconds: 4));
+              _showSnack(context.l10n.tr('ping_timeout', {'id': id}), backgroundColor: context.palette.error, duration: const Duration(seconds: 4));
             }
           });
         },
@@ -782,12 +1085,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   void _showAddContactDialog(String id) {
     final nc = TextEditingController(text: _contactNicknames[id] ?? '');
     showAppDialog(context: context, builder: (ctx) => AlertDialog(
-      title: Text(context.l10n.tr('add_contact'), style: const TextStyle(color: AppColors.onSurface)),
+      title: Text(context.l10n.tr('add_contact'), style: TextStyle(color: context.palette.onSurface)),
       content: TextField(controller: nc, decoration: InputDecoration(labelText: context.l10n.tr('contact_nickname')), maxLength: 16, autofocus: true),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: Text(context.l10n.tr('cancel'))),
         ElevatedButton(
-          style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: Colors.white),
+          style: ElevatedButton.styleFrom(backgroundColor: context.palette.primary, foregroundColor: Colors.white),
           onPressed: () async { final nick = nc.text.trim(); Navigator.pop(ctx); await ContactsService.add(Contact(id: id, nickname: nick)); await _loadContactNicknames(); if (mounted) _showSnack(context.l10n.tr('contact_added')); },
           child: Text(context.l10n.tr('save')),
         ),
@@ -800,14 +1103,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     if (channelKey != null && channelKey.isNotEmpty) map['channelKey'] = channelKey;
     final data = jsonEncode(map);
     showAppDialog(context: context, builder: (ctx) => AlertDialog(
-      title: Text(context.l10n.tr('invite_created'), style: const TextStyle(color: AppColors.onSurface)),
+      title: Text(context.l10n.tr('invite_created'), style: TextStyle(color: context.palette.onSurface)),
       content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('ID: $id', style: const TextStyle(fontFamily: 'monospace', fontSize: 12, color: AppColors.onSurface)),
+        Text('ID: $id', style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: context.palette.onSurface)),
         const SizedBox(height: 8),
-        Text('PubKey: ${pubKey.length > 40 ? '${pubKey.substring(0, 40)}…' : pubKey}', style: const TextStyle(fontFamily: 'monospace', fontSize: 11, color: AppColors.onSurface)),
+        Text('PubKey: ${pubKey.length > 40 ? '${pubKey.substring(0, 40)}…' : pubKey}', style: TextStyle(fontFamily: 'monospace', fontSize: 11, color: context.palette.onSurface)),
         const SizedBox(height: 16),
         ElevatedButton.icon(
-          style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: Colors.white),
+          style: ElevatedButton.styleFrom(backgroundColor: context.palette.primary, foregroundColor: Colors.white),
           onPressed: () { Clipboard.setData(ClipboardData(text: data)); _showSnack(context.l10n.tr('copied')); },
           icon: const Icon(Icons.copy, size: 18), label: Text(context.l10n.tr('copy')),
         ),
@@ -818,24 +1121,33 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
   void _showOtaDialog(String ip, String ssid, String password) {
     showAppDialog(context: context, builder: (ctx) => AlertDialog(
-      title: const Text('OTA', style: TextStyle(color: AppColors.onSurface)),
+      title: Text('OTA', style: TextStyle(color: context.palette.onSurface)),
       content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(context.l10n.tr('ota_connect'), style: const TextStyle(color: AppColors.onSurface)),
+        Text(context.l10n.tr('ota_connect'), style: TextStyle(color: context.palette.onSurface)),
         const SizedBox(height: 8),
-        Text('SSID: $ssid', style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.onSurface)),
-        Text('Pass: $password', style: const TextStyle(color: AppColors.onSurface)),
+        Text('SSID: $ssid', style: TextStyle(fontWeight: FontWeight.bold, color: context.palette.onSurface)),
+        Text('Pass: $password', style: TextStyle(color: context.palette.onSurface)),
         const SizedBox(height: 12),
-        Text(context.l10n.tr('ota_then'), style: const TextStyle(color: AppColors.onSurface)),
+        Text(context.l10n.tr('ota_then'), style: TextStyle(color: context.palette.onSurface)),
         const SizedBox(height: 4),
-        SelectableText('cd firmware\npio run -t upload -e heltec_v3_ota', style: const TextStyle(fontFamily: 'monospace', fontSize: 12, color: AppColors.onSurface)),
+        SelectableText('cd firmware\npio run -t upload -e heltec_v3_ota', style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: context.palette.onSurface)),
         const SizedBox(height: 8),
-        Text('IP: $ip', style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 12)),
+        Text('IP: $ip', style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 12)),
       ])),
       actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: Text(context.l10n.tr('ok')))],
     ));
   }
 
   // ── Build ──
+
+  void _runSelftestFromToolsMenu() {
+    if (!widget.ble.isConnected) {
+      _showSnack(context.l10n.tr('connect_first'));
+      return;
+    }
+    HapticFeedback.lightImpact();
+    widget.ble.selftest();
+  }
 
   Future<void> _showAppMenu(BuildContext context, AppLocalizations l) async {
     FocusScope.of(context).unfocus();
@@ -858,27 +1170,37 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       case 'mesh':
         Navigator.push(context, MaterialPageRoute(builder: (_) => MeshScreen(ble: widget.ble, nodeId: _nodeId, neighbors: _neighbors, neighborsRssi: _neighborsRssi, routes: _routes)));
         break;
-      case 'contacts':
-        Navigator.push(context, MaterialPageRoute(builder: (_) => ContactsScreen(neighbors: _neighbors))).then((_) => _loadContactNicknames());
-        break;
-      case 'groups':
-        Navigator.push(context, MaterialPageRoute(builder: (_) => GroupsScreen(ble: widget.ble, initialGroups: _groups))).then((_) => widget.ble.getGroups());
+      case 'contacts_hub':
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ContactsGroupsHubScreen(
+              ble: widget.ble,
+              neighbors: _neighbors,
+              initialGroups: _groups,
+            ),
+          ),
+        ).then((_) {
+          _loadContactNicknames();
+          widget.ble.getGroups();
+        });
         break;
       case 'ping':
         _showPingDialog();
         break;
-      case 'ota':
-        _startOta();
+      case 'selftest':
+        _runSelftestFromToolsMenu();
         break;
       case 'settings':
         if (widget.ble.isConnected) {
           Navigator.push(context, MaterialPageRoute(builder: (_) => SettingsScreen(
             ble: widget.ble, nodeId: _nodeId, nickname: _nickname, region: _region, channel: _channel,
+            sf: _sf,
             gpsPresent: _gpsPresent, gpsEnabled: _gpsEnabled, gpsFix: _gpsFix, powersave: _powersave,
             offlinePending: _offlinePending, batteryMv: _batteryMv,
-            onDisconnect: () async { await widget.ble.disconnect(); if (!mounted) return; Navigator.of(context).pushAndRemoveUntil(MaterialPageRoute(builder: (_) => const ScanScreen()), (r) => false); },
             onNicknameChanged: (n) => setState(() => _nickname = n),
             onRegionChanged: (r, c) => setState(() { _region = r; _channel = c; }),
+            onSfChanged: (v) => setState(() => _sf = v),
             onPowersaveChanged: (v) => setState(() => _powersave = v),
             onGpsChanged: (v) => setState(() => _gpsEnabled = v),
             meshAnimationEnabled: _meshAnimationEnabled,
@@ -896,7 +1218,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     final l = context.l10n;
     return Scaffold(
       resizeToAvoidBottomInset: true,
-      backgroundColor: AppColors.surface,
+      backgroundColor: context.palette.surface,
       extendBody: true,
       appBar: AppBar(
         toolbarHeight: 44,
@@ -909,15 +1231,19 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
             final row = Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(widget.ble.isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled, size: 18, color: widget.ble.isConnected ? AppColors.success : AppColors.onSurfaceVariant),
+                Icon(widget.ble.isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled, size: 18, color: widget.ble.isConnected ? context.palette.success : context.palette.onSurfaceVariant),
                 const SizedBox(width: 6),
                 Flexible(
                   child: Text(
                     label,
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: widget.ble.isConnected ? AppColors.success : AppColors.onSurfaceVariant),
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: widget.ble.isConnected ? context.palette.success : context.palette.onSurfaceVariant),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
+                if (widget.ble.isConnected && _batteryMv != null && _batteryMv! > 0) ...[
+                  const SizedBox(width: 8),
+                  _buildBatteryBadge(),
+                ],
               ],
             );
             if (!widget.ble.isConnected) {
@@ -935,8 +1261,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
             );
           },
         ),
-        backgroundColor: AppColors.surfaceVariant,
-        foregroundColor: AppColors.onSurface,
+        backgroundColor: context.palette.surfaceVariant,
+        foregroundColor: context.palette.onSurface,
         elevation: 0,
         actions: [
           Center(
@@ -945,33 +1271,47 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
               child: Material(
                 color: Colors.transparent,
                 child: InkWell(
-                  onTap: widget.ble.isConnected ? () {
-                    if (_group > 0) {
-                      setState(() => _group = 0);
-                    } else if (_groups.isNotEmpty) {
-                      setState(() => _group = _groups.first);
-                    } else {
-                      _showSnack(context.l10n.tr('no_groups'));
-                    }
-                  } : null,
-                  borderRadius: BorderRadius.circular(6),
-                  child: Container(
-                    height: 28,
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: _group > 0 ? AppColors.primary.withOpacity(0.12) : AppColors.onSurface.withOpacity(0.04),
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(
-                        color: _group > 0 ? AppColors.primary.withOpacity(0.4) : AppColors.onSurfaceVariant.withOpacity(0.2),
-                        width: 0.5,
+                  onTap: widget.ble.isConnected ? _showRecipientPickerSheet : null,
+                  borderRadius: BorderRadius.circular(8),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.42),
+                    child: Container(
+                      height: 30,
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: (_group > 0 || _unicastTo != null) ? context.palette.primary.withOpacity(0.12) : context.palette.onSurface.withOpacity(0.04),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: (_group > 0 || _unicastTo != null) ? context.palette.primary.withOpacity(0.35) : context.palette.onSurfaceVariant.withOpacity(0.2),
+                          width: 0.5,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            _group > 0 ? Icons.group : (_unicastTo != null ? Icons.person : Icons.public),
+                            size: 14,
+                            color: (_group > 0 || _unicastTo != null) ? context.palette.primary : context.palette.onSurfaceVariant,
+                          ),
+                          const SizedBox(width: 4),
+                          Flexible(
+                            child: Text(
+                              _recipientPillLabel(l),
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                                color: (_group > 0 || _unicastTo != null) ? context.palette.primary : context.palette.onSurfaceVariant,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Icon(Icons.arrow_drop_down, size: 18, color: (_group > 0 || _unicastTo != null) ? context.palette.primary : context.palette.onSurfaceVariant),
+                        ],
                       ),
                     ),
-                    child: Row(mainAxisSize: MainAxisSize.min, mainAxisAlignment: MainAxisAlignment.center, children: [
-                      Icon(_group == 0 ? Icons.public : Icons.group, size: 12, color: _group > 0 ? AppColors.primary : AppColors.onSurfaceVariant),
-                      const SizedBox(width: 4),
-                      Text(_group == 0 ? 'BC' : 'G$_group', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: _group > 0 ? AppColors.primary : AppColors.onSurfaceVariant)),
-                    ]),
                   ),
                 ),
               ),
@@ -993,15 +1333,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                 color: Colors.black54,
                 child: Center(
                   child: Card(
-                    color: AppColors.card,
+                    color: context.palette.card,
                     child: Padding(
                       padding: const EdgeInsets.all(24),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const CircularProgressIndicator(color: AppColors.primary),
+                          CircularProgressIndicator(color: context.palette.primary),
                           const SizedBox(height: 16),
-                          Text(l.tr('reconnecting', {'n': '${_reconnectAttempt}/3'}), style: const TextStyle(color: AppColors.onSurface)),
+                          Text(l.tr('reconnecting', {'n': '${_reconnectAttempt}/3'}), style: TextStyle(color: context.palette.onSurface)),
                         ],
                       ),
                     ),
@@ -1012,7 +1352,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           Positioned.fill(
             child: IgnorePointer(
               child: ColoredBox(
-                color: AppColors.surface,
+                color: context.palette.surface,
                 child: ListenableBuilder(
                   listenable: _meshAnimationEnabled && _meshAnimController != null ? _meshAnimController! : const AlwaysStoppedAnimation(0),
                   builder: (_, __) => CustomPaint(
@@ -1029,8 +1369,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
               mainAxisSize: MainAxisSize.max,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-            const Divider(height: 1, color: AppColors.divider),
-            if (_nodeId.isNotEmpty) _buildRecipientBar(l),
+            Divider(height: 1, color: context.palette.divider),
             Expanded(
               child: Stack(
                 children: [
@@ -1041,9 +1380,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Icon(Icons.chat_bubble_outline, size: 48, color: AppColors.onSurfaceVariant.withOpacity(0.4)),
+                              Icon(Icons.chat_bubble_outline, size: 48, color: context.palette.onSurfaceVariant.withOpacity(0.4)),
                               const SizedBox(height: 12),
-                              Text(l.tr('no_messages'), style: TextStyle(color: AppColors.onSurfaceVariant.withOpacity(0.7), fontSize: 14)),
+                              Text(l.tr('no_messages'), style: TextStyle(color: context.palette.onSurfaceVariant.withOpacity(0.7), fontSize: 14)),
                             ],
                           ),
                         )
@@ -1066,8 +1405,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                             begin: Alignment.topCenter,
                             end: Alignment.bottomCenter,
                             colors: [
-                              AppColors.surface.withOpacity(0),
-                              AppColors.surface.withOpacity(0.95),
+                              context.palette.surface.withOpacity(0),
+                              context.palette.surface.withOpacity(0.95),
                             ],
                           ),
                         ),
@@ -1100,8 +1439,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     return Container(
       padding: EdgeInsets.fromLTRB(20, 10, 8, 10 + bottomPad),
       decoration: BoxDecoration(
-        color: AppColors.surfaceVariant.withOpacity(0.92),
-        border: const Border(top: BorderSide(color: AppColors.divider, width: 0.5)),
+        color: context.palette.surfaceVariant.withOpacity(0.92),
+        border: Border(top: BorderSide(color: context.palette.divider, width: 0.5)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
@@ -1109,9 +1448,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
           Expanded(
             child: Container(
               decoration: BoxDecoration(
-                color: AppColors.card,
+                color: context.palette.card,
                 borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: AppColors.divider),
+                border: Border.all(color: context.palette.divider),
               ),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
@@ -1136,15 +1475,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                             Container(
                               width: 10,
                               height: 10,
-                              decoration: const BoxDecoration(color: AppColors.error, shape: BoxShape.circle),
+                              decoration: BoxDecoration(color: context.palette.error, shape: BoxShape.circle),
                             ),
                             const SizedBox(width: 10),
-                            Text(timeStr, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500, color: AppColors.onSurface, fontFamily: 'monospace')),
+                            Text(timeStr, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500, color: context.palette.onSurface, fontFamily: 'monospace')),
                             const SizedBox(width: 16),
                             Expanded(
                               child: Text(
                                 l.tr('voice_swipe_cancel'),
-                                style: const TextStyle(fontSize: 14, color: AppColors.onSurfaceVariant),
+                                style: TextStyle(fontSize: 14, color: context.palette.onSurfaceVariant),
                                 textAlign: TextAlign.center,
                               ),
                             ),
@@ -1159,9 +1498,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                         maxLines: 6,
                         minLines: 1,
                         maxLength: _group > 0 ? 160 : 200,
-                        style: const TextStyle(color: AppColors.onSurface, fontSize: 16),
+                        style: TextStyle(color: context.palette.onSurface, fontSize: 16),
                         placeholder: l.tr('message_hint'),
-                        placeholderStyle: const TextStyle(color: AppColors.onSurfaceVariant),
+                        placeholderStyle: TextStyle(color: context.palette.onSurfaceVariant),
                         padding: const EdgeInsets.fromLTRB(14, 10, 4, 10),
                         decoration: const BoxDecoration(color: Colors.transparent),
                         onSubmitted: (_) => _send(),
@@ -1222,52 +1561,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     );
   }
 
-  // ── Recipient bar ──
-
-  Widget _buildRecipientBar(AppLocalizations l) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-      decoration: const BoxDecoration(color: AppColors.surface, border: Border(bottom: BorderSide(color: AppColors.divider))),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
-        Text('${l.tr('to')}', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.onSurfaceVariant)),
-        const SizedBox(height: 4),
-        Wrap(spacing: 6, runSpacing: 4, children: [
-          _rcpChip(l.tr('broadcast'), _unicastTo == null && _group == 0, () => setState(() { _unicastTo = null; _group = 0; })),
-          ..._groups.map((gid) => _rcpChip('${l.tr('group')} $gid', _group == gid && _unicastTo == null, () => setState(() { _unicastTo = null; _group = _group == gid ? 0 : gid; }))),
-          ..._neighbors.asMap().entries.map((e) {
-            final id = e.value; final rssi = e.key < _neighborsRssi.length ? _neighborsRssi[e.key] : 0;
-            final hasKey = e.key < _neighborsHasKey.length ? _neighborsHasKey[e.key] : true;
-            final baseLabel = _contactNicknames[id]?.isNotEmpty == true ? _contactNicknames[id]! : (rssi != 0 ? '$id ($rssi)' : id);
-            final label = hasKey ? baseLabel : '$baseLabel — ${l.tr('waiting_key')}';
-            return GestureDetector(
-              onLongPress: () => _showAddContactDialog(id),
-              child: _rcpChip(label, _unicastTo == id, hasKey ? () => setState(() { _unicastTo = _unicastTo == id ? null : id; _group = 0; }) : () {
-                if (!hasKey) _showSnack(l.tr('waiting_key'));
-              }, dimmed: !hasKey),
-            );
-          }),
-        ]),
-      ]),
-    );
-  }
-
-  Widget _rcpChip(String label, bool selected, VoidCallback onTap, {bool dimmed = false}) {
-    final color = dimmed ? AppColors.onSurfaceVariant.withOpacity(0.6) : (selected ? AppColors.primary : AppColors.onSurface);
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(
-          color: selected ? AppColors.primary.withOpacity(0.2) : (dimmed ? AppColors.card.withOpacity(0.7) : AppColors.card),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: selected ? AppColors.primary : AppColors.divider),
-        ),
-        child: Text(label, style: TextStyle(fontSize: 12, color: color, fontWeight: selected ? FontWeight.w600 : FontWeight.normal)),
-      ),
-    );
-  }
-
   // ── Message bubble ──
 
   Widget _buildMessageBubble(_Msg m) {
@@ -1279,18 +1572,18 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
         decoration: BoxDecoration(
-          color: mine ? AppColors.primary.withOpacity(0.25) : AppColors.card,
+          color: mine ? context.palette.primary.withOpacity(0.25) : context.palette.card,
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: mine ? AppColors.primary : AppColors.divider),
+          border: Border.all(color: mine ? context.palette.primary : context.palette.divider),
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
           if (m.isIncoming && m.from.isNotEmpty)
             Padding(padding: const EdgeInsets.only(bottom: 2), child: Text(
-              _contactNicknames[m.from]?.isNotEmpty == true ? '${_contactNicknames[m.from]} (${m.from})' : m.from,
-              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.primary),
+              _nicknameForId(m.from) ?? m.from,
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: context.palette.primary),
             )),
           Row(mainAxisSize: MainAxisSize.min, children: [
-            Flexible(child: Text(m.text, style: const TextStyle(color: AppColors.onSurface, fontSize: 14))),
+            Flexible(child: Text(m.text, style: TextStyle(color: context.palette.onSurface, fontSize: 14))),
             if (!m.isIncoming) Padding(padding: const EdgeInsets.only(left: 6), child: Text(
               m.status == _St.undelivered
                   ? (m.total != null && m.total! > 0 ? '✗ 0/${m.total}' : '✗')
@@ -1299,11 +1592,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                       : m.status == _St.delivered
                           ? (m.delivered != null && m.total != null && m.total! > 0 ? '✓ ${m.delivered}/${m.total}' : '✓✓')
                           : '✓',
-              style: TextStyle(fontSize: 10, color: m.status == _St.undelivered ? AppColors.error : (m.status == _St.read ? AppColors.primary : AppColors.onSurfaceVariant)),
+              style: TextStyle(fontSize: 10, color: m.status == _St.undelivered ? context.palette.error : (m.status == _St.read ? context.palette.primary : context.palette.onSurfaceVariant)),
             )),
-            if (m.isIncoming && m.rssi != null && m.rssi != 0) Padding(padding: const EdgeInsets.only(left: 6), child: Text('${m.rssi}dBm', style: const TextStyle(fontSize: 9, color: AppColors.onSurfaceVariant))),
+            if (m.isIncoming && m.rssi != null && m.rssi != 0) Padding(padding: const EdgeInsets.only(left: 6), child: Text('${m.rssi}dBm', style: TextStyle(fontSize: 9, color: context.palette.onSurfaceVariant))),
             if (m.isVoice && m.voiceData != null) IconButton(
-              icon: const Icon(Icons.play_circle_outline, color: AppColors.primary, size: 22),
+              icon: Icon(Icons.play_circle_outline, color: context.palette.primary, size: 22),
               onPressed: () async { if (m.voiceData != null && m.voiceData!.isNotEmpty) await VoiceService.play(m.voiceData!); },
               tooltip: context.l10n.tr('play'), padding: EdgeInsets.zero, constraints: const BoxConstraints(),
             ),
@@ -1329,17 +1622,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
             alignment: Alignment.center,
             children: [
               if (loading)
-                const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.primary))
+                SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: context.palette.primary))
               else
-                Icon(icon, size: 24, color: active ? AppColors.error : (enabled ? AppColors.onSurfaceVariant : AppColors.divider)),
+                Icon(icon, size: 24, color: active ? context.palette.error : (enabled ? context.palette.onSurfaceVariant : context.palette.divider)),
               if (badge != null && badge.isNotEmpty)
                 Positioned(
                   right: 0,
                   top: 0,
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                    decoration: BoxDecoration(color: AppColors.primary, borderRadius: BorderRadius.circular(8)),
-                    child: Text(badge, style: const TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.w600)),
+                    decoration: BoxDecoration(color: context.palette.primary, borderRadius: BorderRadius.circular(8)),
+                    child: Text(badge, style: TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.w600)),
                   ),
                 ),
             ],
@@ -1359,14 +1652,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           decoration: BoxDecoration(
-            color: enabled ? AppColors.card : AppColors.surfaceVariant,
+            color: enabled ? context.palette.card : context.palette.surfaceVariant,
             borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: AppColors.divider),
+            border: Border.all(color: context.palette.divider),
           ),
           child: Row(mainAxisSize: MainAxisSize.min, children: [
-            if (loading) const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.primary))
-            else Icon(icon, size: 22, color: iconColor ?? (enabled ? AppColors.onSurface : AppColors.onSurfaceVariant)),
-            if (label != null) ...[const SizedBox(width: 6), Text(label, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: enabled ? AppColors.onSurface : AppColors.onSurfaceVariant))],
+            if (loading) SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: context.palette.primary))
+            else Icon(icon, size: 22, color: iconColor ?? (enabled ? context.palette.onSurface : context.palette.onSurfaceVariant)),
+            if (label != null) ...[const SizedBox(width: 6), Text(label, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: enabled ? context.palette.onSurface : context.palette.onSurfaceVariant))],
           ]),
         ),
       ),
@@ -1440,7 +1733,7 @@ class _TtlTapButtonState extends State<_TtlTapButton> {
           width: widget.size,
           height: widget.size,
           decoration: BoxDecoration(
-            color: enabled ? AppColors.primary : AppColors.divider,
+            color: enabled ? context.palette.primary : context.palette.divider,
             shape: BoxShape.circle,
           ),
           alignment: Alignment.center,
@@ -1517,11 +1810,12 @@ class _PingDialogContentState extends State<_PingDialogContent> {
   Future<void> _doPing() async {
     final id = _controller.text.trim().toUpperCase();
     if (id.length != 8) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(widget.l.tr('ping_invalid')),
-        behavior: SnackBarBehavior.floating,
-        margin: const EdgeInsets.only(bottom: 100, left: 16, right: 16),
-      ));
+      showAppSnackBar(
+        context,
+        widget.l.tr('ping_invalid'),
+        kind: AppSnackKind.error,
+        margin: kSnackBarMarginChat,
+      );
       return;
     }
     Navigator.pop(context);
@@ -1537,9 +1831,9 @@ class _PingDialogContentState extends State<_PingDialogContent> {
         child: Container(
           padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
-            color: AppColors.card,
+            color: context.palette.card,
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: AppColors.divider),
+            border: Border.all(color: context.palette.divider),
             boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.4), blurRadius: 24, offset: const Offset(0, 8))],
           ),
           child: Column(
@@ -1548,26 +1842,26 @@ class _PingDialogContentState extends State<_PingDialogContent> {
             children: [
               Row(
                 children: [
-                  Icon(Icons.radar, color: AppColors.primary, size: 28),
+                  Icon(Icons.radar, color: context.palette.primary, size: 28),
                   const SizedBox(width: 12),
-                  Text(widget.l.tr('ping'), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
+                  Text(widget.l.tr('ping'), style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: context.palette.onSurface)),
                 ],
               ),
               const SizedBox(height: 16),
               Container(
                 decoration: BoxDecoration(
-                  color: AppColors.surfaceVariant,
+                  color: context.palette.surfaceVariant,
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: AppColors.divider),
+                  border: Border.all(color: context.palette.divider),
                 ),
                 child: CupertinoTextField(
                   controller: _controller,
                   placeholder: 'A1B2C3D4',
                   maxLength: 8,
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 16, color: AppColors.onSurface),
+                  style: TextStyle(fontFamily: 'monospace', fontSize: 16, color: context.palette.onSurface),
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                   decoration: const BoxDecoration(color: Colors.transparent),
-                  placeholderStyle: const TextStyle(color: AppColors.onSurfaceVariant),
+                  placeholderStyle: TextStyle(color: context.palette.onSurfaceVariant),
                   textCapitalization: TextCapitalization.characters,
                   onSubmitted: (_) => _doPing(),
                 ),
@@ -1579,7 +1873,7 @@ class _PingDialogContentState extends State<_PingDialogContent> {
                   TextButton(onPressed: () => Navigator.pop(context), child: Text(widget.l.tr('cancel'))),
                   const SizedBox(width: 8),
                   ElevatedButton(
-                    style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: Colors.white),
+                    style: ElevatedButton.styleFrom(backgroundColor: context.palette.primary, foregroundColor: Colors.white),
                     onPressed: _doPing,
                     child: const Text('Ping'),
                   ),
@@ -1633,42 +1927,139 @@ class _PopoverMenuRoute<T> extends PageRouteBuilder<T> {
         );
 }
 
-/// Popover меню в стиле Telegram — компактная карточка сверху справа
-class _AppMenuPopover extends StatelessWidget {
+/// Popover меню в стиле Telegram — компактная карточка сверху справа.
+/// Второй уровень «Инструменты»: карта, mesh, ping, самотест (OTA — в настройках, блок Wi‑Fi и OTA).
+class _AppMenuPopover extends StatefulWidget {
   final AppLocalizations l;
 
   const _AppMenuPopover({required this.l});
 
   @override
+  State<_AppMenuPopover> createState() => _AppMenuPopoverState();
+}
+
+class _AppMenuPopoverState extends State<_AppMenuPopover> {
+  bool _tools = false;
+
+  AppLocalizations get l => widget.l;
+
+  @override
   Widget build(BuildContext context) {
     return Material(
       color: Colors.transparent,
-      child: Container(
-        constraints: const BoxConstraints(minWidth: 200, maxWidth: 260),
-        decoration: BoxDecoration(
-          color: AppColors.card,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: AppColors.divider, width: 0.5),
-          boxShadow: [
-            BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 16, offset: const Offset(0, 4)),
-          ],
+      child: AnimatedSize(
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeInOutCubic,
+        alignment: Alignment.topRight,
+        child: Container(
+          constraints: const BoxConstraints(minWidth: 200, maxWidth: 280),
+          decoration: BoxDecoration(
+            color: context.palette.card,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: context.palette.divider, width: 0.5),
+            boxShadow: [
+              BoxShadow(color: Colors.black.withOpacity(0.3), blurRadius: 16, offset: const Offset(0, 4)),
+            ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 220),
+              switchInCurve: Curves.easeOut,
+              switchOutCurve: Curves.easeIn,
+              transitionBuilder: (child, anim) => FadeTransition(
+                opacity: anim,
+                child: SlideTransition(
+                  position: Tween<Offset>(begin: const Offset(0.06, 0), end: Offset.zero).animate(anim),
+                  child: child,
+                ),
+              ),
+              child: _tools
+                  ? _buildToolsPage(key: const ValueKey('tools'))
+                  : _buildMainPage(key: const ValueKey('main')),
+            ),
+          ),
         ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+      ),
+    );
+  }
+
+  Widget _buildMainPage({required Key key}) {
+    return Column(
+      key: key,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _popoverItem(context, Icons.contact_mail_outlined, l.tr('contacts_groups_title'), 'contacts_hub'),
+        _toolsEntry(),
+        _popoverItem(context, Icons.settings, l.tr('settings'), 'settings'),
+      ],
+    );
+  }
+
+  Widget _toolsEntry() {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => setState(() => _tools = true),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          child: Row(
             children: [
-              _popoverItem(context, Icons.map, l.tr('map'), 'map'),
-              _popoverItem(context, Icons.hub, l.tr('mesh_topology'), 'mesh'),
-              _popoverItem(context, Icons.people, l.tr('contacts'), 'contacts'),
-              _popoverItem(context, Icons.group, l.tr('groups'), 'groups'),
-              _popoverItem(context, Icons.radar, l.tr('ping'), 'ping'),
-              _popoverItem(context, Icons.update, 'OTA', 'ota'),
-              _popoverItem(context, Icons.settings, l.tr('settings'), 'settings'),
+              Icon(Icons.handyman_outlined, size: 22, color: context.palette.onSurface),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(l.tr('menu_tools'), style: TextStyle(fontSize: 15, color: context.palette.onSurface)),
+                    const SizedBox(height: 2),
+                    Text(
+                      l.tr('menu_tools_subtitle'),
+                      style: TextStyle(fontSize: 11, height: 1.2, color: context.palette.onSurfaceVariant.withOpacity(0.95)),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right, size: 22, color: context.palette.onSurfaceVariant.withOpacity(0.9)),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildToolsPage({required Key key}) {
+    return Column(
+      key: key,
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () => setState(() => _tools = false),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+              child: Row(
+                children: [
+                  Icon(Icons.arrow_back_ios_new, size: 16, color: context.palette.primary),
+                  const SizedBox(width: 6),
+                  Text(
+                    l.tr('menu_tools'),
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: context.palette.onSurface),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        Divider(height: 1, color: context.palette.divider),
+        _popoverItem(context, Icons.map, l.tr('map'), 'map'),
+        _popoverItem(context, Icons.hub, l.tr('mesh_topology'), 'mesh'),
+        _popoverItem(context, Icons.radar, l.tr('ping'), 'ping'),
+        _popoverItem(context, Icons.health_and_safety, l.tr('selftest'), 'selftest'),
+      ],
     );
   }
 
@@ -1681,9 +2072,155 @@ class _AppMenuPopover extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           child: Row(
             children: [
-              Icon(icon, size: 22, color: AppColors.onSurface),
+              Icon(icon, size: 22, color: context.palette.onSurface),
               const SizedBox(width: 14),
-              Text(label, style: const TextStyle(fontSize: 15, color: AppColors.onSurface)),
+              Text(label, style: TextStyle(fontSize: 15, color: context.palette.onSurface)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Нижний лист выбора TTL (текст и голос).
+class _TtlPickerSheet extends StatelessWidget {
+  final AppLocalizations l;
+
+  const _TtlPickerSheet({required this.l});
+
+  static const List<int> _minutes = [0, 1, 5, 10];
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: context.palette.card,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(22)),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 24, offset: const Offset(0, -4)),
+        ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(20, 10, 20, 12 + MediaQuery.of(context).padding.bottom),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: context.palette.onSurfaceVariant.withOpacity(0.35),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: context.palette.primary.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Icon(Icons.auto_delete_outlined, color: context.palette.primary, size: 26),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          l.tr('ttl_title'),
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                            color: context.palette.onSurface,
+                            letterSpacing: -0.3,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          l.tr('ttl_sheet_hint'),
+                          style: TextStyle(
+                            fontSize: 13,
+                            height: 1.4,
+                            color: context.palette.onSurfaceVariant.withOpacity(0.95),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    icon: Icon(Icons.close_rounded, color: context.palette.onSurfaceVariant.withOpacity(0.85)),
+                    onPressed: () => Navigator.pop(context),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 22),
+              Row(
+                children: [
+                  Expanded(child: _ttlTile(context, _minutes[0])),
+                  const SizedBox(width: 10),
+                  Expanded(child: _ttlTile(context, _minutes[1])),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(child: _ttlTile(context, _minutes[2])),
+                  const SizedBox(width: 10),
+                  Expanded(child: _ttlTile(context, _minutes[3])),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _ttlTile(BuildContext context, int minutes) {
+    final isNone = minutes == 0;
+    final label = isNone ? l.tr('ttl_none') : '${minutes}m';
+    return Material(
+      color: context.palette.surfaceVariant.withOpacity(0.55),
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        onTap: () {
+          HapticFeedback.selectionClick();
+          Navigator.pop(context, minutes);
+        },
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                isNone ? Icons.all_inclusive_rounded : Icons.timer_outlined,
+                size: 30,
+                color: context.palette.primary,
+              ),
+              const SizedBox(height: 10),
+              Text(
+                label,
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: context.palette.onSurface,
+                  height: 1.15,
+                ),
+              ),
             ],
           ),
         ),

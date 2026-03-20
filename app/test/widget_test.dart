@@ -12,6 +12,8 @@ class FakeRiftLinkBle implements RiftLinkBle {
   @override
   BluetoothDevice? get device => null;
   @override
+  RiftLinkInfoEvent? get lastInfo => null;
+  @override
   Stream<RiftLinkEvent> get events => const Stream.empty();
   @override
   Future<bool> connect(BluetoothDevice dev) async => false;
@@ -33,6 +35,8 @@ class FakeRiftLinkBle implements RiftLinkBle {
   Future<bool> setNickname(String nickname) async => false;
   @override
   Future<bool> setChannel(int channel) async => false;
+  @override
+  Future<bool> setSpreadingFactor(int sf) async => false;
   @override
   Future<bool> setWifi({required String ssid, required String pass}) async => false;
   @override

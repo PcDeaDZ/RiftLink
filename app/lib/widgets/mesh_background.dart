@@ -37,17 +37,22 @@ class _MeshBackgroundWrapperState extends State<MeshBackgroundWrapper> with Sing
 
   @override
   Widget build(BuildContext context) {
+    final p = context.palette;
     return Stack(
       fit: StackFit.expand,
       children: [
         Positioned.fill(
           child: IgnorePointer(
             child: ColoredBox(
-              color: AppColors.surface,
+              color: p.surface,
               child: ListenableBuilder(
                 listenable: _animated && _controller != null ? _controller! : const AlwaysStoppedAnimation(0),
                 builder: (_, __) => CustomPaint(
-                  painter: MeshBackgroundPainter(progress: _controller?.value ?? 0, animated: _animated),
+                  painter: MeshBackgroundPainter(
+                    progress: _controller?.value ?? 0,
+                    animated: _animated,
+                    palette: p,
+                  ),
                 ),
               ),
             ),
@@ -61,10 +66,11 @@ class _MeshBackgroundWrapperState extends State<MeshBackgroundWrapper> with Sing
 
 /// Абстрактный фон: узлы сети и тонкие линии связи с опциональной анимацией импульсов
 class MeshBackgroundPainter extends CustomPainter {
-  MeshBackgroundPainter({this.progress = 0, this.animated = false});
+  MeshBackgroundPainter({this.progress = 0, this.animated = false, required this.palette});
 
   final double progress;
   final bool animated;
+  final AppPalette palette;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -76,9 +82,9 @@ class MeshBackgroundPainter extends CustomPainter {
     const pulseOpacity = 0.12;
     const animZoneFraction = 1.0;
 
-    final paint = Paint()..color = AppColors.primary.withOpacity(dotOpacity);
+    final paint = Paint()..color = palette.primary.withOpacity(dotOpacity);
     final linePaint = Paint()
-      ..color = AppColors.primary.withOpacity(lineOpacity)
+      ..color = palette.primary.withOpacity(lineOpacity)
       ..strokeWidth = 0.8
       ..style = PaintingStyle.stroke;
 
@@ -120,7 +126,7 @@ class MeshBackgroundPainter extends CustomPainter {
       final animLimitY = size.height * animZoneFraction;
       final animEdges = edges.where((e) => e.a.dy < animLimitY && e.b.dy < animLimitY).toList();
       if (animEdges.isEmpty) return;
-      final pulsePaint = Paint()..color = AppColors.primary.withOpacity(pulseOpacity);
+      final pulsePaint = Paint()..color = palette.primary.withOpacity(pulseOpacity);
       final maxPulses = animEdges.length.clamp(0, 24);
       for (var k = 0; k < maxPulses; k++) {
         final phase = (k / maxPulses) % 1.0;
@@ -135,5 +141,7 @@ class MeshBackgroundPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant MeshBackgroundPainter oldDelegate) =>
-      oldDelegate.progress != progress || oldDelegate.animated != animated;
+      oldDelegate.progress != progress ||
+      oldDelegate.animated != animated ||
+      oldDelegate.palette != palette;
 }

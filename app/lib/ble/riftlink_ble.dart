@@ -1,6 +1,7 @@
 /// RiftLink BLE — связь с Heltec LoRa по GATT
 /// Протокол: JSON {"cmd":"send","text":"..."} / {"evt":"msg","from":"...","text":"..."}
 
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
@@ -13,6 +14,18 @@ class RiftLinkBle {
   BluetoothDevice? _device;
   BluetoothCharacteristic? _txChar;
   BluetoothCharacteristic? _rxChar;
+
+  /// Один приёмник notify + broadcast: несколько `events.listen` (чат, настройки, группы…)
+  /// получают одни и те же события. Раньше каждый `events` создавал новый `await for` на
+  /// `lastValueStream` — у потока одна подписка, второй экран не видел `info`.
+  StreamController<RiftLinkEvent>? _eventController;
+  StreamSubscription<List<int>>? _rxSub;
+
+  /// Последний успешно распарсенный `evt:info` (ответ на connect/getInfo может прийти
+  /// до подписки экрана на [events] — без кэша UI и «недавние» теряют данные).
+  RiftLinkInfoEvent? _lastInfo;
+
+  RiftLinkInfoEvent? get lastInfo => _lastInfo;
 
   BluetoothDevice? get device => _device;
   bool get isConnected => _device?.isConnected ?? false;
@@ -92,6 +105,7 @@ class RiftLinkBle {
       await disconnect();
       return false;
     }
+    await _startRxDispatcher();
     getInfo();
     getGroups();
     getRoutes();
@@ -102,12 +116,43 @@ class RiftLinkBle {
   Future<bool> getInfo() async => _sendCmd({'cmd': 'info'});
 
   Future<void> disconnect() async {
+    _lastInfo = null;
+    _stopRxDispatcher();
     if (_device != null) {
       await _device!.disconnect();
       _device = null;
     }
     _txChar = null;
     _rxChar = null;
+  }
+
+  Future<void> _startRxDispatcher() async {
+    if (_rxChar == null) return;
+    if (_eventController != null) return;
+    _eventController = StreamController<RiftLinkEvent>.broadcast();
+    await _rxChar!.setNotifyValue(true);
+    _rxSub = _rxChar!.lastValueStream.listen((value) {
+      if (value.isEmpty) return;
+      try {
+        final json = jsonDecode(utf8.decode(value)) as Map<String, dynamic>;
+        final evt = _jsonToEvent(json);
+        if (evt is RiftLinkInfoEvent) {
+          _lastInfo = evt;
+        }
+        if (evt != null && !(_eventController?.isClosed ?? true)) {
+          _eventController!.add(evt);
+        }
+      } catch (_) {}
+    });
+  }
+
+  void _stopRxDispatcher() {
+    _rxSub?.cancel();
+    _rxSub = null;
+    if (_eventController != null && !_eventController!.isClosed) {
+      _eventController!.close();
+    }
+    _eventController = null;
   }
 
   /// Отправка геолокации (broadcast)
@@ -132,6 +177,12 @@ class RiftLinkBle {
   Future<bool> setChannel(int channel) async {
     if (channel < 0 || channel > 2) return false;
     return _sendCmd({'cmd': 'channel', 'channel': channel});
+  }
+
+  /// LoRa spreading factor (mesh), 7–12
+  Future<bool> setSpreadingFactor(int sf) async {
+    if (sf < 7 || sf > 12) return false;
+    return _sendCmd({'cmd': 'sf', 'sf': sf});
   }
 
   /// Отправить голосовое сообщение (Opus/AAC, base64 чанками)
@@ -215,202 +266,223 @@ class RiftLinkBle {
     return _sendCmd(payload);
   }
 
-  /// Подписка на уведомления (входящие сообщения)
-  Stream<RiftLinkEvent> get events async* {
-    if (_rxChar == null) return;
-
-    await _rxChar!.setNotifyValue(true);
-
-    await for (final value in _rxChar!.lastValueStream) {
-      if (value.isEmpty) continue;
-      try {
-        final json = jsonDecode(utf8.decode(value)) as Map<String, dynamic>;
-        final evt = json['evt'] as String?;
-        if (evt == 'msg') {
-          yield RiftLinkMsgEvent(
-            from: json['from'] as String? ?? '',
-            text: json['text'] as String? ?? '',
-            msgId: (json['msgId'] as num?)?.toInt(),
-            rssi: (json['rssi'] as num?)?.toInt(),
-            ttlMinutes: (json['ttl'] as num?)?.toInt(),
-          );
-        } else if (evt == 'sent') {
-          yield RiftLinkSentEvent(
-            to: json['to'] as String? ?? '',
-            msgId: (json['msgId'] as num?)?.toInt() ?? 0,
-          );
-        } else if (evt == 'delivered') {
-          yield RiftLinkDeliveredEvent(
-            from: json['from'] as String? ?? '',
-            msgId: (json['msgId'] as num?)?.toInt() ?? 0,
-          );
-        } else if (evt == 'read') {
-          yield RiftLinkReadEvent(
-            from: json['from'] as String? ?? '',
-            msgId: (json['msgId'] as num?)?.toInt() ?? 0,
-          );
-        } else if (evt == 'undelivered') {
-          yield RiftLinkUndeliveredEvent(
-            to: json['to'] as String? ?? '',
-            msgId: (json['msgId'] as num?)?.toInt() ?? 0,
-            delivered: (json['delivered'] as num?)?.toInt(),
-            total: (json['total'] as num?)?.toInt(),
-          );
-        } else if (evt == 'broadcast_delivery') {
-          yield RiftLinkBroadcastDeliveryEvent(
-            msgId: (json['msgId'] as num?)?.toInt() ?? 0,
-            delivered: (json['delivered'] as num?)?.toInt() ?? 0,
-            total: (json['total'] as num?)?.toInt() ?? 0,
-          );
-        } else if (evt == 'info') {
-          final nb = json['neighbors'];
-          final neighbors = nb is List ? (nb as List).map((e) => e.toString()).toList() : <String>[];
-          final rssiList = json['neighborsRssi'];
-          final neighborsRssi = rssiList is List ? (rssiList as List).map((e) => (e as num).toInt()).toList() : <int>[];
-          final hasKeyList = json['neighborsHasKey'];
-          final neighborsHasKey = hasKeyList is List ? (hasKeyList as List).map((e) => e == true).toList() : <bool>[];
-          final grpList = json['groups'];
-          final groups = grpList is List ? (grpList as List).map((e) => (e as num).toInt()).toList() : <int>[];
-          final routesList = json['routes'];
-          final routes = <Map<String, dynamic>>[];
-          if (routesList is List) {
-            for (final r in routesList) {
-              if (r is Map<String, dynamic>) {
-                routes.add({
-                  'dest': r['dest'] as String? ?? '',
-                  'nextHop': r['nextHop'] as String? ?? '',
-                  'hops': (r['hops'] as num?)?.toInt() ?? 0,
-                  'rssi': (r['rssi'] as num?)?.toInt() ?? 0,
-                });
-              }
-            }
-          }
-          yield RiftLinkInfoEvent(
-            id: json['id'] as String? ?? '',
-            nickname: json['nickname'] as String?,
-            region: json['region'] as String? ?? 'EU',
-            freq: (json['freq'] as num?)?.toDouble() ?? 868.0,
-            power: (json['power'] as num?)?.toInt() ?? 14,
-            channel: (json['channel'] as num?)?.toInt(),
-            version: json['version'] as String?,
-            neighbors: neighbors,
-            neighborsRssi: neighborsRssi,
-            neighborsHasKey: neighborsHasKey,
-            groups: groups,
-            routes: routes,
-            sf: (json['sf'] as num?)?.toInt(),
-            offlinePending: (json['offlinePending'] as num?)?.toInt(),
-            gpsPresent: json['gpsPresent'] == true,
-            gpsEnabled: json['gpsEnabled'] == true,
-            gpsFix: json['gpsFix'] == true,
-            powersave: json['powersave'] == true,
-          );
-        } else if (evt == 'routes') {
-          final routesList = json['routes'];
-          final routes = <Map<String, dynamic>>[];
-          if (routesList is List) {
-            for (final r in routesList) {
-              if (r is Map<String, dynamic>) {
-                routes.add({
-                  'dest': r['dest'] as String? ?? '',
-                  'nextHop': r['nextHop'] as String? ?? '',
-                  'hops': (r['hops'] as num?)?.toInt() ?? 0,
-                  'rssi': (r['rssi'] as num?)?.toInt() ?? 0,
-                });
-              }
-            }
-          }
-          yield RiftLinkRoutesEvent(routes: routes);
-        } else if (evt == 'groups') {
-          final grpList = json['groups'];
-          yield RiftLinkGroupsEvent(
-            groups: grpList is List ? (grpList as List).map((e) => (e as num).toInt()).toList() : <int>[],
-          );
-        } else if (evt == 'telemetry') {
-          final bat = (json['battery'] as num?)?.toInt() ?? 0;
-          final heap = (json['heapKb'] as num?)?.toInt() ?? 0;
-          yield RiftLinkTelemetryEvent(
-            from: json['from'] as String? ?? '',
-            batteryMv: bat,
-            heapKb: heap,
-          );
-        } else if (evt == 'location') {
-          final lat = (json['lat'] as num?)?.toDouble() ?? 0.0;
-          final lon = (json['lon'] as num?)?.toDouble() ?? 0.0;
-          final alt = (json['alt'] as num?)?.toInt() ?? 0;
-          yield RiftLinkLocationEvent(
-            from: json['from'] as String? ?? '',
-            lat: lat,
-            lon: lon,
-            alt: alt,
-          );
-        } else if (evt == 'region') {
-          yield RiftLinkRegionEvent(
-            region: json['region'] as String? ?? 'EU',
-            freq: (json['freq'] as num?)?.toDouble() ?? 868.0,
-            power: (json['power'] as num?)?.toInt() ?? 14,
-            channel: (json['channel'] as num?)?.toInt(),
-          );
-        } else if (evt == 'ota') {
-          yield RiftLinkOtaEvent(
-            ip: json['ip'] as String? ?? '192.168.4.1',
-            ssid: json['ssid'] as String? ?? 'RiftLink-OTA',
-            password: json['password'] as String? ?? 'riftlink123',
-          );
-        } else if (evt == 'neighbors') {
-          final list = json['neighbors'];
-          final rssiList = json['rssi'];
-          final rssi = rssiList is List ? (rssiList as List).map((e) => (e as num).toInt()).toList() : <int>[];
-          final hasKeyList = json['hasKey'];
-          final hasKey = hasKeyList is List ? (hasKeyList as List).map((e) => e == true).toList() : <bool>[];
-          yield RiftLinkNeighborsEvent(
-            neighbors: list is List ? (list as List).map((e) => e.toString()).toList() : [],
-            rssi: rssi,
-            hasKey: hasKey,
-          );
-        } else if (evt == 'pong') {
-          yield RiftLinkPongEvent(from: json['from'] as String? ?? '');
-        } else if (evt == 'error') {
-          yield RiftLinkErrorEvent(
-            code: json['code'] as String? ?? 'unknown',
-            msg: json['msg'] as String? ?? '',
-          );
-        } else if (evt == 'voice') {
-          yield RiftLinkVoiceEvent(
-            from: json['from'] as String? ?? '',
-            chunk: (json['chunk'] as num?)?.toInt() ?? 0,
-            total: (json['total'] as num?)?.toInt() ?? 1,
-            data: json['data'] as String? ?? '',
-          );
-        } else if (evt == 'wifi') {
-          yield RiftLinkWifiEvent(
-            connected: json['connected'] == true,
-            ssid: json['ssid'] as String? ?? '',
-            ip: json['ip'] as String? ?? '',
-          );
-        } else if (evt == 'gps') {
-          yield RiftLinkGpsEvent(
-            present: json['present'] == true,
-            enabled: json['enabled'] == true,
-            hasFix: json['hasFix'] == true,
-          );
-        } else if (evt == 'invite') {
-          yield RiftLinkInviteEvent(
-            id: json['id'] as String? ?? '',
-            pubKey: json['pubKey'] as String? ?? '',
-            channelKey: json['channelKey'] as String?,
-          );
-        } else if (evt == 'selftest') {
-          yield RiftLinkSelftestEvent(
-            radioOk: json['radioOk'] == true,
-            displayOk: json['displayOk'] == true,
-            batteryMv: (json['batteryMv'] as num?)?.toInt() ?? 0,
-            heapFree: (json['heapFree'] as num?)?.toInt() ?? 0,
-          );
-        }
-      } catch (_) {}
+  /// Все подписчики получают один и тот же поток (см. [_startRxDispatcher]).
+  Stream<RiftLinkEvent> get events {
+    if (_rxChar == null || _eventController == null) {
+      return const Stream.empty();
     }
+    return _eventController!.stream;
   }
+}
+
+/// Парсинг одного JSON-уведомления с RX (вынесено из потока для единого диспетчера).
+RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
+  final evt = json['evt'] as String?;
+  if (evt == 'msg') {
+    return RiftLinkMsgEvent(
+      from: json['from'] as String? ?? '',
+      text: json['text'] as String? ?? '',
+      msgId: (json['msgId'] as num?)?.toInt(),
+      rssi: (json['rssi'] as num?)?.toInt(),
+      ttlMinutes: (json['ttl'] as num?)?.toInt(),
+    );
+  }
+  if (evt == 'sent') {
+    return RiftLinkSentEvent(
+      to: json['to'] as String? ?? '',
+      msgId: (json['msgId'] as num?)?.toInt() ?? 0,
+    );
+  }
+  if (evt == 'delivered') {
+    return RiftLinkDeliveredEvent(
+      from: json['from'] as String? ?? '',
+      msgId: (json['msgId'] as num?)?.toInt() ?? 0,
+    );
+  }
+  if (evt == 'read') {
+    return RiftLinkReadEvent(
+      from: json['from'] as String? ?? '',
+      msgId: (json['msgId'] as num?)?.toInt() ?? 0,
+    );
+  }
+  if (evt == 'undelivered') {
+    return RiftLinkUndeliveredEvent(
+      to: json['to'] as String? ?? '',
+      msgId: (json['msgId'] as num?)?.toInt() ?? 0,
+      delivered: (json['delivered'] as num?)?.toInt(),
+      total: (json['total'] as num?)?.toInt(),
+    );
+  }
+  if (evt == 'broadcast_delivery') {
+    return RiftLinkBroadcastDeliveryEvent(
+      msgId: (json['msgId'] as num?)?.toInt() ?? 0,
+      delivered: (json['delivered'] as num?)?.toInt() ?? 0,
+      total: (json['total'] as num?)?.toInt() ?? 0,
+    );
+  }
+  if (evt == 'info') {
+    final nb = json['neighbors'];
+    final neighbors = nb is List ? (nb as List).map((e) => e.toString()).toList() : <String>[];
+    final rssiList = json['neighborsRssi'];
+    final neighborsRssi = rssiList is List ? (rssiList as List).map((e) => (e as num).toInt()).toList() : <int>[];
+    final hasKeyList = json['neighborsHasKey'];
+    final neighborsHasKey = hasKeyList is List ? (hasKeyList as List).map((e) => e == true).toList() : <bool>[];
+    final grpList = json['groups'];
+    final groups = grpList is List ? (grpList as List).map((e) => (e as num).toInt()).toList() : <int>[];
+    final routesList = json['routes'];
+    final routes = <Map<String, dynamic>>[];
+    if (routesList is List) {
+      for (final r in routesList) {
+        if (r is Map<String, dynamic>) {
+          routes.add({
+            'dest': r['dest'] as String? ?? '',
+            'nextHop': r['nextHop'] as String? ?? '',
+            'hops': (r['hops'] as num?)?.toInt() ?? 0,
+            'rssi': (r['rssi'] as num?)?.toInt() ?? 0,
+          });
+        }
+      }
+    }
+    final idRaw = json['id'] ?? json['nodeId'];
+    final idStr = idRaw == null ? '' : idRaw.toString();
+    return RiftLinkInfoEvent(
+      id: idStr,
+      nickname: json['nickname'] as String?,
+      region: json['region'] as String? ?? 'EU',
+      freq: (json['freq'] as num?)?.toDouble() ?? 868.0,
+      power: (json['power'] as num?)?.toInt() ?? 14,
+      channel: (json['channel'] as num?)?.toInt(),
+      version: json['version'] as String?,
+      neighbors: neighbors,
+      neighborsRssi: neighborsRssi,
+      neighborsHasKey: neighborsHasKey,
+      groups: groups,
+      routes: routes,
+      sf: (json['sf'] as num?)?.toInt(),
+      offlinePending: (json['offlinePending'] as num?)?.toInt(),
+      gpsPresent: json['gpsPresent'] == true,
+      gpsEnabled: json['gpsEnabled'] == true,
+      gpsFix: json['gpsFix'] == true,
+      powersave: json['powersave'] == true,
+    );
+  }
+  if (evt == 'routes') {
+    final routesList = json['routes'];
+    final routes = <Map<String, dynamic>>[];
+    if (routesList is List) {
+      for (final r in routesList) {
+        if (r is Map<String, dynamic>) {
+          routes.add({
+            'dest': r['dest'] as String? ?? '',
+            'nextHop': r['nextHop'] as String? ?? '',
+            'hops': (r['hops'] as num?)?.toInt() ?? 0,
+            'rssi': (r['rssi'] as num?)?.toInt() ?? 0,
+          });
+        }
+      }
+    }
+    return RiftLinkRoutesEvent(routes: routes);
+  }
+  if (evt == 'groups') {
+    final grpList = json['groups'];
+    return RiftLinkGroupsEvent(
+      groups: grpList is List ? (grpList as List).map((e) => (e as num).toInt()).toList() : <int>[],
+    );
+  }
+  if (evt == 'telemetry') {
+    final bat = (json['battery'] as num?)?.toInt() ?? 0;
+    final heap = (json['heapKb'] as num?)?.toInt() ?? 0;
+    return RiftLinkTelemetryEvent(
+      from: json['from'] as String? ?? '',
+      batteryMv: bat,
+      heapKb: heap,
+    );
+  }
+  if (evt == 'location') {
+    final lat = (json['lat'] as num?)?.toDouble() ?? 0.0;
+    final lon = (json['lon'] as num?)?.toDouble() ?? 0.0;
+    final alt = (json['alt'] as num?)?.toInt() ?? 0;
+    return RiftLinkLocationEvent(
+      from: json['from'] as String? ?? '',
+      lat: lat,
+      lon: lon,
+      alt: alt,
+    );
+  }
+  if (evt == 'region') {
+    return RiftLinkRegionEvent(
+      region: json['region'] as String? ?? 'EU',
+      freq: (json['freq'] as num?)?.toDouble() ?? 868.0,
+      power: (json['power'] as num?)?.toInt() ?? 14,
+      channel: (json['channel'] as num?)?.toInt(),
+    );
+  }
+  if (evt == 'ota') {
+    return RiftLinkOtaEvent(
+      ip: json['ip'] as String? ?? '192.168.4.1',
+      ssid: json['ssid'] as String? ?? 'RiftLink-OTA',
+      password: json['password'] as String? ?? 'riftlink123',
+    );
+  }
+  if (evt == 'neighbors') {
+    final list = json['neighbors'];
+    final rssiList = json['rssi'];
+    final rssi = rssiList is List ? (rssiList as List).map((e) => (e as num).toInt()).toList() : <int>[];
+    final hasKeyList = json['hasKey'];
+    final hasKey = hasKeyList is List ? (hasKeyList as List).map((e) => e == true).toList() : <bool>[];
+    return RiftLinkNeighborsEvent(
+      neighbors: list is List ? (list as List).map((e) => e.toString()).toList() : [],
+      rssi: rssi,
+      hasKey: hasKey,
+    );
+  }
+  if (evt == 'pong') {
+    return RiftLinkPongEvent(from: json['from'] as String? ?? '');
+  }
+  if (evt == 'error') {
+    return RiftLinkErrorEvent(
+      code: json['code'] as String? ?? 'unknown',
+      msg: json['msg'] as String? ?? '',
+    );
+  }
+  if (evt == 'voice') {
+    return RiftLinkVoiceEvent(
+      from: json['from'] as String? ?? '',
+      chunk: (json['chunk'] as num?)?.toInt() ?? 0,
+      total: (json['total'] as num?)?.toInt() ?? 1,
+      data: json['data'] as String? ?? '',
+    );
+  }
+  if (evt == 'wifi') {
+    return RiftLinkWifiEvent(
+      connected: json['connected'] == true,
+      ssid: json['ssid'] as String? ?? '',
+      ip: json['ip'] as String? ?? '',
+    );
+  }
+  if (evt == 'gps') {
+    return RiftLinkGpsEvent(
+      present: json['present'] == true,
+      enabled: json['enabled'] == true,
+      hasFix: json['hasFix'] == true,
+    );
+  }
+  if (evt == 'invite') {
+    return RiftLinkInviteEvent(
+      id: json['id'] as String? ?? '',
+      pubKey: json['pubKey'] as String? ?? '',
+      channelKey: json['channelKey'] as String?,
+    );
+  }
+  if (evt == 'selftest') {
+    return RiftLinkSelftestEvent(
+      radioOk: json['radioOk'] == true,
+      displayOk: json['displayOk'] == true,
+      batteryMv: (json['batteryMv'] as num?)?.toInt() ?? 0,
+      heapFree: (json['heapFree'] as num?)?.toInt() ?? 0,
+    );
+  }
+  return null;
 }
 
 sealed class RiftLinkEvent {}

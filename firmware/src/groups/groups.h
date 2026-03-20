@@ -23,7 +23,7 @@ void removeGroup(uint32_t groupId);
 int getCount();
 /** ID группы по индексу (0..getCount()-1) */
 uint32_t getId(int index);
-/** Группа по умолчанию (все) */
+/** Служебный id широковещательных OP_GROUP_MSG в mesh; не хранится в списке подписок пользователя */
 constexpr uint32_t GROUP_ALL = 1;
 
 }  // namespace groups

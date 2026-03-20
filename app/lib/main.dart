@@ -6,22 +6,14 @@ import 'l10n/app_localizations.dart';
 import 'locale_notifier.dart';
 import 'screens/scan_screen.dart';
 import 'theme/app_theme.dart';
+import 'theme/theme_notifier.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Тёмная тема в стиле MeshCore
-  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
-    statusBarColor: Colors.transparent,
-    statusBarIconBrightness: Brightness.light,
-    statusBarBrightness: Brightness.dark,
-    systemNavigationBarColor: Color(0xFF121212),
-    systemNavigationBarIconBrightness: Brightness.light,
-    systemNavigationBarDividerColor: Color(0xFF2D2D2D),
-  ));
-
   await AppLocalizations.loadLocale();
   localeNotifier.value = AppLocalizations.currentLocale;
+  await loadThemeMode();
   runApp(const RiftLinkApp());
 }
 
@@ -31,12 +23,12 @@ class RiftLinkApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: localeNotifier,
+      listenable: Listenable.merge([localeNotifier, themeModeNotifier]),
       builder: (_, __) {
         final locale = localeNotifier.value;
         return MaterialApp(
           navigatorKey: navigatorKey,
-          key: ValueKey(locale.languageCode),
+          key: ValueKey('${locale.languageCode}_${themeModeNotifier.value.name}'),
           title: 'RiftLink',
           locale: locale,
           supportedLocales: const [Locale('en'), Locale('ru')],
@@ -45,11 +37,25 @@ class RiftLinkApp extends StatelessWidget {
             GlobalWidgetsLocalizations.delegate,
             GlobalCupertinoLocalizations.delegate,
           ],
-          theme: AppTheme.dark,
-          builder: (context, child) => Directionality(
-            textDirection: TextDirection.ltr,
-            child: child!,
-          ),
+          theme: AppTheme.light,
+          darkTheme: AppTheme.dark,
+          themeMode: themeModeNotifier.value,
+          builder: (context, child) {
+            final brightness = Theme.of(context).brightness;
+            final isDark = brightness == Brightness.dark;
+            SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle(
+              statusBarColor: Colors.transparent,
+              statusBarIconBrightness: isDark ? Brightness.light : Brightness.dark,
+              statusBarBrightness: isDark ? Brightness.dark : Brightness.light,
+              systemNavigationBarColor: Theme.of(context).scaffoldBackgroundColor,
+              systemNavigationBarIconBrightness: isDark ? Brightness.light : Brightness.dark,
+              systemNavigationBarDividerColor: Theme.of(context).dividerColor,
+            ));
+            return Directionality(
+              textDirection: TextDirection.ltr,
+              child: child!,
+            );
+          },
           home: const ScanScreen(),
         );
       },

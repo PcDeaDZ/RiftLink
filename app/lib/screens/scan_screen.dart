@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../theme/app_theme.dart';
+import '../widgets/app_snackbar.dart';
 import '../prefs/mesh_prefs.dart';
 import '../widgets/mesh_background.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -10,6 +11,7 @@ import '../ble/riftlink_ble.dart';
 import '../app_navigator.dart';
 import '../l10n/app_localizations.dart';
 import '../locale_notifier.dart';
+import '../theme/theme_notifier.dart';
 import '../recent_devices/recent_devices_service.dart';
 import 'chat_screen.dart';
 import 'debug_screen.dart';
@@ -55,9 +57,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
     if (widget.initialMessage != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(widget.initialMessage!), backgroundColor: AppColors.error),
-          );
+          showAppSnackBar(context, widget.initialMessage!, kind: AppSnackKind.error);
         }
       });
     }
@@ -207,11 +207,11 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
     final confirm = await showAppDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(l10n.tr('forget_device'), style: const TextStyle(color: AppColors.onSurface)),
-        content: Text(l10n.tr('forget_device_confirm', {'name': d.displayName}), style: const TextStyle(color: AppColors.onSurface)),
+        title: Text(l10n.tr('forget_device'), style: TextStyle(color: context.palette.onSurface)),
+        content: Text(l10n.tr('forget_device_confirm', {'name': d.displayName}), style: TextStyle(color: context.palette.onSurface)),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(l10n.tr('cancel'))),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(l10n.tr('delete'), style: const TextStyle(color: AppColors.error))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(l10n.tr('delete'), style: TextStyle(color: context.palette.error))),
         ],
       ),
     );
@@ -236,15 +236,17 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
     if (mounted) {
       final l10n = context.l10n;
       final langName = AppLocalizations.currentLocale.languageCode == 'ru' ? l10n.tr('lang_ru') : l10n.tr('lang_en');
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${l10n.tr('lang')}: $langName')));
+      showAppSnackBar(context, '${l10n.tr('lang')}: $langName');
     }
   }
+
+  void _showThemePicker() => showThemeModeSheet(context);
 
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
     return Scaffold(
-      backgroundColor: AppColors.surface,
+      backgroundColor: context.palette.surface,
       appBar: AppBar(
         title: GestureDetector(
           onTap: () {
@@ -257,6 +259,11 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
           child: Text(l10n.tr('app_title')),
         ),
         actions: [
+          IconButton(
+            onPressed: _showThemePicker,
+            icon: const Icon(Icons.dark_mode_outlined),
+            tooltip: l10n.tr('theme'),
+          ),
           IconButton(onPressed: _showLangPicker, icon: const Icon(Icons.language), tooltip: l10n.tr('lang')),
           IconButton(
             onPressed: () => showAppDialog(
@@ -275,11 +282,15 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
           Positioned.fill(
             child: IgnorePointer(
               child: ColoredBox(
-                color: AppColors.surface,
+                color: context.palette.surface,
                 child: ListenableBuilder(
                   listenable: _meshAnimationEnabled && _meshAnimController != null ? _meshAnimController! : const AlwaysStoppedAnimation(0),
                   builder: (_, __) => CustomPaint(
-                    painter: MeshBackgroundPainter(progress: _meshAnimController?.value ?? 0, animated: _meshAnimationEnabled),
+                    painter: MeshBackgroundPainter(
+                      progress: _meshAnimController?.value ?? 0,
+                      animated: _meshAnimationEnabled,
+                      palette: context.palette,
+                    ),
                   ),
                 ),
               ),
@@ -294,32 +305,32 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                   const SizedBox(height: 20),
-                  Icon(Icons.bluetooth_searching, size: 56, color: AppColors.primary),
+                  Icon(Icons.bluetooth_searching, size: 56, color: context.palette.primary),
                   const SizedBox(height: 12),
-                  Text(l10n.tr('find_device'), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: AppColors.onSurface), textAlign: TextAlign.center),
+                  Text(l10n.tr('find_device'), style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: context.palette.onSurface), textAlign: TextAlign.center),
                   const SizedBox(height: 12),
                   if (_error != null)
                     Container(
                       margin: const EdgeInsets.symmetric(horizontal: 24),
                       padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(color: AppColors.error.withOpacity(0.2), borderRadius: BorderRadius.circular(8), border: Border.all(color: AppColors.error)),
+                      decoration: BoxDecoration(color: context.palette.error.withOpacity(0.2), borderRadius: BorderRadius.circular(8), border: Border.all(color: context.palette.error)),
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(
                             children: [
-                              const Icon(Icons.error_outline, color: AppColors.error, size: 20),
+                              Icon(Icons.error_outline, color: context.palette.error, size: 20),
                               const SizedBox(width: 8),
-                              Expanded(child: Text(_error!, style: const TextStyle(color: AppColors.error, fontSize: 13))),
+                              Expanded(child: Text(_error!, style: TextStyle(color: context.palette.error, fontSize: 13))),
                             ],
                           ),
                           if (_error!.toLowerCase().contains('permission') || _error!.toLowerCase().contains('denied')) ...[
                             const SizedBox(height: 8),
                             TextButton.icon(
                               onPressed: () => openAppSettings(),
-                              icon: const Icon(Icons.settings, size: 18, color: AppColors.primary),
-                              label: Text(l10n.tr('open_settings'), style: const TextStyle(color: AppColors.primary)),
+                              icon: Icon(Icons.settings, size: 18, color: context.palette.primary),
+                              label: Text(l10n.tr('open_settings'), style: TextStyle(color: context.palette.primary)),
                             ),
                           ],
                         ],
@@ -367,12 +378,12 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                             } else if (_scanning) {
                               labelText = l10n.tr('stop_scan');
                             }
-                            return SizedBox(width: double.infinity, child: Center(child: Text(labelText, style: const TextStyle(color: Colors.white, fontSize: 15), textAlign: TextAlign.center)));
+                            return SizedBox(width: double.infinity, child: Center(child: Text(labelText, style: TextStyle(color: Colors.white, fontSize: 15), textAlign: TextAlign.center)));
                           },
                         ),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: AppColors.primary,
-                          disabledBackgroundColor: AppColors.primary.withOpacity(0.5),
+                          backgroundColor: context.palette.primary,
+                          disabledBackgroundColor: context.palette.primary.withOpacity(0.5),
                           padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                         ),
@@ -383,7 +394,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                     const SizedBox(height: 24),
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 24),
-                      child: Center(child: Text(l10n.tr('recent_devices'), style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.onSurface))),
+                      child: Center(child: Text(l10n.tr('recent_devices'), style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: context.palette.onSurface))),
                     ),
                     const SizedBox(height: 8),
                     Padding(
@@ -419,19 +430,19 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                                   width: double.infinity,
                                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                                 decoration: BoxDecoration(
-                                  color: AppColors.surfaceVariant.withOpacity(0.7),
+                                  color: context.palette.surfaceVariant.withOpacity(0.7),
                                   borderRadius: BorderRadius.circular(14),
-                                  border: Border.all(color: AppColors.divider, width: 1),
+                                  border: Border.all(color: context.palette.divider, width: 1),
                                 ),
                                 child: Row(
                                   children: [
                                     Container(
                                       width: 52,
                                       height: 52,
-                                      decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.2), borderRadius: BorderRadius.circular(26)),
+                                      decoration: BoxDecoration(color: context.palette.primary.withOpacity(0.2), borderRadius: BorderRadius.circular(26)),
                                       child: isConnecting
-                                          ? const Padding(padding: EdgeInsets.all(14), child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.primary))
-                                          : const Icon(Icons.bluetooth, color: AppColors.primary, size: 28),
+                                          ? Padding(padding: const EdgeInsets.all(14), child: CircularProgressIndicator(strokeWidth: 2, color: context.palette.primary))
+                                          : Icon(Icons.bluetooth, color: context.palette.primary, size: 28),
                                     ),
                                     const SizedBox(width: 14),
                                     Expanded(
@@ -440,18 +451,18 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                                         crossAxisAlignment: CrossAxisAlignment.start,
                                         children: d.displayName != d.nodeId
                                             ? [
-                                                Text(d.displayName, style: const TextStyle(fontWeight: FontWeight.w600, color: AppColors.onSurface, fontSize: 16), overflow: TextOverflow.ellipsis),
+                                                Text(d.displayName, style: TextStyle(fontWeight: FontWeight.w600, color: context.palette.onSurface, fontSize: 16), overflow: TextOverflow.ellipsis),
                                                 const SizedBox(height: 2),
-                                                Text(d.nodeId, style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: AppColors.onSurfaceVariant), overflow: TextOverflow.ellipsis),
+                                                Text(d.nodeId, style: TextStyle(fontFamily: 'monospace', fontSize: 13, color: context.palette.onSurfaceVariant), overflow: TextOverflow.ellipsis),
                                               ]
                                             : [
-                                                Text(d.nodeId, style: const TextStyle(fontWeight: FontWeight.w600, color: AppColors.onSurface, fontSize: 16, fontFamily: 'monospace'), overflow: TextOverflow.ellipsis),
+                                                Text(d.nodeId, style: TextStyle(fontWeight: FontWeight.w600, color: context.palette.onSurface, fontSize: 16, fontFamily: 'monospace'), overflow: TextOverflow.ellipsis),
                                               ],
                                       ),
                                     ),
                                     if (!_scanning)
                                       IconButton(
-                                        icon: const Icon(Icons.close, size: 22, color: AppColors.onSurfaceVariant),
+                                        icon: Icon(Icons.close, size: 22, color: context.palette.onSurfaceVariant),
                                         onPressed: () => _confirmForgetDevice(d),
                                         tooltip: l10n.tr('forget_device'),
                                         style: IconButton.styleFrom(padding: const EdgeInsets.all(6), minimumSize: const Size(40, 40)),
@@ -470,7 +481,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                     const SizedBox(height: 12),
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 24),
-                      child: Text(l10n.tr('recent_empty'), textAlign: TextAlign.center, style: const TextStyle(fontSize: 13, color: AppColors.onSurfaceVariant)),
+                      child: Text(l10n.tr('recent_empty'), textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: context.palette.onSurfaceVariant)),
                     ),
                   ],
                   Builder(builder: (_) {
@@ -483,15 +494,15 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                         const SizedBox(height: 24),
                         Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 24),
-                          child: Center(child: Text('${l10n.tr('found')} ${filtered.length}', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppColors.onSurface))),
+                          child: Center(child: Text('${l10n.tr('found')} ${filtered.length}', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: context.palette.onSurface))),
                         ),
                         const SizedBox(height: 4),
-                        const Divider(height: 1, color: AppColors.divider),
+                        Divider(height: 1, color: context.palette.divider),
                         ListView.separated(
                           shrinkWrap: true,
                           physics: const NeverScrollableScrollPhysics(),
                           itemCount: filtered.length,
-                          separatorBuilder: (_, __) => const Divider(height: 1, indent: 72, color: AppColors.divider),
+                          separatorBuilder: (_, __) => Divider(height: 1, indent: 72, color: context.palette.divider),
                           itemBuilder: (_, i) {
                             final r = filtered[i];
                             final name = r.device.advName.isNotEmpty ? r.device.advName
@@ -501,12 +512,12 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                               leading: Container(
                                 width: 40,
                                 height: 40,
-                                decoration: BoxDecoration(color: AppColors.primary.withOpacity(0.2), borderRadius: BorderRadius.circular(20)),
-                                child: const Icon(Icons.bluetooth, color: AppColors.primary, size: 22),
+                                decoration: BoxDecoration(color: context.palette.primary.withOpacity(0.2), borderRadius: BorderRadius.circular(20)),
+                                child: Icon(Icons.bluetooth, color: context.palette.primary, size: 22),
                               ),
-                              title: Text(name, style: const TextStyle(fontWeight: FontWeight.w500, color: AppColors.onSurface)),
-                              subtitle: Text(r.device.remoteId.toString(), style: const TextStyle(fontFamily: 'monospace', fontSize: 12, color: AppColors.onSurfaceVariant)),
-                              trailing: const Icon(Icons.chevron_right, color: AppColors.onSurfaceVariant),
+                              title: Text(name, style: TextStyle(fontWeight: FontWeight.w500, color: context.palette.onSurface)),
+                              subtitle: Text(r.device.remoteId.toString(), style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: context.palette.onSurfaceVariant)),
+                              trailing: Icon(Icons.chevron_right, color: context.palette.onSurfaceVariant),
                               onTap: () => _connect(r.device, displayName: name),
                             );
                           },
@@ -554,7 +565,7 @@ class _AboutDialogState extends State<_AboutDialog> {
   @override
   Widget build(BuildContext context) {
     return Dialog(
-      backgroundColor: AppColors.card,
+      backgroundColor: context.palette.card,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
       insetPadding: const EdgeInsets.symmetric(horizontal: 24),
       child: ConstrainedBox(
@@ -565,36 +576,36 @@ class _AboutDialogState extends State<_AboutDialog> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-              Text('RiftLink', style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: AppColors.onSurface)),
+              Text('RiftLink', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: context.palette.onSurface)),
               const SizedBox(height: 8),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Text('${widget.l10n.tr('about_version')}: ', style: const TextStyle(fontSize: 14, color: AppColors.onSurfaceVariant)),
-                  Text(_version, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.primary)),
+                  Text('${widget.l10n.tr('about_version')}: ', style: TextStyle(fontSize: 14, color: context.palette.onSurfaceVariant)),
+                  Text(_version, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: context.palette.primary)),
                   const SizedBox(width: 16),
-                  Text('${widget.l10n.tr('about_build')}: ', style: const TextStyle(fontSize: 14, color: AppColors.onSurfaceVariant)),
-                  Text(_buildNumber, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.primary)),
+                  Text('${widget.l10n.tr('about_build')}: ', style: TextStyle(fontSize: 14, color: context.palette.onSurfaceVariant)),
+                  Text(_buildNumber, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: context.palette.primary)),
                 ],
               ),
               const SizedBox(height: 20),
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
-                  color: AppColors.surfaceVariant.withOpacity(0.5),
+                  color: context.palette.surfaceVariant.withOpacity(0.5),
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: AppColors.divider, width: 0.5),
+                  border: Border.all(color: context.palette.divider, width: 0.5),
                 ),
                 child: Text(
                   widget.l10n.tr('about_desc'),
-                  style: const TextStyle(fontSize: 14, height: 1.4, color: AppColors.onSurface),
+                  style: TextStyle(fontSize: 14, height: 1.4, color: context.palette.onSurface),
                   textAlign: TextAlign.center,
                 ),
               ),
               const SizedBox(height: 16),
               Text(
                 widget.l10n.tr('about_legal'),
-                style: const TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: AppColors.onSurfaceVariant),
+                style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic, color: context.palette.onSurfaceVariant),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 24),
@@ -603,7 +614,7 @@ class _AboutDialogState extends State<_AboutDialog> {
                 child: ElevatedButton(
                   onPressed: () => Navigator.pop(context),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.primary,
+                    backgroundColor: context.palette.primary,
                     foregroundColor: Colors.white,
                     padding: const EdgeInsets.symmetric(vertical: 14),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
