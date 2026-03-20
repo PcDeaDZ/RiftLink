@@ -17,6 +17,7 @@ namespace esp_now_slots {
 #if defined(RIFTLINK_DISABLE_ESP_NOW)
 
 inline void init() {}
+inline void deinit() {}
 inline uint8_t getChannel() { return 6; }
 inline bool setChannel(uint8_t) { return false; }
 inline bool isAdaptive() { return false; }
@@ -29,6 +30,8 @@ inline void addReceivedRts(const uint8_t*, const uint8_t*, uint16_t, uint32_t) {
 #else
 
 void init();
+/** Деинициализация ESP-NOW: esp_now_deinit, сброс peer-ов и кэша. */
+void deinit();
 /** Текущий WiFi канал ESP-NOW (1–13). По умолчанию 6. */
 uint8_t getChannel();
 /** Установить канал (1–13). Требует перезапуска ESP-NOW. Возвращает true при успехе. */

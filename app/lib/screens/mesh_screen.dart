@@ -8,6 +8,12 @@ import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
 import '../widgets/mesh_background.dart';
 
+Color _rssiColor(AppPalette palette, int rssi) {
+  if (rssi >= -85) return palette.success;
+  if (rssi >= -100) return const Color(0xFFFFB300);
+  return palette.error;
+}
+
 class MeshScreen extends StatefulWidget {
   final RiftLinkBle ble;
   final String nodeId;
@@ -30,7 +36,11 @@ class MeshScreen extends StatefulWidget {
 
 class _MeshScreenState extends State<MeshScreen> {
   List<Map<String, dynamic>> _routes = [];
-  StreamSubscription? _sub;
+  StreamSubscription<RiftLinkEvent>? _sub;
+  bool _signalTestRunning = false;
+  final Map<String, int> _signalRssiByNode = <String, int>{};
+  Timer? _signalTimer;
+  String? _traceTarget;
 
   @override
   void initState() {
@@ -42,6 +52,10 @@ class _MeshScreenState extends State<MeshScreen> {
         setState(() => _routes = evt.routes);
       } else if (evt is RiftLinkInfoEvent) {
         setState(() => _routes = evt.routes);
+      } else if (evt is RiftLinkPongEvent) {
+        final from = evt.from;
+        if (from.isEmpty) return;
+        setState(() => _signalRssiByNode[from] = evt.rssi ?? 0);
       }
     });
     widget.ble.getRoutes();
@@ -50,7 +64,32 @@ class _MeshScreenState extends State<MeshScreen> {
   @override
   void dispose() {
     _sub?.cancel();
+    _signalTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _runSignalTest() async {
+    if (_signalTestRunning) return;
+    final ok = await widget.ble.signalTest();
+    if (!ok || !mounted) return;
+    setState(() {
+      _signalTestRunning = true;
+      _signalRssiByNode.clear();
+    });
+    _signalTimer?.cancel();
+    _signalTimer = Timer(const Duration(seconds: 10), () {
+      if (!mounted) return;
+      setState(() => _signalTestRunning = false);
+    });
+  }
+
+  Future<void> _runTraceroute() async {
+    final to = _traceTarget;
+    if (to == null || to.isEmpty) return;
+    final ok = await widget.ble.traceroute(to);
+    if (ok) {
+      await widget.ble.getRoutes();
+    }
   }
 
   _GraphData _computeGraph() {
@@ -127,19 +166,196 @@ class _MeshScreenState extends State<MeshScreen> {
             ],
           ),
         ),
-        body: TabBarView(
+        body: Column(
           children: [
-            _GraphTab(graph: graph, nodeId: widget.nodeId),
-            _ListTab(
-              neighbors: widget.neighbors,
-              neighborsRssi: widget.neighborsRssi,
-              routes: _routes,
-              hasData: hasListData,
+            Container(
+              margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: context.palette.card,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: context.palette.divider),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    l.tr('mesh_tools'),
+                    style: TextStyle(
+                      color: context.palette.onSurface,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.tonalIcon(
+                          onPressed: _signalTestRunning ? null : _runSignalTest,
+                          icon: const Icon(Icons.network_ping_rounded, size: 18),
+                          label: Text(l.tr('mesh_signal_test')),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        tooltip: l.tr('refresh'),
+                        onPressed: () => widget.ble.getRoutes(),
+                        icon: const Icon(Icons.refresh),
+                      ),
+                    ],
+                  ),
+                  if (_signalTestRunning || _signalRssiByNode.isNotEmpty) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      _signalTestRunning
+                          ? l.tr('mesh_signal_waiting')
+                          : l.tr('mesh_trace_result'),
+                      style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                    ),
+                    const SizedBox(height: 6),
+                    if (_signalRssiByNode.isEmpty)
+                      Text(
+                        l.tr('mesh_signal_no_data'),
+                        style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                      )
+                    else
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: _signalRssiByNode.entries.map((e) {
+                          final c = _rssiColor(context.palette, e.value);
+                          return Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: c.withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: c.withOpacity(0.5)),
+                            ),
+                            child: Text(
+                              '${_shortId(e.key)} ${e.value} dBm',
+                              style: TextStyle(fontSize: 11, color: context.palette.onSurface),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                  ],
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: DropdownButtonFormField<String>(
+                          value: _traceTarget,
+                          decoration: InputDecoration(
+                            labelText: l.tr('mesh_select_node'),
+                            isDense: true,
+                          ),
+                          items: _traceCandidates()
+                              .map(
+                                (id) => DropdownMenuItem<String>(
+                                  value: id,
+                                  child: Text(_shortId(id)),
+                                ),
+                              )
+                              .toList(),
+                          onChanged: (v) => setState(() => _traceTarget = v),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton(
+                        onPressed: _traceTarget == null ? null : _runTraceroute,
+                        child: Text(l.tr('mesh_traceroute')),
+                      ),
+                    ],
+                  ),
+                  if (_traceTarget != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      _traceSummary(context, _traceTarget!),
+                      style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            Expanded(
+              child: TabBarView(
+                children: [
+                  _GraphTab(graph: graph, nodeId: widget.nodeId),
+                  _ListTab(
+                    neighbors: widget.neighbors,
+                    neighborsRssi: widget.neighborsRssi,
+                    routes: _routes,
+                    hasData: hasListData,
+                  ),
+                ],
+              ),
             ),
           ],
         ),
       ),
     );
+  }
+
+  List<String> _traceCandidates() {
+    final all = <String>{...widget.neighbors};
+    for (final r in _routes) {
+      final d = (r['dest'] as String?) ?? '';
+      if (d.isNotEmpty) all.add(d);
+    }
+    all.remove(widget.nodeId);
+    return all.toList()..sort();
+  }
+
+  String _traceSummary(BuildContext context, String target) {
+    final l = context.l10n;
+    Map<String, dynamic>? route;
+    for (final r in _routes) {
+      if ((r['dest'] as String?) == target) {
+        route = r;
+        break;
+      }
+    }
+    if (route == null) return l.tr('mesh_trace_no_route');
+    final hops = (route['hops'] as num?)?.toInt() ?? 0;
+    final pathRaw = route['path'];
+    final hopRssiRaw = route['hopRssi'];
+    final path = <String>[];
+    if (pathRaw is List && pathRaw.isNotEmpty) {
+      path.addAll(pathRaw.map((e) => e.toString()));
+    } else {
+      final next = (route['nextHop'] as String?) ?? '';
+      path.add(widget.nodeId);
+      if (next.isNotEmpty && next.toUpperCase() != widget.nodeId.toUpperCase()) path.add(next);
+      if (hops > 2) path.add('...');
+      path.add(target);
+    }
+    final hopRssi = <int>[];
+    if (hopRssiRaw is List) {
+      hopRssi.addAll(hopRssiRaw.map((e) => (e as num?)?.toInt() ?? 0));
+    } else {
+      final firstHop = (route['nextHop'] as String?) ?? '';
+      if (firstHop.isNotEmpty) {
+        final idx = widget.neighbors.indexWhere((n) => n.toUpperCase() == firstHop.toUpperCase());
+        hopRssi.add(idx >= 0 && idx < widget.neighborsRssi.length ? widget.neighborsRssi[idx] : 0);
+      }
+      hopRssi.add((route['rssi'] as num?)?.toInt() ?? 0);
+    }
+    final rendered = <String>[];
+    for (var i = 0; i < path.length; i++) {
+      final node = path[i];
+      if (node == '...') {
+        rendered.add('...');
+        continue;
+      }
+      final rssi = i > 0 && (i - 1) < hopRssi.length ? hopRssi[i - 1] : 0;
+      rendered.add(rssi != 0 ? '${_shortId(node)} ($rssi dBm)' : _shortId(node));
+    }
+    return '${l.tr('mesh_trace_hops')}: ${rendered.join(' -> ')}';
+  }
+
+  String _shortId(String id) {
+    if (id.length <= 8) return id.toUpperCase();
+    return id.substring(0, 8).toUpperCase();
   }
 }
 
@@ -183,6 +399,18 @@ class _GraphTab extends StatelessWidget {
                   _LegendItem(
                     color: context.palette.primary,
                     label: l.tr('mesh_legend_route'),
+                  ),
+                  _LegendItem(
+                    color: _rssiColor(context.palette, -80),
+                    label: l.tr('mesh_rssi_strong'),
+                  ),
+                  _LegendItem(
+                    color: _rssiColor(context.palette, -95),
+                    label: l.tr('mesh_rssi_medium'),
+                  ),
+                  _LegendItem(
+                    color: _rssiColor(context.palette, -110),
+                    label: l.tr('mesh_rssi_weak'),
                   ),
                   Text(
                     '${l.tr('settings_node_id')}: ${_shortId(nodeId)}',
@@ -345,6 +573,19 @@ class _ListTab extends StatelessWidget {
                                 final next = (r['nextHop'] as String?) ?? '';
                                 final hops = (r['hops'] as num?)?.toInt() ?? 0;
                                 final rssi = (r['rssi'] as num?)?.toInt() ?? 0;
+                                final modemPreset = (r['modemPreset'] as num?)?.toInt();
+                                final sf = (r['sf'] as num?)?.toInt();
+                                final bw = (r['bw'] as num?)?.toDouble();
+                                final cr = (r['cr'] as num?)?.toInt();
+                                String? modem;
+                                if (modemPreset != null) {
+                                  const names = ['Speed', 'Normal', 'Range', 'MaxRange', 'Custom'];
+                                  if (modemPreset >= 0 && modemPreset < names.length) {
+                                    modem = names[modemPreset];
+                                  }
+                                } else if (sf != null || bw != null || cr != null) {
+                                  modem = 'SF${sf ?? '?'} / BW${bw?.toStringAsFixed(1) ?? '?'} / CR${cr ?? '?'}';
+                                }
                                 return ListTile(
                                   leading: CircleAvatar(
                                     backgroundColor: context.palette.success.withOpacity(0.18),
@@ -355,7 +596,7 @@ class _ListTab extends StatelessWidget {
                                     style: TextStyle(fontFamily: 'monospace', fontSize: 14, fontWeight: FontWeight.w600, color: context.palette.onSurface),
                                   ),
                                   subtitle: Text(
-                                    '${l.tr('mesh_col_next')}: ${next.isNotEmpty ? _idLabel(next) : '—'} · $hops ${l.tr('mesh_route_hops')}${rssi != 0 ? ' · RSSI $rssi' : ''}',
+                                    '${l.tr('mesh_col_next')}: ${next.isNotEmpty ? _idLabel(next) : '—'} · $hops ${l.tr('mesh_route_hops')}${rssi != 0 ? ' · RSSI $rssi' : ''}${modem != null ? ' · ${l.tr('mesh_modem')}: $modem' : ''}',
                                     style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant.withOpacity(0.95)),
                                   ),
                                 );
@@ -449,7 +690,12 @@ class _MeshPainter extends CustomPainter {
     for (final e in edges) {
       final from = _pos(e.from);
       final to = _pos(e.to);
-      canvas.drawLine(from, to, e.isDirect ? edgePaint : routePaint);
+      final targetRssi = nodes[e.to]?.rssi ?? 0;
+      final linePaint = Paint()
+        ..color = (targetRssi != 0 ? _rssiColor(palette, targetRssi) : (e.isDirect ? edgePaint.color : routePaint.color)).withOpacity(0.85)
+        ..strokeWidth = e.isDirect ? 2 : 2.5
+        ..style = PaintingStyle.stroke;
+      canvas.drawLine(from, to, linePaint);
       if (!e.isDirect && e.hops > 0) {
         _drawText(
           canvas,
@@ -466,10 +712,11 @@ class _MeshPainter extends CustomPainter {
       final n = e.value;
       final pos = _pos(id);
       final r = n.isSelf ? 22.0 : 17.0;
+      final qualityColor = n.rssi != 0 ? _rssiColor(palette, n.rssi) : palette.primary;
       final fill = n.isSelf
           ? palette.success.withOpacity(0.35)
-          : (n.hops > 0 ? palette.primary.withOpacity(0.22) : palette.primary.withOpacity(0.14));
-      final stroke = n.isSelf ? palette.success : palette.primary.withOpacity(0.8);
+          : qualityColor.withOpacity(n.hops > 0 ? 0.22 : 0.14);
+      final stroke = n.isSelf ? palette.success : qualityColor.withOpacity(0.9);
 
       canvas.drawCircle(pos, r, Paint()..color = fill);
       canvas.drawCircle(

@@ -14,6 +14,7 @@
 #include <esp_random.h>
 #include <nvs.h>
 #include <atomic>
+#include <cmath>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <stdio.h>
@@ -44,10 +45,28 @@ static std::atomic<bool> s_rxListenActive{false};
   #define LORA_PA_TX_EN  46  // CPS — GC1109 PA mode (LOW=bypass/RX)
 #endif
 
-#define LORA_BW    125.0
+#define LORA_BW    125.0f
 #define LORA_SF    7
 #define LORA_CR    5
 #define TCXO_VOLTAGE 1.8f   // SX1262 TCXO 1.8V (V3/V4)
+
+static const radio::ModemConfig MODEM_PRESETS[] = {
+  /* SPEED     */ { 7,  250.0f, 5},
+  /* NORMAL    */ { 7,  125.0f, 5},
+  /* RANGE     */ {10,  125.0f, 5},
+  /* MAX_RANGE */ {12,  125.0f, 8},
+};
+
+const radio::ModemConfig& radio::modemPresetConfig(radio::ModemPreset p) {
+  if (p >= 0 && p < 4) return MODEM_PRESETS[p];
+  return MODEM_PRESETS[radio::MODEM_NORMAL];
+}
+
+static const char* MODEM_PRESET_NAMES[] = {"Speed", "Normal", "Range", "MaxRange", "Custom"};
+const char* radio::modemPresetName(radio::ModemPreset p) {
+  if (p < radio::MODEM_PRESET_COUNT) return MODEM_PRESET_NAMES[p];
+  return "?";
+}
 
 // CSMA/CA: CAD перед TX, Binary Exponential Backoff (BEB) при занятом канале
 // См. docs/plans/CHANNEL_ACCESS_ANALYSIS.md
@@ -63,30 +82,80 @@ static Module* mod = nullptr;
 static std::atomic<uint8_t> s_cadBusyCount{0};  // BEB: растёт при busy/NACK/undelivered, сброс при успешной TX
 static std::atomic<uint32_t> s_lastCongestionTime{0};  // для decay BEB
 static SX1262* lora = nullptr;
-/** Логический mesh SF (NVS, HELLO, txSf=0). Отдельно от физического SF чипа при TX с rssiToSf. */
 static uint8_t s_meshSf = LORA_SF;
-/** Текущий SF на SX1262 — чтобы не дёргать SPI без нужды. */
 static uint8_t s_hwSf = LORA_SF;
+static float   s_bw = LORA_BW;
+static uint8_t s_cr = LORA_CR;
+static radio::ModemPreset s_preset = radio::MODEM_NORMAL;
+
 static const char* NVS_NAMESPACE = "riftlink";
 static const char* NVS_KEY_SF = "lora_sf";
+static const char* NVS_KEY_BW = "lora_bw";
+static const char* NVS_KEY_CR = "lora_cr";
+static const char* NVS_KEY_MODEM = "modem_preset";
 
-static uint8_t loadSfFromNvs() {
-  nvs_handle_t h;
-  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return LORA_SF;
-  uint8_t sf = LORA_SF;
-  esp_err_t err = nvs_get_u8(h, NVS_KEY_SF, &sf);
-  nvs_close(h);
-  if (err != ESP_OK || sf < 7 || sf > 12) return LORA_SF;
-  return sf;
+static bool isValidBw(float bw) {
+  const float valid[] = {62.5f, 125.0f, 250.0f, 500.0f};
+  for (auto v : valid) if (fabsf(bw - v) < 0.1f) return true;
+  return false;
 }
 
-static void saveSfToNvs(uint8_t sf) {
-  if (sf < 7 || sf > 12) return;
+static void loadModemFromNvs(uint8_t& sf, float& bw, uint8_t& cr, radio::ModemPreset& preset) {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+    sf = LORA_SF; bw = LORA_BW; cr = LORA_CR; preset = radio::MODEM_NORMAL;
+    return;
+  }
+  uint8_t p = 0xFF;
+  nvs_get_u8(h, NVS_KEY_MODEM, &p);
+  if (p < 4) {
+    preset = (radio::ModemPreset)p;
+    auto& cfg = MODEM_PRESETS[p];
+    sf = cfg.sf; bw = cfg.bw; cr = cfg.cr;
+  } else if (p == radio::MODEM_CUSTOM) {
+    preset = radio::MODEM_CUSTOM;
+    uint8_t sfv = LORA_SF;
+    nvs_get_u8(h, NVS_KEY_SF, &sfv);
+    sf = (sfv >= 7 && sfv <= 12) ? sfv : LORA_SF;
+    uint16_t bwx10 = 1250;
+    nvs_get_u16(h, NVS_KEY_BW, &bwx10);
+    bw = (float)bwx10 / 10.0f;
+    if (!isValidBw(bw)) bw = LORA_BW;
+    uint8_t crv = LORA_CR;
+    nvs_get_u8(h, NVS_KEY_CR, &crv);
+    cr = (crv >= 5 && crv <= 8) ? crv : LORA_CR;
+  } else {
+    // Legacy: старая прошивка с только lora_sf
+    uint8_t sfv = LORA_SF;
+    esp_err_t err = nvs_get_u8(h, NVS_KEY_SF, &sfv);
+    if (err == ESP_OK && sfv >= 7 && sfv <= 12 && sfv != LORA_SF) {
+      preset = radio::MODEM_CUSTOM; sf = sfv; bw = LORA_BW; cr = LORA_CR;
+    } else {
+      preset = radio::MODEM_NORMAL; sf = LORA_SF; bw = LORA_BW; cr = LORA_CR;
+    }
+  }
+  nvs_close(h);
+}
+
+static void saveModemToNvs(radio::ModemPreset preset, uint8_t sf, float bw, uint8_t cr) {
   nvs_handle_t h;
   if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
-  nvs_set_u8(h, NVS_KEY_SF, sf);
+  nvs_set_u8(h, NVS_KEY_MODEM, (uint8_t)preset);
+  if (preset == radio::MODEM_CUSTOM) {
+    nvs_set_u8(h, NVS_KEY_SF, sf);
+    nvs_set_u16(h, NVS_KEY_BW, (uint16_t)(bw * 10.0f + 0.5f));
+    nvs_set_u8(h, NVS_KEY_CR, cr);
+  }
   nvs_commit(h);
   nvs_close(h);
+}
+
+static void applyModemToChip(uint8_t sf, float bw, uint8_t cr) {
+  if (!lora) return;
+  lora->setSpreadingFactor(sf);
+  lora->setBandwidth(bw);
+  lora->setCodingRate(cr);
+  s_hwSf = sf;
 }
 
 namespace radio {
@@ -116,9 +185,12 @@ bool init() {
   float freq = region::getFreq();
   int power = region::getPower();
 
+  // Загрузка моdem-конфига из NVS (пресет или custom SF/BW/CR)
+  uint8_t initSf; float initBw; uint8_t initCr;
+  loadModemFromNvs(initSf, initBw, initCr, s_preset);
+
   // Preamble 16 (как Meshtastic) — больше времени на синхронизацию RX, меньше потерь при «просыпании»
-  uint8_t initSf = loadSfFromNvs();
-  int16_t st = lora->begin(freq, LORA_BW, initSf, LORA_CR, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, power, 16, TCXO_VOLTAGE, false);
+  int16_t st = lora->begin(freq, initBw, initSf, initCr, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, power, 16, TCXO_VOLTAGE, false);
   if (st != RADIOLIB_ERR_NONE) {
     Serial.printf("[RiftLink] Radio init failed: code=%d (проверьте антенну и питание)\n", st);
     return false;
@@ -132,6 +204,10 @@ bool init() {
   lora->setSyncWord(0x12);  // Private network
   s_meshSf = initSf;
   s_hwSf = initSf;
+  s_bw = initBw;
+  s_cr = initCr;
+  Serial.printf("[RiftLink] Modem: %s SF%u BW%.0f CR4/%u\n",
+      modemPresetName(s_preset), initSf, initBw, initCr);
   s_radioMutex = xSemaphoreCreateMutex();
   if (!s_radioMutex) return false;
   return true;
@@ -318,13 +394,58 @@ void requestApplyRegion(float freq, int power) {
   (void)xQueueSend(radioCmdQueue, &cmd, 0);
 }
 
+void setModemPreset(ModemPreset p) {
+  if (p >= MODEM_PRESET_COUNT) return;
+  if (p < 4) {
+    auto& cfg = MODEM_PRESETS[p];
+    s_meshSf = cfg.sf; s_bw = cfg.bw; s_cr = cfg.cr;
+    applyModemToChip(cfg.sf, cfg.bw, cfg.cr);
+  }
+  s_preset = p;
+  saveModemToNvs(p, s_meshSf, s_bw, s_cr);
+  Serial.printf("[RiftLink] Modem preset: %s SF%u BW%.0f CR4/%u\n",
+      modemPresetName(p), s_meshSf, s_bw, s_cr);
+}
+
+void setCustomModem(uint8_t sf, float bw, uint8_t cr) {
+  if (sf < 7 || sf > 12 || !isValidBw(bw) || cr < 5 || cr > 8) return;
+  s_meshSf = sf; s_bw = bw; s_cr = cr;
+  s_preset = MODEM_CUSTOM;
+  applyModemToChip(sf, bw, cr);
+  saveModemToNvs(MODEM_CUSTOM, sf, bw, cr);
+  Serial.printf("[RiftLink] Modem custom: SF%u BW%.0f CR4/%u\n", sf, bw, cr);
+}
+
+void requestModemPreset(ModemPreset p) {
+  if (p >= MODEM_PRESET_COUNT || !radioCmdQueue) return;
+  RadioCmd cmd;
+  cmd.type = RadioCmdType::ApplyModem;
+  cmd.priority = false;
+  cmd.u.modem.preset = (uint8_t)p;
+  cmd.u.modem.sf = 0; cmd.u.modem.bw10 = 0; cmd.u.modem.cr = 0;
+  (void)xQueueSend(radioCmdQueue, &cmd, 0);
+}
+
+void requestCustomModem(uint8_t sf, float bw, uint8_t cr) {
+  if (sf < 7 || sf > 12 || cr < 5 || cr > 8 || !radioCmdQueue) return;
+  RadioCmd cmd;
+  cmd.type = RadioCmdType::ApplyModem;
+  cmd.priority = false;
+  cmd.u.modem.preset = (uint8_t)MODEM_CUSTOM;
+  cmd.u.modem.sf = sf;
+  cmd.u.modem.bw10 = (uint16_t)(bw * 10.0f + 0.5f);
+  cmd.u.modem.cr = cr;
+  (void)xQueueSend(radioCmdQueue, &cmd, 0);
+}
+
+ModemPreset getModemPreset() { return s_preset; }
+uint8_t getSpreadingFactor()  { return s_meshSf; }
+float   getBandwidth()        { return s_bw; }
+uint8_t getCodingRate()       { return s_cr; }
+
 void setSpreadingFactor(uint8_t sf) {
   if (!lora || sf < 7 || sf > 12) return;
-  if (sf == s_meshSf && sf == s_hwSf) return;
-  lora->setSpreadingFactor(sf);
-  s_meshSf = sf;
-  s_hwSf = sf;
-  saveSfToNvs(sf);
+  setCustomModem(sf, s_bw, s_cr);
 }
 
 void applyHardwareSpreadingFactor(uint8_t sf) {
@@ -334,17 +455,19 @@ void applyHardwareSpreadingFactor(uint8_t sf) {
   s_hwSf = sf;
 }
 
-void requestSpreadingFactor(uint8_t sf) {
-  if (sf < 7 || sf > 12 || !radioCmdQueue) return;
-  RadioCmd cmd;
-  cmd.type = RadioCmdType::ApplySf;
-  cmd.priority = false;
-  cmd.u.spread.sf = sf;
-  (void)xQueueSend(radioCmdQueue, &cmd, 0);
+void applyHardwareModem(uint8_t sf, float bw, uint8_t cr) {
+  if (!lora) return;
+  if (sf < 7 || sf > 12) return;
+  if (!isValidBw(bw) || cr < 5 || cr > 8) return;
+  lora->setSpreadingFactor(sf);
+  lora->setBandwidth(bw);
+  lora->setCodingRate(cr);
+  s_hwSf = sf;
 }
 
-uint8_t getSpreadingFactor() {
-  return s_meshSf;
+void requestSpreadingFactor(uint8_t sf) {
+  if (sf < 7 || sf > 12) return;
+  requestCustomModem(sf, s_bw, s_cr);
 }
 
 }  // namespace radio

@@ -6,16 +6,20 @@
 #include "radio/radio.h"
 #include "ble/ble.h"
 #include "ota/ota.h"
+#include "ui/display.h"
+#include "locale/locale.h"
 #include <driver/gpio.h>
 #include <esp_sleep.h>
 #include <nvs.h>
 #include <nvs_flash.h>
 #include <string.h>
+#include <Arduino.h>
 
 #define NVS_NAMESPACE "riftlink"
 #define NVS_KEY_PSAVE "psave"
 
 static bool s_enabled = true;
+static volatile bool s_shutdownRequested = false;
 
 namespace powersave {
 
@@ -59,5 +63,21 @@ void lightSleepWake() {
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
 }
+
+void deepSleep() {
+  displayClear();
+  displaySetTextSize(1);
+  displayText(20, 24, locale::getForDisplay("shutting_down"));
+  displayShow();
+  delay(1500);
+  displaySleep();
+  ble::deinit();
+  // GPIO0 (USER_SW, active LOW) = wake source
+  esp_sleep_enable_ext1_wakeup(1ULL << GPIO_NUM_0, ESP_EXT1_WAKEUP_ANY_LOW);
+  esp_deep_sleep_start();
+}
+
+void requestShutdown() { s_shutdownRequested = true; }
+bool isShutdownRequested() { return s_shutdownRequested; }
 
 }  // namespace powersave

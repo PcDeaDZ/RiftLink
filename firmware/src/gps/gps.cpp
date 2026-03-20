@@ -8,8 +8,15 @@
 #include <nvs.h>
 #include <nvs_flash.h>
 #include <esp_err.h>
+#include <esp_heap_caps.h>
 #include <Arduino.h>
 #include <cstring>
+
+/** UART-драйверу нужен contiguous internal (DMA); после Wi‑Fi+BLE+async бывает <1KB — иначе abort в uartBegin */
+static bool uartDriverHeapOk() {
+  return heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) >= 2048u &&
+         heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >= 2048u;
+}
 
 #define NVS_NAMESPACE "riftlink"
 #define NVS_KEY_GPS_EN "gps_en"
@@ -80,6 +87,9 @@ static void setDefaults() {
 
 /** При буте — пробуем пины, слушаем NMEA ~1.5 с. Не сохраняем в NVS. */
 static bool probeGps() {
+  if (!uartDriverHeapOk()) {
+    return false;
+  }
   s_serial = new HardwareSerial(1);
   s_serial->begin(9600, SERIAL_8N1, s_pinRx, s_pinTx);
   applyPower(true);
@@ -113,6 +123,11 @@ void init() {
   s_enabled = false;
 
   if (loadConfig()) {
+    if (!uartDriverHeapOk()) {
+      Serial.println("[RiftLink] GPS: UART пропущен — мало internal heap (после Wi‑Fi/BLE). Перезагрузка или отключите лишнее.");
+      s_inited = true;
+      return;
+    }
     // Пользователь настроил через BLE (gps rx,tx,en)
     s_serial = new HardwareSerial(1);
     s_serial->begin(9600, SERIAL_8N1, s_pinRx, s_pinTx);
@@ -238,7 +253,30 @@ void setPhoneSync(int64_t utcMs, float lat, float lon, int16_t alt) {
 }
 
 bool hasPhoneSync() {
-  return (millis() - s_phoneSyncTime) < 60000;  // 1 мин — телефон должен обновлять
+  return s_phoneSyncTime != 0 && (millis() - s_phoneSyncTime) < 60000;
+}
+
+bool hasTime() {
+  if (s_gps.time.isValid() && s_gps.time.age() < 10000) return true;
+  return hasPhoneSync();
+}
+
+int getHour() {
+  if (s_gps.time.isValid() && s_gps.time.age() < 10000) return s_gps.time.hour();
+  if (hasPhoneSync()) {
+    uint64_t now = (uint64_t)s_phoneUtcMs + (millis() - s_phoneSyncTime);
+    return (int)((now / 3600000ULL) % 24);
+  }
+  return -1;
+}
+
+int getMinute() {
+  if (s_gps.time.isValid() && s_gps.time.age() < 10000) return s_gps.time.minute();
+  if (hasPhoneSync()) {
+    uint64_t now = (uint64_t)s_phoneUtcMs + (millis() - s_phoneSyncTime);
+    return (int)((now / 60000ULL) % 60);
+  }
+  return -1;
 }
 
 }  // namespace gps

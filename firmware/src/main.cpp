@@ -63,6 +63,8 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include "led/led.h"
 #include "duty_cycle/duty_cycle.h"
 #include "pkt_cache/pkt_cache.h"
+#include "radio_mode/radio_mode.h"
+#include "ws_server/ws_server.h"
 #include "log.h"
 
 #define BUTTON_PIN         0    // Heltec USER_SW
@@ -72,6 +74,8 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #else
 #define LONG_PRESS_MS      500
 #endif
+#define RADIO_MODE_PRESS_MS 3000   // очень длинное нажатие — переключение BLE ↔ WiFi
+#define SHUTDOWN_PRESS_MS   5000   // 5с — выключение устройства (deep sleep)
 #define POST_PRESS_DEBOUNCE_MS 400  // игнор дребезга после обработки — против двойного long press
 #define PENDING_REDRAW_RETRY_MS 2500  // retry смены вкладки, если дисплей не принял за 2.5с
 
@@ -113,6 +117,11 @@ static const uint8_t SF_DEFAULT = 7;
 static uint32_t s_loopCooldownUntil = 0;  // вместо delay(10) — throttle OTA и конец loop
 static uint8_t s_bootPhase = 0;           // 0=ожидание 4с, 1=готов
 static uint32_t s_bootPhaseStart = 0;
+static uint32_t s_lastBatCheckMs = 0;
+static uint8_t s_lowBatCount = 0;
+#define LOW_BAT_MV          3000
+#define LOW_BAT_CHECK_MS    30000
+#define LOW_BAT_SHUTOFF_CNT 3
 static uint8_t rxBuf[protocol::SYNC_LEN + protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
 
 #define BOOT_PHASE_WAIT_4S  0
@@ -242,6 +251,8 @@ static void pollButtonAndQueue() {
     }
   }
 
+  if (displayIsMenuActive()) { s_lastButton = false; return; }
+
   bool btn = (digitalRead(BUTTON_PIN) == LOW);  // active low
   if (btn) {
     if (!s_lastButton) { s_lastButton = true; s_pressStart = now; }
@@ -256,7 +267,15 @@ static void pollButtonAndQueue() {
       return;
     }
     int cur = displayGetCurrentScreen();
-    if (hold >= LONG_PRESS_MS) {
+    if (hold >= SHUTDOWN_PRESS_MS) {
+      powersave::deepSleep();
+    } else if (hold >= RADIO_MODE_PRESS_MS) {
+      if (radio_mode::current() == radio_mode::BLE) {
+        radio_mode::switchTo(radio_mode::WIFI, radio_mode::AP);
+      } else {
+        radio_mode::switchTo(radio_mode::BLE);
+      }
+    } else if (hold >= LONG_PRESS_MS) {
       s_pendingScreen = 0xFF;  // long press — не смена вкладки
       queueDisplayLongPress((uint8_t)cur);
     } else {
@@ -1146,13 +1165,13 @@ void setup() {
     RIFTLINK_LOG_ERR("[RiftLink] NVS init FAILED: %s (0x%x) — настройки не сохранятся\n",
         esp_err_to_name(nvs), (unsigned)nvs);
   }
-  // Paper: Wi‑Fi до display — максимум heap для esp_wifi_init.
-  // OLED: Wi‑Fi **не** здесь: esp_wifi_init до NimBLE на ESP32‑S3 давал **зависание** в ble::init()
-  // (лог обрывался на "[BLE] Init..."). См. wifi::init после BLE в runBootStateMachine.
-#if defined(USE_EINK)
-  wifi::init();
-  Serial.printf("[RiftLink] Heap after wifi::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-#endif
+  // Meshtastic: malloc > порога уходит в SPIRAM — меньше «дырявого» internal до NimBLE/esp_wifi (Arduino 3 / IDF 5).
+  if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) {
+    // Меньше порог → больше аллокаций в SPIRAM до NimBLE/Wi‑Fi; после async остаётся internal под UART (GPS)
+    heap_caps_malloc_extmem_enable(128);
+  }
+  // Time-sharing: WiFi НЕ запускается при загрузке (Mode A: BLE-only, ~55K free heap).
+  // WiFi инициализируется on-demand через radio_mode::switchTo(WIFI).
   locale::init();
   displayInit();
   Serial.printf("[RiftLink] Heap after displayInit: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -1189,6 +1208,9 @@ static void runBootStateMachine() {
     displayShow();
   }
   Serial.printf("[RiftLink] Heap after radio::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  if (!selftest::quickAntennaCheck()) {
+    displayShowWarning(locale::getForDisplay("antenna_warn"), locale::getForDisplay("antenna_check"), 3000);
+  }
   if (!region::isSet()) {
     displayShowRegionPicker();
   }
@@ -1197,15 +1219,6 @@ static void runBootStateMachine() {
   }
   Serial.printf("[RiftLink] Heap after ble::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   memoryDiagLog("ble");
-#if !defined(USE_EINK)
-  // Wi‑Fi сразу после BLE: до msg_queue/routing иначе фрагментация → largest ~7KB и ESP_ERR_NO_MEM.
-  // Ранний esp_wifi до NimBLE на S3 по-прежнему НЕ делаем (зависание в NimBLEDevice::init).
-  Serial.printf("[RiftLink] Heap before wifi::init (OLED): free=%u largest=%u\n",
-      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-  wifi::init();
-  Serial.printf("[RiftLink] Heap after wifi::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-#endif
   ble::setOnSend(sendMsg);
   ble::setOnLocation(sendLocation);
   msg_queue::init();
@@ -1255,13 +1268,7 @@ static void runBootStateMachine() {
   }
   memoryDiagLog("async_infra");
   asyncMemoryDiagLogStacks();
-  if (wifi::isAvailable()) {
-    Serial.printf("[RiftLink] Heap before ESP-NOW: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    esp_now_slots::init();
-    Serial.printf("[RiftLink] Heap after esp_now_slots::init: %u\n",
-        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    if (wifi::hasCredentials()) wifi::connect();
-  }
+  // ESP-NOW и WiFi connect — только в WiFi-режиме (Mode B), не при загрузке.
   memoryDiagLog("boot_done");
   gps::init();
   displayShowScreenForceFull(0);
@@ -1305,6 +1312,7 @@ void loop() {
   if (ota::isActive()) {
     ota::update();
     pollButtonAndQueue();
+    radio_mode::update();
     displayUpdate();
     s_loopCooldownUntil = millis() + 10;
     return;
@@ -1329,7 +1337,16 @@ void loop() {
 
   // SF фиксированный: не меняем автоматически и не шлём SF beacon.
 
-  esp_now_slots::tickAdaptive();
+  // Time-sharing: ESP-NOW tick только в WiFi-режиме
+  if (radio_mode::current() == radio_mode::WIFI) {
+    esp_now_slots::tickAdaptive();
+  }
+
+  // Radio mode switch (deferred from BLE callback / button)
+  radio_mode::update();
+
+  // WebSocket server tick (WiFi mode)
+  ws_server::update();
 
   gps::update();
   if (gps::isPresent() && gps::isEnabled() && gps::hasFix() &&
@@ -1547,7 +1564,27 @@ void loop() {
 
   // RX и powersave RX — только в radioSchedulerTask (loop без radio::takeMutex).
 
-  ble::update();
+  // Shutdown requested by BLE command
+  if (powersave::isShutdownRequested()) {
+    powersave::deepSleep();
+  }
+
+  // Auto-shutdown on low battery
+  if (millis() - s_lastBatCheckMs >= LOW_BAT_CHECK_MS) {
+    s_lastBatCheckMs = millis();
+    uint16_t mv = telemetry::readBatteryMv();
+    if (mv > 0 && mv < LOW_BAT_MV && !telemetry::isCharging()) {
+      s_lowBatCount++;
+      if (s_lowBatCount >= LOW_BAT_SHUTOFF_CNT) {
+        displayShowWarning(locale::getForDisplay("low_battery"), locale::getForDisplay("shutting_down"), 3000);
+        powersave::deepSleep();
+      }
+    } else {
+      s_lowBatCount = 0;
+    }
+  }
+
+  ble::update();  // processes pending flags; routes to BLE or WS based on mode
   msg_queue::update();
   routing::update();
   offline_queue::update();

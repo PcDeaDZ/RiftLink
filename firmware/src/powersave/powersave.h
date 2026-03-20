@@ -25,6 +25,13 @@ bool canSleep();
  */
 void lightSleepWake();
 
+/** Deep sleep (выключение). Пробуждение — нажатие кнопки USER_SW (GPIO0). */
+void deepSleep();
+
+/** Запросить выключение (из BLE-команды). Проверяется в main loop. */
+void requestShutdown();
+bool isShutdownRequested();
+
 /** Макс. время сна в мкс (1 сек) */
 constexpr uint64_t SLEEP_TIMEOUT_US = 1000000;
 

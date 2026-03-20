@@ -1,6 +1,6 @@
 /**
  * RiftLink OTA — WiFi AP + ArduinoOTA
- * AP: RiftLink-OTA / riftlink123
+ * AP SSID/pass берутся из wifi::getApSsid() / wifi::getApPassword()
  * IP: 192.168.4.1
  */
 
@@ -8,10 +8,6 @@
 #include "wifi/wifi.h"
 #include <WiFi.h>
 #include <ArduinoOTA.h>
-
-#define OTA_AP_SSID     "RiftLink-OTA"
-#define OTA_AP_PASS     "riftlink123"
-#define OTA_PASSWORD    "riftlink123"
 
 static bool s_active = false;
 
@@ -23,13 +19,15 @@ void start() {
     Serial.println("[OTA] WiFi unavailable — use USB");
     return;
   }
+  const char* apSsid = wifi::getApSsid();
+  const char* apPass = wifi::getApPassword();
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(OTA_AP_SSID, OTA_AP_PASS);
+  WiFi.softAP(apSsid, apPass);
   IPAddress ip = WiFi.softAPIP();
-  Serial.printf("[OTA] AP started: %s / %s @ %s\n", OTA_AP_SSID, OTA_AP_PASS, ip.toString().c_str());
+  Serial.printf("[OTA] AP started: %s / %s @ %s\n", apSsid, apPass, ip.toString().c_str());
 
   ArduinoOTA.setHostname("RiftLink");
-  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.setPassword(apPass);
 
   ArduinoOTA.onStart([]() {
     Serial.println("[OTA] Start");

@@ -6,6 +6,7 @@ import 'ble/riftlink_ble.dart';
 import 'ble/riftlink_ble_scope.dart';
 import 'l10n/app_localizations.dart';
 import 'locale_notifier.dart';
+import 'notifications/local_notifications_service.dart';
 import 'screens/scan_screen.dart';
 import 'theme/app_theme.dart';
 import 'theme/theme_notifier.dart';
@@ -16,6 +17,7 @@ void main() async {
   await AppLocalizations.loadLocale();
   localeNotifier.value = AppLocalizations.currentLocale;
   await loadThemeMode();
+  await LocalNotificationsService.init();
   runApp(const RiftLinkApp());
 }
 

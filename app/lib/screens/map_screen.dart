@@ -1,4 +1,5 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../widgets/mesh_background.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -18,7 +19,7 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   final Map<String, _NL> _nodes = {};
-  StreamSubscription? _sub;
+  StreamSubscription<RiftLinkEvent>? _sub;
   LatLng? _myLocation;
   bool _centerOnSelf = false;
   /// Счётчик: без MapController `initialCenter` не обновляется; при каждом запросе геолокации пересоздаём [FlutterMap].
@@ -34,7 +35,10 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   @override
-  void dispose() { _sub?.cancel(); super.dispose(); }
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {

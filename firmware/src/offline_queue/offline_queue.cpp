@@ -14,6 +14,10 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <esp_heap_caps.h>
+#if __has_include(<freertos/idf_additions.h>)
+#include <freertos/idf_additions.h>
+#endif
 
 #define NVS_NAMESPACE "riftlink"
 #define NVS_KEY_OFFLINE "offline_q"
@@ -128,7 +132,14 @@ void init() {
   memset(s_msgs, 0, sizeof(s_msgs));
   loadFromNvs();
   s_inited = true;
-  xTaskCreate(nvsTask, "nvs", NVS_TASK_STACK, nullptr, NVS_TASK_PRIO, nullptr);
+#if __has_include(<esp_heap_caps.h>)
+  if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) {
+    xTaskCreateWithCaps(nvsTask, "nvs", NVS_TASK_STACK, nullptr, NVS_TASK_PRIO, nullptr, MALLOC_CAP_SPIRAM);
+  } else
+#endif
+  {
+    xTaskCreate(nvsTask, "nvs", NVS_TASK_STACK, nullptr, NVS_TASK_PRIO, nullptr);
+  }
 }
 
 static StoredMsg* findFree() {

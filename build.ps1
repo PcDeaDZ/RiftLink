@@ -828,8 +828,9 @@ while ($true) {
             $sub = Read-Host "Выберите"
             switch ($sub) {
                 "1" { Show-AdbDebugHelp }
-                "2" { Invoke-AdbLogsCli | Out-Null }
-                "3" { Invoke-AdbLogcatCli | Out-Null }
+                # Не использовать | Out-Null — он глотает stdout flutter/adb, логи не видны.
+                "2" { $null = Invoke-AdbLogsCli }
+                "3" { $null = Invoke-AdbLogcatCli }
                 "4" {
                     if (Test-Path $Adb) { & $Adb devices } else { Write-Host "[ОШИБКА] ADB не найден. ANDROID_HOME=$env:ANDROID_HOME" -ForegroundColor Red }
                 }

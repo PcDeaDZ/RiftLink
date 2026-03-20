@@ -671,6 +671,28 @@ static BaseType_t createPacketTaskOled() {
 }
 #endif
 
+#if defined(USE_EINK)
+/** Paper: стек packetTask в SPIRAM, чтобы не съедать ~32K internal (как на OLED). Иначе после wifi::init free падает. */
+static BaseType_t createPacketTaskPaper() {
+#if defined(RIFTLINK_HAVE_TASK_CREATE_WITH_CAPS)
+  const size_t psramTot = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+  if (psramTot > 0) {
+    BaseType_t ok = xTaskCreateWithCaps(packetTask, "packet", PACKET_TASK_STACK, nullptr,
+        (UBaseType_t)PACKET_TASK_PRIO_EINK, &s_packetTaskHandle, (UBaseType_t)MALLOC_CAP_SPIRAM);
+    if (ok == pdPASS) {
+      Serial.printf("[RiftLink] packetTask (Paper): стек в SPIRAM, internal largest=%u\n",
+          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+      return ok;
+    }
+    Serial.printf("[RiftLink] packetTask (Paper): SPIRAM stack не удался — fallback internal (largest=%u)\n",
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  }
+#endif
+  return xTaskCreatePinnedToCore(packetTask, "packet", PACKET_TASK_STACK, nullptr, PACKET_TASK_PRIO_EINK,
+      &s_packetTaskHandle, 1);
+}
+#endif
+
 void asyncTasksStart() {
   static bool s_asyncTasksStarted = false;
   if (s_asyncTasksStarted) return;
@@ -679,10 +701,8 @@ void asyncTasksStart() {
   if (!s_displaySpiDone) s_displaySpiDone = xSemaphoreCreateBinary();
 #endif
 #if defined(USE_EINK)
-  // Paper: packet/radio раньше display — крупный стек packet первым при фрагментированном heap.
-  // displayTask на ядре 0 — e-ink display() блокирует ~600ms; packet/rx на ядре 1.
-  BaseType_t okPacket = xTaskCreatePinnedToCore(packetTask, "packet", PACKET_TASK_STACK, nullptr, PACKET_TASK_PRIO_EINK,
-      &s_packetTaskHandle, 1);
+  // Paper: сначала стек packet в SPIRAM (если есть) — освобождает ~32K internal; иначе fallback internal + core 1.
+  BaseType_t okPacket = createPacketTaskPaper();
   if (okPacket == pdFAIL) {
     RIFTLINK_LOG_ERR("[RiftLink] packetTask create FAIL — loop будет обрабатывать packetQueue\n");
   }

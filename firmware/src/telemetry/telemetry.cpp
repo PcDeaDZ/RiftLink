@@ -66,6 +66,19 @@ uint16_t readBatteryMv() {
 #endif
 }
 
+bool isCharging() {
+  uint16_t mv = readBatteryMv();
+  return mv > 4200;
+}
+
+int batteryPercent() {
+  uint16_t mv = readBatteryMv();
+  if (mv < 2500) return -1;
+  if (mv >= 4200) return 100;
+  if (mv <= 3000) return 0;
+  return (int)((mv - 3000) / 12);
+}
+
 void send() {
   uint16_t batMv = readBatteryMv();
   uint16_t heapKb = (uint16_t)(ESP.getFreeHeap() / 1024);

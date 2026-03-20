@@ -12,20 +12,22 @@ QueueHandle_t displayQueue = nullptr;
 
 static constexpr size_t PACKET_QUEUE_LEN =
 #if defined(USE_EINK)
-    32;   // Paper: ~16KB heap; 64+WiFi давало OOM (ret=101)
+    16;
 #else
-    // OLED: после Wi-Fi largest free block часто <16K — 64/48 съедают heap и мешают xTaskCreate(packet).
-    // 32/32: меньше фрагментации; burst HELLO/KEY — см. send_overflow и ACK reserve.
-    32;
+    6;
 #endif
-// Paper: экономия RAM. V3/V4: после lazy-init TX burst (KEY+HELLO) — 32 давало частые drop у HELLO.
 static constexpr size_t SEND_QUEUE_LEN =
 #if defined(USE_EINK)
-    32;
+    16;
 #else
-    32;
+    6;
 #endif
-static constexpr size_t DISPLAY_QUEUE_LEN = 12;  // burst HELLO → много Info redraw; coalesce в displayTask
+static constexpr size_t DISPLAY_QUEUE_LEN =
+#if defined(USE_EINK)
+    12;
+#else
+    6;
+#endif
 
 static bool tryCreateQueues(size_t pktLen, size_t sendLen, size_t dispLen) {
   if (packetQueue) { vQueueDelete(packetQueue); packetQueue = nullptr; }
@@ -51,14 +53,23 @@ bool asyncQueuesInit() {
   if (tryCreateQueues(PACKET_QUEUE_LEN, SEND_QUEUE_LEN, DISPLAY_QUEUE_LEN)) {
     return true;
   }
-  // Fallback: WiFi+ESP-NOW исчерпывают heap (fail to alloc timer) — уменьшаем очереди
-  size_t pkt = (PACKET_QUEUE_LEN >= 16) ? 16 : PACKET_QUEUE_LEN;
-  size_t send = (SEND_QUEUE_LEN >= 16) ? 16 : SEND_QUEUE_LEN;
-  size_t disp = (DISPLAY_QUEUE_LEN >= 4) ? 4 : DISPLAY_QUEUE_LEN;
-  if (tryCreateQueues(pkt, send, disp)) {
-    Serial.printf("[RiftLink] Async queues: fallback %zu/%zu/%zu (heap %zu)\n",
-        pkt, send, disp, (size_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-    return true;
+  // Fallback: WiFi+BLE — мало contiguous под крупные PacketQueueItem
+  const struct {
+    size_t pkt, send, disp;
+  } steps[] = {
+      {4, 4, 4},
+      {4, 4, 2},
+      {3, 3, 2},
+  };
+  for (const auto& st : steps) {
+    size_t pkt = (PACKET_QUEUE_LEN >= st.pkt) ? st.pkt : PACKET_QUEUE_LEN;
+    size_t send = (SEND_QUEUE_LEN >= st.send) ? st.send : SEND_QUEUE_LEN;
+    size_t disp = (DISPLAY_QUEUE_LEN >= st.disp) ? st.disp : DISPLAY_QUEUE_LEN;
+    if (tryCreateQueues(pkt, send, disp)) {
+      Serial.printf("[RiftLink] Async queues: fallback %zu/%zu/%zu (heap %zu)\n",
+          pkt, send, disp, (size_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+      return true;
+    }
   }
   return false;
 }

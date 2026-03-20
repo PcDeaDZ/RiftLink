@@ -20,7 +20,7 @@ bool displayShowLanguagePicker();
 /** Выбор страны/региона при первом буте. Вызывать после region::init() и radio::init(). */
 bool displayShowRegionPicker();
 
-/** Меню: 0=Main, 1=Info, 2=WiFi, 3=Sys, 4=Msg, 5=Lang, 6=GPS. Вызывать после init. */
+/** Меню: 0=Main, 1=Msg, 2=Peers, [GPS], [WiFi], Sys(last). Вызывать после init. */
 void displayShowScreen(int screen);
 /** Смена вкладки с принудительным full refresh (против ghosting на e-ink). */
 void displayShowScreenForceFull(int screen);
@@ -30,7 +30,7 @@ int displayGetCurrentScreen();
 int displayGetNextScreen(int current);
 /** Обработка long press на вкладке (picker, selftest, gps toggle) */
 void displayOnLongPress(int screen);
-/** Показать последнее сообщение (экран 3). */
+/** Установить последнее сообщение — обновит экран если Msg активен. */
 void displaySetLastMsg(const char* fromHex, const char* text);
 /** Обновить экран (периодически в loop). Возвращает true если кнопка нажата */
 bool displayUpdate();
@@ -45,5 +45,9 @@ void displayWake();
 void displayWakeRequest();
 /** Дисплей в слипе? */
 bool displayIsSleeping();
+/** Popup-меню активно? pollButtonAndQueue() должна игнорировать кнопку. */
+bool displayIsMenuActive();
 /** Вызвать при поднятии async infra (lazy: asyncInfraEnsure) — кнопка в displayTask */
 void displaySetButtonPolledExternally(bool on);
+/** Показать предупреждение на экране на duration_ms (блокирующий). */
+void displayShowWarning(const char* line1, const char* line2, uint32_t durationMs);

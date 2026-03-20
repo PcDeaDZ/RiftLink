@@ -3,8 +3,12 @@
  */
 
 #include "wifi.h"
+#include "esp_now_slots/esp_now_slots.h"
+#include "node/node.h"
 #include <WiFi.h>
+#include <esp_heap_caps.h>
 #include <esp_wifi.h>
+#include <esp_random.h>
 #include <cstring>
 #include <nvs.h>
 #include <nvs_flash.h>
@@ -12,35 +16,117 @@
 #define NVS_NAMESPACE "riftlink"
 #define NVS_KEY_SSID "wifi_ssid"
 #define NVS_KEY_PASS "wifi_pass"
+#define NVS_KEY_AP_PASS "ap_pass"
 
 namespace wifi {
 
 static bool s_inited = false;
 static bool s_available = false;
+static bool s_apCredsInited = false;
+static char s_apSsid[16] = {0};
+static char s_apPass[12] = {0};
 
-/** Меньше буферов, чем WIFI_INIT_CONFIG_DEFAULT — ниже требование к contiguous internal RAM
- *  (после тяжёлого бутa esp_wifi_init иначе даёт ESP_ERR_NO_MEM). ESP-NOW/STA остаются рабочими.
- *  OLED: init вызывается сразу после BLE — если всё ещё NO_MEM, ещё сильнее ужать (см. IDF min). */
+static void generateRandomApPassword() {
+  static const char CHARSET[] = "abcdefghjkmnpqrstuvwxyz23456789";
+  for (int i = 0; i < 8; i++) {
+    s_apPass[i] = CHARSET[esp_random() % (sizeof(CHARSET) - 1)];
+  }
+  s_apPass[8] = '\0';
+}
+
+static void ensureApCreds() {
+  if (s_apCredsInited) return;
+  s_apCredsInited = true;
+  const uint8_t* id = node::getId();
+  snprintf(s_apSsid, sizeof(s_apSsid), "RL-%02X%02X%02X%02X", id[0], id[1], id[2], id[3]);
+
+  nvs_handle_t h;
+  if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+    char buf[12] = {0};
+    size_t len = sizeof(buf);
+    if (nvs_get_str(h, NVS_KEY_AP_PASS, buf, &len) == ESP_OK && buf[0]) {
+      strncpy(s_apPass, buf, sizeof(s_apPass) - 1);
+    } else {
+      generateRandomApPassword();
+      nvs_set_str(h, NVS_KEY_AP_PASS, s_apPass);
+      nvs_commit(h);
+    }
+    nvs_close(h);
+  } else {
+    generateRandomApPassword();
+  }
+}
+
+/** Меньше буферов и отключение AMPDU — ниже contiguous internal RAM для esp_wifi_init.
+ *  static_rx_buf_num=1 в IDF недопустимо (лог: static rx buf number 1 is out of range).
+ *  При «actual is 1» — не хватает DMA на второй буфер; уменьшать стек NimBLE / extmem (план).
+ *  mgmt_sbuf_num: в IDF минимум 6. */
 static void applyLowFootprintWifiConfig(wifi_init_config_t* cfg) {
-  cfg->static_rx_buf_num = 5;    // default 10
-  cfg->dynamic_rx_buf_num = 10;  // default 32
-  cfg->mgmt_sbuf_num = 10;       // default 32
+  cfg->static_rx_buf_num = 2;
+  cfg->dynamic_rx_buf_num = 2;
+  cfg->mgmt_sbuf_num = 6;
+  cfg->ampdu_rx_enable = 0;
+  cfg->ampdu_tx_enable = 0;
+  cfg->amsdu_tx_enable = 0;
+  cfg->rx_ba_win = 0;
+  cfg->nvs_enable = 0;         // credentials через свой NVS; wifi-internal NVS не нужен
+  cfg->cache_tx_buf_num = 0;
+  if (cfg->rx_mgmt_buf_num > 2) cfg->rx_mgmt_buf_num = 2;
+  cfg->espnow_max_encrypt_num = 2;
 }
 
 bool init() {
   if (s_inited) return s_available;
+  // Arduino-esp32 3.x: не писать Wi‑Fi креды в NVS при каждом begin — меньше сюрпризов с порядком init
+  WiFi.persistent(false);
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   applyLowFootprintWifiConfig(&cfg);
+  const size_t largestDma =
+      heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  Serial.printf("[RiftLink] WiFi esp_wifi_init: largest_dma(internal)=%u (RX буферы Wi‑Fi — DMA)\n",
+      (unsigned)largestDma);
+  // 2 static RX буфера требуют contiguous DMA; при <8K часто «Expected to init 2 rx buffer, actual is 0/1»
+  if (largestDma < 8192) {
+    Serial.printf("[RiftLink] WiFi: предупреждение — largest_dma=%u < 8192, init может вернуть ESP_ERR_NO_MEM\n",
+        (unsigned)largestDma);
+  }
   esp_err_t err = esp_wifi_init(&cfg);
   if (err != ESP_OK) {
-    Serial.printf("[RiftLink] WiFi init failed: %s (0x%x) — OTA/ESP-NOW отключены\n",
-        esp_err_to_name(err), (unsigned)err);
+    Serial.printf("[RiftLink] WiFi init failed: %s (0x%x) — OTA/ESP-NOW отключены "
+        "(internal free=%u largest_int=%u largest_dma=%u)\n",
+        esp_err_to_name(err), (unsigned)err,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
     s_available = false;
     return false;
   }
   s_inited = true;
   esp_wifi_set_mode(WIFI_MODE_NULL);
   s_available = true;
+  return true;
+}
+
+void deinit() {
+  if (!s_inited) return;
+  Serial.println("[WiFi] Deinit...");
+  esp_wifi_stop();
+  esp_wifi_deinit();
+  s_inited = false;
+  s_available = false;
+  Serial.printf("[WiFi] Deinit done, heap free=%u\n",
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
+bool ensureInit() {
+  if (s_available) return true;
+  Serial.printf("[RiftLink] wifi::ensureInit — lazy init (heap before: free=%u largest=%u)\n",
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+  if (!init()) return false;
+  esp_now_slots::init();
+  Serial.printf("[RiftLink] wifi::ensureInit OK (heap after: free=%u)\n",
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   return true;
 }
 
@@ -121,6 +207,28 @@ bool hasCredentials() {
   bool ok = (nvs_get_str(h, NVS_KEY_SSID, ssid, &len) == ESP_OK && ssid[0] != '\0');
   nvs_close(h);
   return ok;
+}
+
+const char* getApSsid() {
+  ensureApCreds();
+  return s_apSsid;
+}
+
+const char* getApPassword() {
+  ensureApCreds();
+  return s_apPass;
+}
+
+void regenerateApPassword() {
+  ensureApCreds();
+  generateRandomApPassword();
+  nvs_handle_t h;
+  if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+    nvs_set_str(h, NVS_KEY_AP_PASS, s_apPass);
+    nvs_commit(h);
+    nvs_close(h);
+  }
+  Serial.printf("[WiFi] New AP password: %s\n", s_apPass);
 }
 
 }  // namespace wifi

@@ -198,6 +198,20 @@ bool setChannel(uint8_t ch) {
   return true;
 }
 
+void deinit() {
+  if (!s_inited) return;
+  Serial.println("[ESP-NOW] Deinit...");
+  esp_now_unregister_recv_cb();
+  esp_now_del_peer(s_broadcastMac);
+  esp_now_deinit();
+  s_ok = false;
+  s_inited = false;
+  memset(s_rtsCache, 0, sizeof(s_rtsCache));
+  s_rtsCount = 0;
+  Serial.printf("[ESP-NOW] Deinit done, heap free=%u\n",
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
 void init() {
   if (s_inited) return;
   s_inited = true;

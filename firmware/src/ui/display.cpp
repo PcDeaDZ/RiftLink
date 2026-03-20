@@ -16,6 +16,10 @@
 #include "wifi/wifi.h"
 #include "ota/ota.h"
 #include "telemetry/telemetry.h"
+#include "radio/radio.h"
+#include "radio_mode/radio_mode.h"
+#include "powersave/powersave.h"
+#include "ble/ble.h"
 #include "version.h"
 #include <cstring>
 #include <cstdio>
@@ -44,7 +48,7 @@
 #define MAX_LINE_CHARS 20
 #define CONTENT_X 4
 
-static const char* TAB_KEYS[] = {"tab_main", "tab_info", "tab_wifi", "tab_sys", "tab_msg", "tab_lang", "tab_gps"};
+static const char* TAB_KEYS[] = {"tab_main", "tab_msg", "tab_info", "tab_sys", "tab_net", "tab_gps"};
 
 #define SHORT_PRESS_MS  350   // короткое = смена вкладки
 #define LONG_PRESS_MS   500   // длинное = подтверждение / вход в режим модификации
@@ -64,6 +68,7 @@ static bool s_displaySleeping = false;
 static bool s_wakeRequested = false;
 static uint32_t s_lastActivityTime = 0;
 static bool s_buttonPolledExternally = false;
+static volatile bool s_menuActive = false;
 static bool s_showingBootScreen = false;  // не перезаписывать бутскрин displayUpdate()
 
 /** Печать CP1251: конвертация в кодировку glcdfont AdafruitGFXRusFonts */
@@ -144,6 +149,10 @@ void displayWakeRequest() {
 
 bool displayIsSleeping() {
   return s_displaySleeping;
+}
+
+bool displayIsMenuActive() {
+  return s_menuActive;
 }
 
 void displayClear() {
@@ -228,11 +237,12 @@ bool displayShowLanguagePicker() {
     disp->setTextSize(1);
     disp->setTextColor(SSD1306_WHITE);
 
-    drawTruncRaw(4, 8, locale::getForLang("lang_picker_title", pickLang), 18);
-    disp->setCursor(36, 28);
+    drawTruncRaw(4, 4, locale::getForLang("lang_picker_title", pickLang), 18);
+    disp->setCursor(36, 24);
     disp->print(pickLang == LANG_EN ? "[EN]" : " EN ");
     disp->print(" ");
     disp->print(pickLang == LANG_RU ? "[RU]" : " RU ");
+    drawTruncRaw(4, 48, locale::getForLang("short_long_hint", pickLang), 18);
 
     disp->display();
 
@@ -309,6 +319,83 @@ region_done:
   return true;
 }
 
+static void displayShowModemPicker() {
+  if (!disp) return;
+  delay(200);
+
+  int pickIdx = (int)radio::getModemPreset();
+  if (pickIdx < 0 || pickIdx > 4) pickIdx = 1;
+
+  const char* names[] = {"Speed", "Normal", "Range", "MaxRange", "Custom"};
+  const char* desc[]  = {"SF7 BW250", "SF7 BW125", "SF10 BW125", "SF12 BW125", ""};
+
+  uint32_t lastPress = millis();
+  const uint32_t CONFIRM_MS = 3000;
+
+  while (1) {
+    disp->clearDisplay();
+    disp->setTextSize(1);
+    disp->setTextColor(SSD1306_WHITE);
+
+    drawTruncRaw(4, 4, "Modem Preset", 18);
+    // [Normal] Speed Range...
+    disp->setCursor(4, 20);
+    for (int i = 0; i < 5; i++) {
+      if (i == pickIdx) { disp->print("["); disp->print(names[i]); disp->print("]"); }
+      else { disp->print(" "); disp->print(names[i][0]); }
+    }
+    if (pickIdx < 4) drawTruncRaw(4, 36, desc[pickIdx], 18);
+    else {
+      char buf[24];
+      snprintf(buf, sizeof(buf), "SF%u BW%.0f CR%u",
+          radio::getSpreadingFactor(), radio::getBandwidth(), radio::getCodingRate());
+      drawTruncRaw(4, 36, buf, 18);
+    }
+    drawTruncRaw(4, 48, locale::getForDisplay("short_long_hint"), 18);
+    disp->display();
+
+    while (millis() - lastPress < CONFIRM_MS) {
+      int pt = waitButtonPressWithType(CONFIRM_MS - (millis() - lastPress));
+      if (pt == PRESS_SHORT) {
+        pickIdx = (pickIdx + 1) % 5;
+        lastPress = millis();
+        break;
+      } else if (pt == PRESS_LONG || pt == PRESS_NONE) {
+        goto modem_done;
+      }
+    }
+  }
+modem_done:
+  if (pickIdx < 4) radio::requestModemPreset((radio::ModemPreset)pickIdx);
+}
+
+static void displayRunModemScan() {
+  if (!disp) return;
+  disp->clearDisplay();
+  disp->setTextSize(1);
+  disp->setTextColor(SSD1306_WHITE);
+  drawTruncRaw(4, 4, locale::getForDisplay("scanning"), 18);
+  drawTruncRaw(4, 20, "~36s ...", 18);
+  disp->display();
+
+  selftest::ScanResult res[6];
+  int found = selftest::modemScan(res, 6);
+
+  disp->clearDisplay();
+  if (found == 0) {
+    drawTruncRaw(4, 4, locale::getForDisplay("scan_empty"), 18);
+  } else {
+    drawTruncRaw(4, 4, locale::getForDisplay("scan_found"), 18);
+    for (int i = 0; i < found && i < 4; i++) {
+      char buf[28];
+      snprintf(buf, sizeof(buf), "SF%u BW%.0f %ddBm", res[i].sf, res[i].bw, res[i].rssi);
+      drawTruncRaw(4, 16 + i * 12, buf, 18);
+    }
+  }
+  disp->display();
+  for (int i = 0; i < 50; i++) { delay(100); yield(); }
+}
+
 // Рамка: вкладки сверху, разделитель, футер
 static void drawFrame(int activeTab) {
   if (!disp) return;
@@ -339,77 +426,149 @@ static void drawFrame(int activeTab) {
   disp->drawRect(0, CONTENT_Y, SCREEN_WIDTH, CONTENT_H, SSD1306_WHITE);
 }
 
+/** Battery icon: 16x7 outline with fill proportional to percent */
+static void drawBatteryIcon(int x, int y, int pct, bool charging) {
+  if (!disp) return;
+  // Body: 14x7, nub: 2x3 on right
+  disp->drawRect(x, y, 14, 7, SSD1306_WHITE);
+  disp->fillRect(x + 14, y + 2, 2, 3, SSD1306_WHITE);
+  if (pct > 0) {
+    int fill = (pct * 10) / 100;
+    if (fill < 1 && pct > 0) fill = 1;
+    if (fill > 10) fill = 10;
+    disp->fillRect(x + 2, y + 2, fill, 3, SSD1306_WHITE);
+  }
+  if (charging) {
+    // Lightning bolt: small zigzag inside icon
+    disp->drawLine(x + 8, y + 1, x + 6, y + 3, SSD1306_WHITE);
+    disp->drawLine(x + 6, y + 3, x + 9, y + 3, SSD1306_WHITE);
+    disp->drawLine(x + 9, y + 3, x + 7, y + 5, SSD1306_WHITE);
+  }
+}
+
+/** Signal strength bars: 4 bars at x,y. barsCount 0-4 */
+static void drawSignalBars(int x, int y, int barsCount) {
+  if (!disp) return;
+  for (int i = 0; i < 4; i++) {
+    int h = 2 + i * 2;  // heights: 2,4,6,8
+    int bx = x + i * 4;
+    int by = y + 8 - h;
+    if (i < barsCount)
+      disp->fillRect(bx, by, 3, h, SSD1306_WHITE);
+    else
+      disp->drawRect(bx, by, 3, h, SSD1306_WHITE);
+  }
+}
+
+static int rssiToBars(int rssi) {
+  if (rssi >= -75) return 4;
+  if (rssi >= -85) return 3;
+  if (rssi >= -95) return 2;
+  if (rssi >= -105) return 1;
+  return 0;
+}
+
 static void drawContentMain() {
   if (!disp) return;
-  const uint8_t* id = node::getId();
   char buf[28];
 
-  snprintf(buf, sizeof(buf), "%s %02X%02X%02X%02X", locale::getForDisplay("id"), id[0], id[1], id[2], id[3]);
-  drawTruncRaw(CONTENT_X, CONTENT_Y + 2, buf, MAX_LINE_CHARS);
-
-  int ch = region::getChannel();
-  int nCh = region::getChannelCount();
-  if (nCh > 0) {
-    snprintf(buf, sizeof(buf), "%s %d %.1fMHz", locale::getForDisplay("ch"), ch, region::getFreq());
+  // Line 0: nick (or short ID) + clock right
+  char nick[17];
+  node::getNickname(nick, sizeof(nick));
+  if (nick[0]) {
+    drawTruncRaw(CONTENT_X, CONTENT_Y + 2, nick, MAX_LINE_CHARS);
   } else {
-    snprintf(buf, sizeof(buf), "%.1f MHz", region::getFreq());
+    const uint8_t* id = node::getId();
+    snprintf(buf, sizeof(buf), "%02X%02X%02X%02X", id[0], id[1], id[2], id[3]);
+    drawTruncRaw(CONTENT_X, CONTENT_Y + 2, buf, MAX_LINE_CHARS);
   }
+  if (gps::hasTime()) {
+    char clk[6];
+    snprintf(clk, sizeof(clk), "%02d:%02d", gps::getHour(), gps::getMinute());
+    drawTruncRaw(SCREEN_WIDTH - 30 - 2, CONTENT_Y + 2, clk, 5);
+  }
+
+  // Line 1: modem preset or SF/BW
+  radio::ModemPreset mp = radio::getModemPreset();
+  if (mp < radio::MODEM_CUSTOM)
+    snprintf(buf, sizeof(buf), "%.0fMHz %s", region::getFreq(), radio::modemPresetName(mp));
+  else
+    snprintf(buf, sizeof(buf), "%.0fMHz SF%u BW%.0f", region::getFreq(), (unsigned)radio::getSpreadingFactor(), radio::getBandwidth());
   drawTruncRaw(CONTENT_X, CONTENT_Y + 10, buf, MAX_LINE_CHARS);
 
-  snprintf(buf, sizeof(buf), "%s %s %ddBm", locale::getForDisplay("region"), region::getCode(), region::getPower());
-  drawTruncRaw(CONTENT_X, CONTENT_Y + 18, buf, MAX_LINE_CHARS);
-
+  // Line 2: neighbors + signal bars
   int n = neighbors::getCount();
+  int avgRssi = neighbors::getAverageRssi();
   snprintf(buf, sizeof(buf), "%s %d", locale::getForDisplay("neighbors"), n);
-  drawTruncRaw(CONTENT_X, CONTENT_Y + 26, buf, MAX_LINE_CHARS);
+  drawTruncRaw(CONTENT_X, CONTENT_Y + 18, buf, MAX_LINE_CHARS);
+  if (n > 0) {
+    drawSignalBars(SCREEN_WIDTH - 20, CONTENT_Y + 18, rssiToBars(avgRssi));
+  }
 
-  uint16_t batMv = telemetry::readBatteryMv();
-  int pct = (batMv >= 3000) ? (int)((batMv - 3000) / 12) : -1;
-  if (pct > 100) pct = 100;
-  const char* batLabel = locale::getForDisplay("battery");
-  if (pct >= 0) snprintf(buf, sizeof(buf), "%s %d%%", batLabel, pct);
-  else snprintf(buf, sizeof(buf), "%s --", batLabel);
-  drawTruncRaw(CONTENT_X, CONTENT_Y + 34, buf, MAX_LINE_CHARS);
+  // Bottom-right: battery icon + percent
+  int pct = telemetry::batteryPercent();
+  bool chg = telemetry::isCharging();
+  int batY = CONTENT_Y + CONTENT_H - 9;
+  drawBatteryIcon(SCREEN_WIDTH - 38, batY, pct >= 0 ? pct : 0, chg);
+  if (chg) snprintf(buf, sizeof(buf), "%s", locale::getForDisplay("charging"));
+  else if (pct >= 0) snprintf(buf, sizeof(buf), "%d%%", pct);
+  else snprintf(buf, sizeof(buf), "--");
+  drawTruncRaw(SCREEN_WIDTH - 20, batY, buf, 4);
 }
 
 static void drawContentInfo() {
   if (!disp) return;
-  char nick[17];
-  node::getNickname(nick, sizeof(nick));
   char buf[28];
+  int n = neighbors::getCount();
 
-  drawContentLine(0, locale::getForDisplay("nickname"));
-  drawContentLine(1, nick[0] ? nick : locale::getForDisplay("not_set"), true);
+  snprintf(buf, sizeof(buf), "%s: %d", locale::getForDisplay("peers"), n);
+  drawTruncRaw(CONTENT_X, CONTENT_Y + 2, buf, MAX_LINE_CHARS);
 
-  snprintf(buf, sizeof(buf), "%.1f MHz", region::getFreq());
-  drawTruncRaw(CONTENT_X, CONTENT_Y + 2 + 2 * LINE_H, buf, MAX_LINE_CHARS);
-
-  snprintf(buf, sizeof(buf), "%s %ddBm", region::getCode(), region::getPower());
-  drawTruncRaw(CONTENT_X, CONTENT_Y + 2 + 3 * LINE_H, buf, MAX_LINE_CHARS);
+  int maxShow = (n > 5) ? 5 : n;
+  for (int i = 0; i < maxShow; i++) {
+    char hex[17];
+    neighbors::getIdHex(i, hex);
+    int rssi = neighbors::getRssi(i);
+    snprintf(buf, sizeof(buf), "%c%c%c%c %ddBm", hex[0], hex[1], hex[2], hex[3], rssi);
+    drawTruncRaw(CONTENT_X, CONTENT_Y + 2 + (1 + i) * LINE_H, buf, 16);
+    drawSignalBars(SCREEN_WIDTH - 20, CONTENT_Y + 2 + (1 + i) * LINE_H, rssiToBars(rssi));
+  }
+  if (n > 5) {
+    snprintf(buf, sizeof(buf), "+%d more", n - 5);
+    drawTruncRaw(CONTENT_X, CONTENT_Y + 2 + 6 * LINE_H, buf, MAX_LINE_CHARS);
+  }
 }
 
-static void drawContentWiFi() {
+static void drawContentNet() {
   if (!disp) return;
-  char ssid[24] = {0}, ip[20] = {0};
-  wifi::getStatus(ssid, sizeof(ssid), ip, sizeof(ip));
+  char buf[24];
 
-  if (ota::isActive()) {
-    char buf[24];
-    drawContentLine(0, locale::getForDisplay("ota_ap"));
-    drawContentLine(1, "RiftLink-OTA");
-    drawContentLine(2, "192.168.4.1");
-    snprintf(buf, sizeof(buf), "%s riftlink123", locale::getForDisplay("pass"));
-    drawTruncRaw(CONTENT_X, CONTENT_Y + 2 + 3 * LINE_H, buf, MAX_LINE_CHARS);
-  } else if (wifi::isConnected()) {
-    drawContentLine(0, locale::getForDisplay("connected"));
-    drawContentLine(1, ssid[0] ? ssid : "-", true);
-    drawContentLine(2, ip[0] ? ip : "-");
-    drawContentLine(3, locale::getForDisplay("sta_mode"));
+  if (radio_mode::current() == radio_mode::BLE) {
+    drawContentLine(0, locale::getForDisplay("ble_mode"));
+    snprintf(buf, sizeof(buf), "%s %06u", locale::getForDisplay("pin"), (unsigned)ble::getPasskey());
+    drawContentLine(1, buf);
+    drawContentLine(2, ble::isConnected() ? locale::getForDisplay("connected") : "...");
+    drawContentLine(4, locale::getForDisplay("hold_wifi"));
   } else {
-    drawContentLine(0, locale::getForDisplay("wifi_off"));
-    drawContentLine(1, wifi::hasCredentials() ? locale::getForDisplay("reconnecting") : locale::getForDisplay("no_config"));
-    drawContentLine(2, locale::getForDisplay("ble_wifi"));
-    drawContentLine(3, locale::getForDisplay("ssid_pass"));
+    if (ota::isActive()) {
+      drawContentLine(0, locale::getForDisplay("wifi_mode"));
+      drawContentLine(1, wifi::getApSsid());
+      drawContentLine(2, "192.168.4.1");
+      snprintf(buf, sizeof(buf), "%s %s", locale::getForDisplay("pass"), wifi::getApPassword());
+      drawTruncRaw(CONTENT_X, CONTENT_Y + 2 + 3 * LINE_H, buf, MAX_LINE_CHARS);
+    } else if (wifi::isConnected()) {
+      char ssid[24] = {0}, ip[20] = {0};
+      wifi::getStatus(ssid, sizeof(ssid), ip, sizeof(ip));
+      drawContentLine(0, locale::getForDisplay("connected"));
+      drawContentLine(1, ssid[0] ? ssid : "-", true);
+      drawContentLine(2, ip[0] ? ip : "-");
+    } else {
+      drawContentLine(0, locale::getForDisplay("wifi_mode"));
+      drawContentLine(1, wifi::getApSsid());
+      snprintf(buf, sizeof(buf), "%s %s", locale::getForDisplay("pass"), wifi::getApPassword());
+      drawContentLine(2, buf);
+    }
+    drawContentLine(4, locale::getForDisplay("hold_ble"));
   }
 }
 
@@ -418,8 +577,22 @@ static void drawContentSys() {
   char buf[24];
   snprintf(buf, sizeof(buf), "RiftLink v%s", RIFTLINK_VERSION);
   drawContentLine(0, buf);
-  drawContentLine(1, "BLE + LoRa + E2E");
-  drawContentLine(2, locale::getForDisplay("ota_cmd"));
+
+  const uint8_t* id = node::getId();
+  snprintf(buf, sizeof(buf), "ID: %02X%02X%02X%02X", id[0], id[1], id[2], id[3]);
+  drawContentLine(1, buf);
+
+  radio::ModemPreset mp = radio::getModemPreset();
+  if (mp < radio::MODEM_CUSTOM)
+    snprintf(buf, sizeof(buf), "%s %s %ddBm", region::getCode(), radio::modemPresetName(mp), region::getPower());
+  else
+    snprintf(buf, sizeof(buf), "%s SF%u/%u/%u", region::getCode(), radio::getSpreadingFactor(), (unsigned)radio::getBandwidth(), radio::getCodingRate());
+  drawContentLine(2, buf);
+
+  snprintf(buf, sizeof(buf), "PS:%s %s", powersave::isEnabled() ? "ON" : "OFF", locale::getLang() == LANG_RU ? "[RU]" : "[EN]");
+  drawContentLine(3, buf);
+
+  drawContentLine(4, locale::getForDisplay("hold_settings"));
 }
 
 static void drawContentMsg() {
@@ -429,16 +602,17 @@ static void drawContentMsg() {
   drawContentLine(2, s_lastMsgText[0] ? s_lastMsgText : locale::getForDisplay("no_messages"), true);
 }
 
-static void drawContentLang() {
-  if (!disp) return;
-  drawContentLine(0, locale::getForDisplay("select_lang"));
-  int lang = locale::getLang();
-  drawContentLine(1, lang == LANG_RU ? "[RU]" : " EN ");
-}
-
 static void drawContentGps() {
   if (!disp) return;
   char buf[32];
+  if (!gps::isPresent() && gps::hasPhoneSync()) {
+    drawContentLine(0, locale::getForDisplay("gps_phone"));
+    if (gps::hasTime()) {
+      snprintf(buf, sizeof(buf), "%02d:%02d UTC", gps::getHour(), gps::getMinute());
+      drawContentLine(1, buf);
+    }
+    return;
+  }
   if (!gps::isPresent()) {
     drawContentLine(0, locale::getForDisplay("gps_not_present"));
     drawContentLine(1, "BLE: gps rx,tx,en");
@@ -460,18 +634,18 @@ static void drawContentGps() {
     snprintf(buf, sizeof(buf), "%.4f %.4f", gps::getLat(), gps::getLon());
     drawContentLine(3, buf);
   }
+  drawContentLine(4, locale::getForDisplay("hold_gps"));
 }
 
 static void drawScreen(int tab) {
   drawFrame(tab);
   switch (display_tabs::contentForTab(tab)) {
     case display_tabs::CT_MAIN: drawContentMain(); break;
+    case display_tabs::CT_MSG:  drawContentMsg(); break;
     case display_tabs::CT_INFO: drawContentInfo(); break;
-    case display_tabs::CT_WIFI: drawContentWiFi(); break;
-    case display_tabs::CT_SYS: drawContentSys(); break;
-    case display_tabs::CT_MSG: drawContentMsg(); break;
-    case display_tabs::CT_LANG: drawContentLang(); break;
-    default: drawContentGps(); break;
+    case display_tabs::CT_NET:  drawContentNet(); break;
+    case display_tabs::CT_SYS:  drawContentSys(); break;
+    case display_tabs::CT_GPS:  drawContentGps(); break;
   }
   disp->display();
 }
@@ -487,7 +661,7 @@ void displaySetLastMsg(const char* fromHex, const char* text) {
     strncpy(s_lastMsgText, text, 63);
     s_lastMsgText[63] = '\0';
   }
-  if (s_currentScreen == 4) s_needRedrawMsg = true;  // отложить — не блокировать handlePacket (stack overflow)
+  if (display_tabs::contentForTab(s_currentScreen) == display_tabs::CT_MSG) s_needRedrawMsg = true;
 }
 
 void displayShowScreen(int screen) {
@@ -509,21 +683,109 @@ int displayGetNextScreen(int current) {
   return (current + 1) % display_tabs::getTabCount();
 }
 
+/** Popup menu: short press = next item, long press = select, timeout = back.
+ *  Returns selected index or -1 on timeout. */
+static int displayShowPopupMenu(const char* items[], int count) {
+  if (!disp || count <= 0) return -1;
+  delay(200);
+  int selected = 0;
+  int scrollOff = 0;
+  uint32_t lastPress = millis();
+  const uint32_t MENU_TIMEOUT_MS = 10000;
+  const int maxVisible = (CONTENT_H - 4) / LINE_H;
+
+  while (1) {
+    if (selected < scrollOff) scrollOff = selected;
+    if (selected >= scrollOff + maxVisible) scrollOff = selected - maxVisible + 1;
+
+    drawFrame(s_currentScreen);
+    disp->setTextSize(1);
+    int show = count - scrollOff;
+    if (show > maxVisible) show = maxVisible;
+    for (int i = 0; i < show; i++) {
+      int idx = scrollOff + i;
+      int y = CONTENT_Y + 2 + i * LINE_H;
+      if (idx == selected) {
+        disp->fillRect(1, y - 1, SCREEN_WIDTH - 2, LINE_H, SSD1306_WHITE);
+        disp->setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+      } else {
+        disp->setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+      }
+      drawTruncRaw(CONTENT_X + 2, y, items[idx], MAX_LINE_CHARS - 1);
+    }
+    disp->setTextColor(SSD1306_WHITE);
+    if (scrollOff > 0)
+      disp->fillTriangle(SCREEN_WIDTH - 6, CONTENT_Y + 2, SCREEN_WIDTH - 10, CONTENT_Y + 6, SCREEN_WIDTH - 2, CONTENT_Y + 6, SSD1306_WHITE);
+    if (scrollOff + maxVisible < count)
+      disp->fillTriangle(SCREEN_WIDTH - 6, CONTENT_Y + CONTENT_H - 3, SCREEN_WIDTH - 10, CONTENT_Y + CONTENT_H - 7, SCREEN_WIDTH - 2, CONTENT_Y + CONTENT_H - 7, SSD1306_WHITE);
+    disp->display();
+
+    while (millis() - lastPress < MENU_TIMEOUT_MS) {
+      int pt = waitButtonPressWithType(MENU_TIMEOUT_MS - (millis() - lastPress));
+      if (pt == PRESS_SHORT) {
+        selected = (selected + 1) % count;
+        lastPress = millis();
+        break;
+      } else if (pt == PRESS_LONG) {
+        return selected;
+      } else if (pt == PRESS_NONE) {
+        return -1;
+      }
+    }
+    if (millis() - lastPress >= MENU_TIMEOUT_MS) return -1;
+  }
+}
+
 void displayOnLongPress(int screen) {
   s_lastActivityTime = millis();
+  s_menuActive = true;
   display_tabs::ContentTab ct = display_tabs::contentForTab(screen);
-  if (ct == display_tabs::CT_MAIN) {
-    displayShowRegionPicker();
-    drawScreen(s_currentScreen);
-  } else if (ct == display_tabs::CT_LANG) {
-    displayShowLanguagePicker();
-    drawScreen(s_currentScreen);
-  } else if (ct == display_tabs::CT_GPS && gps::isPresent()) {
-    gps::toggle();
-    drawScreen(s_currentScreen);
-  } else if (ct == display_tabs::CT_SYS) {
-    selftest::run(nullptr);
+
+  if (ct == display_tabs::CT_SYS) {
+    char psBuf[20];
+    snprintf(psBuf, sizeof(psBuf), "PS: %s", powersave::isEnabled() ? "ON -> OFF" : "OFF -> ON");
+    const char* items[] = {
+      locale::getForDisplay("menu_modem"),
+      locale::getForDisplay("scan_title"),
+      psBuf,
+      locale::getForDisplay("region"),
+      locale::getForDisplay("select_lang"),
+      locale::getForDisplay("menu_selftest"),
+      locale::getForDisplay("menu_back")
+    };
+    int sel = displayShowPopupMenu(items, 7);
+    if (sel == 0) { displayShowModemPicker(); }
+    else if (sel == 1) { displayRunModemScan(); }
+    else if (sel == 2) { powersave::setEnabled(!powersave::isEnabled()); }
+    else if (sel == 3) { displayShowRegionPicker(); }
+    else if (sel == 4) { displayShowLanguagePicker(); }
+    else if (sel == 5) { selftest::run(nullptr); }
+
+  } else if (ct == display_tabs::CT_NET) {
+    bool isBle = (radio_mode::current() == radio_mode::BLE);
+    const char* items[] = {
+      isBle ? "-> WiFi" : "-> BLE",
+      locale::getForDisplay("menu_back")
+    };
+    int sel = displayShowPopupMenu(items, 2);
+    if (sel == 0) {
+      radio_mode::switchTo(isBle ? radio_mode::WIFI : radio_mode::BLE);
+    }
+
+  } else if (ct == display_tabs::CT_GPS) {
+    bool gpsOn = gps::isPresent() && gps::isEnabled();
+    char gpsBuf[20];
+    snprintf(gpsBuf, sizeof(gpsBuf), "GPS: %s", gpsOn ? "ON -> OFF" : "OFF -> ON");
+    const char* items[] = {
+      gpsBuf,
+      locale::getForDisplay("menu_back")
+    };
+    int sel = displayShowPopupMenu(items, 2);
+    if (sel == 0 && gps::isPresent()) { gps::toggle(); }
   }
+
+  s_menuActive = false;
+  drawScreen(s_currentScreen);
 }
 
 void displaySetButtonPolledExternally(bool on) {
@@ -533,6 +795,22 @@ void displaySetButtonPolledExternally(bool on) {
 void displayRequestInfoRedraw() {
   displayWakeRequest();
   s_needRedrawInfo = true;
+}
+
+void displayShowWarning(const char* line1, const char* line2, uint32_t durationMs) {
+  if (!disp) return;
+  disp->clearDisplay();
+  disp->setTextSize(1);
+  disp->setTextColor(SSD1306_WHITE);
+  disp->drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+  drawTruncRaw(8, 20, line1, MAX_LINE_CHARS);
+  if (line2) drawTruncRaw(8, 36, line2, MAX_LINE_CHARS);
+  disp->display();
+  uint32_t start = millis();
+  while (millis() - start < durationMs) {
+    delay(50);
+    yield();
+  }
 }
 
 bool displayUpdate() {
@@ -562,15 +840,15 @@ bool displayUpdate() {
     return false;
   }
 
-  if (s_needRedrawInfo && s_currentScreen == 1) {
+  if (s_needRedrawInfo) {
     s_needRedrawInfo = false;
-    s_lastActivityTime = now;  // BLE/ник — считаем активностью
-    drawScreen(1);
+    s_lastActivityTime = now;
+    drawScreen(s_currentScreen);
   }
-  if (s_needRedrawMsg && s_currentScreen == 4) {
+  if (s_needRedrawMsg && display_tabs::contentForTab(s_currentScreen) == display_tabs::CT_MSG) {
     s_needRedrawMsg = false;
-    s_lastActivityTime = now;  // входящее сообщение — активность
-    drawScreen(4);
+    s_lastActivityTime = now;
+    drawScreen(s_currentScreen);
   }
 
   if (!s_buttonPolledExternally) {
@@ -580,7 +858,7 @@ bool displayUpdate() {
     } else if (s_lastButton) {
       uint32_t hold = now - s_pressStart;
       bool isLong = (hold >= LONG_PRESS_MS);
-      bool isShort = (hold >= MIN_PRESS_MS && hold < SHORT_PRESS_MS);
+      bool isShort = (hold >= MIN_PRESS_MS && !isLong);
       s_lastActivityTime = now;
       if (isShort) {
         s_currentScreen = displayGetNextScreen(s_currentScreen);
@@ -600,7 +878,7 @@ bool displayUpdate() {
   if (!s_showingBootScreen && (millis() - s_lastScreenUpdate > 2000)) {
     s_lastScreenUpdate = millis();
     display_tabs::ContentTab ct = display_tabs::contentForTab(s_currentScreen);
-    if (ct == display_tabs::CT_MAIN || ct == display_tabs::CT_INFO || ct == display_tabs::CT_WIFI || ct == display_tabs::CT_GPS) drawScreen(s_currentScreen);
+    if (ct == display_tabs::CT_MAIN || ct == display_tabs::CT_INFO || ct == display_tabs::CT_NET || ct == display_tabs::CT_GPS) drawScreen(s_currentScreen);
   }
   return false;
 }

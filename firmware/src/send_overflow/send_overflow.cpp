@@ -111,6 +111,12 @@ void drainApplyCommandsFromRadioQueue(void) {
       duty_cycle::reset();
     } else if (cmd.type == RadioCmdType::ApplySf) {
       radio::setSpreadingFactor(cmd.u.spread.sf);
+    } else if (cmd.type == RadioCmdType::ApplyModem) {
+      if (cmd.u.modem.preset < 4) {
+        radio::setModemPreset((radio::ModemPreset)cmd.u.modem.preset);
+      } else {
+        radio::setCustomModem(cmd.u.modem.sf, (float)cmd.u.modem.bw10 / 10.0f, cmd.u.modem.cr);
+      }
     }
   }
 }

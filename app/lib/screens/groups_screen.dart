@@ -32,7 +32,7 @@ class GroupsScreen extends StatefulWidget {
 class _GroupsScreenState extends State<GroupsScreen> {
   List<int> _groups = [];
   bool _loading = false;
-  StreamSubscription? _sub;
+  StreamSubscription<RiftLinkEvent>? _sub;
 
   List<int> _normalizeGroups(Iterable<int> groups) {
     final out = groups.where((g) => g != kMeshBroadcastGroupId && g > 0).toSet().toList();

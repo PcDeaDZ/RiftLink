@@ -20,7 +20,7 @@ class FakeRiftLinkBle implements RiftLinkBle {
   @override
   Future<void> disconnect() async {}
   @override
-  Future<bool> getInfo() async => false;
+  Future<bool> getInfo({bool force = false}) async => false;
   @override
   Future<bool> getRoutes() async => false;
   @override

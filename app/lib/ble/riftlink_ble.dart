@@ -1,11 +1,14 @@
-/// RiftLink BLE — связь с Heltec LoRa по GATT
+/// RiftLink BLE — связь с Heltec LoRa по GATT / WiFi WebSocket
 /// Протокол: JSON {"cmd":"send","text":"..."} / {"evt":"msg","from":"...","text":"..."}
+/// Dual transport: BLE (default) ↔ WiFi (on demand) through radio mode switching.
 
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode, kIsWeb;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+
+import '../transport/wifi_transport.dart';
 
 class RiftLinkBle {
   static const serviceUuid = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
@@ -17,21 +20,42 @@ class RiftLinkBle {
   BluetoothCharacteristic? _txChar;
   BluetoothCharacteristic? _rxChar;
 
-  /// Один приёмник notify + broadcast: несколько `events.listen` (чат, настройки, группы…)
-  /// получают одни и те же события. Длинные JSON склеиваются из нескольких пакетов ([onValueReceived]).
-  ///
-  /// Поток живёт всё время жизни [RiftLinkBle]: при отключении RX не закрывается — иначе подписка,
-  /// созданная до connect() или до повторного connect(), остаётся на [Stream.empty] / закрытом stream.
-  final StreamController<RiftLinkEvent> _eventBus = StreamController<RiftLinkEvent>.broadcast();
+  /// Broadcast: каждый подписчик получает каждое событие.
+  /// Пока `listen` ещё не вызван (окно после connect, async initState), события копятся в [_preListenBuffer]
+  /// и сливаются в поток при первом подписчике — иначе Dart broadcast **теряет** add без слушателей.
+  int _eventsStreamListeners = 0;
+  final List<RiftLinkEvent> _preListenBuffer = [];
+  static const int _maxPreListenBuffer = 64;
+
+  late final StreamController<RiftLinkEvent> _eventBus = StreamController<RiftLinkEvent>.broadcast(
+    onListen: _onEventsStreamListen,
+    onCancel: _onEventsStreamCancel,
+  );
+
+  void _onEventsStreamListen() {
+    _eventsStreamListeners++;
+    if (_eventsStreamListeners == 1 && _preListenBuffer.isNotEmpty) {
+      final batch = List<RiftLinkEvent>.from(_preListenBuffer);
+      _preListenBuffer.clear();
+      for (final e in batch) {
+        if (!_eventBus.isClosed) _eventBus.add(e);
+      }
+    }
+  }
+
+  void _onEventsStreamCancel() {
+    if (_eventsStreamListeners > 0) _eventsStreamListeners--;
+  }
+
   StreamSubscription<OnCharacteristicReceivedEvent>? _rxSub;
   /// Склейка фрагментов notify (длинный `info` / MTU): каждый chunk может быть не целым JSON.
   final List<int> _rxAccum = [];
+  int _lastRxIncompleteLogLen = 0;
   DateTime? _lastInfoRequestAt;
   Timer? _queuedInfoTimer;
   bool _hasQueuedInfoRequest = false;
 
-  /// Последний успешно распарсенный `evt:info` (ответ на connect/getInfo может прийти
-  /// до подписки экрана на [events] — без кэша UI и «недавние» теряют данные).
+  /// Последний успешно распарсенный `evt:info` (до первого кадра экрана / после connect).
   RiftLinkInfoEvent? _lastInfo;
 
   RiftLinkInfoEvent? get lastInfo => _lastInfo;
@@ -80,6 +104,13 @@ class RiftLinkBle {
     return na.isNotEmpty && na == nb;
   }
 
+  /// Сравнение UUID характеристик (FBP может отдавать разный формат строки).
+  static bool characteristicUuidsMatch(Object a, Object b) {
+    final sa = a.toString().toLowerCase().replaceAll('-', '');
+    final sb = b.toString().toLowerCase().replaceAll('-', '');
+    return sa.isNotEmpty && sa == sb;
+  }
+
   /// Короткий ID из имени BLE (`RL-XXXXXXXX`) — пока нет полного `evt.info.id`.
   static String? nodeIdHintFromDevice(BluetoothDevice? dev) {
     if (dev == null) return null;
@@ -89,6 +120,10 @@ class RiftLinkBle {
   }
 
   Future<bool> _sendCmd(Map<String, dynamic> payload) async {
+    // WiFi mode: route through WebSocket
+    if (_isWifiMode && _wifiTransport != null && _wifiTransport!.isConnected) {
+      return _wifiTransport!.sendJson(jsonEncode(payload));
+    }
     if (_txChar == null || !isConnected) return false;
     try {
       final json = jsonEncode(payload);
@@ -178,11 +213,14 @@ class RiftLinkBle {
 
   Future<void> disconnect() async {
     _lastInfo = null;
+    _preListenBuffer.clear();
     _queuedInfoTimer?.cancel();
     _queuedInfoTimer = null;
     _hasQueuedInfoRequest = false;
     _lastInfoRequestAt = null;
-    _stopRxDispatcher();
+    await _disconnectWifi();
+    _isWifiMode = false;
+    await _stopRxDispatcher();
     if (_device != null) {
       await _device!.disconnect();
       _device = null;
@@ -195,8 +233,9 @@ class RiftLinkBle {
     if (_rxChar == null || _device == null) return;
     // Не используем [_rxChar.onValueReceived]: в FBP фильтр сравнивает primaryServiceUuid события
     // с полем у объекта из discovery — при null vs не-null (типично на Android) все notify отсекаются.
-    _rxSub?.cancel();
+    final oldRx = _rxSub;
     _rxSub = null;
+    await oldRx?.cancel();
     _rxAccum.clear();
 
     final devId = _device!.remoteId;
@@ -209,11 +248,27 @@ class RiftLinkBle {
     // Подписка до setNotifyValue: иначе первые notify после включения CCCD могут прийти до listen().
     _rxSub = FlutterBluePlus.events.onCharacteristicReceived.listen(
       (OnCharacteristicReceivedEvent event) {
-        // Не отбрасывать полезную нагрузку, если платформа пометила success=false.
-        if (event.error != null && event.value.isEmpty) return;
         final c = event.characteristic;
-        if (!RiftLinkBle.remoteIdsMatch(c.remoteId.str, devId.str)) return;
-        if (c.characteristicUuid != rx.characteristicUuid) return;
+        if (kDebugMode) {
+          debugPrint(
+            'RiftLinkBle: chrReceived ${event.value.length}b remote=${c.remoteId.str} chr=${c.characteristicUuid}',
+          );
+        }
+        if (event.error != null && event.value.isEmpty) return;
+        if (!RiftLinkBle.remoteIdsMatch(c.remoteId.str, devId.str)) {
+          if (kDebugMode) {
+            debugPrint('RiftLinkBle: chrReceived skipped (remoteId) want=${devId.str} got=${c.remoteId.str}');
+          }
+          return;
+        }
+        if (!RiftLinkBle.characteristicUuidsMatch(c.characteristicUuid, rx.characteristicUuid)) {
+          if (kDebugMode) {
+            debugPrint(
+              'RiftLinkBle: chrReceived skipped (uuid) want=${rx.characteristicUuid} got=${c.characteristicUuid}',
+            );
+          }
+          return;
+        }
         _feedRxChunk(event.value);
       },
       onError: (Object e, StackTrace _) {
@@ -252,18 +307,80 @@ class RiftLinkBle {
     if (evt is RiftLinkInfoEvent) {
       _lastInfo = evt;
     }
-    if (evt != null && !_eventBus.isClosed) {
+    if (_eventBus.isClosed) return;
+    if (evt == null) {
+      if (kDebugMode) {
+        debugPrint(
+          'RiftLinkBle: JSON без известного evt keys=${json.keys.toList()} evt=${json['evt']}',
+        );
+      }
+      return;
+    }
+
+    debugPrint('RiftLinkBle: evt ${evt.runtimeType}'); // отладка: видно в I/flutter, что парсинг доходит до Dart
+    if (_eventsStreamListeners == 0) {
+      _preListenBuffer.add(evt);
+      if (_preListenBuffer.length > _maxPreListenBuffer) {
+        _preListenBuffer.removeAt(0);
+      }
+    } else {
       _eventBus.add(evt);
     }
   }
 
-  /// Разбор RX: сначала один целый JSON (основной путь), иначе — несколько объектов подряд.
-  /// Разбор по скобкам оставлен как запасной; он может ошибаться на `\"`/`\\` внутри строк.
+  void _stripToFirstAsciiBraceByte() {
+    final i = _rxAccum.indexWhere((b) => b == 0x7B);
+    if (i < 0) {
+      _rxAccum.clear();
+      return;
+    }
+    if (i > 0) _rxAccum.removeRange(0, i);
+  }
+
+  /// Сначала строгий UTF-8; при обрезке чанка по середине символа — lenient (без вечного «null»).
+  String _decodeUtf8Lenient(List<int> bytes) {
+    if (bytes.isEmpty) return '';
+    try {
+      return utf8.decode(bytes, allowMalformed: false);
+    } catch (_) {
+      return utf8.decode(bytes, allowMalformed: true);
+    }
+  }
+
+  /// NDJSON: после каждого JSON на прошивке — `\n` (или `\r\n`). Тогда границы не зависят от MTU.
+  /// Внутри строковых полей неэкранированный `\n` ломает разбор — экранировать или не использовать.
+  String? _tryDrainNewlineDelimitedJson(String s) {
+    if (!s.contains('\n')) return null;
+    final lastNl = s.lastIndexOf('\n');
+    final complete = s.substring(0, lastNl + 1);
+    final tail = s.substring(lastNl + 1);
+    for (final line in complete.split('\n')) {
+      final lineNoCr = line.trim().replaceAll('\r', '');
+      if (lineNoCr.isEmpty) continue;
+      try {
+        final decoded = jsonDecode(lineNoCr);
+        if (decoded is Map) {
+          final m = Map<String, dynamic>.from(decoded as Map);
+          if (m.containsKey('evt')) {
+            _lastRxIncompleteLogLen = 0;
+            _emitParsedJson(m);
+          }
+        }
+      } catch (_) {}
+    }
+    return tail;
+  }
+
+  /// Разбор RX: отрезка мусора до первого `{` по **байтам** (не ждём целого UTF-8),
+  /// затем decode с lenient для границ чанков внутри многобайтовых символов.
+  /// Далее — один объект jsonDecode или несколько подряд по скобкам (осторожно с `\"` в строках).
   void _drainRxAccum() {
     for (var iter = 0; iter < 32; iter++) {
-      final s = _decodeUtf8OrNull(_rxAccum);
-      if (s == null) return;
+      if (_rxAccum.isEmpty) return;
+      _stripToFirstAsciiBraceByte();
+      if (_rxAccum.isEmpty) return;
 
+      final s = _decodeUtf8Lenient(_rxAccum);
       final i0 = s.indexOf('{');
       if (i0 < 0) {
         _rxAccum.clear();
@@ -277,20 +394,62 @@ class RiftLinkBle {
       }
 
       final t = s;
+      final ndTail = _tryDrainNewlineDelimitedJson(t);
+      if (ndTail != null) {
+        _rxAccum
+          ..clear()
+          ..addAll(utf8.encode(ndTail));
+        if (ndTail.isEmpty) return;
+        continue;
+      }
+
       // Один полный объект в буфере (самый частый случай).
       try {
         final decoded = jsonDecode(t);
         if (decoded is Map) {
+          _lastRxIncompleteLogLen = 0;
           _emitParsedJson(Map<String, dynamic>.from(decoded as Map));
           _rxAccum.clear();
           return;
         }
+        // Массив объектов на корне — без этого разбор молча зависел от экстрактора по скобкам.
+        if (decoded is List) {
+          _lastRxIncompleteLogLen = 0;
+          for (final e in decoded) {
+            if (e is Map) {
+              _emitParsedJson(Map<String, dynamic>.from(e as Map));
+            }
+          }
+          _rxAccum.clear();
+          return;
+        }
+        if (kDebugMode) {
+          debugPrint('RiftLinkBle: RX json root is ${decoded.runtimeType}, trying brace extract');
+        }
       } catch (_) {
-        // Неполный JSON или несколько объектов подряд — ниже.
+        // Неполный JSON или несколько объектов подряд — разбираем ниже (extractor / _tryEmitFromConcatenated).
       }
 
       final objs = _extractTopLevelJsonObjects(s);
       if (objs.objects.isEmpty) {
+        // Неполный первый объект (обрезка по границе notify) — ищем любой полный объект с позиции `{`.
+        final tail = _tryEmitFromConcatenated(s, _emitParsedJson);
+        if (tail.length < s.length) {
+          _lastRxIncompleteLogLen = 0;
+          _rxAccum
+            ..clear()
+            ..addAll(utf8.encode(tail));
+          if (tail.isEmpty) return;
+          continue;
+        }
+        if (kDebugMode && t.length >= 64) {
+          if (t.length - _lastRxIncompleteLogLen >= 300 || _lastRxIncompleteLogLen == 0) {
+            _lastRxIncompleteLogLen = t.length;
+            debugPrint(
+              'RiftLinkBle: RX no complete JSON yet len=${t.length} (waiting for more notify) head=${_rxDebugPreview(t)}',
+            );
+          }
+        }
         if (_rxAccum.length > 4096) {
           final lastBrace = s.lastIndexOf('{');
           if (lastBrace > 0) {
@@ -303,6 +462,7 @@ class RiftLinkBle {
         }
         return;
       }
+      _lastRxIncompleteLogLen = 0;
       for (final raw in objs.objects) {
         try {
           final decoded = jsonDecode(raw);
@@ -318,10 +478,12 @@ class RiftLinkBle {
     }
   }
 
-  void _stopRxDispatcher() {
-    _rxSub?.cancel();
+  Future<void> _stopRxDispatcher() async {
+    final old = _rxSub;
     _rxSub = null;
+    await old?.cancel();
     _rxAccum.clear();
+    _lastRxIncompleteLogLen = 0;
   }
 
   /// Отправка геолокации (broadcast)
@@ -352,6 +514,18 @@ class RiftLinkBle {
   Future<bool> setSpreadingFactor(int sf) async {
     if (sf < 7 || sf > 12) return false;
     return _sendCmd({'cmd': 'sf', 'sf': sf});
+  }
+
+  /// Modem preset (0=Speed, 1=Normal, 2=Range, 3=MaxRange)
+  Future<bool> setModemPreset(int preset) async {
+    if (preset < 0 || preset > 3) return false;
+    return _sendCmd({'cmd': 'modemPreset', 'preset': preset});
+  }
+
+  /// Custom modem: SF 7–12, BW kHz (62.5/125/250/500), CR 5–8
+  Future<bool> setCustomModem(int sf, double bw, int cr) async {
+    if (sf < 7 || sf > 12 || cr < 5 || cr > 8) return false;
+    return _sendCmd({'cmd': 'modemCustom', 'sf': sf, 'bw': bw, 'cr': cr});
   }
 
   /// Отправить голосовое сообщение (Opus/AAC, base64 чанками)
@@ -393,12 +567,107 @@ class RiftLinkBle {
   Future<bool> sendPing(String to) async =>
       to.length < 8 ? false : _sendCmd({'cmd': 'ping', 'to': to});
 
-  /// Запуск OTA режима (WiFi AP + ArduinoOTA)
+  /// Запуск WiFi OTA режима (переключает в WiFi AP)
   Future<bool> sendOta() async => _sendCmd({'cmd': 'ota'});
 
-  /// WiFi: SSID + пароль
+  // --- Radio Mode Switching (Time-sharing BLE ↔ WiFi) ---
+
+  WifiTransport? _wifiTransport;
+  StreamSubscription? _wifiRxSub;
+  bool _isWifiMode = false;
+
+  /// Текущий радио-режим: true = WiFi, false = BLE
+  bool get isWifiMode => _isWifiMode;
+
+  /// Переключить в WiFi AP-режим
+  Future<bool> switchToWifiAp() => _sendCmd({'cmd': 'radioMode', 'mode': 'wifi', 'variant': 'ap'});
+
+  /// Переключить в WiFi STA-режим (подключение к сети)
+  Future<bool> switchToWifiSta({required String ssid, required String pass}) =>
+      _sendCmd({'cmd': 'radioMode', 'mode': 'wifi', 'variant': 'sta', 'ssid': ssid, 'pass': pass});
+
+  /// Переключить обратно в BLE
+  Future<bool> switchToBle() async {
+    if (!_isWifiMode) return true;
+    final ok = await _sendCmd({'cmd': 'radioMode', 'mode': 'ble'});
+    if (ok) {
+      await _disconnectWifi();
+      _isWifiMode = false;
+    }
+    return ok;
+  }
+
+  /// После получения evt:wifi_ready с IP, подключиться по WebSocket
+  Future<bool> connectWifi(String ip) async {
+    _wifiTransport = WifiTransport();
+    final ok = await _wifiTransport!.connectToDevice(ip);
+    if (!ok) {
+      _wifiTransport = null;
+      return false;
+    }
+    _isWifiMode = true;
+    _wifiRxSub = _wifiTransport!.rawJsonStream.listen((raw) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          _emitParsedJson(Map<String, dynamic>.from(decoded as Map));
+        }
+      } catch (_) {}
+    });
+    return true;
+  }
+
+  Future<void> _disconnectWifi() async {
+    await _wifiRxSub?.cancel();
+    _wifiRxSub = null;
+    await _wifiTransport?.disconnect();
+    _wifiTransport = null;
+  }
+
+  /// BLE OTA: начать OTA обновление
+  Future<bool> startBleOta({required int size, String? md5}) =>
+      _sendCmd({'cmd': 'bleOtaStart', 'size': size, if (md5 != null) 'md5': md5});
+
+  /// BLE OTA: отправить чанк бинарных данных
+  Future<bool> sendBleOtaChunk(List<int> data) async {
+    if (_txChar == null || !isConnected) return false;
+    try {
+      await _txChar!.write(data, withoutResponse: true);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// BLE OTA: завершить OTA
+  Future<bool> endBleOta() => _sendCmd({'cmd': 'bleOtaEnd'});
+
+  /// BLE OTA: отменить OTA
+  Future<bool> abortBleOta() => _sendCmd({'cmd': 'bleOtaAbort'});
+
+  /// Выключить устройство (deep sleep, пробуждение кнопкой)
+  Future<bool> shutdown() => _sendCmd({'cmd': 'shutdown'});
+
+  /// Тест сигнала: пинг всех соседей (ответы приходят как evt:pong)
+  Future<bool> signalTest() => _sendCmd({'cmd': 'signalTest'});
+
+  /// Трассировка: запрос маршрута до узла (ответ evt:routes)
+  Future<bool> traceroute(String to) async =>
+      to.length < 8 ? false : _sendCmd({'cmd': 'traceroute', 'to': to});
+
+  /// ESP-NOW: канал 1..13 (для WiFi-режима)
+  Future<bool> setEspNowChannel(int channel) async {
+    if (channel < 1 || channel > 13) return false;
+    return _sendCmd({'cmd': 'espnowChannel', 'channel': channel});
+  }
+
+  /// ESP-NOW: адаптивный подбор канала
+  Future<bool> setEspNowAdaptive(bool enabled) async =>
+      _sendCmd({'cmd': 'espnowAdaptive', 'enabled': enabled});
+
+  /// WiFi: SSID + пароль (переключает в WiFi STA)
   Future<bool> setWifi({required String ssid, required String pass}) async =>
-      _sendCmd({'cmd': 'wifi', 'ssid': ssid, 'pass': pass});
+      switchToWifiSta(ssid: ssid, pass: pass);
 
   /// GPS: вкл/выкл
   Future<bool> setGps(bool enabled) async =>
@@ -422,6 +691,12 @@ class RiftLinkBle {
     return _sendCmd(payload);
   }
 
+  /// Перегенерировать BLE PIN (passkey) — устройство покажет новый PIN на экране
+  Future<bool> regeneratePin() async => _sendCmd({'cmd': 'regeneratePin'});
+
+  /// Перегенерировать пароль AP (WiFi точки доступа) — новый отобразится на устройстве
+  Future<bool> regenerateApPass() async => _sendCmd({'cmd': 'regenerateApPass'});
+
   /// Selftest (evt "selftest")
   Future<bool> selftest() async => _sendCmd({'cmd': 'selftest'});
 
@@ -435,7 +710,7 @@ class RiftLinkBle {
     return _sendCmd(payload);
   }
 
-  /// Все подписчики получают один и тот же поток (см. [_eventBus]).
+  /// Все подписчики получают каждое событие (multicast). Длинные JSON склеиваются в [_drainRxAccum].
   Stream<RiftLinkEvent> get events => _eventBus.stream;
 }
 
@@ -450,6 +725,12 @@ double _jsonDouble(dynamic v, [double fallback = 868.0]) {
   if (v == null) return fallback;
   if (v is num) return v.toDouble();
   return double.tryParse(v.toString()) ?? fallback;
+}
+
+double? _jsonDoubleNullable(dynamic v) {
+  if (v == null) return null;
+  if (v is num) return v.toDouble();
+  return double.tryParse(v.toString());
 }
 
 int _jsonIntDefault(dynamic v, int d) {
@@ -476,14 +757,6 @@ String? _trimmedStringOrNull(dynamic v) {
   if (v == null) return null;
   final s = v.toString().trim();
   return s.isEmpty ? null : s;
-}
-
-String? _decodeUtf8OrNull(List<int> bytes) {
-  try {
-    return utf8.decode(bytes, allowMalformed: false);
-  } catch (_) {
-    return null;
-  }
 }
 
 ({List<String> objects, String tail}) _extractTopLevelJsonObjects(String s) {
@@ -529,6 +802,100 @@ String? _decodeUtf8OrNull(List<int> bytes) {
 
   final tail = lastConsumed > 0 ? s.substring(lastConsumed) : s;
   return (objects: out, tail: tail);
+}
+
+/// Индекс закрывающей `}` для `{` в [openIndex]; учитывает строки и экранирование. null если неполный.
+int? _indexOfMatchingBrace(String s, int openIndex) {
+  if (openIndex >= s.length || s.codeUnitAt(openIndex) != 0x7B) return null;
+  var inStr = false;
+  var esc = false;
+  var depth = 0;
+  for (var i = openIndex; i < s.length; i++) {
+    final ch = s.codeUnitAt(i);
+    if (inStr) {
+      if (esc) {
+        esc = false;
+        continue;
+      }
+      if (ch == 0x5C) esc = true;
+      else if (ch == 0x22) inStr = false;
+      continue;
+    }
+    if (ch == 0x22) {
+      inStr = true;
+      continue;
+    }
+    if (ch == 0x7B) {
+      depth++;
+      continue;
+    }
+    if (ch == 0x7D && depth > 0) {
+      depth--;
+      if (depth == 0) return i;
+    }
+  }
+  return null;
+}
+
+/// Из буфера с конкатенированным/обрезанным JSON извлекает полные **корневые** уведомления (`evt` в корне).
+/// Вложенные `{...}` (routes и т.д.) не трогаем — иначе портим буфер при обрезанном `info`.
+/// Если ничего не извлечено — возвращаем [s] целиком (ожидаем следующий notify).
+String _tryEmitFromConcatenated(String s, void Function(Map<String, dynamic>) emit) {
+  var tailStart = 0;
+  var searchPos = 0;
+  while (searchPos < s.length) {
+    final pos = s.indexOf('{', searchPos);
+    if (pos < 0) break;
+    final end = _indexOfMatchingBrace(s, pos);
+    if (end == null) {
+      searchPos = pos + 1;
+      continue;
+    }
+    try {
+      final decoded = jsonDecode(s.substring(pos, end + 1));
+      if (decoded is Map) {
+        final m = Map<String, dynamic>.from(decoded as Map);
+        if (m.containsKey('evt')) {
+          emit(m);
+          tailStart = end + 1;
+          searchPos = end + 1;
+          continue;
+        }
+      }
+    } catch (_) {}
+    searchPos = pos + 1;
+  }
+  return s.substring(tailStart);
+}
+
+String _rxDebugPreview(String s, [int max = 200]) {
+  final t = s.replaceAll('\n', '\\n').replaceAll('\r', '\\r');
+  if (t.length <= max) return t;
+  return '${t.substring(0, max)}...';
+}
+
+Map<String, dynamic> _normalizeRouteMap(Map<dynamic, dynamic> raw) {
+  final m = Map<String, dynamic>.from(raw);
+  final out = <String, dynamic>{
+    'dest': m['dest']?.toString() ?? '',
+    'nextHop': m['nextHop']?.toString() ?? '',
+    'hops': _jsonIntDefault(m['hops'], 0),
+    'rssi': _jsonIntDefault(m['rssi'], 0),
+  };
+  // Optional extended route data (for richer traceroute/modem UI).
+  final pathRaw = m['path'];
+  if (pathRaw is List) {
+    out['path'] = pathRaw.map((e) => e.toString()).toList();
+  }
+  final hopRssiRaw = m['hopRssi'] ?? m['pathRssi'];
+  if (hopRssiRaw is List) {
+    out['hopRssi'] = hopRssiRaw.map(_jsonInt).toList();
+  }
+  if (m.containsKey('modemPreset')) out['modemPreset'] = _jsonIntNullable(m['modemPreset']);
+  if (m.containsKey('sf')) out['sf'] = _jsonIntNullable(m['sf']);
+  if (m.containsKey('bw')) out['bw'] = _jsonDoubleNullable(m['bw']);
+  if (m.containsKey('cr')) out['cr'] = _jsonIntNullable(m['cr']);
+  return out;
 }
 
 /// Парсинг одного JSON-уведомления с RX (вынесено из потока для единого диспетчера).
@@ -593,13 +960,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     if (routesList is List) {
       for (final r in routesList) {
         if (r is Map) {
-          final m = Map<String, dynamic>.from(r as Map);
-          routes.add({
-            'dest': m['dest']?.toString() ?? '',
-            'nextHop': m['nextHop']?.toString() ?? '',
-            'hops': _jsonIntDefault(m['hops'], 0),
-            'rssi': _jsonIntDefault(m['rssi'], 0),
-          });
+          routes.add(_normalizeRouteMap(r as Map));
         }
       }
     }
@@ -608,8 +969,6 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     return RiftLinkInfoEvent(
       id: idStr,
       nickname: _trimmedStringOrNull(json['nickname']),
-      /// Прошивка опускает ключи, если значение «пустое» (см. ble.cpp notifyInfo):
-      /// без флагов приложение затирало UI при null из отсутствующего поля.
       hasNicknameField: json.containsKey('nickname'),
       hasChannelField: json.containsKey('channel'),
       hasOfflinePendingField: json.containsKey('offlinePending'),
@@ -618,18 +977,31 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       power: _jsonIntDefault(json['power'], 14),
       channel: _jsonIntNullable(json['channel']),
       version: json['version']?.toString(),
+      radioMode: json['radioMode']?.toString() ?? 'ble',
       neighbors: neighbors,
       neighborsRssi: neighborsRssi,
       neighborsHasKey: neighborsHasKey,
       groups: groups,
       routes: routes,
       sf: _jsonIntNullable(json['sf']),
+      bw: _jsonDoubleNullable(json['bw']),
+      cr: _jsonIntNullable(json['cr']),
+      modemPreset: _jsonIntNullable(json['modemPreset']),
       offlinePending: _jsonIntNullable(json['offlinePending']),
       batteryMv: _jsonIntNullable(json['batteryMv']) ?? _jsonIntNullable(json['battery']),
+      batteryPercent: _jsonIntNullable(json['batteryPercent']),
+      charging: json['charging'] == true || json['charging'] == 1,
+      timeHour: _jsonIntNullable(json['timeHour']),
+      timeMinute: _jsonIntNullable(json['timeMinute']),
       gpsPresent: json['gpsPresent'] == true || json['gpsPresent'] == 1,
       gpsEnabled: json['gpsEnabled'] == true || json['gpsEnabled'] == 1,
       gpsFix: json['gpsFix'] == true || json['gpsFix'] == 1,
       powersave: json['powersave'] == true || json['powersave'] == 1,
+      blePin: _jsonIntNullable(json['blePin']),
+      apSsid: json['apSsid']?.toString(),
+      apPassword: json['apPassword']?.toString(),
+      espNowChannel: _jsonIntNullable(json['espNowChannel']) ?? _jsonIntNullable(json['espnowChannel']),
+      espNowAdaptive: json['espNowAdaptive'] == true || json['espNowAdaptive'] == 1 || json['espnowAdaptive'] == true || json['espnowAdaptive'] == 1,
     );
   }
   if (evt == 'routes') {
@@ -638,13 +1010,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     if (routesList is List) {
       for (final r in routesList) {
         if (r is Map) {
-          final m = Map<String, dynamic>.from(r as Map);
-          routes.add({
-            'dest': m['dest'] as String? ?? '',
-            'nextHop': m['nextHop'] as String? ?? '',
-            'hops': (m['hops'] as num?)?.toInt() ?? 0,
-            'rssi': (m['rssi'] as num?)?.toInt() ?? 0,
-          });
+          routes.add(_normalizeRouteMap(r as Map));
         }
       }
     }
@@ -704,7 +1070,10 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     );
   }
   if (evt == 'pong') {
-    return RiftLinkPongEvent(from: json['from'] as String? ?? '');
+    return RiftLinkPongEvent(
+      from: json['from'] as String? ?? '',
+      rssi: _jsonIntNullable(json['rssi']),
+    );
   }
   if (evt == 'error') {
     return RiftLinkErrorEvent(
@@ -718,6 +1087,22 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       chunk: (json['chunk'] as num?)?.toInt() ?? 0,
       total: (json['total'] as num?)?.toInt() ?? 1,
       data: json['data'] as String? ?? '',
+    );
+  }
+  if (evt == 'bleOtaReady') {
+    return RiftLinkBleOtaReadyEvent(
+      chunkSize: _jsonIntDefault(json['chunkSize'], 509),
+    );
+  }
+  if (evt == 'bleOtaProgress') {
+    return RiftLinkBleOtaProgressEvent(
+      written: _jsonIntDefault(json['written'], 0),
+    );
+  }
+  if (evt == 'bleOtaResult') {
+    return RiftLinkBleOtaResultEvent(
+      ok: json['ok'] == true,
+      reason: json['reason'] as String?,
     );
   }
   if (evt == 'wifi') {
@@ -745,7 +1130,10 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     return RiftLinkSelftestEvent(
       radioOk: json['radioOk'] == true,
       displayOk: json['displayOk'] == true,
+      antennaOk: json['antennaOk'] != false,
       batteryMv: (json['batteryMv'] as num?)?.toInt() ?? 0,
+      batteryPercent: _jsonIntNullable(json['batteryPercent']),
+      charging: json['charging'] == true,
       heapFree: (json['heapFree'] as num?)?.toInt() ?? 0,
     );
   }
@@ -801,29 +1189,39 @@ class RiftLinkBroadcastDeliveryEvent extends RiftLinkEvent {
 class RiftLinkInfoEvent extends RiftLinkEvent {
   final String id;
   final String? nickname;
-  /// Ключ `nickname` есть в JSON (прошивка не шлёт ключ, если ник пустой).
   final bool hasNicknameField;
-  /// Ключ `channel` есть в JSON (для RU/US и т.д. может отсутствовать).
   final bool hasChannelField;
-  /// Ключ `offlinePending` есть в JSON (прошивка не шлёт, если 0).
   final bool hasOfflinePendingField;
   final String region;
   final double freq;
   final int power;
-  final int? channel;  // 0–2 для EU/UK
+  final int? channel;
   final String? version;
+  final String radioMode;  // "ble" or "wifi"
   final List<String> neighbors;
   final List<int> neighborsRssi;
-  final List<bool> neighborsHasKey;  // true = можно отправить (ключ есть)
+  final List<bool> neighborsHasKey;
   final List<int> groups;
   final List<Map<String, dynamic>> routes;
   final int? sf;
+  final double? bw;
+  final int? cr;
+  final int? modemPreset;   // 0=Speed,1=Normal,2=Range,3=MaxRange,4=Custom
   final int? offlinePending;
   final int? batteryMv;
+  final int? batteryPercent;
+  final bool charging;
+  final int? timeHour;
+  final int? timeMinute;
   final bool gpsPresent;
   final bool gpsEnabled;
   final bool gpsFix;
   final bool powersave;
+  final int? blePin;
+  final String? apSsid;
+  final String? apPassword;
+  final int? espNowChannel;
+  final bool espNowAdaptive;
   RiftLinkInfoEvent({
     required this.id,
     this.nickname,
@@ -835,18 +1233,31 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
     this.power = 14,
     this.channel,
     this.version,
+    this.radioMode = 'ble',
     this.neighbors = const [],
     this.neighborsRssi = const [],
     this.neighborsHasKey = const [],
     this.groups = const [],
     this.routes = const [],
     this.sf,
+    this.bw,
+    this.cr,
+    this.modemPreset,
     this.offlinePending,
     this.batteryMv,
+    this.batteryPercent,
+    this.charging = false,
+    this.timeHour,
+    this.timeMinute,
     this.gpsPresent = false,
     this.gpsEnabled = false,
     this.gpsFix = false,
     this.powersave = false,
+    this.blePin,
+    this.apSsid,
+    this.apPassword,
+    this.espNowChannel,
+    this.espNowAdaptive = false,
   });
 }
 
@@ -874,12 +1285,18 @@ class RiftLinkInviteEvent extends RiftLinkEvent {
 class RiftLinkSelftestEvent extends RiftLinkEvent {
   final bool radioOk;
   final bool displayOk;
+  final bool antennaOk;
   final int batteryMv;
+  final int? batteryPercent;
+  final bool charging;
   final int heapFree;
   RiftLinkSelftestEvent({
     required this.radioOk,
     required this.displayOk,
+    this.antennaOk = true,
     required this.batteryMv,
+    this.batteryPercent,
+    this.charging = false,
     required this.heapFree,
   });
 }
@@ -951,7 +1368,8 @@ class RiftLinkOtaEvent extends RiftLinkEvent {
 
 class RiftLinkPongEvent extends RiftLinkEvent {
   final String from;
-  RiftLinkPongEvent({required this.from});
+  final int? rssi;
+  RiftLinkPongEvent({required this.from, this.rssi});
 }
 
 class RiftLinkErrorEvent extends RiftLinkEvent {
@@ -971,4 +1389,20 @@ class RiftLinkVoiceEvent extends RiftLinkEvent {
     required this.total,
     required this.data,
   });
+}
+
+class RiftLinkBleOtaReadyEvent extends RiftLinkEvent {
+  final int chunkSize;
+  RiftLinkBleOtaReadyEvent({required this.chunkSize});
+}
+
+class RiftLinkBleOtaProgressEvent extends RiftLinkEvent {
+  final int written;
+  RiftLinkBleOtaProgressEvent({required this.written});
+}
+
+class RiftLinkBleOtaResultEvent extends RiftLinkEvent {
+  final bool ok;
+  final String? reason;
+  RiftLinkBleOtaResultEvent({required this.ok, this.reason});
 }

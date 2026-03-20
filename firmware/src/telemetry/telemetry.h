@@ -19,4 +19,10 @@ void send();  // Отправка broadcast TELEMETRY
 // Чтение батареи (mV), 0 если недоступно
 uint16_t readBatteryMv();
 
+/** Устройство заряжается (напряжение > 4.2V — выше полного Li-ion) */
+bool isCharging();
+
+/** Процент заряда (0-100), -1 если не подключена батарея. Li-ion 3.0–4.2V */
+int batteryPercent();
+
 }  // namespace telemetry

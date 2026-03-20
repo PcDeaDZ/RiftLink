@@ -10,6 +10,24 @@
 
 namespace radio {
 
+enum ModemPreset : uint8_t {
+  MODEM_SPEED     = 0,  // SF7  BW250 CR5 — город, скорость
+  MODEM_NORMAL    = 1,  // SF7  BW125 CR5 — баланс (дефолт)
+  MODEM_RANGE     = 2,  // SF10 BW125 CR5 — дальность
+  MODEM_MAX_RANGE = 3,  // SF12 BW125 CR8 — максимальная дальность
+  MODEM_CUSTOM    = 4,  // ручные SF/BW/CR
+  MODEM_PRESET_COUNT = 5
+};
+
+struct ModemConfig {
+  uint8_t sf;
+  float   bw;
+  uint8_t cr;
+};
+
+const ModemConfig& modemPresetConfig(ModemPreset p);
+const char* modemPresetName(ModemPreset p);
+
 bool init();
 void setAsyncMode(bool on);
 /** TX только через очередь → `radioSchedulerTask` (без синхронного SPI из loop/packetTask).
@@ -36,13 +54,30 @@ int getLastRssi();
 void applyRegion(float freq, int power);  // низкоуровнево; из приложения — requestApplyRegion
 /** Смена частоты/мощности из BLE/UI — постановка в `radioCmdQueue` (применение в планировщике под mutex). */
 void requestApplyRegion(float freq, int power);
-/** Mesh SF: NVS + чип. Только из BLE ApplySf / явной смены — не вызывать из TX с rssiToSf. */
+
+// --- Modem config (SF + BW + CR) ---
+/** Применить пресет (0–3) или CUSTOM (4) с текущими NVS-значениями. Вызов под mutex. */
+void setModemPreset(ModemPreset p);
+/** Применить ручные SF/BW/CR и сохранить как CUSTOM в NVS. Вызов под mutex. */
+void setCustomModem(uint8_t sf, float bw, uint8_t cr);
+/** Постановка в radioCmdQueue — безопасно из любого контекста. */
+void requestModemPreset(ModemPreset p);
+void requestCustomModem(uint8_t sf, float bw, uint8_t cr);
+
+ModemPreset getModemPreset();
+uint8_t getSpreadingFactor();
+float   getBandwidth();
+uint8_t getCodingRate();
+
+/** Legacy: mesh SF → переводит в CUSTOM с текущими BW/CR. */
 void setSpreadingFactor(uint8_t sf);
 /** Только чип (планировщик RX/TX) — не трогает mesh и NVS. */
 void applyHardwareSpreadingFactor(uint8_t sf);
+/** Только чип (для сканера) — меняет SF+BW+CR без NVS и mesh state. */
+void applyHardwareModem(uint8_t sf, float bw, uint8_t cr);
 /** Запрос смены SF из BLE/UI — постановка в `radioCmdQueue`. */
 void requestSpreadingFactor(uint8_t sf);
-uint8_t getSpreadingFactor();            // текущий SF (для info/evt)
+
 uint32_t getTimeOnAir(size_t len);       // мкс, для duty cycle
 /** CAD (mutex + SPI). Предпочтительно не вызывать из прикладного кода — CSMA в планировщике при TX. */
 bool isChannelFree();

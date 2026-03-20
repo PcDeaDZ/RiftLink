@@ -33,9 +33,38 @@
 #include "bls_n/bls_n.h"
 #include "crypto/crypto.h"
 #include "esp_now_slots/esp_now_slots.h"
+#include "radio_mode/radio_mode.h"
+#include "ws_server/ws_server.h"
+#include "ble_ota/ble_ota.h"
 #include <mbedtls/base64.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_heap_caps.h>
+#include <stdlib.h>
+#include <nvs.h>
+#include <esp_random.h>
+
+#define NVS_BLE_NAMESPACE "riftlink"
+#define NVS_KEY_BLE_PIN   "ble_pin"
+
+static uint32_t s_passkey = 0;
+
+static void loadOrGeneratePasskey() {
+  nvs_handle_t h;
+  if (nvs_open(NVS_BLE_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+    uint32_t pin = 0;
+    if (nvs_get_u32(h, NVS_KEY_BLE_PIN, &pin) == ESP_OK && pin >= 100000 && pin <= 999999) {
+      s_passkey = pin;
+    } else {
+      s_passkey = esp_random() % 900000 + 100000;
+      nvs_set_u32(h, NVS_KEY_BLE_PIN, s_passkey);
+      nvs_commit(h);
+    }
+    nvs_close(h);
+  } else {
+    s_passkey = esp_random() % 900000 + 100000;
+  }
+}
 
 #define SERVICE_UUID        "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 #define CHAR_TX_UUID        "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  // write from app
@@ -43,13 +72,15 @@
 #define DEVICE_NAME         "RiftLink"
 /**
  * Один JSON на запись в GATT TX / одно notify: ≤ BLE_ATT_MAX_JSON_BYTES.
+ * После JSON в notify добавляется `\n` (NDJSON) — приложение режет поток по строкам; при len==512 байт `\n` не добавляется (редкий край).
  * NimBLE: BLE_ATT_ATTR_MAX_LEN и CONFIG_NIMBLE_CPP_ATT_VALUE_INIT_LENGTH — макс. 512 байт на значение атрибута.
  * Поэтому «512» — не произвольный порог, а потолок стека BLE.
  *
  * Оценка voice: {"cmd":"voice","to":"HH...","chunk":n,"total":t,"data":"<b64>"} — оболочка ~85–95 B,
  * на base64 остаётся ~417 B → сырой Opus ≤ ~312 B на чанк (см. BLE_VOICE_CHUNK_RAW_MAX).
  *
- * ArduinoJson 7.4+: JsonDocument без фиксированной ёмкости; при переполнении — doc.overflowed().
+ * ArduinoJson 7: JsonDocument с кастомным Allocator — предпочтительно SPIRAM, иначе malloc (платы без PSRAM).
+ * При переполнении — doc.overflowed().
  */
 static constexpr size_t BLE_ATT_MAX_JSON_BYTES = 512;
 /** Сырой Opus на один BLE-чанк voice (вход/выход), чтобы весь JSON уместился в 512 B. */
@@ -57,6 +88,28 @@ static constexpr size_t BLE_VOICE_CHUNK_RAW_MAX = 300;
 static constexpr size_t BLE_VOICE_CHUNK_B64_BUF = 400;  // ceil(300/3)*4
 static constexpr size_t kBleJsonProtocolMaxBytes = BLE_ATT_MAX_JSON_BYTES;
 static_assert(kBleJsonProtocolMaxBytes == 512, "согласовано с BLE_ATT_ATTR_MAX_LEN");
+
+namespace {
+struct BleJsonAllocator : ArduinoJson::Allocator {
+  void* allocate(size_t size) override {
+    if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) {
+      void* p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
+      if (p) return p;
+    }
+    return malloc(size);
+  }
+  void deallocate(void* pointer) override { free(pointer); }
+  void* reallocate(void* pointer, size_t new_size) override {
+    if (!pointer) return allocate(new_size);
+    if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) {
+      void* p = heap_caps_realloc(pointer, new_size, MALLOC_CAP_SPIRAM);
+      if (p) return p;
+    }
+    return realloc(pointer, new_size);
+  }
+};
+static BleJsonAllocator s_bleJsonAllocator;
+}  // namespace
 
 static NimBLEServer* pServer = nullptr;
 static NimBLECharacteristic* pRxChar = nullptr;
@@ -104,6 +157,14 @@ static bool s_blsScanEnded = false;
 static uint32_t s_blsScanLastStart = 0;
 #define BLS_SCAN_DURATION_SEC 15
 #define BLS_SCAN_RESTART_DELAY_MS 500
+/** NimBLE scan резервирует internal heap; при ~1KB после Wi‑Fi+async — BLE_INIT: Malloc failed */
+#define BLS_SCAN_MIN_FREE_INTERNAL 5120
+#define BLS_SCAN_MIN_LARGEST_INTERNAL 4096
+
+static bool blsScanHeapOk() {
+  return heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >= BLS_SCAN_MIN_FREE_INTERNAL &&
+         heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) >= BLS_SCAN_MIN_LARGEST_INTERNAL;
+}
 
 /** Manufacturer Specific Data (AD type 0xFF), индекс как у NimBLE getManufacturerData(index) — без std::string. */
 static bool bleAdvGetMfgData(const uint8_t* pl, size_t plLen, uint8_t index,
@@ -133,15 +194,64 @@ static bool bleAdvGetMfgData(const uint8_t* pl, size_t plLen, uint8_t index,
 }
 #endif /* !RIFTLINK_DISABLE_BLS_N */
 
+static uint8_t s_notifyTxBuf[BLE_ATT_MAX_JSON_BYTES];
+
+static bool hasActiveTransport() {
+  if (radio_mode::current() == radio_mode::WIFI)
+    return ws_server::hasClient();
+  return s_connected && pRxChar;
+}
+
+/** Макс. payload одного BLE notify = negotiated MTU - 3 (ATT header). */
+static size_t bleNotifyMtu() {
+  if (!pServer || pServer->getConnectedCount() == 0) return BLE_ATT_MAX_JSON_BYTES;
+  uint16_t mtu = pServer->getPeerMTU(pServer->getPeerInfo(0).getConnHandle());
+  return (mtu > 3) ? (mtu - 3) : BLE_ATT_MAX_JSON_BYTES;
+}
+
 static void notifyJsonToApp(const char* payload, size_t len) {
-  if (!pRxChar || !s_connected || !payload || len == 0) return;
+  if (!payload || len == 0) return;
+
+  // WiFi mode: route to WebSocket (no size limit)
+  if (radio_mode::current() == radio_mode::WIFI) {
+#if BLE_LOG_TX_JSON
+    Serial.print("[WS->APP] ");
+    Serial.write((const uint8_t*)payload, len);
+    Serial.println();
+#endif
+    ws_server::sendEvent(payload, (int)len);
+    return;
+  }
+
+  if (!pRxChar || !s_connected) return;
+
 #if BLE_LOG_TX_JSON
   Serial.print("[BLE->APP] ");
   Serial.write((const uint8_t*)payload, len);
   Serial.println();
 #endif
-  pRxChar->setValue((uint8_t*)payload, len);
-  pRxChar->notify();
+
+  const size_t chunkMax = bleNotifyMtu();
+  size_t off = 0;
+  while (off < len) {
+    size_t remain = len - off;
+    bool lastChunk = (remain <= chunkMax);
+    size_t chunk = lastChunk ? remain : chunkMax;
+
+    memcpy(s_notifyTxBuf, payload + off, chunk);
+    size_t sendLen = chunk;
+    // NDJSON newline delimiter only on the very last chunk
+    if (lastChunk && chunk < sizeof(s_notifyTxBuf)) {
+      s_notifyTxBuf[chunk] = '\n';
+      sendLen = chunk + 1;
+    }
+
+    pRxChar->setValue(s_notifyTxBuf, sendLen);
+    pRxChar->notify();
+    off += chunk;
+
+    if (!lastChunk) vTaskDelay(pdMS_TO_TICKS(8));
+  }
 }
 
 #if !defined(RIFTLINK_DISABLE_BLS_N)
@@ -225,15 +335,77 @@ static bool s_riftTxCharConstructed = false;
 
 static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
   if (len == 0) return;
-  if (len > BLE_ATT_MAX_JSON_BYTES) return;  // см. BLE_ATT_MAX_JSON_BYTES — лимит атрибута GATT
 
-  JsonDocument doc;
+  // BLE OTA: binary chunk mode — data goes directly to ble_ota, not JSON
+  if (ble_ota::isActive()) {
+    // Check if it's a JSON control message (starts with '{')
+    if (val[0] == '{') {
+      // Parse as JSON — could be bleOtaEnd or bleOtaAbort
+      JsonDocument doc(&s_bleJsonAllocator);
+      DeserializationError err = deserializeJson(doc, std::string_view((const char*)val, len));
+      if (!err) {
+        const char* cmd = doc["cmd"];
+        if (cmd && strcmp(cmd, "bleOtaEnd") == 0) {
+          bool ok = ble_ota::end();
+          char resp[64];
+          snprintf(resp, sizeof(resp), "{\"evt\":\"bleOtaResult\",\"ok\":%s}", ok ? "true" : "false");
+          notifyJsonToApp(resp, strlen(resp));
+          if (ok) {
+            delay(500);
+            esp_restart();
+          }
+          return;
+        }
+        if (cmd && strcmp(cmd, "bleOtaAbort") == 0) {
+          ble_ota::abort();
+          notifyJsonToApp("{\"evt\":\"bleOtaResult\",\"ok\":false,\"reason\":\"aborted\"}", 52);
+          return;
+        }
+      }
+      // Not a control message, treat as data
+    }
+    // Raw binary chunk
+    if (!ble_ota::writeChunk(val, len)) {
+      ble_ota::abort();
+      notifyJsonToApp("{\"evt\":\"bleOtaResult\",\"ok\":false,\"reason\":\"write_failed\"}", 56);
+      return;
+    }
+    // Progress notification every 16K
+    uint32_t w = ble_ota::bytesWritten();
+    if (w > 0 && (w % 16384) < len) {
+      char prog[80];
+      int n = snprintf(prog, sizeof(prog), "{\"evt\":\"bleOtaProgress\",\"written\":%u}", (unsigned)w);
+      notifyJsonToApp(prog, n);
+    }
+    return;
+  }
+
+  if (len > BLE_ATT_MAX_JSON_BYTES) return;
+
+  JsonDocument doc(&s_bleJsonAllocator);
   const std::string_view jsonSv(reinterpret_cast<const char*>(val), len);
   DeserializationError err = deserializeJson(doc, jsonSv);
   if (err) return;
 
     const char* cmd = doc["cmd"];
     if (!cmd) return;
+
+    if (strcmp(cmd, "bleOtaStart") == 0) {
+      uint32_t size = doc["size"] | 0;
+      const char* md5 = doc["md5"];
+      if (size == 0) {
+        notifyJsonToApp("{\"evt\":\"bleOtaResult\",\"ok\":false,\"reason\":\"no_size\"}", 51);
+        return;
+      }
+      if (ble_ota::begin(size, md5)) {
+        char resp[64];
+        int n = snprintf(resp, sizeof(resp), "{\"evt\":\"bleOtaReady\",\"chunkSize\":%u}", (unsigned)(BLE_ATT_MAX_JSON_BYTES - 3));
+        notifyJsonToApp(resp, n);
+      } else {
+        notifyJsonToApp("{\"evt\":\"bleOtaResult\",\"ok\":false,\"reason\":\"begin_failed\"}", 56);
+      }
+      return;
+    }
 
     if (strcmp(cmd, "info") == 0) {
       s_pendingInfo = true;
@@ -325,8 +497,24 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     }
 
     if (strcmp(cmd, "ota") == 0) {
-      ota::start();
-      if (ota::isActive()) ble::notifyOta("192.168.4.1", "RiftLink-OTA", "riftlink123");
+      // OTA через WiFi AP — переключаем в WiFi режим
+      radio_mode::switchTo(radio_mode::WIFI, radio_mode::AP);
+      return;
+    }
+
+    if (strcmp(cmd, "radioMode") == 0) {
+      const char* mode = doc["mode"];
+      if (!mode) return;
+      if (strcmp(mode, "wifi") == 0) {
+        const char* variant = doc["variant"] | "ap";
+        const char* ssid = doc["ssid"];
+        const char* pass = doc["pass"].as<const char*>();
+        if (!pass) pass = doc["password"].as<const char*>();
+        auto wv = (strcmp(variant, "sta") == 0) ? radio_mode::STA : radio_mode::AP;
+        radio_mode::switchTo(radio_mode::WIFI, wv, ssid, pass);
+      } else if (strcmp(mode, "ble") == 0) {
+        radio_mode::switchTo(radio_mode::BLE);
+      }
       return;
     }
 
@@ -343,11 +531,8 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       const char* ssid = doc["ssid"];
       const char* pass = doc["pass"].as<const char*>();
       if (!pass) pass = doc["password"].as<const char*>();
-      if (ssid && wifi::setCredentials(ssid, pass)) {
-        wifi::connect();
-        char ip[16];
-        wifi::getStatus(nullptr, 0, ip, sizeof(ip));
-        ble::notifyWifi(wifi::isConnected(), ssid, ip);
+      if (ssid) {
+        radio_mode::switchTo(radio_mode::WIFI, radio_mode::STA, ssid, pass);
       }
       return;
     }
@@ -375,7 +560,29 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       }
       return;
     }
+    if (strcmp(cmd, "modemPreset") == 0) {
+      int p = doc["preset"] | doc["value"] | -1;
+      if (p >= 0 && p < 4) {
+        radio::requestModemPreset((radio::ModemPreset)p);
+        s_pendingInfo = true;
+      }
+      return;
+    }
+    if (strcmp(cmd, "modemCustom") == 0) {
+      int sf = doc["sf"] | -1;
+      float bw = doc["bw"] | -1.0f;
+      int cr = doc["cr"] | -1;
+      if (sf >= 7 && sf <= 12 && bw > 0 && cr >= 5 && cr <= 8) {
+        radio::requestCustomModem((uint8_t)sf, bw, (uint8_t)cr);
+        s_pendingInfo = true;
+      }
+      return;
+    }
     if (strcmp(cmd, "espnowChannel") == 0) {
+      if (radio_mode::current() != radio_mode::WIFI) {
+        ble::notifyError("espnow", "ESP-NOW доступен только в WiFi-режиме");
+        return;
+      }
       int ch = doc["channel"] | doc["espnowChannel"] | -1;
       if (ch >= 1 && ch <= 13 && esp_now_slots::setChannel((uint8_t)ch)) {
         esp_now_slots::setAdaptive(false);
@@ -384,6 +591,10 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       return;
     }
     if (strcmp(cmd, "espnowAdaptive") == 0) {
+      if (radio_mode::current() != radio_mode::WIFI) {
+        ble::notifyError("espnow", "ESP-NOW доступен только в WiFi-режиме");
+        return;
+      }
       bool on = doc["enabled"] | doc["adaptive"] | false;
       if (esp_now_slots::setAdaptive(on)) s_pendingInfo = true;
       return;
@@ -414,6 +625,16 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       if (doc["enabled"].is<bool>()) {
         powersave::setEnabled(doc["enabled"].as<bool>());
       }
+      return;
+    }
+    if (strcmp(cmd, "regeneratePin") == 0) {
+      ble::regeneratePasskey();
+      s_pendingInfo = true;
+      return;
+    }
+    if (strcmp(cmd, "regenerateApPass") == 0) {
+      wifi::regenerateApPassword();
+      s_pendingInfo = true;
       return;
     }
     if (strcmp(cmd, "addGroup") == 0) {
@@ -459,6 +680,41 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
 
     if (strcmp(cmd, "selftest") == 0 || strcmp(cmd, "test") == 0) {
       s_pendingSelftest = true;
+      return;
+    }
+
+    if (strcmp(cmd, "shutdown") == 0 || strcmp(cmd, "poweroff") == 0) {
+      powersave::requestShutdown();
+      return;
+    }
+
+    if (strcmp(cmd, "signalTest") == 0) {
+      // Ping all neighbors and report RSSI
+      int n = neighbors::getCount();
+      for (int i = 0; i < n && i < 8; i++) {
+        uint8_t peerId[protocol::NODE_ID_LEN];
+        if (!neighbors::getId(i, peerId)) continue;
+        uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
+        size_t len = protocol::buildPacket(pkt, sizeof(pkt),
+            node::getId(), peerId, 31, protocol::OP_PING, nullptr, 0);
+        if (len > 0) radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(peerId)));
+      }
+      return;
+    }
+
+    if (strcmp(cmd, "traceroute") == 0) {
+      const char* toStr = doc["to"];
+      if (toStr && strlen(toStr) >= 8) {
+        uint8_t target[protocol::NODE_ID_LEN];
+        memset(target, 0xFF, protocol::NODE_ID_LEN);
+        int n = (strlen(toStr) >= 16) ? 8 : 4;
+        for (int i = 0; i < n; i++) {
+          char hex[3] = { toStr[i*2], toStr[i*2+1], 0 };
+          target[i] = (uint8_t)strtoul(hex, nullptr, 16);
+        }
+        routing::requestRoute(target);
+        s_pendingRoutes = true;
+      }
       return;
     }
 
@@ -543,13 +799,24 @@ static ServerCallbacks s_bleServerCallbacks;
 
 namespace ble {
 
+void processCommand(const uint8_t* data, size_t len) {
+  bleHandleTxJson(data, (uint16_t)(len > 0xFFFF ? 0xFFFF : len));
+}
+
 bool init() {
   Serial.println("[BLE] Init...");
   if (!NimBLEDevice::init(DEVICE_NAME)) {
     Serial.println("[BLE] NimBLEDevice::init FAILED — устройство не будет видно в скане BLE");
     return false;
   }
-  NimBLEDevice::setPower(ESP_PWR_LVL_P3);  // P3 вместо P9 — меньше ток, стабильнее при connect
+  NimBLEDevice::setPower(ESP_PWR_LVL_P3);
+  NimBLEDevice::setMTU(517);
+
+  loadOrGeneratePasskey();
+  NimBLEDevice::setSecurityAuth(true, true, true);
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
+  NimBLEDevice::setSecurityPasskey(s_passkey);
+  Serial.printf("[BLE] Passkey: %06u\n", (unsigned)s_passkey);
 
   pServer = NimBLEDevice::createServer();
   pServer->setCallbacks(&s_bleServerCallbacks);
@@ -586,6 +853,22 @@ bool init() {
   return true;
 }
 
+void deinit() {
+  Serial.println("[BLE] Deinit...");
+#if !defined(RIFTLINK_DISABLE_BLS_N)
+  if (s_blsScanActive) {
+    NimBLEDevice::getScan()->stop();
+    s_blsScanActive = false;
+  }
+#endif
+  s_connected = false;
+  pRxChar = nullptr;
+  pServer = nullptr;
+  NimBLEDevice::deinit(true);
+  Serial.printf("[BLE] Deinit done, heap free=%u\n",
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
 void setOnSend(void (*cb)(const uint8_t* to, const char* text, uint8_t ttlMinutes)) {
   s_onSend = cb;
 }
@@ -608,7 +891,7 @@ void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId, int
 void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes) {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "msg";
   char fromHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(fromHex + i*2, 3, "%02X", from[i]);
@@ -626,7 +909,7 @@ void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, 
 void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi) {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "delivered";
   char fromHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(fromHex + i*2, 3, "%02X", from[i]);
@@ -642,7 +925,7 @@ void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi) {
 void notifyRead(const uint8_t* from, uint32_t msgId, int rssi) {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "read";
   char fromHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(fromHex + i*2, 3, "%02X", from[i]);
@@ -658,7 +941,7 @@ void notifyRead(const uint8_t* from, uint32_t msgId, int rssi) {
 void notifySent(const uint8_t* to, uint32_t msgId) {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "sent";
   char toHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(toHex + i*2, 3, "%02X", to[i]);
@@ -673,7 +956,7 @@ void notifySent(const uint8_t* to, uint32_t msgId) {
 void notifyUndelivered(const uint8_t* to, uint32_t msgId) {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "undelivered";
   char toHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(toHex + i*2, 3, "%02X", to[i]);
@@ -688,7 +971,7 @@ void notifyUndelivered(const uint8_t* to, uint32_t msgId) {
 void notifyBroadcastDelivery(uint32_t msgId, int delivered, int total) {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   if (total > 0 && delivered == 0) {
     doc["evt"] = "undelivered";
   } else {
@@ -706,7 +989,7 @@ void notifyBroadcastDelivery(uint32_t msgId, int delivered, int total) {
 void notifyLocation(const uint8_t* from, float lat, float lon, int16_t alt, int rssi) {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "location";
   char fromHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(fromHex + i*2, 3, "%02X", from[i]);
@@ -727,9 +1010,9 @@ void notifyTelemetry(const uint8_t* from, uint16_t batteryMv, uint16_t heapKb, i
 }
 
 void notifyInfo() {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "info";
   const uint8_t* id = node::getId();
   char idHex[17] = {0};
@@ -744,18 +1027,32 @@ void notifyInfo() {
   if (region::getChannelCount() > 0) {
     doc["channel"] = region::getChannel();
   }
+  doc["radioMode"] = (radio_mode::current() == radio_mode::BLE) ? "ble" : "wifi";
   doc["espnowChannel"] = esp_now_slots::getChannel();
   doc["espnowAdaptive"] = esp_now_slots::isAdaptive();
   doc["version"] = RIFTLINK_VERSION;
   doc["sf"] = radio::getSpreadingFactor();
+  doc["bw"] = radio::getBandwidth();
+  doc["cr"] = radio::getCodingRate();
+  doc["modemPreset"] = (int)radio::getModemPreset();
   uint16_t batteryMv = telemetry::readBatteryMv();
   if (batteryMv > 0) doc["batteryMv"] = batteryMv;
+  int batPct = telemetry::batteryPercent();
+  if (batPct >= 0) doc["batteryPercent"] = batPct;
+  doc["charging"] = telemetry::isCharging();
+  if (gps::hasTime()) {
+    doc["timeHour"] = gps::getHour();
+    doc["timeMinute"] = gps::getMinute();
+  }
   int offlinePending = offline_queue::getPendingCount();
   if (offlinePending > 0) doc["offlinePending"] = offlinePending;
   doc["gpsPresent"] = gps::isPresent();
   doc["gpsEnabled"] = gps::isEnabled();
   doc["gpsFix"] = gps::hasFix();
   doc["powersave"] = powersave::isEnabled();
+  doc["blePin"] = s_passkey;
+  doc["apSsid"] = wifi::getApSsid();
+  doc["apPassword"] = wifi::getApPassword();
 
   JsonArray grpArr = doc["groups"].to<JsonArray>();
   int ng = groups::getCount();
@@ -812,7 +1109,7 @@ void notifyInvite() {
   if (mbedtls_base64_encode((unsigned char*)pubKeyB64, sizeof(pubKeyB64), &b64Len, pubKey, 32) != 0) return;
   pubKeyB64[b64Len] = '\0';
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "invite";
   const uint8_t* id = node::getId();
   char idHex[17] = {0};
@@ -839,7 +1136,7 @@ void notifyInvite() {
 void notifyRoutes() {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "routes";
   JsonArray arr = doc["routes"].to<JsonArray>();
   int n = routing::getRouteCount();
@@ -865,7 +1162,7 @@ void notifyRoutes() {
 void notifyGroups() {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "groups";
   JsonArray arr = doc["groups"].to<JsonArray>();
   int n = groups::getCount();
@@ -885,7 +1182,7 @@ void requestNeighborsNotify() {
 void notifyNeighbors() {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "neighbors";
   JsonArray arr = doc["neighbors"].to<JsonArray>();
   JsonArray rssiArr = doc["rssi"].to<JsonArray>();
@@ -909,7 +1206,7 @@ void notifyNeighbors() {
 void notifyOta(const char* ip, const char* ssid, const char* password) {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "ota";
   doc["ip"] = ip;
   doc["ssid"] = ssid;
@@ -923,7 +1220,7 @@ void notifyOta(const char* ip, const char* ssid, const char* password) {
 void notifyWifi(bool connected, const char* ssid, const char* ip) {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "wifi";
   doc["connected"] = connected;
   if (ssid) doc["ssid"] = ssid;
@@ -937,7 +1234,7 @@ void notifyWifi(bool connected, const char* ssid, const char* ip) {
 void notifyRegion(const char* code, float freq, int power, int channel) {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "region";
   doc["region"] = code;
   doc["freq"] = freq;
@@ -952,7 +1249,7 @@ void notifyRegion(const char* code, float freq, int power, int channel) {
 void notifyGps(bool present, bool enabled, bool hasFix, int rx, int tx, int en) {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "gps";
   doc["present"] = present;
   doc["enabled"] = enabled;
@@ -969,7 +1266,7 @@ void notifyGps(bool present, bool enabled, bool hasFix, int rx, int tx, int en) 
 void notifyError(const char* code, const char* msg) {
   if (!pRxChar || !s_connected || !code || !msg) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "error";
   doc["code"] = code;
   doc["msg"] = msg;
@@ -982,7 +1279,7 @@ void notifyError(const char* code, const char* msg) {
 void notifyPong(const uint8_t* from, int rssi) {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "pong";
   char fromHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(fromHex + i*2, 3, "%02X", from[i]);
@@ -997,14 +1294,18 @@ void notifyPong(const uint8_t* from, int rssi) {
 void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t heapFree) {
   if (!pRxChar || !s_connected) return;
 
-  JsonDocument doc;
+  JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "selftest";
   doc["radioOk"] = radioOk;
   doc["displayOk"] = displayOk;
+  doc["antennaOk"] = radioOk;
   doc["batteryMv"] = batteryMv;
+  int batPct = telemetry::batteryPercent();
+  if (batPct >= 0) doc["batteryPercent"] = batPct;
+  doc["charging"] = telemetry::isCharging();
   doc["heapFree"] = heapFree;
 
-  char buf[120];
+  char buf[160];
   size_t len = serializeJson(doc, buf);
   notifyJsonToApp(buf, len);
 }
@@ -1028,7 +1329,7 @@ void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen) {
     if (mbedtls_base64_encode(b64, sizeof(b64) - 1, &olen, data + off, chunkLen) != 0) break;
     if (olen < sizeof(b64)) b64[olen] = '\0';
 
-    JsonDocument doc;
+    JsonDocument doc(&s_bleJsonAllocator);
     doc["evt"] = "voice";
     doc["from"] = fromHex;
     doc["chunk"] = (int)i;
@@ -1052,15 +1353,15 @@ void update() {
       gps::setPins(s_pendingGpsRx, s_pendingGpsTx, s_pendingGpsEn);
       gps::saveConfig();
     }
-    if (s_connected && pRxChar) {
+    if (hasActiveTransport()) {
       int rx, tx, en;
       gps::getPins(&rx, &tx, &en);
       notifyGps(gps::isPresent(), gps::isEnabled(), gps::hasFix(), rx, tx, en);
     }
     return;
   }
-  if (s_connected && pRxChar) {
-    // Сначала применить nickname из BLE (thread-safe: main loop пишет в node)
+  if (hasActiveTransport()) {
+    // Сначала применить nickname (thread-safe: main loop пишет в node)
     if (s_pendingNickname) {
       s_pendingNickname = false;
       node::setNickname(s_pendingNicknameBuf);
@@ -1094,7 +1395,8 @@ void update() {
       if (!ok) notifyError("group_send", "Сообщение слишком длинное или ошибка шифрования");
     }
   }
-  if (pServer && !s_connected && pServer->getConnectedCount() == 0) {
+  if (radio_mode::current() == radio_mode::BLE &&
+      pServer && !s_connected && pServer->getConnectedCount() == 0) {
     NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
     if (!pAdv->isAdvertising()) {
       pAdv->start();
@@ -1103,8 +1405,19 @@ void update() {
 
   // BLS-N: при подключённом телефоне — BLE scan для приёма RTS от соседей
   // Paper: отключено — BLE scan вызывает Malloc failed при heap ~10KB (много advertisers)
+  // OLED + Wi‑Fi: после esp_wifi_init остаётся мало internal — не стартуем scan без порога (иначе NimBLE BLE_INIT).
 #if !defined(USE_EINK) && !defined(RIFTLINK_DISABLE_BLS_N)
   if (s_connected) {
+    static uint32_t s_blsHeapSkipLogMs = 0;
+    if (!blsScanHeapOk()) {
+      if (millis() - s_blsHeapSkipLogMs > 60000) {
+        s_blsHeapSkipLogMs = millis();
+        Serial.printf("[RiftLink] BLS: BLE scan пропущен (internal free=%u largest=%u; нужно >=%u / >=%u)\n",
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+            (unsigned)BLS_SCAN_MIN_FREE_INTERNAL, (unsigned)BLS_SCAN_MIN_LARGEST_INTERNAL);
+      }
+    } else {
     NimBLEScan* pScan = NimBLEDevice::getScan();
     if (pScan && !pScan->isScanning() && !s_blsScanActive) {
       if (s_blsScanEnded && (millis() - s_blsScanLastStart) < BLS_SCAN_RESTART_DELAY_MS)
@@ -1121,10 +1434,25 @@ void update() {
         }
       }
     }
+    }
   }
 #endif  // !USE_EINK && !RIFTLINK_DISABLE_BLS_N
 }
 
 bool isConnected() { return s_connected; }
+
+uint32_t getPasskey() { return s_passkey; }
+
+void regeneratePasskey() {
+  s_passkey = esp_random() % 900000 + 100000;
+  nvs_handle_t h;
+  if (nvs_open(NVS_BLE_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+    nvs_set_u32(h, NVS_KEY_BLE_PIN, s_passkey);
+    nvs_commit(h);
+    nvs_close(h);
+  }
+  NimBLEDevice::setSecurityPasskey(s_passkey);
+  Serial.printf("[BLE] New passkey: %06u\n", (unsigned)s_passkey);
+}
 
 }  // namespace ble

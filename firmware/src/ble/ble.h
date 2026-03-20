@@ -11,6 +11,8 @@
 namespace ble {
 
 bool init();
+/** Полная деинициализация BLE: остановка advertising, NimBLE deinit, освобождение heap. */
+void deinit();
 void update();  // вызов из loop()
 
 void setOnSend(void (*cb)(const uint8_t* to, const char* text, uint8_t ttlMinutes));
@@ -46,5 +48,12 @@ void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen);
 /** evt "error" — уведомить приложение о сбое (code, msg) */
 void notifyError(const char* code, const char* msg);
 bool isConnected();
+/** Обработать JSON-команду (вызывается и из BLE onWrite, и из WebSocket). */
+void processCommand(const uint8_t* data, size_t len);
+
+/** 6-значный PIN для passkey pairing (отображается на экране). */
+uint32_t getPasskey();
+/** Перегенерировать PIN и сохранить в NVS. */
+void regeneratePasskey();
 
 }  // namespace ble

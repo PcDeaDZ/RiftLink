@@ -16,6 +16,7 @@ import '../app_navigator.dart';
 import '../l10n/app_localizations.dart';
 import 'map_screen.dart';
 import 'mesh_screen.dart';
+import '../notifications/local_notifications_service.dart';
 import 'contacts_groups_hub_screen.dart';
 import 'settings_screen.dart';
 import 'scan_screen.dart';
@@ -38,11 +39,11 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
+class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, WidgetsBindingObserver {
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
   final _messages = <_Msg>[];
-  StreamSubscription? _sub;
+  StreamSubscription<RiftLinkEvent>? _sub;
   String _nodeId = '';
   String? _nickname;
   /// Пусто, пока не пришёл evt info (избегаем ложного EU в настройках).
@@ -56,6 +57,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   bool _gpsFix = false;
   bool _powersave = false;
   int? _batteryMv;
+  int? _batteryPercent;
+  bool _charging = false;
   List<String> _neighbors = [];
   List<int> _neighborsRssi = [];
   List<bool> _neighborsHasKey = [];  // true = можно отправить
@@ -84,6 +87,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   bool _intentionalDisconnect = false;
   String? _currentBleRemoteId;
   List<RecentDevice> _recentDevices = [];
+  AppLifecycleState _appLifecycle = AppLifecycleState.resumed;
 
   List<_Msg> get _visibleMessages =>
       _messages.where((m) => m.deleteAt == null || DateTime.now().isBefore(m.deleteAt!)).toList();
@@ -93,6 +97,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _controller.addListener(_onTextChanged);
     _listenEvents();
     _loadContactNicknames();
@@ -170,6 +175,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _connStateSub?.cancel();
     _controller.removeListener(_onTextChanged);
     localeNotifier.removeListener(_onLocaleChanged);
@@ -179,9 +185,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     _voiceRecordTicker?.dispose();
     _meshAnimController?.dispose();
     _sub?.cancel();
+    _sub = null;
     _controller.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _appLifecycle = state;
   }
 
   void _listenConnectionState() {
@@ -376,7 +388,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
         _intentionalDisconnect = false;
         _currentBleRemoteId = found.remoteId.toString();
         _listenConnectionState();
-        _listenEvents(); // переподписка: RiftLinkBle.events — новый broadcast после reconnect
+          _listenEvents(); // переподписка после reconnect (await cancel + новый listen)
         setState(_resetStateUntilInfo);
         _applyNodeIdFromDeviceName();
         widget.ble.getInfo();
@@ -709,6 +721,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       _gpsFix = evt.gpsFix; _powersave = evt.powersave; _neighbors = evt.neighbors;
       _neighborsRssi = evt.neighborsRssi; _neighborsHasKey = evt.neighborsHasKey; _routes = evt.routes;
       if (evt.batteryMv != null && evt.batteryMv! > 0) _batteryMv = evt.batteryMv;
+      _batteryPercent = evt.batteryPercent;
+      _charging = evt.charging;
+      if (_batteryPercent != null && _batteryPercent! <= 15) {
+        LocalNotificationsService.showLowBattery(percent: _batteryPercent!);
+      }
       _groups = _filterUserGroups(evt.groups);
       if (_group > 0 && !_groups.contains(_group)) _group = 0;
     });
@@ -723,112 +740,121 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
 
   // ── BLE Events ──
 
+  /// Синхронная подписка: `async` + `await cancel` откладывал listen — broadcast терял notify до первого кадра.
   void _listenEvents() {
     _sub?.cancel();
     _sub = widget.ble.events.listen((evt) {
       if (!mounted) return;
-      if (evt is RiftLinkMsgEvent) {
-        setState(() {
-          final ttl = evt.ttlMinutes ?? 0;
-          _messages.add(_Msg(from: evt.from, text: evt.text, isIncoming: true, msgId: evt.msgId, rssi: evt.rssi,
-              deleteAt: ttl > 0 ? DateTime.now().add(Duration(minutes: ttl)) : null));
-        });
-        _sendReadForUnread();
-        _scrollToBottom();
-      } else if (evt is RiftLinkSentEvent) {
-        setState(() {
-          final toMatch = evt.to.isEmpty ? null : evt.to;
-          for (var i = _messages.length - 1; i >= 0; i--) {
-            final m = _messages[i];
-            if (!m.isIncoming && m.msgId == null && m.to == toMatch) {
-              _messages[i] = m.copyWith(msgId: evt.msgId, to: evt.to, status: _St.sent);
-              break;
-            }
-          }
-        });
-      } else if (evt is RiftLinkDeliveredEvent) {
-        setState(() { for (var i = 0; i < _messages.length; i++) { final m = _messages[i]; if (!m.isIncoming && m.to == evt.from && m.msgId == evt.msgId) { _messages[i] = m.copyWith(status: _St.delivered); break; } } });
-      } else if (evt is RiftLinkReadEvent) {
-        setState(() { for (var i = 0; i < _messages.length; i++) { final m = _messages[i]; if (!m.isIncoming && m.to == evt.from && m.msgId == evt.msgId) { _messages[i] = m.copyWith(status: _St.read); break; } } });
-      } else if (evt is RiftLinkUndeliveredEvent) {
-        setState(() {
-          for (var i = 0; i < _messages.length; i++) {
-            final m = _messages[i];
-            if (!m.isIncoming && m.msgId == evt.msgId) {
-              final isBroadcast = evt.to.isEmpty || m.to == _broadcastTo;
-              if (isBroadcast || m.to == evt.to) {
-                _messages[i] = m.copyWith(status: _St.undelivered, delivered: evt.delivered ?? 0, total: evt.total ?? 0);
-                break;
-              }
-            }
-          }
-        });
-      } else if (evt is RiftLinkBroadcastDeliveryEvent) {
-        setState(() {
-          for (var i = 0; i < _messages.length; i++) {
-            final m = _messages[i];
-            if (!m.isIncoming && m.msgId == evt.msgId && (m.to == _broadcastTo || m.to == null)) {
-              _messages[i] = m.copyWith(status: evt.delivered > 0 ? _St.delivered : _St.undelivered, delivered: evt.delivered, total: evt.total);
-              break;
-            }
-          }
-        });
-      } else if (evt is RiftLinkInfoEvent) {
-        _onInfoEvent(evt);
-      } else if (evt is RiftLinkRoutesEvent) { setState(() => _routes = evt.routes); }
-      else if (evt is RiftLinkGroupsEvent) {
-        setState(() {
-          _groups = _filterUserGroups(evt.groups);
-          if (_group > 0 && !_groups.contains(_group)) _group = 0;
-        });
-      }
-      else if (evt is RiftLinkTelemetryEvent) {
-        setState(() {
-          if (evt.from == _nodeId && evt.batteryMv > 0) _batteryMv = evt.batteryMv;
-          _messages.add(_Msg(from: evt.from, text: '🔋 ${(evt.batteryMv / 1000).toStringAsFixed(2)}V, ${evt.heapKb} KB', isIncoming: true));
-        });
-        _scrollToBottom();
-      } else if (evt is RiftLinkLocationEvent) {
-        setState(() { _messages.add(_Msg(from: evt.from, text: '📍 ${evt.lat.toStringAsFixed(5)}, ${evt.lon.toStringAsFixed(5)}', isIncoming: true, isLocation: true)); });
-        _scrollToBottom();
-      } else if (evt is RiftLinkOtaEvent) { _showOtaDialog(evt.ip, evt.ssid, evt.password); }
-      else if (evt is RiftLinkRegionEvent) { setState(() { _region = evt.region; _channel = evt.channel; }); }
-      else if (evt is RiftLinkNeighborsEvent) { setState(() { _neighbors = evt.neighbors; _neighborsRssi = evt.rssi; _neighborsHasKey = evt.hasKey; }); }
-      else if (evt is RiftLinkPongEvent) {
-        final fromNorm = evt.from.length >= 8 ? evt.from.substring(0, 8).toUpperCase() : evt.from.toUpperCase();
-        _pendingPings.remove(fromNorm);
-        _showSnack('✓ ${context.l10n.tr('link_ok', {'from': evt.from})}', backgroundColor: context.palette.success, duration: const Duration(seconds: 4));
-      }
-      else if (evt is RiftLinkErrorEvent) { _showSnack('${context.l10n.tr('error')}: ${evt.msg}', backgroundColor: context.palette.error); }
-      else if (evt is RiftLinkWifiEvent) { _showSnack(evt.connected ? 'WiFi: ${evt.ssid} — ${evt.ip}' : 'WiFi: не подключено'); }
-      else if (evt is RiftLinkGpsEvent) { setState(() { _gpsPresent = evt.present; _gpsEnabled = evt.enabled; _gpsFix = evt.hasFix; }); }
-      else if (evt is RiftLinkInviteEvent) { _showInviteDialog(evt.id, evt.pubKey, evt.channelKey); }
-      else if (evt is RiftLinkSelftestEvent) {
-        if (mounted) _showSelftestDialog(evt);
-        if (evt.batteryMv > 0) setState(() => _batteryMv = evt.batteryMv);
-      }       else if (evt is RiftLinkVoiceEvent) {
-        _voiceChunks[evt.from] ??= {};
-        _voiceChunks[evt.from]![evt.chunk] = evt.data;
-        final chunks = _voiceChunks[evt.from]!;
-        if (chunks.length == evt.total) {
-          final parts = List.generate(evt.total, (i) => chunks[i] ?? '');
-          try {
-            var bytes = base64Decode(parts.join());
-            DateTime? deleteAt;
-            if (bytes.length >= 2 && bytes[0] == 0xFF && bytes[1] >= 1 && bytes[1] <= 255) {
-              final ttl = bytes[1];
-              bytes = bytes.sublist(2);
-              deleteAt = DateTime.now().add(Duration(minutes: ttl));
-            }
-            _voiceChunks.remove(evt.from);
-            setState(() { _messages.add(_Msg(from: evt.from, text: '🎤 ${context.l10n.tr('voice')}', isIncoming: true, isVoice: true, voiceData: bytes, deleteAt: deleteAt)); });
-            _scrollToBottom();
-          } catch (_) {}
-        }
-      }
+      _handleBleEvent(evt);
     });
     final li = widget.ble.lastInfo;
     if (li != null && mounted) _onInfoEvent(li);
+  }
+
+  void _handleBleEvent(RiftLinkEvent evt) {
+    if (!mounted) return;
+    if (evt is RiftLinkMsgEvent) {
+      setState(() {
+        final ttl = evt.ttlMinutes ?? 0;
+        _messages.add(_Msg(from: evt.from, text: evt.text, isIncoming: true, msgId: evt.msgId, rssi: evt.rssi,
+            deleteAt: ttl > 0 ? DateTime.now().add(Duration(minutes: ttl)) : null));
+      });
+      if (_appLifecycle != AppLifecycleState.resumed) {
+        LocalNotificationsService.showIncomingMessage(from: evt.from, text: evt.text);
+      }
+      _sendReadForUnread();
+      _scrollToBottom();
+    } else if (evt is RiftLinkSentEvent) {
+      setState(() {
+        final toMatch = evt.to.isEmpty ? null : evt.to;
+        for (var i = _messages.length - 1; i >= 0; i--) {
+          final m = _messages[i];
+          if (!m.isIncoming && m.msgId == null && m.to == toMatch) {
+            _messages[i] = m.copyWith(msgId: evt.msgId, to: evt.to, status: _St.sent);
+            break;
+          }
+        }
+      });
+    } else if (evt is RiftLinkDeliveredEvent) {
+      setState(() { for (var i = 0; i < _messages.length; i++) { final m = _messages[i]; if (!m.isIncoming && m.to == evt.from && m.msgId == evt.msgId) { _messages[i] = m.copyWith(status: _St.delivered); break; } } });
+    } else if (evt is RiftLinkReadEvent) {
+      setState(() { for (var i = 0; i < _messages.length; i++) { final m = _messages[i]; if (!m.isIncoming && m.to == evt.from && m.msgId == evt.msgId) { _messages[i] = m.copyWith(status: _St.read); break; } } });
+    } else if (evt is RiftLinkUndeliveredEvent) {
+      setState(() {
+        for (var i = 0; i < _messages.length; i++) {
+          final m = _messages[i];
+          if (!m.isIncoming && m.msgId == evt.msgId) {
+            final isBroadcast = evt.to.isEmpty || m.to == _broadcastTo;
+            if (isBroadcast || m.to == evt.to) {
+              _messages[i] = m.copyWith(status: _St.undelivered, delivered: evt.delivered ?? 0, total: evt.total ?? 0);
+              break;
+            }
+          }
+        }
+      });
+    } else if (evt is RiftLinkBroadcastDeliveryEvent) {
+      setState(() {
+        for (var i = 0; i < _messages.length; i++) {
+          final m = _messages[i];
+          if (!m.isIncoming && m.msgId == evt.msgId && (m.to == _broadcastTo || m.to == null)) {
+            _messages[i] = m.copyWith(status: evt.delivered > 0 ? _St.delivered : _St.undelivered, delivered: evt.delivered, total: evt.total);
+            break;
+          }
+        }
+      });
+    } else if (evt is RiftLinkInfoEvent) {
+      _onInfoEvent(evt);
+    } else if (evt is RiftLinkRoutesEvent) { setState(() => _routes = evt.routes); }
+    else if (evt is RiftLinkGroupsEvent) {
+      setState(() {
+        _groups = _filterUserGroups(evt.groups);
+        if (_group > 0 && !_groups.contains(_group)) _group = 0;
+      });
+    }
+    else if (evt is RiftLinkTelemetryEvent) {
+      setState(() {
+        if (evt.from == _nodeId && evt.batteryMv > 0) _batteryMv = evt.batteryMv;
+        _messages.add(_Msg(from: evt.from, text: '🔋 ${(evt.batteryMv / 1000).toStringAsFixed(2)}V, ${evt.heapKb} KB', isIncoming: true));
+      });
+      _scrollToBottom();
+    } else if (evt is RiftLinkLocationEvent) {
+      setState(() { _messages.add(_Msg(from: evt.from, text: '📍 ${evt.lat.toStringAsFixed(5)}, ${evt.lon.toStringAsFixed(5)}', isIncoming: true, isLocation: true)); });
+      _scrollToBottom();
+    } else if (evt is RiftLinkOtaEvent) { _showOtaDialog(evt.ip, evt.ssid, evt.password); }
+    else if (evt is RiftLinkRegionEvent) { setState(() { _region = evt.region; _channel = evt.channel; }); }
+    else if (evt is RiftLinkNeighborsEvent) { setState(() { _neighbors = evt.neighbors; _neighborsRssi = evt.rssi; _neighborsHasKey = evt.hasKey; }); }
+    else if (evt is RiftLinkPongEvent) {
+      final fromNorm = evt.from.length >= 8 ? evt.from.substring(0, 8).toUpperCase() : evt.from.toUpperCase();
+      _pendingPings.remove(fromNorm);
+      _showSnack('✓ ${context.l10n.tr('link_ok', {'from': evt.from})}', backgroundColor: context.palette.success, duration: const Duration(seconds: 4));
+    }
+    else if (evt is RiftLinkErrorEvent) { _showSnack('${context.l10n.tr('error')}: ${evt.msg}', backgroundColor: context.palette.error); }
+    else if (evt is RiftLinkWifiEvent) { _showSnack(evt.connected ? 'WiFi: ${evt.ssid} — ${evt.ip}' : 'WiFi: не подключено'); }
+    else if (evt is RiftLinkGpsEvent) { setState(() { _gpsPresent = evt.present; _gpsEnabled = evt.enabled; _gpsFix = evt.hasFix; }); }
+    else if (evt is RiftLinkInviteEvent) { _showInviteDialog(evt.id, evt.pubKey, evt.channelKey); }
+    else if (evt is RiftLinkSelftestEvent) {
+      if (mounted) _showSelftestDialog(evt);
+      if (evt.batteryMv > 0) setState(() => _batteryMv = evt.batteryMv);
+    } else if (evt is RiftLinkVoiceEvent) {
+      _voiceChunks[evt.from] ??= {};
+      _voiceChunks[evt.from]![evt.chunk] = evt.data;
+      final chunks = _voiceChunks[evt.from]!;
+      if (chunks.length == evt.total) {
+        final parts = List.generate(evt.total, (i) => chunks[i] ?? '');
+        try {
+          var bytes = base64Decode(parts.join());
+          DateTime? deleteAt;
+          if (bytes.length >= 2 && bytes[0] == 0xFF && bytes[1] >= 1 && bytes[1] <= 255) {
+            final ttl = bytes[1];
+            bytes = bytes.sublist(2);
+            deleteAt = DateTime.now().add(Duration(minutes: ttl));
+          }
+          _voiceChunks.remove(evt.from);
+          setState(() { _messages.add(_Msg(from: evt.from, text: '🎤 ${context.l10n.tr('voice')}', isIncoming: true, isVoice: true, voiceData: bytes, deleteAt: deleteAt)); });
+          _scrollToBottom();
+        } catch (_) {}
+      }
+    }
   }
 
   void _scrollToBottom() {
@@ -1026,7 +1052,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _showSelftestDialog(RiftLinkSelftestEvent evt) async {
-    await showRiftSelftestDialog(context, evt);
+    await showRiftSelftestDialog(context, evt, lastInfo: widget.ble.lastInfo);
   }
 
   Color _batteryColorForMv(int mv) {
@@ -1040,7 +1066,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
     final mv = _batteryMv;
     if (mv == null || mv <= 0) return const SizedBox.shrink();
     final color = _batteryColorForMv(mv);
-    final vStr = (mv / 1000.0).toStringAsFixed(2);
+    final pct = _batteryPercent;
+    final label = pct != null ? '$pct%' : '${(mv / 1000.0).toStringAsFixed(2)} V';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
@@ -1051,10 +1078,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.battery_std, size: 15, color: color),
+          Icon(_charging ? Icons.battery_charging_full : Icons.battery_std, size: 15, color: color),
           const SizedBox(width: 4),
           Text(
-            '$vStr V',
+            label,
             style: TextStyle(
               fontSize: 11,
               fontWeight: FontWeight.w700,
@@ -1389,6 +1416,25 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
                   const SizedBox(width: 8),
                   _buildBatteryBadge(),
                 ],
+                if (_offlinePending != null && _offlinePending! > 0) ...[
+                  const SizedBox(width: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: context.palette.primary.withOpacity(0.16),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: context.palette.primary.withOpacity(0.45)),
+                    ),
+                    child: Text(
+                      '${_offlinePending!}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: context.palette.primary,
+                      ),
+                    ),
+                  ),
+                ],
               ],
             );
             if (!widget.ble.isConnected) {
@@ -1690,7 +1736,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin {
               m.status == _St.undelivered
                   ? (m.total != null && m.total! > 0 ? '✗ 0/${m.total}' : '✗')
                   : m.status == _St.read
-                      ? '✓✓✓'
+                      ? '✓✓'
                       : m.status == _St.delivered
                           ? (m.delivered != null && m.total != null && m.total! > 0 ? '✓ ${m.delivered}/${m.total}' : '✓✓')
                           : '✓',

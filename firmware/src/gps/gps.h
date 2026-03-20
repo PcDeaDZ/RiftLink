@@ -40,4 +40,11 @@ void setPhoneSync(int64_t utcMs, float lat, float lon, int16_t alt);
 /** Есть ли данные от телефона (для beacon с timestamp) */
 bool hasPhoneSync();
 
+/** Есть ли валидное время (GPS NMEA или phone sync) */
+bool hasTime();
+/** Час (0-23 UTC), -1 если нет источника */
+int getHour();
+/** Минуты (0-59), -1 если нет источника */
+int getMinute();
+
 }  // namespace gps

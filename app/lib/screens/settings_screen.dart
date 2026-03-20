@@ -335,6 +335,235 @@ class _SfCell extends StatelessWidget {
   }
 }
 
+class _ModemSection extends StatefulWidget {
+  final int? modemPreset;
+  final int? sf;
+  final double? bw;
+  final int? cr;
+  final bool enabled;
+  final Future<void> Function(int preset) onPreset;
+  final Future<void> Function(int sf, double bw, int cr) onCustom;
+
+  const _ModemSection({
+    this.modemPreset,
+    this.sf,
+    this.bw,
+    this.cr,
+    this.enabled = true,
+    required this.onPreset,
+    required this.onCustom,
+  });
+
+  @override
+  State<_ModemSection> createState() => _ModemSectionState();
+}
+
+class _ModemSectionState extends State<_ModemSection> {
+  static const _presetNames = ['Speed', 'Normal', 'Range', 'MaxRange', 'Custom'];
+  static const _presetDescRu = [
+    'SF7 · BW250 · CR5\nГород, скорость, малая дальность',
+    'SF7 · BW125 · CR5\nБаланс скорости и дальности',
+    'SF10 · BW125 · CR5\nХорошая дальность',
+    'SF12 · BW125 · CR8\nМакс. дальность, медленно',
+    'Ручная настройка SF / BW / CR',
+  ];
+  static const _presetDescEn = [
+    'SF7 · BW250 · CR5\nCity use, high speed, short range',
+    'SF7 · BW125 · CR5\nBalanced speed and range',
+    'SF10 · BW125 · CR5\nGood long-range profile',
+    'SF12 · BW125 · CR8\nMaximum range, slower throughput',
+    'Manual SF / BW / CR configuration',
+  ];
+  static const _presetSf  = [7, 7, 10, 12];
+  static const _presetBw  = [250.0, 125.0, 125.0, 125.0];
+  static const _presetCr  = [5, 5, 5, 8];
+  static const _bwOptions = [62.5, 125.0, 250.0, 500.0];
+  static const _crOptions = [5, 6, 7, 8];
+  static const _crDesc    = ['4/5 мин.', '4/6', '4/7', '4/8 макс.'];
+
+  late int _sel;
+  late int _cSf;
+  late double _cBw;
+  late int _cCr;
+
+  @override
+  void initState() {
+    super.initState();
+    _syncFromWidget();
+  }
+
+  @override
+  void didUpdateWidget(_ModemSection old) {
+    super.didUpdateWidget(old);
+    if (old.modemPreset != widget.modemPreset ||
+        old.sf != widget.sf || old.bw != widget.bw || old.cr != widget.cr) {
+      _syncFromWidget();
+    }
+  }
+
+  void _syncFromWidget() {
+    _sel = (widget.modemPreset != null && widget.modemPreset! >= 0 && widget.modemPreset! <= 4)
+        ? widget.modemPreset! : 1;
+    _cSf = widget.sf ?? 7;
+    _cBw = widget.bw ?? 125.0;
+    _cCr = widget.cr ?? 5;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pal = context.palette;
+    final enabled = widget.enabled;
+    final isCustom = _sel == 4;
+    final isRu = AppLocalizations.currentLocale.languageCode == 'ru';
+    final presetDesc = isRu ? _presetDescRu : _presetDescEn;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: [
+            for (var i = 0; i < 5; i++)
+              _presetChip(context, i, enabled),
+          ],
+        ),
+        const SizedBox(height: 8),
+        AnimatedSize(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Text(
+              presetDesc[_sel],
+              style: TextStyle(fontSize: 12, height: 1.4, color: pal.onSurfaceVariant.withOpacity(0.85)),
+            ),
+          ),
+        ),
+        if (isCustom) ...[
+          const SizedBox(height: 10),
+          Text('SF', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+          const SizedBox(height: 4),
+          _SfPickGrid(
+            selectedSf: _cSf,
+            enabled: enabled,
+            onSelectSf: (sf) {
+              setState(() => _cSf = sf);
+              widget.onCustom(sf, _cBw, _cCr);
+            },
+          ),
+          const SizedBox(height: 10),
+          Text('BW (kHz)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+          const SizedBox(height: 4),
+          _optionRow<double>(
+            context,
+            options: _bwOptions,
+            selected: _cBw,
+            label: (v) => v == 62.5 ? '62.5' : '${v.toInt()}',
+            enabled: enabled,
+            onSelect: (v) {
+              setState(() => _cBw = v);
+              widget.onCustom(_cSf, v, _cCr);
+            },
+          ),
+          const SizedBox(height: 10),
+          Text('CR', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+          const SizedBox(height: 4),
+          _optionRow<int>(
+            context,
+            options: _crOptions,
+            selected: _cCr,
+            label: (v) => _crDesc[v - 5],
+            enabled: enabled,
+            onSelect: (v) {
+              setState(() => _cCr = v);
+              widget.onCustom(_cSf, _cBw, v);
+            },
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _presetChip(BuildContext context, int idx, bool enabled) {
+    final pal = context.palette;
+    final sel = _sel == idx;
+    return GestureDetector(
+      onTap: enabled ? () {
+        HapticFeedback.selectionClick();
+        setState(() => _sel = idx);
+        if (idx < 4) widget.onPreset(idx);
+      } : null,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(10),
+          color: sel ? pal.primary.withOpacity(0.15) : pal.surfaceVariant,
+          border: Border.all(
+            color: sel ? pal.primary : pal.divider,
+            width: sel ? 1.6 : 1,
+          ),
+        ),
+        child: Text(
+          _presetNames[idx],
+          style: TextStyle(
+            fontSize: 12.5,
+            fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
+            color: sel ? pal.primary : pal.onSurfaceVariant.withOpacity(enabled ? 1.0 : 0.5),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _optionRow<T>(
+    BuildContext context, {
+    required List<T> options,
+    required T selected,
+    required String Function(T) label,
+    required bool enabled,
+    required ValueChanged<T> onSelect,
+  }) {
+    final pal = context.palette;
+    return Row(
+      children: [
+        for (var i = 0; i < options.length; i++) ...[
+          if (i > 0) const SizedBox(width: 6),
+          Expanded(
+            child: GestureDetector(
+              onTap: enabled ? () {
+                HapticFeedback.selectionClick();
+                onSelect(options[i]);
+              } : null,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(10),
+                  color: options[i] == selected ? pal.primary.withOpacity(0.15) : pal.surfaceVariant,
+                  border: Border.all(
+                    color: options[i] == selected ? pal.primary : pal.divider,
+                    width: options[i] == selected ? 1.6 : 1,
+                  ),
+                ),
+                child: Text(
+                  label(options[i]),
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: options[i] == selected ? FontWeight.w700 : FontWeight.w500,
+                    color: options[i] == selected ? pal.primary : pal.onSurfaceVariant.withOpacity(enabled ? 1.0 : 0.5),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
 class SettingsScreen extends StatefulWidget {
   final RiftLinkBle ble;
   final String nodeId;
@@ -391,6 +620,9 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
   late String _region;
   late int? _channel;
   int? _sf;
+  double? _bw;
+  int? _cr;
+  int? _modemPreset;  // 0=Speed,1=Normal,2=Range,3=MaxRange,4=Custom
   late bool _gpsPresent;
   late bool _gpsEnabled;
   late bool _gpsFix;
@@ -398,6 +630,15 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
   late bool _meshAnimationEnabled;
   int? _offlinePending;
   int? _batteryMv;
+  int? _batteryPercent;
+  bool _charging = false;
+  int? _blePin;
+  String? _apSsid;
+  String? _apPassword;
+  String? _version;
+  String _radioMode = 'ble';
+  int _espNowChannel = 1;
+  bool _espNowAdaptive = false;
 
   /// Актуальный ID (обновляется по evt info, пока открыты настройки).
   late String _nodeIdLive;
@@ -416,12 +657,26 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
       _region = evt.region;
       if (evt.hasChannelField) _channel = evt.channel;
       _sf = evt.sf;
+      _bw = evt.bw;
+      _cr = evt.cr;
+      _modemPreset = evt.modemPreset;
       _gpsPresent = evt.gpsPresent;
       _gpsEnabled = evt.gpsEnabled;
       _gpsFix = evt.gpsFix;
       _powersave = evt.powersave;
       if (evt.hasOfflinePendingField) _offlinePending = evt.offlinePending;
       if (evt.batteryMv != null && evt.batteryMv! > 0) _batteryMv = evt.batteryMv;
+      _batteryPercent = evt.batteryPercent;
+      _charging = evt.charging;
+      _blePin = evt.blePin;
+      _apSsid = evt.apSsid;
+      _apPassword = evt.apPassword;
+      _version = evt.version;
+      _radioMode = evt.radioMode;
+      if (evt.espNowChannel != null && evt.espNowChannel! >= 1 && evt.espNowChannel! <= 13) {
+        _espNowChannel = evt.espNowChannel!;
+      }
+      _espNowAdaptive = evt.espNowAdaptive;
     });
     // Ключ nickname в JSON может отсутствовать (прошивка) — не перезаписываем поле из «пустого» evt.
     if (evt.hasNicknameField) {
@@ -444,12 +699,26 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     _region = li?.region ?? widget.region;
     _channel = li?.channel ?? widget.channel;
     _sf = li?.sf ?? widget.sf;
+    _bw = li?.bw;
+    _cr = li?.cr;
+    _modemPreset = li?.modemPreset;
     _gpsPresent = li?.gpsPresent ?? widget.gpsPresent;
     _gpsEnabled = li?.gpsEnabled ?? widget.gpsEnabled;
     _gpsFix = li?.gpsFix ?? widget.gpsFix;
     _powersave = li?.powersave ?? widget.powersave;
     _offlinePending = li?.offlinePending ?? widget.offlinePending;
     _batteryMv = li?.batteryMv ?? widget.batteryMv;
+    _batteryPercent = li?.batteryPercent;
+    _charging = li?.charging ?? false;
+    _blePin = li?.blePin;
+    _apSsid = li?.apSsid;
+    _apPassword = li?.apPassword;
+    _version = li?.version;
+    _radioMode = li?.radioMode ?? 'ble';
+    _espNowChannel = (li?.espNowChannel != null && li!.espNowChannel! >= 1 && li.espNowChannel! <= 13)
+        ? li.espNowChannel!
+        : 1;
+    _espNowAdaptive = li?.espNowAdaptive ?? false;
     _meshAnimationEnabled = widget.meshAnimationEnabled;
     final nick0 = (li?.nickname != null && li!.nickname!.trim().isNotEmpty)
         ? li.nickname!.trim()
@@ -461,7 +730,6 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     _inviteKeyController = TextEditingController();
     _inviteChannelKeyController = TextEditingController();
 
-    // Подписка сразу: broadcast не буферизует — до первого кадра уже могут прийти notify.
     _bleSub?.cancel();
     _bleSub = widget.ble.events.listen((evt) {
       if (!mounted) return;
@@ -685,43 +953,169 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
               ),
               const SizedBox(height: 12),
               _SettingsCard(
-                title: l.tr('settings_sf'),
-                subtitle: l.tr('settings_sf_hint'),
+                title: l.tr('settings_modem'),
+                subtitle: l.tr('settings_modem_hint'),
+                child: _ModemSection(
+                  modemPreset: _modemPreset,
+                  sf: _sf,
+                  bw: _bw,
+                  cr: _cr,
+                  enabled: connected,
+                  onPreset: (p) async {
+                    if (await widget.ble.setModemPreset(p)) {
+                      setState(() => _modemPreset = p);
+                      widget.ble.getInfo();
+                    }
+                  },
+                  onCustom: (sf, bw, cr) async {
+                    if (await widget.ble.setCustomModem(sf, bw, cr)) {
+                      setState(() { _sf = sf; _bw = bw; _cr = cr; _modemPreset = 4; });
+                      widget.onSfChanged(sf);
+                      widget.ble.getInfo();
+                    }
+                  },
+                ),
+              ),
+              const SizedBox(height: 12),
+              _SettingsCard(
+                title: l.tr('connection'),
+                subtitle: l.tr('settings_connection_hint'),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Row(
-                      children: [
-                        Icon(Icons.tune_rounded, size: 20, color: context.palette.primary.withOpacity(0.95)),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            l.tr('settings_sf_legend'),
+                    Text(
+                      l.tr('ble_pin'),
+                      style: TextStyle(fontSize: 13, color: context.palette.onSurfaceVariant),
+                    ),
+                    const SizedBox(height: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: context.palette.surfaceVariant,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: context.palette.divider),
+                      ),
+                      child: Text(
+                        _blePin != null ? _blePin.toString() : '—',
+                        style: TextStyle(
+                          fontFamily: 'monospace',
+                          color: context.palette.onSurface,
+                          fontWeight: FontWeight.w600,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    FilledButton.tonalIcon(
+                      onPressed: connected
+                          ? () async {
+                              final ok = await widget.ble.regeneratePin();
+                              if (ok) await widget.ble.getInfo();
+                              if (mounted) _snack(ok ? l.tr('saved') : l.tr('error'));
+                            }
+                          : null,
+                      icon: const Icon(Icons.lock_reset_rounded, size: 18),
+                      label: Text(l.tr('regen_pin')),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      l.tr('ap_access_point'),
+                      style: TextStyle(fontSize: 13, color: context.palette.onSurfaceVariant),
+                    ),
+                    const SizedBox(height: 6),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: context.palette.surfaceVariant,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: context.palette.divider),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'SSID: ${_apSsid?.isNotEmpty == true ? _apSsid : '—'}',
+                            style: TextStyle(color: context.palette.onSurface),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Pass: ${_apPassword?.isNotEmpty == true ? _apPassword : '—'}',
                             style: TextStyle(
-                              fontSize: 11.5,
-                              height: 1.35,
-                              color: context.palette.onSurfaceVariant.withOpacity(0.95),
+                              color: context.palette.onSurface,
+                              fontFamily: 'monospace',
                             ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
-                    const SizedBox(height: 12),
-                    _SfPickGrid(
-                      selectedSf: _sf,
-                      enabled: connected,
-                      onSelectSf: (sf) async {
-                        if (await widget.ble.setSpreadingFactor(sf)) {
-                          widget.onSfChanged(sf);
-                          setState(() => _sf = sf);
-                          widget.ble.getInfo();
-                        }
-                      },
+                    const SizedBox(height: 10),
+                    FilledButton.tonalIcon(
+                      onPressed: connected
+                          ? () async {
+                              final ok = await widget.ble.regenerateApPass();
+                              if (ok) await widget.ble.getInfo();
+                              if (mounted) _snack(ok ? l.tr('saved') : l.tr('error'));
+                            }
+                          : null,
+                      icon: const Icon(Icons.password_rounded, size: 18),
+                      label: Text(l.tr('regen_ap_password')),
                     ),
                   ],
                 ),
               ),
               const SizedBox(height: 12),
+              if (_radioMode == 'wifi') ...[
+                _SettingsCard(
+                  title: l.tr('espnow_section'),
+                  subtitle: l.tr('espnow_section_hint'),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      DropdownButtonFormField<int>(
+                        value: _espNowChannel,
+                        isDense: true,
+                        decoration: InputDecoration(labelText: l.tr('espnow_channel')),
+                        items: List.generate(
+                          13,
+                          (i) => DropdownMenuItem<int>(
+                            value: i + 1,
+                            child: Text('${i + 1}'),
+                          ),
+                        ),
+                        onChanged: connected
+                            ? (v) async {
+                                if (v == null) return;
+                                if (await widget.ble.setEspNowChannel(v)) {
+                                  setState(() => _espNowChannel = v);
+                                  widget.ble.getInfo();
+                                }
+                              }
+                            : null,
+                      ),
+                      const SizedBox(height: 8),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(
+                          l.tr('espnow_adaptive'),
+                          style: TextStyle(color: context.palette.onSurface),
+                        ),
+                        value: _espNowAdaptive,
+                        activeThumbColor: context.palette.primary,
+                        activeTrackColor: context.palette.primary.withOpacity(0.45),
+                        onChanged: connected
+                            ? (v) async {
+                                if (await widget.ble.setEspNowAdaptive(v)) {
+                                  setState(() => _espNowAdaptive = v);
+                                  widget.ble.getInfo();
+                                }
+                              }
+                            : null,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
               _SettingsCard(
                 title: l.tr('wifi_ota_section'),
                 subtitle: l.tr('wifi_ota_section_hint'),
@@ -1114,36 +1508,71 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                   ],
                 ),
               ),
-              if ((_offlinePending != null && _offlinePending! > 0) ||
-                  (_batteryMv != null && _batteryMv! > 0)) ...[
-                const SizedBox(height: 12),
-                _SettingsCard(
-                  title: l.tr('other'),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      if (_offlinePending != null && _offlinePending! > 0)
-                        ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          leading: Icon(Icons.schedule, color: context.palette.onSurfaceVariant),
-                          title: Text(
-                            '${l.tr('offline_pending')}: $_offlinePending',
-                            style: TextStyle(color: context.palette.onSurface),
-                          ),
+              const SizedBox(height: 12),
+              _SettingsCard(
+                title: l.tr('other'),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (_offlinePending != null && _offlinePending! > 0)
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.schedule, color: context.palette.onSurfaceVariant),
+                        title: Text(
+                          '${l.tr('offline_pending')}: $_offlinePending',
+                          style: TextStyle(color: context.palette.onSurface),
                         ),
-                      if (_batteryMv != null && _batteryMv! > 0)
-                        ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          leading: Icon(Icons.battery_charging_full, color: context.palette.onSurfaceVariant),
-                          title: Text(
-                            '${(_batteryMv! / 1000).toStringAsFixed(2)} V',
-                            style: TextStyle(color: context.palette.onSurface),
-                          ),
+                      ),
+                    if (_version != null && _version!.isNotEmpty)
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.info_outline, color: context.palette.onSurfaceVariant),
+                        title: Text(
+                          '${l.tr('settings_firmware_version')}: $_version',
+                          style: TextStyle(color: context.palette.onSurface),
                         ),
-                    ],
-                  ),
+                      ),
+                    if (_batteryMv != null && _batteryMv! > 0)
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(
+                          _charging ? Icons.battery_charging_full : Icons.battery_std,
+                          color: _batteryPercent != null && _batteryPercent! <= 15
+                              ? Colors.red
+                              : context.palette.onSurfaceVariant,
+                        ),
+                        title: Text(
+                          _batteryPercent != null
+                              ? '$_batteryPercent% (${(_batteryMv! / 1000).toStringAsFixed(2)} V)${_charging ? ' ⚡' : ''}'
+                              : '${(_batteryMv! / 1000).toStringAsFixed(2)} V${_charging ? ' ⚡' : ''}',
+                          style: TextStyle(color: context.palette.onSurface),
+                        ),
+                      ),
+                    const Divider(height: 1),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.power_settings_new, color: Colors.redAccent),
+                      title: Text(l.tr('shutdown_device'), style: TextStyle(color: context.palette.onSurface)),
+                      onTap: () async {
+                        final confirmed = await showDialog<bool>(
+                          context: context,
+                          builder: (ctx) => AlertDialog(
+                            title: Text(l.tr('shutdown_device')),
+                            content: Text(l.tr('shutdown_confirm')),
+                            actions: [
+                              TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(l.tr('cancel'))),
+                              TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(l.tr('shutdown_device'))),
+                            ],
+                          ),
+                        );
+                        if (confirmed == true) {
+                          widget.ble.shutdown();
+                        }
+                      },
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ],
           ),
         ),

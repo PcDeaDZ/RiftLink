@@ -27,8 +27,8 @@ struct SendQueueItem {
   uint8_t txSf;  // 0 = текущий baseSf, 7–12 = принудительный SF (per-neighbor)
 };
 
-/** Единая очередь команд радио (актор): TX + отложенное применение региона/SF. */
-enum class RadioCmdType : uint8_t { Tx = 0, ApplyRegion = 1, ApplySf = 2 };
+/** Единая очередь команд радио (актор): TX + отложенное применение региона/SF/modem. */
+enum class RadioCmdType : uint8_t { Tx = 0, ApplyRegion = 1, ApplySf = 2, ApplyModem = 3 };
 
 struct RadioCmd {
   RadioCmdType type;
@@ -46,6 +46,12 @@ struct RadioCmd {
     struct {
       uint8_t sf;
     } spread;
+    struct {
+      uint8_t preset;   // radio::ModemPreset
+      uint8_t sf;       // для CUSTOM
+      uint16_t bw10;    // BW * 10 (1250 = 125.0 kHz)
+      uint8_t cr;       // 5–8
+    } modem;
   } u;
 };
 

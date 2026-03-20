@@ -133,10 +133,11 @@ Future<bool?> showRiftConfirmDialog({
 Future<void> showRiftSelftestDialog(
   BuildContext context,
   RiftLinkSelftestEvent evt,
+  {RiftLinkInfoEvent? lastInfo}
 ) {
   final l = context.l10n;
   final p = context.palette;
-  final ok = evt.radioOk && evt.displayOk;
+  final ok = evt.radioOk && evt.displayOk && evt.antennaOk;
   final accent = ok ? p.success : p.error;
 
   return showAppDialog<void>(
@@ -196,13 +197,17 @@ Future<void> showRiftSelftestDialog(
                 children: [
                   _selftestRow(context, l.tr('selftest_radio'), evt.radioOk),
                   Divider(height: 1, thickness: 1, color: p.divider.withOpacity(0.25)),
+                  _selftestRow(context, l.tr('selftest_antenna'), evt.antennaOk),
+                  Divider(height: 1, thickness: 1, color: p.divider.withOpacity(0.25)),
                   _selftestRow(context, l.tr('selftest_display'), evt.displayOk),
                   if (evt.batteryMv > 0) ...[
                     Divider(height: 1, thickness: 1, color: p.divider.withOpacity(0.25)),
                     _selftestMetric(
                       context,
-                      Icons.battery_std_rounded,
-                      l.tr('selftest_voltage', {'v': vStr}),
+                      evt.charging ? Icons.battery_charging_full_rounded : Icons.battery_std_rounded,
+                      evt.batteryPercent != null
+                          ? '${evt.batteryPercent}% ($vStr V)${evt.charging ? ' ⚡' : ''}'
+                          : l.tr('selftest_voltage', {'v': vStr}),
                     ),
                   ],
                   if (evt.heapFree > 0) ...[
@@ -211,6 +216,14 @@ Future<void> showRiftSelftestDialog(
                       context,
                       Icons.memory_rounded,
                       l.tr('selftest_heap', {'kb': '${evt.heapFree}'}),
+                    ),
+                  ],
+                  if (lastInfo != null) ...[
+                    Divider(height: 1, thickness: 1, color: p.divider.withOpacity(0.25)),
+                    _selftestMetric(
+                      context,
+                      Icons.settings_input_antenna_rounded,
+                      l.tr('selftest_modem', {'value': _modemInfoString(l, lastInfo)}),
                     ),
                   ],
                 ],
@@ -280,4 +293,22 @@ Widget _selftestMetric(BuildContext context, IconData icon, String text) {
       ],
     ),
   );
+}
+
+String _modemInfoString(AppLocalizations l, RiftLinkInfoEvent info) {
+  final preset = info.modemPreset;
+  if (preset == null) return '—';
+  if (preset == 4) {
+    final sf = info.sf?.toString() ?? '?';
+    final bw = info.bw?.toStringAsFixed(1) ?? '?';
+    final cr = info.cr?.toString() ?? '?';
+    return '${l.tr('modem_preset_custom')} (SF$sf / BW$bw / CR$cr)';
+  }
+  const presetKeys = <int, String>{
+    0: 'modem_preset_speed',
+    1: 'modem_preset_normal',
+    2: 'modem_preset_range',
+    3: 'modem_preset_maxrange',
+  };
+  return l.tr(presetKeys[preset] ?? 'modem_preset_normal');
 }
