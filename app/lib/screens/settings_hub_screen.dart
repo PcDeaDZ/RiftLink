@@ -1,28 +1,78 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:ui' show FontFeature;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
+import '../prefs/mesh_prefs.dart';
 import '../theme/app_theme.dart';
+import '../theme/design_tokens.dart';
 import '../theme/theme_notifier.dart';
 import '../widgets/app_primitives.dart';
+import '../widgets/mesh_background.dart';
 import '../widgets/app_snackbar.dart';
 import 'ota_screen.dart';
-import 'settings_screen.dart';
+
+// ─── utilities ─────────────────────────────────────────────────────────────
 
 String _nodeIdForClipboard(String raw) =>
     raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
 
-String _formatNodeIdDisplay(String raw) {
+String _fmtId(String raw) {
   final c = _nodeIdForClipboard(raw);
   if (c.isEmpty) return raw.trim();
-  final parts = <String>[];
+  final p = <String>[];
   for (var i = 0; i < c.length; i += 4) {
-    final end = (i + 4 < c.length) ? i + 4 : c.length;
-    parts.add(c.substring(i, end));
+    p.add(c.substring(i, i + 4 > c.length ? c.length : i + 4));
   }
-  return parts.join(' ');
+  return p.join(' ');
 }
+
+String _normHex(String raw) =>
+    raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+
+bool _samePeerId(String a, String b) {
+  final an = _normHex(a);
+  final bn = _normHex(b);
+  if (an.isEmpty || bn.isEmpty) return false;
+  return an == bn || an.startsWith(bn) || bn.startsWith(an);
+}
+
+bool _peerHasKey(RiftLinkInfoEvent evt, String peerId) {
+  for (var i = 0; i < evt.neighbors.length; i++) {
+    if (!_samePeerId(evt.neighbors[i], peerId)) continue;
+    if (i < evt.neighborsHasKey.length && evt.neighborsHasKey[i] == true) return true;
+    return false;
+  }
+  return false;
+}
+
+// ─── motion constants ──────────────────────────────────────────────────────
+
+const int _kBaseMs = 220;
+const int _kStepMs = 40;
+const Duration _kDur = Duration(milliseconds: _kBaseMs);
+const Curve _kIn = Curves.easeOutCubic;
+const Curve _kOut = Curves.easeInCubic;
+
+Widget _stagger(int idx, Widget child) {
+  return TweenAnimationBuilder<double>(
+    tween: Tween(begin: 0, end: 1),
+    duration: Duration(milliseconds: _kBaseMs + _kStepMs * idx),
+    curve: _kIn,
+    builder: (_, v, __) => Opacity(
+      opacity: v,
+      child: Transform.translate(offset: Offset(0, 14 * (1 - v)), child: child),
+    ),
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SettingsHubScreen — единственная точка входа в настройки
+// ═══════════════════════════════════════════════════════════════════════════
 
 class SettingsHubScreen extends StatefulWidget {
   final RiftLinkBle ble;
@@ -65,848 +115,1469 @@ class SettingsHubScreen extends StatefulWidget {
   });
 
   @override
-  State<SettingsHubScreen> createState() => _SettingsHubScreenState();
+  State<SettingsHubScreen> createState() => _HubState();
 }
 
-class _SettingsHubScreenState extends State<SettingsHubScreen> {
-  late String _nickname;
+class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
+  late String _nodeId;
+  String? _nickname;
   late String _region;
-  late int? _channel;
-  late bool _meshAnimationEnabled;
+  int? _channel, _sf;
+  double? _bw;
+  int? _cr, _modemPreset;
+  late bool _gpsPresent, _gpsEnabled, _gpsFix, _powersave, _meshAnim;
+  int? _offPend, _offCourier, _offDirect, _batMv, _batPct;
+  bool _charging = false;
+  int? _blePin;
+  String? _version;
+  String _radioMode = 'ble';
+  String? _radioVariant;
+  bool _wifiConn = false;
+  String? _wifiSsid, _wifiIp;
+  int _espCh = 1;
+  bool _espAdapt = false;
+  StreamSubscription<RiftLinkEvent>? _sub;
+
+  void _apply(RiftLinkInfoEvent e) {
+    if (!mounted) return;
+    setState(() {
+      if (e.id.isNotEmpty) _nodeId = e.id;
+      _region = e.region;
+      if (e.hasChannelField) _channel = e.channel;
+      _sf = e.sf; _bw = e.bw; _cr = e.cr; _modemPreset = e.modemPreset;
+      _gpsPresent = e.gpsPresent; _gpsEnabled = e.gpsEnabled; _gpsFix = e.gpsFix;
+      _powersave = e.powersave;
+      if (e.hasOfflinePendingField) _offPend = e.offlinePending;
+      if (e.hasOfflineCourierPendingField) _offCourier = e.offlineCourierPending;
+      if (e.hasOfflineDirectPendingField) _offDirect = e.offlineDirectPending;
+      if (e.batteryMv != null && e.batteryMv! > 0) _batMv = e.batteryMv;
+      _batPct = e.batteryPercent; _charging = e.charging;
+      _blePin = e.blePin; _version = e.version;
+      _radioMode = e.radioMode; _radioVariant = e.radioVariant;
+      _wifiConn = e.wifiConnected; _wifiSsid = e.wifiSsid; _wifiIp = e.wifiIp;
+      if (e.espNowChannel != null && e.espNowChannel! >= 1 && e.espNowChannel! <= 13) _espCh = e.espNowChannel!;
+      _espAdapt = e.espNowAdaptive;
+      if (e.hasNicknameField && e.nickname != null && e.nickname!.trim().isNotEmpty) _nickname = e.nickname!.trim();
+    });
+  }
 
   @override
   void initState() {
     super.initState();
-    _nickname = widget.nickname ?? '';
-    _region = widget.region;
-    _channel = widget.channel;
-    _meshAnimationEnabled = widget.meshAnimationEnabled;
+    WidgetsBinding.instance.addObserver(this);
+    final li = widget.ble.lastInfo;
+    _nodeId = (li != null && li.id.isNotEmpty) ? li.id : widget.nodeId;
+    _nickname = li?.nickname?.trim().isNotEmpty == true ? li!.nickname!.trim() : widget.nickname;
+    _region = li?.region ?? widget.region;
+    _channel = li?.channel ?? widget.channel;
+    _sf = li?.sf ?? widget.sf; _bw = li?.bw; _cr = li?.cr;
+    _modemPreset = li?.modemPreset;
+    _gpsPresent = li?.gpsPresent ?? widget.gpsPresent;
+    _gpsEnabled = li?.gpsEnabled ?? widget.gpsEnabled;
+    _gpsFix = li?.gpsFix ?? widget.gpsFix;
+    _powersave = li?.powersave ?? widget.powersave;
+    _meshAnim = widget.meshAnimationEnabled;
+    _offPend = li?.offlinePending ?? widget.offlinePending;
+    _offCourier = li?.offlineCourierPending;
+    _offDirect = li?.offlineDirectPending;
+    _batMv = li?.batteryMv ?? widget.batteryMv;
+    _batPct = li?.batteryPercent; _charging = li?.charging ?? false;
+    _blePin = li?.blePin; _version = li?.version;
+    _radioMode = li?.radioMode ?? 'ble'; _radioVariant = li?.radioVariant;
+    _wifiConn = li?.wifiConnected ?? false; _wifiSsid = li?.wifiSsid; _wifiIp = li?.wifiIp;
+    _espCh = (li?.espNowChannel != null && li!.espNowChannel! >= 1 && li.espNowChannel! <= 13) ? li.espNowChannel! : 1;
+    _espAdapt = li?.espNowAdaptive ?? false;
+    _sub = widget.ble.events.listen((evt) {
+      if (!mounted) return;
+      if (evt is RiftLinkInfoEvent) _apply(evt);
+      else if (evt is RiftLinkRegionEvent) setState(() { _region = evt.region; _channel = evt.channel; });
+      else if (evt is RiftLinkGpsEvent) setState(() { _gpsPresent = evt.present; _gpsEnabled = evt.enabled; _gpsFix = evt.hasFix; });
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !widget.ble.isConnected) return;
+      final c = widget.ble.lastInfo;
+      if (c != null) _apply(c);
+      widget.ble.getInfo();
+    });
   }
 
-  void _snack(String text) => showAppSnackBar(context, text);
-
-  Future<void> _openDeviceProfile() async {
-    final updated = await Navigator.push<String>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => _DeviceProfilePage(
-          ble: widget.ble,
-          nodeId: widget.nodeId,
-          nickname: _nickname,
-        ),
-      ),
-    );
-    if (updated != null) {
-      widget.onNicknameChanged(updated);
-      if (mounted) setState(() => _nickname = updated);
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState s) {
+    if (s == AppLifecycleState.resumed && mounted && widget.ble.isConnected) {
+      final c = widget.ble.lastInfo;
+      if (c != null) _apply(c);
+      widget.ble.getInfo();
     }
   }
 
-  Future<void> _openMeshRegion() async {
-    final updated = await Navigator.push<({String region, int? channel})>(
-      context,
-      MaterialPageRoute(
-        builder: (_) => _MeshRegionPage(
-          ble: widget.ble,
-          region: _region,
-          channel: _channel,
+  @override
+  void didUpdateWidget(covariant SettingsHubScreen o) {
+    super.didUpdateWidget(o);
+    if (o.meshAnimationEnabled != widget.meshAnimationEnabled) setState(() => _meshAnim = widget.meshAnimationEnabled);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _sub?.cancel();
+    super.dispose();
+  }
+
+  String _presetTag(AppLocalizations l) => switch (_modemPreset) {
+    0 => l.tr('modem_preset_speed'), 1 => l.tr('modem_preset_normal'),
+    2 => l.tr('modem_preset_range'), 3 => l.tr('modem_preset_maxrange'),
+    4 => l.tr('modem_preset_custom'), _ => '—',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final l = context.l10n;
+    final pal = context.palette;
+
+    final devSub = _nickname != null && _nickname!.isNotEmpty
+        ? '$_nickname · ${_fmtId(_nodeId)}' : 'ID: ${_fmtId(_nodeId)}';
+    final netSub = '$_region · ${_presetTag(l)}';
+    final connSub = _radioMode == 'wifi'
+        ? 'Wi-Fi STA${_wifiConn ? ' · ${_wifiSsid ?? ""}' : ""}'
+        : 'BLE${_blePin != null ? " · PIN: $_blePin" : ""}';
+    final enSub = '${_powersave ? l.tr("powersave_mode_eco") : l.tr("powersave_mode_normal")}'
+        '${_gpsPresent ? " · GPS: ${_gpsEnabled ? "ON" : "OFF"}" : ""}';
+    final diagSub = [
+      if (_batPct != null) '$_batPct%',
+      if (_version != null && _version!.isNotEmpty) 'v$_version',
+    ].join(' · ');
+
+    return Scaffold(
+      backgroundColor: pal.surface,
+      appBar: AppBar(
+        title: Text(l.tr('settings')),
+        leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context)),
+      ),
+      body: MeshBackgroundWrapper(
+        child: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xxl + AppSpacing.sm),
+            children: [
+              _stagger(0, _HubCard(icon: Icons.devices_rounded, iconColor: pal.primary,
+                title: l.tr('settings_device'), subtitle: devSub,
+                onTap: () => _push(_DevicePage(ble: widget.ble, nodeId: _nodeId, nickname: _nickname,
+                  onNicknameChanged: (n) { widget.onNicknameChanged(n); setState(() => _nickname = n); })))),
+              const SizedBox(height: AppSpacing.md),
+              _stagger(1, _HubCard(icon: Icons.cell_tower_rounded, iconColor: Colors.orange,
+                title: l.tr('settings_network_title'), subtitle: netSub,
+                onTap: () => _push(_NetworkModemPage(ble: widget.ble, region: _region, channel: _channel,
+                  sf: _sf, bw: _bw, cr: _cr, modemPreset: _modemPreset, radioMode: _radioMode,
+                  espNowChannel: _espCh, espNowAdaptive: _espAdapt,
+                  onRegionChanged: (r, c) { widget.onRegionChanged(r, c); setState(() { _region = r; _channel = c; }); },
+                  onSfChanged: (v) { widget.onSfChanged(v); setState(() => _sf = v); })))),
+              const SizedBox(height: AppSpacing.md),
+              _stagger(2, _HubCard(icon: Icons.bluetooth_searching_rounded, iconColor: Colors.blueAccent,
+                title: l.tr('connection'), subtitle: connSub,
+                onTap: () => _push(_ConnectionPage(ble: widget.ble)))),
+              const SizedBox(height: AppSpacing.md),
+              _stagger(3, _HubCard(icon: Icons.shield_outlined, iconColor: Colors.green,
+                title: l.tr('settings_security_title'), subtitle: l.tr('e2e_invite_hint'),
+                onTap: () => _push(_SecurityPage(ble: widget.ble)))),
+              const SizedBox(height: AppSpacing.md),
+              _stagger(4, _HubCard(icon: Icons.battery_saver_rounded, iconColor: Colors.amber,
+                title: l.tr('settings_energy_title'), subtitle: enSub,
+                onTap: () => _push(_EnergyThemePage(ble: widget.ble, powersave: _powersave,
+                  gpsPresent: _gpsPresent, gpsEnabled: _gpsEnabled, gpsFix: _gpsFix,
+                  meshAnimationEnabled: _meshAnim,
+                  onPowersaveChanged: (v) { widget.onPowersaveChanged(v); setState(() => _powersave = v); },
+                  onGpsChanged: (v) { widget.onGpsChanged(v); setState(() => _gpsEnabled = v); },
+                  onMeshAnimationChanged: (v) { widget.onMeshAnimationChanged(v); setState(() => _meshAnim = v); })))),
+              const SizedBox(height: AppSpacing.md),
+              _stagger(5, _HubCard(icon: Icons.analytics_outlined, iconColor: Colors.purple,
+                title: l.tr('settings_diagnostics_title'),
+                subtitle: diagSub.isNotEmpty ? diagSub : l.tr('settings_diagnostics_hint'),
+                onTap: () => _push(_DiagnosticsPage(ble: widget.ble)))),
+            ],
+          ),
         ),
       ),
     );
-    if (updated != null) {
-      widget.onRegionChanged(updated.region, updated.channel);
-      if (mounted) {
+  }
+
+  void _push(Widget page) {
+    Navigator.push(context, MaterialPageRoute(builder: (_) => page)).then((_) {
+      if (mounted && widget.ble.isConnected) widget.ble.getInfo();
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  _HubCard — карточка хаба
+// ═══════════════════════════════════════════════════════════════════════════
+
+class _HubCard extends StatelessWidget {
+  final IconData icon;
+  final Color iconColor;
+  final String title;
+  final String subtitle;
+  final VoidCallback onTap;
+
+  const _HubCard({required this.icon, required this.iconColor, required this.title, required this.subtitle, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final pal = context.palette;
+    return AppSectionCard(
+      padding: EdgeInsets.zero,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        onTap: () { HapticFeedback.selectionClick(); onTap(); },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md + 2),
+          child: Row(children: [
+            Container(
+              width: 44, height: 44,
+              decoration: BoxDecoration(color: iconColor.withOpacity(0.12), borderRadius: BorderRadius.circular(AppRadius.md)),
+              child: Icon(icon, color: iconColor, size: 24),
+            ),
+            const SizedBox(width: AppSpacing.lg),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(title, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: pal.onSurface)),
+              const SizedBox(height: 2),
+              Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 12, color: pal.onSurfaceVariant)),
+            ])),
+            Icon(Icons.chevron_right_rounded, color: pal.onSurfaceVariant),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  _AnimatedStatusChip — анимированная обратная связь (сохранено / ошибка)
+// ═══════════════════════════════════════════════════════════════════════════
+
+class _AnimatedStatusChip extends StatefulWidget {
+  final String? label;
+  final bool isError;
+  const _AnimatedStatusChip({this.label, this.isError = false});
+  @override
+  State<_AnimatedStatusChip> createState() => _AnimatedStatusChipState();
+}
+
+class _AnimatedStatusChipState extends State<_AnimatedStatusChip> {
+  Timer? _t;
+  String? _shown;
+  bool _err = false;
+
+  @override
+  void initState() { super.initState(); _shown = widget.label; _err = widget.isError; _arm(); }
+
+  @override
+  void didUpdateWidget(covariant _AnimatedStatusChip o) {
+    super.didUpdateWidget(o);
+    if (widget.label != o.label || widget.isError != o.isError) {
+      _t?.cancel();
+      setState(() { _shown = widget.label; _err = widget.isError; });
+      _arm();
+    }
+  }
+
+  void _arm() {
+    if (_shown != null && !_err) {
+      _t = Timer(const Duration(milliseconds: 2500), () { if (mounted) setState(() => _shown = null); });
+    }
+  }
+
+  @override
+  void dispose() { _t?.cancel(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSize(
+      duration: _kDur, curve: _kIn, alignment: Alignment.topLeft,
+      child: AnimatedSwitcher(
+        duration: _kDur, switchInCurve: _kIn, switchOutCurve: _kOut,
+        child: _shown != null
+            ? Padding(key: ValueKey('$_shown$_err'), padding: const EdgeInsets.only(top: AppSpacing.sm),
+                child: AppStateChip(label: _shown!, kind: _err ? AppStateKind.error : AppStateKind.success))
+            : const SizedBox.shrink(key: ValueKey('none')),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Shared scaffold / card / section header
+// ═══════════════════════════════════════════════════════════════════════════
+
+class _SubpageScaffold extends StatelessWidget {
+  final String title;
+  final List<Widget> children;
+  const _SubpageScaffold({required this.title, required this.children});
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: context.palette.surface,
+      appBar: AppBar(
+        title: Text(title),
+        leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context)),
+      ),
+      body: MeshBackgroundWrapper(
+        child: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xxl + AppSpacing.sm),
+            children: [
+              for (var i = 0; i < children.length; i++) ...[
+                if (i > 0) const SizedBox(height: AppSpacing.md),
+                _stagger(i, children[i]),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PageCard extends StatelessWidget {
+  final String? title;
+  final String? subtitle;
+  final Widget child;
+  const _PageCard({this.title, this.subtitle, required this.child});
+  @override
+  Widget build(BuildContext context) {
+    return AppSectionCard(
+      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 14, AppSpacing.lg, AppSpacing.lg),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        if (title != null) ...[
+          Text(title!, style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600, color: context.palette.onSurface, letterSpacing: 0.2)),
+          if (subtitle != null) ...[
+            const SizedBox(height: AppSpacing.xs),
+            Text(subtitle!, style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant, height: 1.3)),
+          ],
+          const SizedBox(height: AppSpacing.sm),
+        ],
+        child,
+      ]),
+    );
+  }
+}
+
+class _SectionAccentHeader extends StatelessWidget {
+  final String text;
+  final IconData? trailingIcon;
+  const _SectionAccentHeader({required this.text, this.trailingIcon});
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return Row(children: [
+      Container(width: 3, height: 14, decoration: BoxDecoration(color: p.primary, borderRadius: BorderRadius.circular(2))),
+      const SizedBox(width: AppSpacing.sm + 2),
+      Expanded(child: Text(text, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, letterSpacing: 0.2, color: p.onSurface))),
+      if (trailingIcon != null) Icon(trailingIcon, size: 18, color: p.onSurfaceVariant),
+    ]);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PAGE 1 — Устройство (Node ID + Nickname)
+// ═══════════════════════════════════════════════════════════════════════════
+
+class _DevicePage extends StatefulWidget {
+  final RiftLinkBle ble;
+  final String nodeId;
+  final String? nickname;
+  final void Function(String) onNicknameChanged;
+  const _DevicePage({required this.ble, required this.nodeId, this.nickname, required this.onNicknameChanged});
+  @override
+  State<_DevicePage> createState() => _DevicePageState();
+}
+
+class _DevicePageState extends State<_DevicePage> {
+  late String _nodeId;
+  late final TextEditingController _nickCtrl;
+  final _nickFocus = FocusNode();
+  String? _copySt;
+  bool _copyErr = false;
+  String? _nickSt;
+  bool _nickErr = false;
+  StreamSubscription<RiftLinkEvent>? _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    final li = widget.ble.lastInfo;
+    _nodeId = (li != null && li.id.isNotEmpty) ? li.id : widget.nodeId;
+    final nick = (li?.nickname?.trim().isNotEmpty == true) ? li!.nickname!.trim() : (widget.nickname ?? '');
+    _nickCtrl = TextEditingController(text: nick);
+    _sub = widget.ble.events.listen((evt) {
+      if (!mounted) return;
+      if (evt is RiftLinkInfoEvent) {
+        setState(() { if (evt.id.isNotEmpty) _nodeId = evt.id; });
+        if (evt.hasNicknameField && evt.nickname != null && evt.nickname!.trim().isNotEmpty && !_nickFocus.hasFocus) {
+          _nickCtrl.text = evt.nickname!.trim();
+        }
+      }
+    });
+  }
+
+  @override
+  void dispose() { _sub?.cancel(); _nickCtrl.dispose(); _nickFocus.dispose(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    final l = context.l10n;
+    final pal = context.palette;
+    final connected = widget.ble.isConnected;
+    final plain = _nodeIdForClipboard(_nodeId);
+    final shown = _fmtId(_nodeId);
+
+    return _SubpageScaffold(title: l.tr('settings_device'), children: [
+      _PageCard(title: l.tr('settings_node_id'), subtitle: l.tr('settings_node_id_hint'), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SelectableText(shown, style: TextStyle(color: pal.onSurface, fontSize: 15, height: 1.35, fontFamily: 'monospace', letterSpacing: 0.5)),
+          const SizedBox(height: AppSpacing.md),
+          AppSecondaryButton(fullWidth: true, onPressed: plain.isEmpty ? null : () async {
+            await Clipboard.setData(ClipboardData(text: plain));
+            HapticFeedback.lightImpact();
+            if (mounted) setState(() { _copySt = l.tr('copied'); _copyErr = false; });
+          }, child: Row(mainAxisAlignment: MainAxisAlignment.center, mainAxisSize: MainAxisSize.min, children: [
+            const Icon(Icons.copy, size: 18), SizedBox(width: AppSpacing.sm), Text(l.tr('copy')),
+          ])),
+          _AnimatedStatusChip(label: _copySt, isError: _copyErr),
+        ],
+      )),
+      _PageCard(title: l.tr('nickname'), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        TextField(controller: _nickCtrl, focusNode: _nickFocus, maxLength: 16,
+          style: TextStyle(color: pal.onSurface), decoration: InputDecoration(hintText: l.tr('nickname_hint'), counterText: '')),
+        const SizedBox(height: AppSpacing.md),
+        AppPrimaryButton(onPressed: connected ? () async {
+          final n = _nickCtrl.text.trim();
+          if (await widget.ble.setNickname(n)) {
+            widget.onNicknameChanged(n);
+            HapticFeedback.lightImpact();
+            if (mounted) setState(() { _nickSt = l.tr('saved'); _nickErr = false; });
+          } else {
+            if (mounted) setState(() { _nickSt = l.tr('error'); _nickErr = true; });
+          }
+        } : null, child: Text(l.tr('save'))),
+        _AnimatedStatusChip(label: _nickSt, isError: _nickErr),
+      ])),
+    ]);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PAGE 2 — Сеть и модем (Region + Channel + Modem + ESP-NOW)
+// ═══════════════════════════════════════════════════════════════════════════
+
+class _NetworkModemPage extends StatefulWidget {
+  final RiftLinkBle ble;
+  final String region;
+  final int? channel, sf;
+  final double? bw;
+  final int? cr, modemPreset;
+  final String radioMode;
+  final int espNowChannel;
+  final bool espNowAdaptive;
+  final void Function(String, int?) onRegionChanged;
+  final void Function(int?) onSfChanged;
+
+  const _NetworkModemPage({required this.ble, required this.region, this.channel, this.sf, this.bw, this.cr,
+    this.modemPreset, required this.radioMode, required this.espNowChannel, required this.espNowAdaptive,
+    required this.onRegionChanged, required this.onSfChanged});
+
+  @override
+  State<_NetworkModemPage> createState() => _NetworkModemPageState();
+}
+
+class _NetworkModemPageState extends State<_NetworkModemPage> {
+  late String _region;
+  int? _channel, _sf;
+  double? _bw;
+  int? _cr, _modemPreset;
+  String _radioMode = 'ble';
+  int _espCh = 1;
+  bool _espAdapt = false;
+  bool _modemApplying = false;
+  String? _regSt, _modemSt;
+  bool _regErr = false, _modemErr = false;
+  StreamSubscription<RiftLinkEvent>? _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    final li = widget.ble.lastInfo;
+    _region = li?.region ?? widget.region;
+    _channel = li?.channel ?? widget.channel;
+    _sf = li?.sf ?? widget.sf; _bw = li?.bw ?? widget.bw; _cr = li?.cr ?? widget.cr;
+    _modemPreset = li?.modemPreset ?? widget.modemPreset;
+    _radioMode = li?.radioMode ?? widget.radioMode;
+    _espCh = (li?.espNowChannel != null && li!.espNowChannel! >= 1 && li.espNowChannel! <= 13) ? li.espNowChannel! : widget.espNowChannel;
+    _espAdapt = li?.espNowAdaptive ?? widget.espNowAdaptive;
+    _sub = widget.ble.events.listen((evt) {
+      if (!mounted) return;
+      if (evt is RiftLinkInfoEvent) {
         setState(() {
-          _region = updated.region;
-          _channel = updated.channel;
+          _region = evt.region;
+          if (evt.hasChannelField) _channel = evt.channel;
+          _sf = evt.sf; _bw = evt.bw; _cr = evt.cr; _modemPreset = evt.modemPreset;
+          _radioMode = evt.radioMode;
+          if (evt.espNowChannel != null && evt.espNowChannel! >= 1 && evt.espNowChannel! <= 13) _espCh = evt.espNowChannel!;
+          _espAdapt = evt.espNowAdaptive;
         });
+      } else if (evt is RiftLinkRegionEvent) {
+        setState(() { _region = evt.region; _channel = evt.channel; });
+      }
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isConnected) widget.ble.getInfo(); });
+  }
+
+  @override
+  void dispose() { _sub?.cancel(); super.dispose(); }
+
+  Future<bool> _waitModem({required int preset, int? sf, double? bw, int? cr}) async {
+    for (var i = 0; i < 5; i++) {
+      await widget.ble.getInfo(force: true);
+      await Future<void>.delayed(const Duration(milliseconds: 280));
+      final li = widget.ble.lastInfo;
+      if (li != null && li.modemPreset == preset) {
+        if (preset != 4) return true;
+        if (sf != null && bw != null && cr != null && li.sf == sf && (li.bw! - bw).abs() < 0.2 && li.cr == cr) return true;
       }
     }
-  }
-
-  Future<void> _openDiagnostics() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => _DiagnosticsPage(
-          version: widget.ble.lastInfo?.version,
-          batteryMv: widget.ble.lastInfo?.batteryMv ?? widget.batteryMv,
-          batteryPercent: widget.ble.lastInfo?.batteryPercent,
-          offlinePending: widget.ble.lastInfo?.offlinePending ?? widget.offlinePending,
-          gpsPresent: widget.ble.lastInfo?.gpsPresent ?? widget.gpsPresent,
-          gpsEnabled: widget.ble.lastInfo?.gpsEnabled ?? widget.gpsEnabled,
-          gpsFix: widget.ble.lastInfo?.gpsFix ?? widget.gpsFix,
-          powersave: widget.ble.lastInfo?.powersave ?? widget.powersave,
-        ),
-      ),
-    );
-  }
-
-  Future<void> _openConnection() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => _ConnectionPage(ble: widget.ble)),
-    );
-  }
-
-  Future<void> _openSecurity() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => _SecurityPage(ble: widget.ble)),
-    );
-  }
-
-  Future<void> _openLegacySettings() async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => SettingsScreen(
-          ble: widget.ble,
-          nodeId: widget.nodeId,
-          nickname: _nickname,
-          region: _region,
-          channel: _channel,
-          sf: widget.sf,
-          gpsPresent: widget.gpsPresent,
-          gpsEnabled: widget.gpsEnabled,
-          gpsFix: widget.gpsFix,
-          powersave: widget.powersave,
-          offlinePending: widget.offlinePending,
-          batteryMv: widget.batteryMv,
-          onNicknameChanged: widget.onNicknameChanged,
-          onRegionChanged: widget.onRegionChanged,
-          onSfChanged: widget.onSfChanged,
-          onPowersaveChanged: widget.onPowersaveChanged,
-          onGpsChanged: widget.onGpsChanged,
-          meshAnimationEnabled: _meshAnimationEnabled,
-          onMeshAnimationChanged: widget.onMeshAnimationChanged,
-        ),
-      ),
-    );
+    return false;
   }
 
   @override
   Widget build(BuildContext context) {
     final l = context.l10n;
-    return Scaffold(
-      backgroundColor: context.palette.surface,
-      appBar: AppBar(
-        title: Text(l.tr('settings')),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_rounded),
-          onPressed: () => Navigator.pop(context),
-        ),
-      ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+    final pal = context.palette;
+    final conn = widget.ble.isConnected;
+    final regions = ['EU', 'RU', 'UK', 'US', 'AU'];
+    final isEu = _region == 'EU' || _region == 'UK';
+
+    return _SubpageScaffold(title: l.tr('settings_network_title'), children: [
+      _PageCard(title: l.tr('region'), subtitle: l.tr('settings_region_hint'), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          AppSectionCard(
-            child: Column(
-              children: [
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.devices_outlined, color: context.palette.primary),
-                  title: Text('Device profile', style: TextStyle(color: context.palette.onSurface)),
-                  subtitle: Text(
-                    _nickname.trim().isEmpty ? _formatNodeIdDisplay(widget.nodeId) : _nickname.trim(),
-                    style: TextStyle(color: context.palette.onSurfaceVariant),
-                  ),
-                  trailing: Icon(Icons.chevron_right_rounded, color: context.palette.onSurfaceVariant),
-                  onTap: _openDeviceProfile,
-                ),
-                Divider(height: 1, color: context.palette.divider),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.route_outlined, color: context.palette.primary),
-                  title: Text('Mesh network', style: TextStyle(color: context.palette.onSurface)),
-                  subtitle: Text(
-                    _channel != null ? 'Region: $_region, channel: $_channel' : 'Region: $_region',
-                    style: TextStyle(color: context.palette.onSurfaceVariant),
-                  ),
-                  trailing: Icon(Icons.chevron_right_rounded, color: context.palette.onSurfaceVariant),
-                  onTap: _openMeshRegion,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          AppSectionCard(
-            child: Column(
-              children: [
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.dark_mode_outlined, color: context.palette.primary),
-                  title: Text(l.tr('theme'), style: TextStyle(color: context.palette.onSurface)),
-                  subtitle: Text(l.tr('theme_hint'), style: TextStyle(color: context.palette.onSurfaceVariant)),
-                  trailing: Icon(Icons.chevron_right_rounded, color: context.palette.onSurfaceVariant),
-                  onTap: () => showThemeModeSheet(context),
-                ),
-                Divider(height: 1, color: context.palette.divider),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  secondary: Icon(Icons.animation_rounded, color: context.palette.primary),
-                  title: Text(l.tr('mesh_animation'), style: TextStyle(color: context.palette.onSurface)),
-                  subtitle: Text(l.tr('mesh_animation_hint'), style: TextStyle(color: context.palette.onSurfaceVariant)),
-                  value: _meshAnimationEnabled,
-                  onChanged: (v) {
-                    widget.onMeshAnimationChanged(v);
-                    setState(() => _meshAnimationEnabled = v);
-                    _snack(l.tr('saved'));
-                  },
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          AppSectionCard(
-            child: Column(
-              children: [
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.bluetooth_searching_rounded, color: context.palette.primary),
-                  title: Text('Connection', style: TextStyle(color: context.palette.onSurface)),
-                  subtitle: Text(
-                    widget.ble.isWifiMode ? 'Radio mode: Wi-Fi' : 'Radio mode: BLE',
-                    style: TextStyle(color: context.palette.onSurfaceVariant),
-                  ),
-                  trailing: Icon(Icons.chevron_right_rounded, color: context.palette.onSurfaceVariant),
-                  onTap: _openConnection,
-                ),
-                Divider(height: 1, color: context.palette.divider),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.lock_outline_rounded, color: context.palette.primary),
-                  title: Text('Security', style: TextStyle(color: context.palette.onSurface)),
-                  subtitle: Text('E2E invite, accept invite and pairing controls', style: TextStyle(color: context.palette.onSurfaceVariant)),
-                  trailing: Icon(Icons.chevron_right_rounded, color: context.palette.onSurfaceVariant),
-                  onTap: _openSecurity,
-                ),
-                Divider(height: 1, color: context.palette.divider),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.system_update_alt_rounded, color: context.palette.primary),
-                  title: Text(l.tr('firmware_update_title'), style: TextStyle(color: context.palette.onSurface)),
-                  subtitle: Text('Open OTA update screen', style: TextStyle(color: context.palette.onSurfaceVariant)),
-                  trailing: Icon(Icons.chevron_right_rounded, color: context.palette.onSurfaceVariant),
-                  onTap: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => OtaScreen(ble: widget.ble)),
-                  ),
-                ),
-                Divider(height: 1, color: context.palette.divider),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  leading: Icon(Icons.analytics_outlined, color: context.palette.primary),
-                  title: Text('Diagnostics', style: TextStyle(color: context.palette.onSurface)),
-                  subtitle: Text('Battery, queues, GPS and version', style: TextStyle(color: context.palette.onSurfaceVariant)),
-                  trailing: Icon(Icons.chevron_right_rounded, color: context.palette.onSurfaceVariant),
-                  onTap: _openDiagnostics,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          AppSectionCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Advanced settings', style: TextStyle(color: context.palette.onSurface, fontWeight: FontWeight.w600)),
-                const SizedBox(height: 6),
-                Text(
-                  'All detailed controls (modem, invite, radio mode, ESP-NOW, low-level options).',
-                  style: TextStyle(color: context.palette.onSurfaceVariant),
-                ),
-                const SizedBox(height: 12),
-                AppSecondaryButton(
-                  fullWidth: true,
-                  onPressed: _openLegacySettings,
-                  child: const Text('Open full settings'),
-                ),
-              ],
-            ),
-          ),
+          Text(l.tr('region_warning'), style: TextStyle(color: pal.onSurfaceVariant, fontSize: 12, height: 1.35)),
+          const SizedBox(height: AppSpacing.md + AppSpacing.xs),
+          _SegmentedPickBar(leadingIcon: Icons.public_rounded, labels: regions,
+            selectedIndex: regions.contains(_region) ? regions.indexOf(_region) : null, enabled: conn,
+            onSelected: (i) async {
+              final r = regions[i];
+              if (await widget.ble.setRegion(r)) {
+                widget.onRegionChanged(r, _channel);
+                setState(() { _region = r; _regSt = l.tr('saved'); _regErr = false; });
+              }
+            }),
+          _AnimatedStatusChip(label: _regSt, isError: _regErr),
+          AnimatedSize(duration: _kDur, curve: _kIn,
+            child: isEu ? Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              const SizedBox(height: AppSpacing.lg + AppSpacing.xs),
+              Row(children: [
+                Icon(Icons.radio_button_checked, size: 18, color: pal.primary.withOpacity(0.9)),
+                const SizedBox(width: AppSpacing.sm),
+                Text(l.tr('channel_eu'), style: TextStyle(color: pal.onSurface, fontSize: 14, fontWeight: FontWeight.w600, letterSpacing: 0.2)),
+              ]),
+              const SizedBox(height: AppSpacing.sm + 2),
+              _SegmentedPickBar(leadingIcon: Icons.layers_outlined, labels: const ['0', '1', '2'],
+                selectedIndex: _channel != null && _channel! >= 0 && _channel! <= 2 ? _channel : null, enabled: conn,
+                onSelected: (i) async {
+                  if (await widget.ble.setChannel(i)) { widget.onRegionChanged(_region, i); setState(() => _channel = i); }
+                }),
+            ]) : const SizedBox.shrink()),
         ],
-      ),
-    );
+      )),
+
+      _PageCard(title: l.tr('settings_modem'), subtitle: l.tr('settings_modem_hint'), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _ModemSection(modemPreset: _modemPreset, sf: _sf, bw: _bw, cr: _cr,
+            enabled: conn && !_modemApplying,
+            onPreset: (p) async {
+              if (!mounted || _modemApplying) return;
+              setState(() => _modemApplying = true);
+              var sent = false;
+              for (var i = 0; i < 2 && !sent; i++) { sent = await widget.ble.setModemPreset(p); if (!sent) await Future<void>.delayed(const Duration(milliseconds: 120)); }
+              if (sent) {
+                final ok = await _waitModem(preset: p);
+                if (mounted) setState(() { _modemSt = ok ? l.tr('saved') : l.tr('modem_apply_failed'); _modemErr = !ok; });
+              } else { if (mounted) setState(() { _modemSt = l.tr('error'); _modemErr = true; }); }
+              if (mounted) setState(() => _modemApplying = false);
+            },
+            onCustom: (sf, bw, cr) async {
+              if (!mounted || _modemApplying) return;
+              setState(() => _modemApplying = true);
+              var sent = false;
+              for (var i = 0; i < 2 && !sent; i++) { sent = await widget.ble.setCustomModem(sf, bw, cr); if (!sent) await Future<void>.delayed(const Duration(milliseconds: 120)); }
+              if (sent) {
+                final ok = await _waitModem(preset: 4, sf: sf, bw: bw, cr: cr);
+                if (ok) { setState(() { _sf = sf; _bw = bw; _cr = cr; _modemPreset = 4; }); widget.onSfChanged(sf); }
+                if (mounted) setState(() { _modemSt = ok ? l.tr('saved') : l.tr('modem_apply_failed'); _modemErr = !ok; });
+              } else { if (mounted) setState(() { _modemSt = l.tr('error'); _modemErr = true; }); }
+              if (mounted) setState(() => _modemApplying = false);
+            }),
+          if (_modemApplying) const Padding(padding: EdgeInsets.only(top: AppSpacing.sm - 2), child: LinearProgressIndicator(minHeight: 2)),
+          _AnimatedStatusChip(label: _modemSt, isError: _modemErr),
+        ],
+      )),
+
+      if (_radioMode == 'wifi')
+        _PageCard(title: l.tr('espnow_section'), subtitle: l.tr('espnow_section_hint'), child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            DropdownButtonFormField<int>(value: _espCh, isDense: true,
+              decoration: InputDecoration(labelText: l.tr('espnow_channel')),
+              items: List.generate(13, (i) => DropdownMenuItem(value: i + 1, child: Text('${i + 1}'))),
+              onChanged: conn ? (v) async {
+                if (v == null) return;
+                if (await widget.ble.setEspNowChannel(v)) { setState(() => _espCh = v); widget.ble.getInfo(); }
+              } : null),
+            const SizedBox(height: AppSpacing.sm),
+            SwitchListTile(contentPadding: EdgeInsets.zero,
+              title: Text(l.tr('espnow_adaptive'), style: TextStyle(color: pal.onSurface)),
+              value: _espAdapt, activeThumbColor: pal.primary, activeTrackColor: pal.primary.withOpacity(0.45),
+              onChanged: conn ? (v) async {
+                if (await widget.ble.setEspNowAdaptive(v)) { setState(() => _espAdapt = v); widget.ble.getInfo(); }
+              } : null),
+          ],
+        )),
+    ]);
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  PAGE 3 — Соединение (Radio + Wi-Fi + BLE PIN + OTA)
+// ═══════════════════════════════════════════════════════════════════════════
+
 class _ConnectionPage extends StatefulWidget {
-  const _ConnectionPage({required this.ble});
-
   final RiftLinkBle ble;
-
+  const _ConnectionPage({required this.ble});
   @override
   State<_ConnectionPage> createState() => _ConnectionPageState();
 }
 
 class _ConnectionPageState extends State<_ConnectionPage> {
-  late final TextEditingController _ssidController = TextEditingController();
-  late final TextEditingController _passController = TextEditingController();
-
-  bool _busy = false;
   int? _blePin;
   String _radioMode = 'ble';
-  String? _wifiSsid;
-  String? _wifiIp;
+  String? _radioVariant;
+  bool _wifiConn = false;
+  String? _wifiSsid, _wifiIp;
+  bool _radioApplying = false;
+  late final TextEditingController _ssidCtrl, _passCtrl;
+  String? _pinSt, _radioSt;
+  bool _pinErr = false, _radioErr = false;
+  StreamSubscription<RiftLinkEvent>? _sub;
 
   @override
   void initState() {
     super.initState();
-    _refreshFromInfo();
+    _ssidCtrl = TextEditingController();
+    _passCtrl = TextEditingController();
+    final li = widget.ble.lastInfo;
+    _blePin = li?.blePin; _radioMode = li?.radioMode ?? 'ble'; _radioVariant = li?.radioVariant;
+    _wifiConn = li?.wifiConnected ?? false; _wifiSsid = li?.wifiSsid; _wifiIp = li?.wifiIp;
+    _sub = widget.ble.events.listen((evt) {
+      if (!mounted) return;
+      if (evt is RiftLinkInfoEvent) {
+        setState(() {
+          _blePin = evt.blePin; _radioMode = evt.radioMode; _radioVariant = evt.radioVariant;
+          _wifiConn = evt.wifiConnected; _wifiSsid = evt.wifiSsid; _wifiIp = evt.wifiIp;
+        });
+      }
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isConnected) widget.ble.getInfo(); });
   }
 
   @override
-  void dispose() {
-    _ssidController.dispose();
-    _passController.dispose();
-    super.dispose();
+  void dispose() { _sub?.cancel(); _ssidCtrl.dispose(); _passCtrl.dispose(); super.dispose(); }
+
+  Future<void> _toBle() async {
+    final l = context.l10n;
+    if (!widget.ble.isConnected || _radioApplying) return;
+    setState(() => _radioApplying = true);
+    final ok = await widget.ble.switchToBle();
+    if (ok) {
+      await widget.ble.getInfo(force: true);
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      final li = widget.ble.lastInfo;
+      if (mounted) {
+        setState(() {
+          _radioSt = (li != null && li.radioMode == 'ble') ? l.tr('radio_mode_switched', {'mode': l.tr('radio_mode_ble')}) : l.tr('radio_mode_failed');
+          _radioErr = !(li != null && li.radioMode == 'ble');
+        });
+      }
+    } else { if (mounted) setState(() { _radioSt = l.tr('radio_mode_failed'); _radioErr = true; }); }
+    if (mounted) setState(() => _radioApplying = false);
   }
 
-  void _refreshFromInfo() {
-    final info = widget.ble.lastInfo;
-    if (info == null) return;
-    _blePin = info.blePin;
-    _radioMode = info.radioMode;
-    _wifiSsid = info.wifiSsid;
-    _wifiIp = info.wifiIp;
-  }
-
-  void _snack(String t) => showAppSnackBar(context, t);
-
-  Future<void> _withBusy(Future<void> Function() action) async {
-    if (_busy) return;
-    setState(() => _busy = true);
-    try {
-      await action();
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _refreshInfo() async {
-    await widget.ble.getInfo(force: true);
-    if (!mounted) return;
-    setState(_refreshFromInfo);
+  Future<void> _toWifi() async {
+    final l = context.l10n;
+    if (!widget.ble.isConnected || _radioApplying) return;
+    final ssid = _ssidCtrl.text.trim();
+    if (ssid.isEmpty) { showAppSnackBar(context, l.tr('radio_mode_need_ssid')); return; }
+    setState(() => _radioApplying = true);
+    final ok = await widget.ble.switchToWifiSta(ssid: ssid, pass: _passCtrl.text);
+    if (ok) {
+      if (!widget.ble.isConnected) {
+        if (mounted) { showAppSnackBar(context, l.tr('radio_mode_switching_reconnect')); setState(() => _radioApplying = false); }
+        return;
+      }
+      await widget.ble.getInfo(force: true);
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      final li = widget.ble.lastInfo;
+      if (mounted) {
+        final success = li != null && li.radioMode == 'wifi' && li.radioVariant == 'sta';
+        setState(() {
+          _radioSt = success ? l.tr('radio_mode_switched', {'mode': l.tr('radio_mode_wifi_sta')}) : l.tr('radio_mode_failed');
+          _radioErr = !success;
+        });
+      }
+    } else { if (mounted) setState(() { _radioSt = l.tr('radio_mode_failed'); _radioErr = true; }); }
+    if (mounted) setState(() => _radioApplying = false);
   }
 
   @override
   Widget build(BuildContext context) {
-    final p = context.palette;
-    return Scaffold(
-      backgroundColor: p.surface,
-      appBar: AppBar(title: const Text('Connection')),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+    final l = context.l10n;
+    final pal = context.palette;
+    final conn = widget.ble.isConnected;
+    final usingWifi = widget.ble.isWifiMode;
+
+    return _SubpageScaffold(title: l.tr('connection'), children: [
+      // BLE PIN
+      _PageCard(title: l.tr('ble_pin'), subtitle: l.tr('settings_connection_hint'), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          AppSectionCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Current mode', style: TextStyle(color: p.onSurfaceVariant)),
-                const SizedBox(height: 8),
-                AppStateChip(
-                  label: _radioMode == 'wifi' ? 'Wi-Fi' : 'BLE',
-                  kind: AppStateKind.info,
-                ),
-                const SizedBox(height: 12),
-                if (_wifiSsid != null && _wifiSsid!.isNotEmpty)
-                  Text('SSID: $_wifiSsid', style: TextStyle(color: p.onSurfaceVariant)),
-                if (_wifiIp != null && _wifiIp!.isNotEmpty)
-                  Text('IP: $_wifiIp', style: TextStyle(color: p.onSurfaceVariant)),
-                const SizedBox(height: 12),
-                AppSecondaryButton(
-                  onPressed: _busy
-                      ? null
-                      : () => _withBusy(() async {
-                            final ok = await widget.ble.switchToBle();
-                            await _refreshInfo();
-                            _snack(ok ? 'Switched to BLE' : 'Switch failed');
-                          }),
-                  child: const Text('Switch to BLE'),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _ssidController,
-                  decoration: const InputDecoration(labelText: 'Wi-Fi SSID'),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _passController,
-                  obscureText: true,
-                  decoration: const InputDecoration(labelText: 'Wi-Fi password'),
-                ),
-                const SizedBox(height: 12),
-                AppPrimaryButton(
-                  onPressed: _busy
-                      ? null
-                      : () => _withBusy(() async {
-                            final ssid = _ssidController.text.trim();
-                            final pass = _passController.text;
-                            if (ssid.isEmpty) {
-                              _snack('SSID is required');
-                              return;
-                            }
-                            final ok = await widget.ble.switchToWifiSta(ssid: ssid, pass: pass);
-                            await _refreshInfo();
-                            _snack(ok ? 'Switch command sent' : 'Switch failed');
-                          }),
-                  child: const Text('Switch to Wi-Fi STA'),
-                ),
-              ],
-            ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm + 2),
+            decoration: BoxDecoration(color: pal.surfaceVariant, borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: pal.divider)),
+            child: Text(_blePin != null ? _blePin.toString() : '—', style: TextStyle(fontFamily: 'monospace', color: pal.onSurface, fontWeight: FontWeight.w600, fontFeatures: const [FontFeature.tabularFigures()])),
           ),
-          const SizedBox(height: 12),
-          AppSectionCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('BLE PIN', style: TextStyle(color: p.onSurfaceVariant)),
-                const SizedBox(height: 8),
-                SelectableText(
-                  _blePin?.toString() ?? '—',
-                  style: TextStyle(
-                    color: p.onSurface,
-                    fontFamily: 'monospace',
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                AppSecondaryButton(
-                  onPressed: _busy
-                      ? null
-                      : () => _withBusy(() async {
-                            final ok = await widget.ble.regeneratePin();
-                            await _refreshInfo();
-                            _snack(ok ? 'PIN regenerated' : 'Failed to regenerate PIN');
-                          }),
-                  child: const Text('Regenerate PIN'),
-                ),
-              ],
-            ),
-          ),
+          const SizedBox(height: AppSpacing.sm + 2),
+          FilledButton.tonalIcon(
+            onPressed: conn ? () async {
+              final ok = await widget.ble.regeneratePin();
+              if (ok) await widget.ble.getInfo();
+              HapticFeedback.lightImpact();
+              if (mounted) setState(() { _pinSt = ok ? l.tr('saved') : l.tr('error'); _pinErr = !ok; });
+            } : null,
+            icon: const Icon(Icons.lock_reset_rounded, size: 18), label: Text(l.tr('regen_pin'))),
+          _AnimatedStatusChip(label: _pinSt, isError: _pinErr),
         ],
-      ),
-    );
+      )),
+
+      // Radio mode
+      _PageCard(title: l.tr('radio_mode_title'), subtitle: l.tr('radio_mode_hint'), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(children: [
+            Icon(_radioMode == 'wifi' ? Icons.wifi_rounded : Icons.bluetooth_rounded, size: 18, color: pal.primary),
+            const SizedBox(width: AppSpacing.sm),
+            Text('${l.tr('radio_mode_current')}: ${_radioMode == 'wifi' ? l.tr('radio_mode_wifi_sta') : l.tr('radio_mode_ble')}',
+              style: TextStyle(color: pal.onSurface, fontWeight: FontWeight.w600)),
+          ]),
+          const SizedBox(height: AppSpacing.md),
+          _SegmentedPickBar(leadingIcon: Icons.swap_horiz_rounded,
+            labels: [l.tr('radio_mode_ble'), l.tr('radio_mode_wifi_sta')],
+            selectedIndex: _radioMode == 'wifi' ? 1 : 0, enabled: conn && !_radioApplying,
+            onSelected: (i) async { if (i == 0) await _toBle(); else await _toWifi(); }),
+          _AnimatedStatusChip(label: _radioSt, isError: _radioErr),
+          AnimatedSize(duration: _kDur, curve: _kIn,
+            child: _radioMode == 'wifi' ? Padding(padding: const EdgeInsets.only(top: AppSpacing.sm + 2), child: Container(
+              padding: const EdgeInsets.all(AppSpacing.sm + 2),
+              decoration: BoxDecoration(color: pal.surfaceVariant, borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: pal.divider)),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(_wifiConn ? l.tr('radio_mode_wifi_connected') : l.tr('radio_mode_wifi_not_connected'),
+                  style: TextStyle(color: _wifiConn ? pal.success : pal.onSurfaceVariant, fontWeight: FontWeight.w600)),
+                if (_wifiSsid != null && _wifiSsid!.isNotEmpty) ...[const SizedBox(height: AppSpacing.xs), Text('SSID: $_wifiSsid', style: TextStyle(color: pal.onSurfaceVariant, fontSize: 12))],
+                if (_wifiIp != null && _wifiIp!.isNotEmpty) ...[const SizedBox(height: AppSpacing.xs / 2), Text('IP: $_wifiIp', style: TextStyle(color: pal.onSurfaceVariant, fontSize: 12))],
+              ]),
+            )) : const SizedBox.shrink()),
+          const SizedBox(height: AppSpacing.md),
+          TextField(controller: _ssidCtrl, style: TextStyle(color: pal.onSurface), decoration: InputDecoration(labelText: l.tr('wifi_ssid'))),
+          const SizedBox(height: AppSpacing.sm + 2),
+          TextField(controller: _passCtrl, obscureText: true, style: TextStyle(color: pal.onSurface), decoration: InputDecoration(labelText: l.tr('wifi_password'))),
+          const SizedBox(height: AppSpacing.md),
+          FilledButton.icon(onPressed: conn && !_radioApplying ? _toWifi : null,
+            icon: const Icon(Icons.wifi_find_rounded), label: Text(l.tr('radio_mode_connect_sta'))),
+          if (_radioApplying) const Padding(padding: EdgeInsets.only(top: AppSpacing.sm + 2), child: LinearProgressIndicator(minHeight: 2)),
+        ],
+      )),
+
+      // OTA
+      _PageCard(title: l.tr('firmware_update_title'), subtitle: l.tr('firmware_update_hint'), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (!usingWifi) ...[
+            FilledButton.icon(onPressed: conn ? () => Navigator.push(context, MaterialPageRoute(builder: (_) => OtaScreen(ble: widget.ble))) : null,
+              icon: const Icon(Icons.bluetooth_searching_rounded), label: Text(l.tr('firmware_update_ble'))),
+            const SizedBox(height: AppSpacing.sm + 2),
+            Text(l.tr('firmware_update_where_hint'), style: TextStyle(fontSize: 12, color: pal.onSurfaceVariant)),
+            const SizedBox(height: AppSpacing.sm - 2),
+            Text(l.tr('firmware_update_path'), style: TextStyle(fontFamily: 'monospace', color: pal.onSurfaceVariant.withOpacity(0.95), fontSize: 12)),
+          ] else ...[
+            Text(l.tr('firmware_update_wifi'), style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: pal.onSurface)),
+            const SizedBox(height: AppSpacing.sm),
+            Text(l.tr('firmware_update_where_hint'), style: TextStyle(fontSize: 12, color: pal.onSurfaceVariant)),
+          ],
+          if (!usingWifi && _radioMode != 'wifi') ...[
+            const SizedBox(height: AppSpacing.md),
+            Row(children: [
+              Icon(Icons.info_outline_rounded, size: 16, color: pal.onSurfaceVariant), const SizedBox(width: AppSpacing.sm - 2),
+              Expanded(child: Text(l.tr('firmware_update_wifi_requires_wifi_mode'), style: TextStyle(fontSize: 12, color: pal.onSurfaceVariant))),
+            ]),
+          ],
+          if (usingWifi || _radioMode == 'wifi') ...[
+            const SizedBox(height: AppSpacing.md),
+            Row(children: [
+              Icon(Icons.check_circle_outline_rounded, size: 16, color: pal.success), const SizedBox(width: AppSpacing.sm - 2),
+              Expanded(child: Text(l.tr('firmware_update_wifi_mode_ready'), style: TextStyle(fontSize: 12, color: pal.onSurfaceVariant))),
+            ]),
+          ],
+          const SizedBox(height: AppSpacing.md),
+          AppSecondaryButton(fullWidth: true, onPressed: conn && !_radioApplying && _radioMode != 'ble' ? _toBle : null,
+            child: Row(mainAxisAlignment: MainAxisAlignment.center, mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.bluetooth_rounded), SizedBox(width: AppSpacing.sm), Text(l.tr('radio_mode_back_to_ble')),
+            ])),
+        ],
+      )),
+    ]);
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  PAGE 4 — Безопасность (E2E Invite)
+// ═══════════════════════════════════════════════════════════════════════════
+
 class _SecurityPage extends StatefulWidget {
-  const _SecurityPage({required this.ble});
-
   final RiftLinkBle ble;
-
+  const _SecurityPage({required this.ble});
   @override
   State<_SecurityPage> createState() => _SecurityPageState();
 }
 
 class _SecurityPageState extends State<_SecurityPage> {
-  late final TextEditingController _inviteIdController = TextEditingController();
-  late final TextEditingController _inviteKeyController = TextEditingController();
-  late final TextEditingController _inviteChannelKeyController =
-      TextEditingController();
-  late final TextEditingController _inviteTokenController =
-      TextEditingController();
-  bool _busy = false;
+  late final TextEditingController _idCtrl, _keyCtrl, _ckCtrl, _tokCtrl;
+  String? _invSt;
+  bool _invErr = false;
+  String? _pendPeer;
+  Timer? _expiryTimer;
+  StreamSubscription<RiftLinkEvent>? _sub;
 
   @override
-  void dispose() {
-    _inviteIdController.dispose();
-    _inviteKeyController.dispose();
-    _inviteChannelKeyController.dispose();
-    _inviteTokenController.dispose();
-    super.dispose();
-  }
-
-  void _snack(String t) => showAppSnackBar(context, t);
-
-  Future<void> _withBusy(Future<void> Function() action) async {
-    if (_busy) return;
-    setState(() => _busy = true);
-    try {
-      await action();
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+  void initState() {
+    super.initState();
+    _idCtrl = TextEditingController(); _keyCtrl = TextEditingController();
+    _ckCtrl = TextEditingController(); _tokCtrl = TextEditingController();
+    _sub = widget.ble.events.listen((evt) {
+      if (!mounted) return;
+      if (evt is RiftLinkInfoEvent) {
+        final pp = _pendPeer;
+        if (pp != null && _peerHasKey(evt, pp) && mounted) {
+          setState(() { _invErr = false; _invSt = context.l10n.tr('invite_status_key_ready'); _pendPeer = null; });
+        }
+      } else if (evt is RiftLinkInviteEvent) {
+        final ttl = evt.inviteTtlMs != null ? (evt.inviteTtlMs! / 1000).round() : null;
+        _armExpiry(evt.inviteTtlMs);
+        setState(() { _invErr = false; _invSt = ttl != null ? context.l10n.tr('invite_status_created_ttl', {'sec': '$ttl'}) : context.l10n.tr('invite_created'); });
+      } else if (evt is RiftLinkErrorEvent && evt.code.startsWith('invite_')) {
+        String mapped = evt.msg;
+        if (evt.code == 'invite_peer_key_mismatch') mapped = context.l10n.tr('invite_status_mismatch');
+        else if (evt.code == 'invite_token_bad_length' || evt.code == 'invite_token_bad_format') mapped = context.l10n.tr('invite_status_token_bad');
+        setState(() { _invErr = true; _invSt = mapped; });
+      }
+    });
   }
 
   @override
-  Widget build(BuildContext context) {
-    final p = context.palette;
-    return Scaffold(
-      backgroundColor: p.surface,
-      appBar: AppBar(title: const Text('Security')),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-        children: [
-          AppSectionCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('E2E invite', style: TextStyle(color: p.onSurface)),
-                const SizedBox(height: 8),
-                Text(
-                  'Create new invite from device and accept invite data from trusted peers.',
-                  style: TextStyle(color: p.onSurfaceVariant),
-                ),
-                const SizedBox(height: 12),
-                AppPrimaryButton(
-                  onPressed: _busy
-                      ? null
-                      : () => _withBusy(() async {
-                            final ok = await widget.ble.createInvite();
-                            _snack(ok ? 'Invite requested' : 'Failed to create invite');
-                          }),
-                  child: const Text('Create invite'),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          AppSectionCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Accept invite', style: TextStyle(color: p.onSurface)),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _inviteIdController,
-                  maxLength: 16,
-                  decoration: const InputDecoration(
-                    labelText: 'Inviter ID (hex)',
-                    counterText: '',
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _inviteKeyController,
-                  minLines: 2,
-                  maxLines: 3,
-                  decoration: const InputDecoration(labelText: 'Public key'),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _inviteChannelKeyController,
-                  minLines: 1,
-                  maxLines: 2,
-                  decoration: const InputDecoration(
-                    labelText: 'Channel key (optional)',
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _inviteTokenController,
-                  maxLength: 16,
-                  decoration: const InputDecoration(
-                    labelText: 'Invite token (optional)',
-                    counterText: '',
-                  ),
-                ),
-                const SizedBox(height: 12),
-                AppPrimaryButton(
-                  onPressed: _busy
-                      ? null
-                      : () => _withBusy(() async {
-                            final id = _inviteIdController.text
-                                .trim()
-                                .replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
-                            final pubKey = _inviteKeyController.text.trim();
-                            final channelKey = _inviteChannelKeyController.text.trim();
-                            final token = _inviteTokenController.text
-                                .trim()
-                                .replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
-                            if (id.length < 8 || pubKey.isEmpty) {
-                              _snack('Invite ID and public key are required');
-                              return;
-                            }
-                            final ok = await widget.ble.acceptInvite(
-                              id: id.substring(0, id.length > 16 ? 16 : id.length),
-                              pubKey: pubKey,
-                              channelKey:
-                                  channelKey.isEmpty ? null : channelKey,
-                              inviteToken: token.isEmpty ? null : token,
-                            );
-                            _snack(ok ? 'Invite accepted' : 'Invite accept failed');
-                          }),
-                  child: const Text('Accept invite'),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
+  void dispose() { _sub?.cancel(); _expiryTimer?.cancel(); _idCtrl.dispose(); _keyCtrl.dispose(); _ckCtrl.dispose(); _tokCtrl.dispose(); super.dispose(); }
 
-class _DeviceProfilePage extends StatefulWidget {
-  const _DeviceProfilePage({
-    required this.ble,
-    required this.nodeId,
-    required this.nickname,
-  });
-
-  final RiftLinkBle ble;
-  final String nodeId;
-  final String nickname;
-
-  @override
-  State<_DeviceProfilePage> createState() => _DeviceProfilePageState();
-}
-
-class _DeviceProfilePageState extends State<_DeviceProfilePage> {
-  late final TextEditingController _controller =
-      TextEditingController(text: widget.nickname);
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
+  void _armExpiry(int? ms) {
+    _expiryTimer?.cancel();
+    if (ms == null || ms <= 0) return;
+    _expiryTimer = Timer(Duration(milliseconds: ms), () {
+      if (!mounted) return;
+      if (_pendPeer == null && !_invErr && _invSt == context.l10n.tr('invite_status_key_ready')) return;
+      setState(() { _invErr = true; _invSt = context.l10n.tr('invite_status_expired'); });
+    });
   }
 
-  void _snack(String t) => showAppSnackBar(context, t);
+  String? _valToken(String raw) {
+    if (raw.isEmpty) return null;
+    if (raw.length != 16 || !RegExp(r'^[0-9A-Fa-f]{16}$').hasMatch(raw)) return context.l10n.tr('invite_status_token_bad');
+    return null;
+  }
 
   @override
   Widget build(BuildContext context) {
     final l = context.l10n;
-    return Scaffold(
-      backgroundColor: context.palette.surface,
-      appBar: AppBar(title: const Text('Device profile')),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+    final pal = context.palette;
+    final conn = widget.ble.isConnected;
+
+    return _SubpageScaffold(title: l.tr('settings_security_title'), children: [
+      _PageCard(title: l.tr('e2e_invite'), subtitle: l.tr('e2e_invite_hint'), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          AppSectionCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(l.tr('settings_node_id'), style: TextStyle(color: context.palette.onSurfaceVariant)),
-                const SizedBox(height: 8),
-                SelectableText(
-                  _formatNodeIdDisplay(widget.nodeId),
-                  style: TextStyle(color: context.palette.onSurface, fontFamily: 'monospace', fontSize: 15),
-                ),
-                const SizedBox(height: 12),
-                AppSecondaryButton(
-                  onPressed: () async {
-                    await Clipboard.setData(
-                      ClipboardData(text: _nodeIdForClipboard(widget.nodeId)),
-                    );
-                    if (mounted) _snack(l.tr('copied'));
-                  },
-                  child: Text(l.tr('copy')),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
-          AppSectionCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(l.tr('nickname'), style: TextStyle(color: context.palette.onSurface)),
-                const SizedBox(height: 8),
-                TextField(
-                  controller: _controller,
-                  maxLength: 16,
-                  decoration: InputDecoration(hintText: l.tr('nickname_hint'), counterText: ''),
-                ),
-                const SizedBox(height: 12),
-                AppPrimaryButton(
-                  onPressed: () async {
-                    final n = _controller.text.trim();
-                    final ok = await widget.ble.setNickname(n);
-                    if (!mounted) return;
-                    if (!ok) {
-                      _snack(l.tr('error'));
-                      return;
-                    }
-                    _snack(l.tr('saved'));
-                    Navigator.pop(context, n);
-                  },
-                  child: Text(l.tr('save')),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _MeshRegionPage extends StatefulWidget {
-  const _MeshRegionPage({
-    required this.ble,
-    required this.region,
-    required this.channel,
-  });
-
-  final RiftLinkBle ble;
-  final String region;
-  final int? channel;
-
-  @override
-  State<_MeshRegionPage> createState() => _MeshRegionPageState();
-}
-
-class _MeshRegionPageState extends State<_MeshRegionPage> {
-  late String _region = widget.region;
-  late int? _channel = widget.channel;
-  static const _regions = ['EU', 'RU', 'UK', 'US', 'AU'];
-
-  void _snack(String t) => showAppSnackBar(context, t);
-
-  @override
-  Widget build(BuildContext context) {
-    final l = context.l10n;
-    final isEu = _region == 'EU' || _region == 'UK';
-    return Scaffold(
-      backgroundColor: context.palette.surface,
-      appBar: AppBar(title: const Text('Mesh network')),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-        children: [
-          AppSectionCard(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(l.tr('region'), style: TextStyle(color: context.palette.onSurface)),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: _regions.map((r) {
-                    return ChoiceChip(
-                      label: Text(r),
-                      selected: _region == r,
-                      onSelected: (_) async {
-                        final ok = await widget.ble.setRegion(r);
-                        if (!mounted) return;
-                        if (!ok) {
-                          _snack(l.tr('error'));
-                          return;
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(foregroundColor: pal.primary, side: BorderSide(color: pal.primary, width: 1.2),
+              padding: const EdgeInsets.symmetric(vertical: AppSpacing.buttonPrimaryV, horizontal: AppSpacing.lg),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md))),
+            onPressed: conn ? () {
+              HapticFeedback.lightImpact();
+              setState(() { _invErr = false; _invSt = l.tr('invite_status_creating'); });
+              widget.ble.createInvite();
+            } : null,
+            icon: const Icon(Icons.add_moderator_outlined, size: 22),
+            label: Text(l.tr('create_invite'), style: const TextStyle(fontWeight: FontWeight.w600))),
+          SizedBox(height: AppSpacing.xl + AppSpacing.xs),
+          _SectionAccentHeader(text: l.tr('invite_accept_section')),
+          const SizedBox(height: AppSpacing.md),
+          Container(
+            padding: const EdgeInsets.all(AppSpacing.md + AppSpacing.xs),
+            decoration: BoxDecoration(color: pal.surfaceVariant.withOpacity(0.65), borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: pal.divider)),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              TextField(controller: _idCtrl, style: TextStyle(color: pal.onSurface, fontFamily: 'monospace', fontSize: 13),
+                decoration: InputDecoration(isDense: true, labelText: l.tr('inviter_id'),
+                  suffixIcon: IconButton(icon: Icon(Icons.content_paste_rounded, color: pal.primary), tooltip: l.tr('paste'),
+                    onPressed: () async {
+                      final data = await Clipboard.getData(Clipboard.kTextPlain);
+                      final text = data?.text?.trim();
+                      if (text == null || text.isEmpty) return;
+                      try {
+                        final m = jsonDecode(text) as Map<String, dynamic>?;
+                        if (m != null) {
+                          _idCtrl.text = ((m['id'] as String?) ?? '').replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
+                          _keyCtrl.text = (m['pubKey'] as String?) ?? '';
+                          _ckCtrl.text = (m['channelKey'] as String?) ?? '';
+                          _tokCtrl.text = ((m['inviteToken'] as String?) ?? '').replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
+                          final ttl = (m['inviteTtlMs'] as num?)?.toInt();
+                          if (ttl != null && mounted) showAppSnackBar(context, l.tr('invite_ttl', {'sec': '${(ttl / 1000).round()}'}));
+                          if (mounted) setState(() {});
                         }
-                        setState(() => _region = r);
-                        _snack(l.tr('saved'));
-                      },
-                    );
-                  }).toList(),
-                ),
-                if (isEu) ...[
-                  const SizedBox(height: 12),
-                  Text('Channel', style: TextStyle(color: context.palette.onSurface)),
-                  const SizedBox(height: 8),
-                  Wrap(
-                    spacing: 8,
-                    children: List.generate(3, (i) {
-                      return ChoiceChip(
-                        label: Text('$i'),
-                        selected: _channel == i,
-                        onSelected: (_) async {
-                          final ok = await widget.ble.setChannel(i);
-                          if (!mounted) return;
-                          if (!ok) {
-                            _snack(l.tr('error'));
-                            return;
-                          }
-                          setState(() => _channel = i);
-                          _snack(l.tr('saved'));
-                        },
-                      );
-                    }),
-                  ),
-                ],
-                const SizedBox(height: 16),
-                AppPrimaryButton(
-                  onPressed: () => Navigator.pop(
-                    context,
-                    (region: _region, channel: isEu ? _channel : null),
-                  ),
-                  child: Text(l.tr('ok')),
-                ),
-              ],
-            ),
+                      } catch (_) {}
+                    })),
+                maxLength: 16),
+              const SizedBox(height: AppSpacing.md),
+              TextField(controller: _keyCtrl, style: TextStyle(color: pal.onSurface, fontSize: 13, height: 1.35),
+                decoration: InputDecoration(isDense: true, labelText: l.tr('invite_pubkey'), alignLabelWithHint: true), maxLines: 3, minLines: 2),
+              const SizedBox(height: AppSpacing.md),
+              TextField(controller: _ckCtrl, style: TextStyle(color: pal.onSurface, fontSize: 13, height: 1.35),
+                decoration: InputDecoration(isDense: true, labelText: l.tr('invite_channel_key'), alignLabelWithHint: true), maxLines: 2, minLines: 1),
+              const SizedBox(height: AppSpacing.md),
+              TextField(controller: _tokCtrl, style: TextStyle(color: pal.onSurface, fontFamily: 'monospace', fontSize: 13),
+                decoration: InputDecoration(isDense: true, labelText: l.tr('invite_token_optional')), maxLength: 16),
+            ]),
           ),
+          const SizedBox(height: AppSpacing.md + AppSpacing.xs),
+          FilledButton.icon(
+            style: FilledButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: AppSpacing.buttonPrimaryV, horizontal: AppSpacing.buttonPrimaryH - 2),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md))),
+            onPressed: conn ? () async {
+              HapticFeedback.lightImpact();
+              final id = _idCtrl.text.trim().replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
+              final key = _keyCtrl.text.trim();
+              final ck = _ckCtrl.text.trim();
+              final token = _tokCtrl.text.trim().replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
+              if (id.length < 8 || key.isEmpty) return;
+              final tokErr = _valToken(token);
+              if (tokErr != null) { setState(() { _invErr = true; _invSt = tokErr; }); showAppSnackBar(context, tokErr); return; }
+              setState(() { _invErr = false; _invSt = l.tr('invite_status_handshake_pending'); });
+              if (await widget.ble.acceptInvite(
+                id: id.substring(0, id.length > 16 ? 16 : id.length), pubKey: key,
+                channelKey: ck.isEmpty ? null : ck, inviteToken: token.isEmpty ? null : token)) {
+                if (mounted) {
+                  setState(() { _invErr = false; _invSt = l.tr('invite_status_accepted_wait_key'); _pendPeer = id.substring(0, id.length > 16 ? 16 : id.length); });
+                  showAppSnackBar(context, l.tr('invite_accepted'));
+                }
+              }
+            } : null,
+            icon: const Icon(Icons.check_circle_outline_rounded, size: 22),
+            label: Text(l.tr('accept_invite'), style: const TextStyle(fontWeight: FontWeight.w600))),
+          if (_invSt != null && _invSt!.isNotEmpty) ...[
+            const SizedBox(height: AppSpacing.sm + 2),
+            AppStateChip(label: _invSt!, kind: _invErr ? AppStateKind.error : AppStateKind.success),
+          ],
         ],
-      ),
-    );
+      )),
+    ]);
   }
 }
 
-class _DiagnosticsPage extends StatelessWidget {
-  const _DiagnosticsPage({
-    required this.version,
-    required this.batteryMv,
-    required this.batteryPercent,
-    required this.offlinePending,
-    required this.gpsPresent,
-    required this.gpsEnabled,
-    required this.gpsFix,
-    required this.powersave,
-  });
+// ═══════════════════════════════════════════════════════════════════════════
+//  PAGE 5 — Энергия и тема (Powersave + GPS + Theme + MeshAnim)
+// ═══════════════════════════════════════════════════════════════════════════
 
-  final String? version;
-  final int? batteryMv;
-  final int? batteryPercent;
-  final int? offlinePending;
-  final bool gpsPresent;
-  final bool gpsEnabled;
-  final bool gpsFix;
-  final bool powersave;
+class _EnergyThemePage extends StatefulWidget {
+  final RiftLinkBle ble;
+  final bool powersave, gpsPresent, gpsEnabled, gpsFix, meshAnimationEnabled;
+  final void Function(bool) onPowersaveChanged, onGpsChanged, onMeshAnimationChanged;
+
+  const _EnergyThemePage({required this.ble, required this.powersave,
+    required this.gpsPresent, required this.gpsEnabled, required this.gpsFix,
+    required this.meshAnimationEnabled,
+    required this.onPowersaveChanged, required this.onGpsChanged, required this.onMeshAnimationChanged});
+
+  @override
+  State<_EnergyThemePage> createState() => _EnergyThemePageState();
+}
+
+class _EnergyThemePageState extends State<_EnergyThemePage> {
+  late bool _ps, _gpsPresent, _gpsOn, _gpsFix, _meshAnim;
+  StreamSubscription<RiftLinkEvent>? _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    final li = widget.ble.lastInfo;
+    _ps = li?.powersave ?? widget.powersave;
+    _gpsPresent = li?.gpsPresent ?? widget.gpsPresent;
+    _gpsOn = li?.gpsEnabled ?? widget.gpsEnabled;
+    _gpsFix = li?.gpsFix ?? widget.gpsFix;
+    _meshAnim = widget.meshAnimationEnabled;
+    _sub = widget.ble.events.listen((evt) {
+      if (!mounted) return;
+      if (evt is RiftLinkInfoEvent) setState(() { _ps = evt.powersave; _gpsPresent = evt.gpsPresent; _gpsOn = evt.gpsEnabled; _gpsFix = evt.gpsFix; });
+      else if (evt is RiftLinkGpsEvent) setState(() { _gpsPresent = evt.present; _gpsOn = evt.enabled; _gpsFix = evt.hasFix; });
+    });
+  }
+
+  @override
+  void dispose() { _sub?.cancel(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: context.palette.surface,
-      appBar: AppBar(title: const Text('Diagnostics')),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+    final l = context.l10n;
+    final pal = context.palette;
+    final conn = widget.ble.isConnected;
+
+    return _SubpageScaffold(title: l.tr('settings_energy_title'), children: [
+      _PageCard(title: l.tr('settings_energy_title'), subtitle: l.tr('settings_energy_hint'), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          AppSectionCard(
-            child: Column(
-              children: [
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Firmware version'),
-                  subtitle: Text(version?.isNotEmpty == true ? version! : '—'),
-                ),
-                Divider(height: 1, color: context.palette.divider),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Battery'),
-                  subtitle: Text(
-                    batteryMv != null && batteryMv! > 0
-                        ? (batteryPercent != null
-                            ? '$batteryPercent% (${(batteryMv! / 1000).toStringAsFixed(2)} V)'
-                            : '${(batteryMv! / 1000).toStringAsFixed(2)} V')
-                        : '—',
-                  ),
-                ),
-                Divider(height: 1, color: context.palette.divider),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Offline queue'),
-                  subtitle: Text('${offlinePending ?? 0} pending'),
-                ),
-                Divider(height: 1, color: context.palette.divider),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('GPS'),
-                  subtitle: Text(gpsPresent ? 'enabled: $gpsEnabled, fix: $gpsFix' : 'not present'),
-                ),
-                Divider(height: 1, color: context.palette.divider),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Power save'),
-                  subtitle: Text(powersave ? 'on' : 'off'),
-                ),
-              ],
-            ),
-          ),
+          _SectionAccentHeader(text: l.tr('settings_energy_node'), trailingIcon: Icons.memory_rounded),
+          const SizedBox(height: AppSpacing.sm + 2),
+          _SegmentedPickBar(leadingIcon: Icons.battery_saver_outlined,
+            labels: [l.tr('powersave_mode_normal'), l.tr('powersave_mode_eco')],
+            selectedIndex: _ps ? 1 : 0, enabled: conn,
+            onSelected: (i) async {
+              final eco = i == 1;
+              if (eco == _ps) return;
+              if (await widget.ble.setPowersave(eco)) { widget.onPowersaveChanged(eco); setState(() => _ps = eco); }
+            }),
+          const SizedBox(height: AppSpacing.xl),
+          _SectionAccentHeader(text: l.tr('settings_energy_app'), trailingIcon: Icons.smartphone_rounded),
+          const SizedBox(height: AppSpacing.sm - 2),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.dark_mode_outlined, color: pal.primary),
+            title: Text(l.tr('theme'), style: TextStyle(color: pal.onSurface, fontWeight: FontWeight.w500)),
+            subtitle: Text(l.tr('theme_hint'), style: TextStyle(color: pal.onSurfaceVariant, fontSize: 12, height: 1.35)),
+            trailing: Icon(Icons.chevron_right, color: pal.onSurfaceVariant),
+            onTap: () { HapticFeedback.selectionClick(); showThemeModeSheet(context); }),
+          const SizedBox(height: AppSpacing.xs),
+          SwitchListTile(contentPadding: EdgeInsets.zero,
+            title: Text(l.tr('mesh_animation'), style: TextStyle(color: pal.onSurface, fontWeight: FontWeight.w500)),
+            subtitle: Text(l.tr('mesh_animation_hint'), style: TextStyle(color: pal.onSurfaceVariant, fontSize: 12, height: 1.35)),
+            secondary: Icon(Icons.animation_rounded, color: pal.primary),
+            value: _meshAnim, activeThumbColor: pal.primary, activeTrackColor: pal.primary.withOpacity(0.45),
+            onChanged: (v) { HapticFeedback.selectionClick(); widget.onMeshAnimationChanged(v); setState(() => _meshAnim = v); }),
         ],
+      )),
+
+      if (_gpsPresent)
+        _PageCard(title: l.tr('gps_section'), child: SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: Text(l.tr('gps_enable'), style: TextStyle(color: pal.onSurface)),
+          subtitle: Text(_gpsFix ? l.tr('gps_fix_yes') : l.tr('gps_fix_no'), style: TextStyle(color: pal.onSurfaceVariant, fontSize: 13)),
+          value: _gpsOn, activeThumbColor: pal.primary, activeTrackColor: pal.primary.withOpacity(0.45),
+          onChanged: conn ? (v) async {
+            if (await widget.ble.setGps(v)) { widget.onGpsChanged(v); setState(() => _gpsOn = v); }
+          } : null)),
+    ]);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  PAGE 6 — Диагностика (Info + Voice + Shutdown)
+// ═══════════════════════════════════════════════════════════════════════════
+
+class _DiagnosticsPage extends StatefulWidget {
+  final RiftLinkBle ble;
+  const _DiagnosticsPage({required this.ble});
+  @override
+  State<_DiagnosticsPage> createState() => _DiagnosticsPageState();
+}
+
+class _DiagnosticsPageState extends State<_DiagnosticsPage> {
+  int? _offPend, _offCourier, _offDirect, _batMv, _batPct;
+  bool _charging = false;
+  String? _version;
+  late final TextEditingController _avgCtrl, _hardCtrl, _minCtrl;
+  bool _saving = false;
+  String? _voiceSt;
+  bool _voiceErr = false;
+  StreamSubscription<RiftLinkEvent>? _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    _avgCtrl = TextEditingController(); _hardCtrl = TextEditingController(); _minCtrl = TextEditingController();
+    final li = widget.ble.lastInfo;
+    _offPend = li?.offlinePending; _offCourier = li?.offlineCourierPending; _offDirect = li?.offlineDirectPending;
+    _batMv = li?.batteryMv; _batPct = li?.batteryPercent; _charging = li?.charging ?? false;
+    _version = li?.version;
+    _sub = widget.ble.events.listen((evt) {
+      if (!mounted) return;
+      if (evt is RiftLinkInfoEvent) {
+        setState(() {
+          if (evt.hasOfflinePendingField) _offPend = evt.offlinePending;
+          if (evt.hasOfflineCourierPendingField) _offCourier = evt.offlineCourierPending;
+          if (evt.hasOfflineDirectPendingField) _offDirect = evt.offlineDirectPending;
+          if (evt.batteryMv != null && evt.batteryMv! > 0) _batMv = evt.batteryMv;
+          _batPct = evt.batteryPercent; _charging = evt.charging; _version = evt.version;
+        });
+      }
+    });
+    _loadVoicePrefs();
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isConnected) widget.ble.getInfo(); });
+  }
+
+  @override
+  void dispose() { _sub?.cancel(); _avgCtrl.dispose(); _hardCtrl.dispose(); _minCtrl.dispose(); super.dispose(); }
+
+  Future<void> _loadVoicePrefs() async {
+    final avg = await MeshPrefs.getVoiceAcceptMaxAvgLossPercent();
+    final hard = await MeshPrefs.getVoiceAcceptMaxHardLossPercent();
+    final min = await MeshPrefs.getVoiceAcceptMinSessions();
+    if (!mounted) return;
+    setState(() { _avgCtrl.text = '$avg'; _hardCtrl.text = '$hard'; _minCtrl.text = '$min'; });
+  }
+
+  Future<void> _saveVoicePrefs() async {
+    final l = context.l10n;
+    final avg = int.tryParse(_avgCtrl.text.trim());
+    final hard = int.tryParse(_hardCtrl.text.trim());
+    final min = int.tryParse(_minCtrl.text.trim());
+    if (avg == null || hard == null || min == null || avg < 0 || avg > 100 || hard < 0 || hard > 100 || min < 1 || min > 500) {
+      showAppSnackBar(context, l.tr('voice_acceptance_bad_values'));
+      return;
+    }
+    setState(() => _saving = true);
+    await MeshPrefs.setVoiceAcceptMaxAvgLossPercent(avg);
+    await MeshPrefs.setVoiceAcceptMaxHardLossPercent(hard);
+    await MeshPrefs.setVoiceAcceptMinSessions(min);
+    if (!mounted) return;
+    setState(() { _saving = false; _voiceSt = l.tr('saved'); _voiceErr = false; });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l = context.l10n;
+    final pal = context.palette;
+
+    return _SubpageScaffold(title: l.tr('settings_diagnostics_title'), children: [
+      _PageCard(title: l.tr('settings_diagnostics_title'), subtitle: l.tr('settings_diagnostics_hint'), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (_version != null && _version!.isNotEmpty)
+            ListTile(contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.info_outline, color: pal.onSurfaceVariant),
+              title: Text('${l.tr('settings_firmware_version')}: $_version', style: TextStyle(color: pal.onSurface))),
+          if (_batMv != null && _batMv! > 0)
+            ListTile(contentPadding: EdgeInsets.zero,
+              leading: Icon(_charging ? Icons.battery_charging_full : Icons.battery_std,
+                color: _batPct != null && _batPct! <= 15 ? pal.error : pal.onSurfaceVariant),
+              title: Text(_batPct != null
+                ? '$_batPct% (${(_batMv! / 1000).toStringAsFixed(2)} V)${_charging ? ' ⚡' : ''}'
+                : '${(_batMv! / 1000).toStringAsFixed(2)} V${_charging ? ' ⚡' : ''}',
+                style: TextStyle(color: pal.onSurface))),
+          if (_offPend != null && _offPend! > 0)
+            ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.schedule, color: pal.onSurfaceVariant),
+              title: Text('${l.tr('offline_pending')}: $_offPend', style: TextStyle(color: pal.onSurface))),
+          if (_offCourier != null && _offCourier! > 0)
+            ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.local_shipping_outlined, color: pal.onSurfaceVariant),
+              title: Text(l.tr('scf_courier_status_count', {'n': '$_offCourier'}), style: TextStyle(color: pal.onSurface))),
+          if (_offDirect != null && _offDirect! > 0)
+            ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.mark_email_unread_outlined, color: pal.onSurfaceVariant),
+              title: Text(l.tr('offline_direct_status_count', {'n': '$_offDirect'}), style: TextStyle(color: pal.onSurface))),
+        ],
+      )),
+
+      _PageCard(title: l.tr('voice_acceptance_title'), subtitle: l.tr('voice_acceptance_hint'), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextField(controller: _avgCtrl, keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: InputDecoration(isDense: true, labelText: l.tr('voice_acceptance_avg_loss'))),
+          const SizedBox(height: AppSpacing.sm),
+          TextField(controller: _hardCtrl, keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: InputDecoration(isDense: true, labelText: l.tr('voice_acceptance_hard_loss'))),
+          const SizedBox(height: AppSpacing.sm),
+          TextField(controller: _minCtrl, keyboardType: TextInputType.number,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: InputDecoration(isDense: true, labelText: l.tr('voice_acceptance_min_sessions'))),
+          const SizedBox(height: AppSpacing.sm + 2),
+          FilledButton.tonalIcon(
+            onPressed: _saving ? null : _saveVoicePrefs,
+            icon: _saving
+              ? SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: pal.primary))
+              : const Icon(Icons.tune_rounded, size: 18),
+            label: Text(l.tr('voice_acceptance_apply'))),
+          _AnimatedStatusChip(label: _voiceSt, isError: _voiceErr),
+        ],
+      )),
+
+      _PageCard(child: ListTile(
+        contentPadding: EdgeInsets.zero,
+        leading: Icon(Icons.power_settings_new, color: pal.error),
+        title: Text(l.tr('shutdown_device'), style: TextStyle(color: pal.onSurface)),
+        onTap: () async {
+          final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
+            title: Text(l.tr('shutdown_device')),
+            content: Text(l.tr('shutdown_confirm')),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(l.tr('cancel'))),
+              TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(l.tr('shutdown_device'))),
+            ],
+          ));
+          if (ok == true) widget.ble.shutdown();
+        },
+      )),
+    ]);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Shared widgets — скопированы из settings_screen.dart для автономности
+// ═══════════════════════════════════════════════════════════════════════════
+
+class _SegmentedPickBar extends StatelessWidget {
+  final List<String> labels;
+  final int? selectedIndex;
+  final ValueChanged<int> onSelected;
+  final bool enabled;
+  final IconData? leadingIcon;
+
+  const _SegmentedPickBar({required this.labels, required this.selectedIndex, required this.onSelected, this.enabled = true, this.leadingIcon});
+
+  static const _anim = Duration(milliseconds: 320);
+  static const _curve = Curves.easeOutCubic;
+
+  @override
+  Widget build(BuildContext context) {
+    final inactive = context.palette.onSurfaceVariant.withOpacity(enabled ? 1.0 : 0.45);
+    final n = labels.length;
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        decoration: BoxDecoration(
+          color: context.palette.surfaceVariant,
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          border: Border.all(color: context.palette.divider)),
+        padding: const EdgeInsets.all(AppSpacing.xs),
+        child: Row(children: [
+          if (leadingIcon != null) ...[
+            Padding(padding: const EdgeInsets.only(left: AppSpacing.sm, right: AppSpacing.xs),
+              child: AnimatedSwitcher(duration: _kDur, switchInCurve: Curves.easeOut, switchOutCurve: Curves.easeIn,
+                transitionBuilder: (child, anim) => ScaleTransition(scale: anim, child: FadeTransition(opacity: anim, child: child)),
+                child: Icon(leadingIcon, key: ValueKey(leadingIcon), size: 20, color: context.palette.primary.withOpacity(enabled ? 1 : 0.4)))),
+          ],
+          Expanded(child: n == 0 ? const SizedBox.shrink() : LayoutBuilder(builder: (context, constraints) {
+            final segW = constraints.maxWidth / n;
+            final idx = selectedIndex;
+            final show = idx != null && idx >= 0 && idx < n;
+            final left = show ? segW * idx : 0.0;
+            return ClipRRect(
+              borderRadius: BorderRadius.circular(AppRadius.md),
+              child: Stack(clipBehavior: Clip.none, children: [
+                AnimatedPositioned(duration: _anim, curve: _curve, left: left, width: show ? segW : 0, top: 0, bottom: 0,
+                  child: AnimatedOpacity(duration: const Duration(milliseconds: 200), opacity: show ? 1 : 0,
+                    child: DecoratedBox(decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(AppRadius.md),
+                      color: context.palette.primary.withOpacity(enabled ? 0.22 : 0.12),
+                      border: Border.all(color: context.palette.primary.withOpacity(enabled ? 1 : 0.45), width: 1.5),
+                      boxShadow: [BoxShadow(color: context.palette.primary.withOpacity(0.2), blurRadius: 12, offset: const Offset(0, 2))])))),
+                Row(children: List.generate(n, (i) {
+                  final sel = idx == i;
+                  return Expanded(child: Material(color: Colors.transparent, child: InkWell(
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                    onTap: enabled ? () { HapticFeedback.selectionClick(); onSelected(i); } : null,
+                    child: Padding(padding: const EdgeInsets.symmetric(vertical: AppSpacing.md, horizontal: 2),
+                      child: Center(child: AnimatedDefaultTextStyle(duration: _anim, curve: _curve,
+                        style: TextStyle(fontSize: 13, letterSpacing: 0.3, fontWeight: sel ? FontWeight.w800 : FontWeight.w500, color: sel ? context.palette.primary : inactive),
+                        child: FittedBox(fit: BoxFit.scaleDown, child: Text(labels[i], maxLines: 1))))))));
+                })),
+              ]));
+          })),
+        ]),
       ),
     );
   }
 }
 
+class _SfPickGrid extends StatelessWidget {
+  final int? selectedSf;
+  final ValueChanged<int> onSelectSf;
+  final bool enabled;
+  const _SfPickGrid({required this.selectedSf, required this.onSelectSf, this.enabled = true});
+
+  static const _sfs = [7, 8, 9, 10, 11, 12];
+
+  @override
+  Widget build(BuildContext context) {
+    final inactive = context.palette.onSurfaceVariant.withOpacity(enabled ? 1.0 : 0.45);
+    return LayoutBuilder(builder: (context, c) {
+      final w = c.maxWidth;
+      final gap = AppSpacing.sm;
+      final n = _sfs.length;
+      final cell = (w - gap * (n - 1)) / n;
+      final minCell = 44.0;
+      if (cell < minCell) {
+        return SizedBox(height: 52, child: ListView.separated(
+          scrollDirection: Axis.horizontal, physics: const BouncingScrollPhysics(), itemCount: n,
+          separatorBuilder: (_, __) => SizedBox(width: gap),
+          itemBuilder: (_, i) => _SfCell(sf: _sfs[i], selected: selectedSf == _sfs[i], enabled: enabled, inactiveColor: inactive, minWidth: minCell, onTap: enabled ? () => onSelectSf(_sfs[i]) : null)));
+      }
+      return Row(children: [
+        for (var i = 0; i < n; i++) ...[
+          if (i > 0) SizedBox(width: gap),
+          Expanded(child: _SfCell(sf: _sfs[i], selected: selectedSf == _sfs[i], enabled: enabled, inactiveColor: inactive, minWidth: 0, onTap: enabled ? () => onSelectSf(_sfs[i]) : null)),
+        ],
+      ]);
+    });
+  }
+}
+
+class _SfCell extends StatelessWidget {
+  final int sf;
+  final bool selected, enabled;
+  final Color inactiveColor;
+  final double minWidth;
+  final VoidCallback? onTap;
+  const _SfCell({required this.sf, required this.selected, required this.enabled, required this.inactiveColor, required this.minWidth, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedScale(scale: selected ? 1.06 : 1.0, duration: _kDur, curve: _kIn, alignment: Alignment.center,
+      child: Material(color: Colors.transparent, borderRadius: BorderRadius.circular(AppRadius.md),
+        child: InkWell(borderRadius: BorderRadius.circular(AppRadius.md),
+          onTap: onTap == null ? null : () { HapticFeedback.selectionClick(); onTap!(); },
+          child: AnimatedContainer(duration: _kDur, curve: _kIn,
+            constraints: BoxConstraints(minWidth: minWidth, minHeight: 48),
+            padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm, horizontal: AppSpacing.xs),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(AppRadius.md),
+              color: context.palette.surfaceVariant,
+              border: Border.all(color: selected ? context.palette.primary : context.palette.divider, width: selected ? 2 : 1),
+              boxShadow: selected && enabled ? [BoxShadow(color: context.palette.primary.withOpacity(0.28), blurRadius: 14, offset: const Offset(0, 3))] : null),
+            child: Column(mainAxisAlignment: MainAxisAlignment.center, mainAxisSize: MainAxisSize.min, children: [
+              AnimatedDefaultTextStyle(duration: _kDur, style: TextStyle(fontSize: 10, height: 1, fontWeight: FontWeight.w500, color: inactiveColor, letterSpacing: 0.5), child: const Text('SF')),
+              const SizedBox(height: 2),
+              AnimatedDefaultTextStyle(duration: _kDur, style: TextStyle(fontSize: 16, height: 1, fontWeight: selected ? FontWeight.w800 : FontWeight.w600, color: selected ? context.palette.primary : inactiveColor, fontFeatures: const [FontFeature.tabularFigures()]), child: Text('$sf')),
+            ])))));
+  }
+}
+
+class _ModemSection extends StatefulWidget {
+  final int? modemPreset, sf, cr;
+  final double? bw;
+  final bool enabled;
+  final Future<void> Function(int preset) onPreset;
+  final Future<void> Function(int sf, double bw, int cr) onCustom;
+  const _ModemSection({this.modemPreset, this.sf, this.bw, this.cr, this.enabled = true, required this.onPreset, required this.onCustom});
+  @override
+  State<_ModemSection> createState() => _ModemSectionState();
+}
+
+class _ModemSectionState extends State<_ModemSection> {
+  static const _descRu = ['SF7·BW250·CR5\nГород, скорость, малая дальность', 'SF7·BW125·CR5\nБаланс скорости и дальности', 'SF10·BW125·CR5\nХорошая дальность', 'SF12·BW125·CR8\nМакс. дальность, медленно', 'Ручная настройка SF / BW / CR'];
+  static const _descEn = ['SF7·BW250·CR5\nCity use, high speed, short range', 'SF7·BW125·CR5\nBalanced speed and range', 'SF10·BW125·CR5\nGood long-range profile', 'SF12·BW125·CR8\nMaximum range, slower throughput', 'Manual SF / BW / CR configuration'];
+  static const _bwOpts = [62.5, 125.0, 250.0, 500.0];
+  static const _crOpts = [5, 6, 7, 8];
+  static const _crDesc = ['4/5', '4/6', '4/7', '4/8'];
+
+  late int _sel, _cSf, _cCr;
+  late double _cBw;
+
+  @override
+  void initState() { super.initState(); _sync(); }
+
+  @override
+  void didUpdateWidget(_ModemSection o) {
+    super.didUpdateWidget(o);
+    if (o.modemPreset != widget.modemPreset || o.sf != widget.sf || o.bw != widget.bw || o.cr != widget.cr) _sync();
+  }
+
+  void _sync() {
+    _sel = (widget.modemPreset != null && widget.modemPreset! >= 0 && widget.modemPreset! <= 4) ? widget.modemPreset! : 1;
+    _cSf = widget.sf ?? 7; _cBw = widget.bw ?? 125.0; _cCr = widget.cr ?? 5;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pal = context.palette;
+    final en = widget.enabled;
+    final isCustom = _sel == 4;
+    final isRu = AppLocalizations.currentLocale.languageCode == 'ru';
+    final desc = isRu ? _descRu : _descEn;
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Wrap(spacing: AppSpacing.sm - 2, runSpacing: AppSpacing.sm - 2, children: [for (var i = 0; i < 5; i++) _chip(context, i, en)]),
+      const SizedBox(height: AppSpacing.sm),
+      AnimatedSize(duration: _kDur, curve: _kIn, child: Padding(padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+        child: Text(desc[_sel], style: TextStyle(fontSize: 12, height: 1.4, color: pal.onSurfaceVariant.withOpacity(0.85))))),
+      if (isCustom) ...[
+        const SizedBox(height: AppSpacing.sm + 2),
+        Text('SF', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+        const SizedBox(height: AppSpacing.xs),
+        _SfPickGrid(selectedSf: _cSf, enabled: en, onSelectSf: (sf) => setState(() => _cSf = sf)),
+        const SizedBox(height: AppSpacing.sm + 2),
+        Text('BW (kHz)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+        const SizedBox(height: AppSpacing.xs),
+        _optionRow<double>(context, options: _bwOpts, selected: _cBw, label: (v) => v == 62.5 ? '62.5' : '${v.toInt()}', enabled: en, onSelect: (v) => setState(() => _cBw = v)),
+        const SizedBox(height: AppSpacing.sm + 2),
+        Text('CR', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+        const SizedBox(height: AppSpacing.xs),
+        _optionRow<int>(context, options: _crOpts, selected: _cCr, label: (v) => _crDesc[v - 5], enabled: en, onSelect: (v) => setState(() => _cCr = v)),
+        const SizedBox(height: AppSpacing.md),
+        FilledButton.tonalIcon(onPressed: en ? () => widget.onCustom(_cSf, _cBw, _cCr) : null,
+          icon: const Icon(Icons.tune_rounded, size: 18), label: Text(context.l10n.tr('modem_apply_custom'))),
+      ],
+    ]);
+  }
+
+  Widget _chip(BuildContext context, int idx, bool en) {
+    final pal = context.palette;
+    final l = context.l10n;
+    final sel = _sel == idx;
+    final label = switch (idx) { 0 => l.tr('modem_preset_speed'), 1 => l.tr('modem_preset_normal'), 2 => l.tr('modem_preset_range'), 3 => l.tr('modem_preset_maxrange'), _ => l.tr('modem_preset_custom') };
+    return GestureDetector(
+      onTap: en ? () { HapticFeedback.selectionClick(); setState(() => _sel = idx); if (idx < 4) widget.onPreset(idx); } : null,
+      child: AnimatedContainer(duration: _kDur, constraints: const BoxConstraints(minWidth: 84),
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
+        decoration: BoxDecoration(borderRadius: BorderRadius.circular(AppRadius.md),
+          color: sel ? pal.primary.withOpacity(0.15) : pal.surfaceVariant,
+          border: Border.all(color: sel ? pal.primary : pal.divider, width: sel ? 1.6 : 1)),
+        child: Text(label, textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 12.5, fontWeight: sel ? FontWeight.w700 : FontWeight.w500, color: sel ? pal.primary : pal.onSurfaceVariant.withOpacity(en ? 1.0 : 0.5)))));
+  }
+
+  Widget _optionRow<T>(BuildContext context, {required List<T> options, required T selected, required String Function(T) label, required bool enabled, required ValueChanged<T> onSelect}) {
+    final pal = context.palette;
+    return Row(children: [
+      for (var i = 0; i < options.length; i++) ...[
+        if (i > 0) const SizedBox(width: AppSpacing.sm - 2),
+        Expanded(child: GestureDetector(
+          onTap: enabled ? () { HapticFeedback.selectionClick(); onSelect(options[i]); } : null,
+          child: AnimatedContainer(duration: _kDur, padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm), alignment: Alignment.center,
+            decoration: BoxDecoration(borderRadius: BorderRadius.circular(AppRadius.md),
+              color: options[i] == selected ? pal.primary.withOpacity(0.15) : pal.surfaceVariant,
+              border: Border.all(color: options[i] == selected ? pal.primary : pal.divider, width: options[i] == selected ? 1.6 : 1)),
+            child: Text(label(options[i]), style: TextStyle(fontSize: 11.5, fontWeight: options[i] == selected ? FontWeight.w700 : FontWeight.w500,
+              color: options[i] == selected ? pal.primary : pal.onSurfaceVariant.withOpacity(enabled ? 1.0 : 0.5)))))),
+      ],
+    ]);
+  }
+}
