@@ -203,12 +203,16 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _connStateSub = dev.connectionState.listen((state) {
       if (!mounted || _intentionalDisconnect) return;
       if (state == BluetoothConnectionState.disconnected) {
+        // When node switches to Wi-Fi transport, BLE disconnect (often status=133 on Android)
+        // is expected and should not trigger BLE reconnect flow.
+        if (widget.ble.isWifiMode) return;
         _onConnectionLost();
       }
     });
   }
 
   Future<void> _onConnectionLost() async {
+    if (widget.ble.isWifiMode) return;
     if (_reconnecting || !mounted) return;
     final remoteId = _currentBleRemoteId ?? widget.ble.device?.remoteId.toString();
     if (remoteId == null || remoteId.isEmpty) return;
@@ -820,8 +824,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     } else if (evt is RiftLinkLocationEvent) {
       setState(() { _messages.add(_Msg(from: evt.from, text: '📍 ${evt.lat.toStringAsFixed(5)}, ${evt.lon.toStringAsFixed(5)}', isIncoming: true, isLocation: true)); });
       _scrollToBottom();
-    } else if (evt is RiftLinkOtaEvent) { _showOtaDialog(evt.ip, evt.ssid, evt.password); }
-    else if (evt is RiftLinkRegionEvent) { setState(() { _region = evt.region; _channel = evt.channel; }); }
+    } else if (evt is RiftLinkRegionEvent) { setState(() { _region = evt.region; _channel = evt.channel; }); }
     else if (evt is RiftLinkNeighborsEvent) { setState(() { _neighbors = evt.neighbors; _neighborsRssi = evt.rssi; _neighborsHasKey = evt.hasKey; }); }
     else if (evt is RiftLinkPongEvent) {
       final fromNorm = evt.from.length >= 8 ? evt.from.substring(0, 8).toUpperCase() : evt.from.toUpperCase();
@@ -829,7 +832,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _showSnack('✓ ${context.l10n.tr('link_ok', {'from': evt.from})}', backgroundColor: context.palette.success, duration: const Duration(seconds: 4));
     }
     else if (evt is RiftLinkErrorEvent) { _showSnack('${context.l10n.tr('error')}: ${evt.msg}', backgroundColor: context.palette.error); }
-    else if (evt is RiftLinkWifiEvent) { _showSnack(evt.connected ? 'WiFi: ${evt.ssid} — ${evt.ip}' : 'WiFi: не подключено'); }
+    else if (evt is RiftLinkWifiEvent) {
+      _showSnack(
+        evt.connected
+            ? context.l10n.tr('wifi_status_connected', {'ssid': evt.ssid, 'ip': evt.ip})
+            : context.l10n.tr('wifi_status_disconnected'),
+      );
+    }
     else if (evt is RiftLinkGpsEvent) { setState(() { _gpsPresent = evt.present; _gpsEnabled = evt.enabled; _gpsFix = evt.hasFix; }); }
     else if (evt is RiftLinkInviteEvent) { _showInviteDialog(evt.id, evt.pubKey, evt.channelKey); }
     else if (evt is RiftLinkSelftestEvent) {
@@ -1177,7 +1186,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           ),
         ],
       ),
-    )).then((_) => nc.dispose());
+    ));
   }
 
   void _showInviteDialog(String id, String pubKey, [String? channelKey]) {
@@ -1231,62 +1240,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
               },
               icon: const Icon(Icons.copy_rounded, size: 20),
               label: Text(l.tr('copy')),
-            ),
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton(
-                style: TextButton.styleFrom(foregroundColor: p.primary),
-                onPressed: () => Navigator.pop(ctx),
-                child: Text(l.tr('ok')),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _showOtaDialog(String ip, String ssid, String password) {
-    final p = context.palette;
-    final l = context.l10n;
-    showAppDialog(
-      context: context,
-      builder: (ctx) => RiftDialogFrame(
-        maxWidth: 360,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              'OTA',
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    color: p.onSurface,
-                  ),
-            ),
-            const SizedBox(height: 12),
-            ConstrainedBox(
-              constraints: BoxConstraints(maxHeight: MediaQuery.sizeOf(context).height * 0.42),
-              child: SingleChildScrollView(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(l.tr('ota_connect'), style: TextStyle(color: p.onSurface, fontSize: 14)),
-                    const SizedBox(height: 8),
-                    Text('SSID: $ssid', style: TextStyle(fontWeight: FontWeight.w700, color: p.onSurface)),
-                    Text('Pass: $password', style: TextStyle(color: p.onSurface)),
-                    const SizedBox(height: 12),
-                    Text(l.tr('ota_then'), style: TextStyle(color: p.onSurface)),
-                    const SizedBox(height: 4),
-                    SelectableText(
-                      'cd firmware\npio run -t upload -e heltec_v3_ota',
-                      style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: p.onSurface),
-                    ),
-                    const SizedBox(height: 8),
-                    Text('IP: $ip', style: TextStyle(color: p.onSurfaceVariant, fontSize: 12)),
-                  ],
-                ),
-              ),
             ),
             Align(
               alignment: Alignment.centerRight,

@@ -42,6 +42,21 @@ class _MeshScreenState extends State<MeshScreen> {
   Timer? _signalTimer;
   String? _traceTarget;
 
+  void _snack(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text), duration: const Duration(seconds: 2)),
+    );
+  }
+
+  void _normalizeTraceTarget() {
+    if (_traceTarget == null) return;
+    final candidates = _traceCandidates().map((e) => e.toUpperCase()).toSet();
+    if (!candidates.contains(_traceTarget!.toUpperCase())) {
+      _traceTarget = null;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -49,9 +64,15 @@ class _MeshScreenState extends State<MeshScreen> {
     _sub = widget.ble.events.listen((evt) {
       if (!mounted) return;
       if (evt is RiftLinkRoutesEvent) {
-        setState(() => _routes = evt.routes);
+        setState(() {
+          _routes = evt.routes;
+          _normalizeTraceTarget();
+        });
       } else if (evt is RiftLinkInfoEvent) {
-        setState(() => _routes = evt.routes);
+        setState(() {
+          _routes = evt.routes;
+          _normalizeTraceTarget();
+        });
       } else if (evt is RiftLinkPongEvent) {
         final from = evt.from;
         if (from.isEmpty) return;
@@ -71,7 +92,10 @@ class _MeshScreenState extends State<MeshScreen> {
   Future<void> _runSignalTest() async {
     if (_signalTestRunning) return;
     final ok = await widget.ble.signalTest();
-    if (!ok || !mounted) return;
+    if (!ok || !mounted) {
+      _snack(context.l10n.tr('mesh_signal_test_failed'));
+      return;
+    }
     setState(() {
       _signalTestRunning = true;
       _signalRssiByNode.clear();
@@ -89,6 +113,8 @@ class _MeshScreenState extends State<MeshScreen> {
     final ok = await widget.ble.traceroute(to);
     if (ok) {
       await widget.ble.getRoutes();
+    } else {
+      _snack(context.l10n.tr('mesh_traceroute_failed'));
     }
   }
 
@@ -219,24 +245,30 @@ class _MeshScreenState extends State<MeshScreen> {
                         style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
                       )
                     else
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 6,
-                        children: _signalRssiByNode.entries.map((e) {
-                          final c = _rssiColor(context.palette, e.value);
-                          return Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: c.withOpacity(0.15),
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: c.withOpacity(0.5)),
-                            ),
-                            child: Text(
-                              '${_shortId(e.key)} ${e.value} dBm',
-                              style: TextStyle(fontSize: 11, color: context.palette.onSurface),
-                            ),
+                      Builder(
+                        builder: (_) {
+                          final sorted = _signalRssiByNode.entries.toList()
+                            ..sort((a, b) => b.value.compareTo(a.value));
+                          return Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: sorted.map((e) {
+                              final c = _rssiColor(context.palette, e.value);
+                              return Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: c.withOpacity(0.15),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: c.withOpacity(0.5)),
+                                ),
+                                child: Text(
+                                  '${_shortId(e.key)} ${e.value} dBm',
+                                  style: TextStyle(fontSize: 11, color: context.palette.onSurface),
+                                ),
+                              );
+                            }).toList(),
                           );
-                        }).toList(),
+                        },
                       ),
                   ],
                   const SizedBox(height: 12),
@@ -350,7 +382,36 @@ class _MeshScreenState extends State<MeshScreen> {
       final rssi = i > 0 && (i - 1) < hopRssi.length ? hopRssi[i - 1] : 0;
       rendered.add(rssi != 0 ? '${_shortId(node)} ($rssi dBm)' : _shortId(node));
     }
-    return '${l.tr('mesh_trace_hops')}: ${rendered.join(' -> ')}';
+    final next = (route['nextHop'] as String?) ?? '';
+    final rssi = (route['rssi'] as num?)?.toInt() ?? 0;
+    final modemPreset = (route['modemPreset'] as num?)?.toInt();
+    final sf = (route['sf'] as num?)?.toInt();
+    final bw = (route['bw'] as num?)?.toDouble();
+    final cr = (route['cr'] as num?)?.toInt();
+    String? modem;
+    if (modemPreset != null) {
+      modem = _modemPresetLabel(l, modemPreset);
+    } else if (sf != null || bw != null || cr != null) {
+      modem = 'SF${sf ?? '?'} / BW${bw?.toStringAsFixed(1) ?? '?'} / CR${cr ?? '?'}';
+    }
+    final base = '${l.tr('mesh_trace_hops')}: ${rendered.join(' -> ')}';
+    final details = <String>[
+      if (next.isNotEmpty) '${l.tr('mesh_col_next')}: ${_shortId(next)}',
+      '$hops ${l.tr('mesh_route_hops')}',
+      if (rssi != 0) 'RSSI $rssi dBm',
+      if (modem != null) '${l.tr('mesh_modem')}: $modem',
+    ];
+    return '$base\n${details.join(' · ')}';
+  }
+
+  String _modemPresetLabel(AppLocalizations l, int preset) {
+    return switch (preset) {
+      0 => l.tr('modem_preset_speed'),
+      1 => l.tr('modem_preset_normal'),
+      2 => l.tr('modem_preset_range'),
+      3 => l.tr('modem_preset_maxrange'),
+      _ => l.tr('modem_preset_custom'),
+    };
   }
 
   String _shortId(String id) {
@@ -489,6 +550,16 @@ class _ListTab extends StatelessWidget {
 
   String _idLabel(String id) => id.length >= 8 ? id.substring(0, 8).toUpperCase() : id.toUpperCase();
 
+  String _modemPresetLabel(AppLocalizations l, int preset) {
+    return switch (preset) {
+      0 => l.tr('modem_preset_speed'),
+      1 => l.tr('modem_preset_normal'),
+      2 => l.tr('modem_preset_range'),
+      3 => l.tr('modem_preset_maxrange'),
+      _ => l.tr('modem_preset_custom'),
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
     final l = context.l10n;
@@ -579,10 +650,7 @@ class _ListTab extends StatelessWidget {
                                 final cr = (r['cr'] as num?)?.toInt();
                                 String? modem;
                                 if (modemPreset != null) {
-                                  const names = ['Speed', 'Normal', 'Range', 'MaxRange', 'Custom'];
-                                  if (modemPreset >= 0 && modemPreset < names.length) {
-                                    modem = names[modemPreset];
-                                  }
+                                  modem = _modemPresetLabel(l, modemPreset);
                                 } else if (sf != null || bw != null || cr != null) {
                                   modem = 'SF${sf ?? '?'} / BW${bw?.toStringAsFixed(1) ?? '?'} / CR${cr ?? '?'}';
                                 }
@@ -678,7 +746,7 @@ class _MeshPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final edgePaint = Paint()
-      ..color = palette.onSurfaceVariant.withOpacity(0.45)
+      ..color = palette.onSurfaceVariant.withOpacity(0.62)
       ..strokeWidth = 2
       ..style = PaintingStyle.stroke;
 
@@ -731,14 +799,14 @@ class _MeshPainter extends CustomPainter {
       final short = id.length >= 8 ? '${id.substring(0, 4)}…' : id;
       _drawText(canvas, short, Offset(pos.dx, pos.dy + r + 10), 11, palette.onSurface);
       if (n.rssi != 0) {
-        _drawText(canvas, '${n.rssi} dBm', Offset(pos.dx, pos.dy + r + 24), 9, palette.onSurfaceVariant);
+        _drawText(canvas, '${n.rssi} dBm', Offset(pos.dx, pos.dy + r + 24), 10, palette.onSurfaceVariant);
       }
       if (n.hops > 0) {
         _drawText(
           canvas,
           '${n.hops}h',
           Offset(pos.dx, pos.dy + r + (n.rssi != 0 ? 36 : 24)),
-          9,
+          10,
           palette.primary,
         );
       }

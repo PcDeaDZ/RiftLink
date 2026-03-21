@@ -567,9 +567,6 @@ class RiftLinkBle {
   Future<bool> sendPing(String to) async =>
       to.length < 8 ? false : _sendCmd({'cmd': 'ping', 'to': to});
 
-  /// Запуск WiFi OTA режима (переключает в WiFi AP)
-  Future<bool> sendOta() async => _sendCmd({'cmd': 'ota'});
-
   // --- Radio Mode Switching (Time-sharing BLE ↔ WiFi) ---
 
   WifiTransport? _wifiTransport;
@@ -579,18 +576,16 @@ class RiftLinkBle {
   /// Текущий радио-режим: true = WiFi, false = BLE
   bool get isWifiMode => _isWifiMode;
 
-  /// Переключить в WiFi AP-режим
-  Future<bool> switchToWifiAp() => _sendCmd({'cmd': 'radioMode', 'mode': 'wifi', 'variant': 'ap'});
-
   /// Переключить в WiFi STA-режим (подключение к сети)
   Future<bool> switchToWifiSta({required String ssid, required String pass}) =>
       _sendCmd({'cmd': 'radioMode', 'mode': 'wifi', 'variant': 'sta', 'ssid': ssid, 'pass': pass});
 
   /// Переключить обратно в BLE
   Future<bool> switchToBle() async {
-    if (!_isWifiMode) return true;
+    // Важно: radioMode устройства и локальный флаг _isWifiMode не эквивалентны.
+    // Команду нужно отправлять всегда, иначе UI может думать, что режим сменился, а устройство останется в WiFi.
     final ok = await _sendCmd({'cmd': 'radioMode', 'mode': 'ble'});
-    if (ok) {
+    if (ok && _isWifiMode) {
       await _disconnectWifi();
       _isWifiMode = false;
     }
@@ -614,6 +609,13 @@ class RiftLinkBle {
         }
       } catch (_) {}
     });
+    // Wi-Fi transport does not push initial state automatically like BLE connect flow.
+    // Request baseline payload right after WS attach.
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    await getInfo(force: true);
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+    await getGroups();
+    await getRoutes();
     return true;
   }
 
@@ -630,6 +632,15 @@ class RiftLinkBle {
 
   /// BLE OTA: отправить чанк бинарных данных
   Future<bool> sendBleOtaChunk(List<int> data) async {
+    // WiFi transport: send OTA chunk as base64 JSON command.
+    if (_isWifiMode && _wifiTransport != null && _wifiTransport!.isConnected) {
+      return _wifiTransport!.sendJson(
+        jsonEncode(<String, dynamic>{
+          'cmd': 'bleOtaChunk',
+          'data': base64Encode(data),
+        }),
+      );
+    }
     if (_txChar == null || !isConnected) return false;
     try {
       await _txChar!.write(data, withoutResponse: true);
@@ -693,9 +704,6 @@ class RiftLinkBle {
 
   /// Перегенерировать BLE PIN (passkey) — устройство покажет новый PIN на экране
   Future<bool> regeneratePin() async => _sendCmd({'cmd': 'regeneratePin'});
-
-  /// Перегенерировать пароль AP (WiFi точки доступа) — новый отобразится на устройстве
-  Future<bool> regenerateApPass() async => _sendCmd({'cmd': 'regenerateApPass'});
 
   /// Selftest (evt "selftest")
   Future<bool> selftest() async => _sendCmd({'cmd': 'selftest'});
@@ -978,6 +986,10 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       channel: _jsonIntNullable(json['channel']),
       version: json['version']?.toString(),
       radioMode: json['radioMode']?.toString() ?? 'ble',
+      radioVariant: json['radioVariant']?.toString(),
+      wifiConnected: json['wifiConnected'] == true || json['wifiConnected'] == 1,
+      wifiSsid: _trimmedStringOrNull(json['wifiSsid']),
+      wifiIp: _trimmedStringOrNull(json['wifiIp']),
       neighbors: neighbors,
       neighborsRssi: neighborsRssi,
       neighborsHasKey: neighborsHasKey,
@@ -998,8 +1010,6 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       gpsFix: json['gpsFix'] == true || json['gpsFix'] == 1,
       powersave: json['powersave'] == true || json['powersave'] == 1,
       blePin: _jsonIntNullable(json['blePin']),
-      apSsid: json['apSsid']?.toString(),
-      apPassword: json['apPassword']?.toString(),
       espNowChannel: _jsonIntNullable(json['espNowChannel']) ?? _jsonIntNullable(json['espnowChannel']),
       espNowAdaptive: json['espNowAdaptive'] == true || json['espNowAdaptive'] == 1 || json['espnowAdaptive'] == true || json['espnowAdaptive'] == 1,
     );
@@ -1048,13 +1058,6 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       freq: (json['freq'] as num?)?.toDouble() ?? 868.0,
       power: (json['power'] as num?)?.toInt() ?? 14,
       channel: (json['channel'] as num?)?.toInt(),
-    );
-  }
-  if (evt == 'ota') {
-    return RiftLinkOtaEvent(
-      ip: json['ip'] as String? ?? '192.168.4.1',
-      ssid: json['ssid'] as String? ?? 'RiftLink-OTA',
-      password: json['password'] as String? ?? 'riftlink123',
     );
   }
   if (evt == 'neighbors') {
@@ -1198,6 +1201,10 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
   final int? channel;
   final String? version;
   final String radioMode;  // "ble" or "wifi"
+  final String? radioVariant;  // "sta"
+  final bool wifiConnected;
+  final String? wifiSsid;
+  final String? wifiIp;
   final List<String> neighbors;
   final List<int> neighborsRssi;
   final List<bool> neighborsHasKey;
@@ -1218,8 +1225,6 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
   final bool gpsFix;
   final bool powersave;
   final int? blePin;
-  final String? apSsid;
-  final String? apPassword;
   final int? espNowChannel;
   final bool espNowAdaptive;
   RiftLinkInfoEvent({
@@ -1234,6 +1239,10 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
     this.channel,
     this.version,
     this.radioMode = 'ble',
+    this.radioVariant,
+    this.wifiConnected = false,
+    this.wifiSsid,
+    this.wifiIp,
     this.neighbors = const [],
     this.neighborsRssi = const [],
     this.neighborsHasKey = const [],
@@ -1254,8 +1263,6 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
     this.gpsFix = false,
     this.powersave = false,
     this.blePin,
-    this.apSsid,
-    this.apPassword,
     this.espNowChannel,
     this.espNowAdaptive = false,
   });
@@ -1352,17 +1359,6 @@ class RiftLinkLocationEvent extends RiftLinkEvent {
     required this.lat,
     required this.lon,
     this.alt = 0,
-  });
-}
-
-class RiftLinkOtaEvent extends RiftLinkEvent {
-  final String ip;
-  final String ssid;
-  final String password;
-  RiftLinkOtaEvent({
-    required this.ip,
-    required this.ssid,
-    required this.password,
   });
 }
 

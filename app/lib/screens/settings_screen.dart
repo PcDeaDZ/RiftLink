@@ -12,6 +12,7 @@ import '../theme/app_theme.dart';
 import '../theme/theme_notifier.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/app_snackbar.dart';
+import 'ota_screen.dart';
 
 /// Форматирует hex ID для отображения (группы по 4 символа). Копирование — без пробелов.
 String _formatNodeIdDisplay(String raw) {
@@ -359,7 +360,6 @@ class _ModemSection extends StatefulWidget {
 }
 
 class _ModemSectionState extends State<_ModemSection> {
-  static const _presetNames = ['Speed', 'Normal', 'Range', 'MaxRange', 'Custom'];
   static const _presetDescRu = [
     'SF7 · BW250 · CR5\nГород, скорость, малая дальность',
     'SF7 · BW125 · CR5\nБаланс скорости и дальности',
@@ -448,7 +448,6 @@ class _ModemSectionState extends State<_ModemSection> {
             enabled: enabled,
             onSelectSf: (sf) {
               setState(() => _cSf = sf);
-              widget.onCustom(sf, _cBw, _cCr);
             },
           ),
           const SizedBox(height: 10),
@@ -462,7 +461,6 @@ class _ModemSectionState extends State<_ModemSection> {
             enabled: enabled,
             onSelect: (v) {
               setState(() => _cBw = v);
-              widget.onCustom(_cSf, v, _cCr);
             },
           ),
           const SizedBox(height: 10),
@@ -476,8 +474,13 @@ class _ModemSectionState extends State<_ModemSection> {
             enabled: enabled,
             onSelect: (v) {
               setState(() => _cCr = v);
-              widget.onCustom(_cSf, _cBw, v);
             },
+          ),
+          const SizedBox(height: 12),
+          FilledButton.tonalIcon(
+            onPressed: enabled ? () => widget.onCustom(_cSf, _cBw, _cCr) : null,
+            icon: const Icon(Icons.tune_rounded, size: 18),
+            label: Text(context.l10n.tr('modem_apply_custom')),
           ),
         ],
       ],
@@ -486,7 +489,15 @@ class _ModemSectionState extends State<_ModemSection> {
 
   Widget _presetChip(BuildContext context, int idx, bool enabled) {
     final pal = context.palette;
+    final l = context.l10n;
     final sel = _sel == idx;
+    final label = switch (idx) {
+      0 => l.tr('modem_preset_speed'),
+      1 => l.tr('modem_preset_normal'),
+      2 => l.tr('modem_preset_range'),
+      3 => l.tr('modem_preset_maxrange'),
+      _ => l.tr('modem_preset_custom'),
+    };
     return GestureDetector(
       onTap: enabled ? () {
         HapticFeedback.selectionClick();
@@ -495,7 +506,8 @@ class _ModemSectionState extends State<_ModemSection> {
       } : null,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        constraints: const BoxConstraints(minWidth: 84),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(10),
           color: sel ? pal.primary.withOpacity(0.15) : pal.surfaceVariant,
@@ -505,7 +517,8 @@ class _ModemSectionState extends State<_ModemSection> {
           ),
         ),
         child: Text(
-          _presetNames[idx],
+          label,
+          textAlign: TextAlign.center,
           style: TextStyle(
             fontSize: 12.5,
             fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
@@ -633,12 +646,16 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
   int? _batteryPercent;
   bool _charging = false;
   int? _blePin;
-  String? _apSsid;
-  String? _apPassword;
   String? _version;
   String _radioMode = 'ble';
+  String? _radioVariant;
+  bool _wifiConnected = false;
+  String? _wifiSsid;
+  String? _wifiIp;
   int _espNowChannel = 1;
   bool _espNowAdaptive = false;
+  bool _modemApplying = false;
+  bool _radioModeApplying = false;
 
   /// Актуальный ID (обновляется по evt info, пока открыты настройки).
   late String _nodeIdLive;
@@ -669,10 +686,12 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
       _batteryPercent = evt.batteryPercent;
       _charging = evt.charging;
       _blePin = evt.blePin;
-      _apSsid = evt.apSsid;
-      _apPassword = evt.apPassword;
       _version = evt.version;
       _radioMode = evt.radioMode;
+      _radioVariant = evt.radioVariant;
+      _wifiConnected = evt.wifiConnected;
+      _wifiSsid = evt.wifiSsid;
+      _wifiIp = evt.wifiIp;
       if (evt.espNowChannel != null && evt.espNowChannel! >= 1 && evt.espNowChannel! <= 13) {
         _espNowChannel = evt.espNowChannel!;
       }
@@ -711,10 +730,12 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     _batteryPercent = li?.batteryPercent;
     _charging = li?.charging ?? false;
     _blePin = li?.blePin;
-    _apSsid = li?.apSsid;
-    _apPassword = li?.apPassword;
     _version = li?.version;
     _radioMode = li?.radioMode ?? 'ble';
+    _radioVariant = li?.radioVariant;
+    _wifiConnected = li?.wifiConnected ?? false;
+    _wifiSsid = li?.wifiSsid;
+    _wifiIp = li?.wifiIp;
     _espNowChannel = (li?.espNowChannel != null && li!.espNowChannel! >= 1 && li.espNowChannel! <= 13)
         ? li.espNowChannel!
         : 1;
@@ -802,12 +823,107 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
 
   void _snack(String t) => showAppSnackBar(context, t);
 
+  bool _isModemMatch(
+    RiftLinkInfoEvent info, {
+    required int preset,
+    int? sf,
+    double? bw,
+    int? cr,
+  }) {
+    if (info.modemPreset != preset) return false;
+    if (preset != 4) return true;
+    if (sf == null || bw == null || cr == null) return false;
+    final infoSf = info.sf;
+    final infoBw = info.bw;
+    final infoCr = info.cr;
+    if (infoSf == null || infoBw == null || infoCr == null) return false;
+    return infoSf == sf && (infoBw - bw).abs() < 0.2 && infoCr == cr;
+  }
+
+  Future<bool> _waitForModemApply({
+    required int preset,
+    int? sf,
+    double? bw,
+    int? cr,
+  }) async {
+    for (var i = 0; i < 5; i++) {
+      await widget.ble.getInfo(force: true);
+      await Future<void>.delayed(const Duration(milliseconds: 280));
+      final li = widget.ble.lastInfo;
+      if (li != null && _isModemMatch(li, preset: preset, sf: sf, bw: bw, cr: cr)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  String _radioModeLabel(AppLocalizations l, String mode) {
+    if (mode == 'wifi') {
+      if (_radioVariant == 'sta') return l.tr('radio_mode_wifi_sta');
+      return l.tr('radio_mode_wifi');
+    }
+    return l.tr('radio_mode_ble');
+  }
+
+  Future<void> _switchRadioToBle() async {
+    if (!widget.ble.isConnected || _radioModeApplying) return;
+    setState(() => _radioModeApplying = true);
+    final ok = await widget.ble.switchToBle();
+    if (ok) {
+      await widget.ble.getInfo(force: true);
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      final li = widget.ble.lastInfo;
+      if (mounted) {
+        if (li != null && li.radioMode == 'ble') {
+          _snack(context.l10n.tr('radio_mode_switched', {'mode': context.l10n.tr('radio_mode_ble')}));
+        } else {
+          _snack(context.l10n.tr('radio_mode_failed'));
+        }
+      }
+    } else {
+      if (mounted) _snack(context.l10n.tr('radio_mode_failed'));
+    }
+    if (mounted) setState(() => _radioModeApplying = false);
+  }
+
+  Future<void> _switchRadioToWifiSta() async {
+    if (!widget.ble.isConnected || _radioModeApplying) return;
+    final ssid = _wifiSsidController.text.trim();
+    if (ssid.isEmpty) {
+      _snack(context.l10n.tr('radio_mode_need_ssid'));
+      return;
+    }
+    setState(() => _radioModeApplying = true);
+    final ok = await widget.ble.switchToWifiSta(ssid: ssid, pass: _wifiPassController.text);
+    if (ok) {
+      if (!widget.ble.isConnected) {
+        if (mounted) _snack(context.l10n.tr('radio_mode_switching_reconnect'));
+        if (mounted) setState(() => _radioModeApplying = false);
+        return;
+      }
+      await widget.ble.getInfo(force: true);
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      final li = widget.ble.lastInfo;
+      if (mounted) {
+        if (li != null && li.radioMode == 'wifi' && li.radioVariant == 'sta') {
+          _snack(context.l10n.tr('radio_mode_switched', {'mode': context.l10n.tr('radio_mode_wifi_sta')}));
+        } else {
+          _snack(context.l10n.tr('radio_mode_failed'));
+        }
+      }
+    } else {
+      if (mounted) _snack(context.l10n.tr('radio_mode_failed'));
+    }
+    if (mounted) setState(() => _radioModeApplying = false);
+  }
+
   @override
   Widget build(BuildContext context) {
     final l = context.l10n;
     final regions = ['EU', 'RU', 'UK', 'US', 'AU'];
     final isEu = _region == 'EU' || _region == 'UK';
     final connected = widget.ble.isConnected;
+    final usingWifiTransport = widget.ble.isWifiMode;
     final idPlain = _nodeIdForClipboard(_nodeIdLive);
     final idShown = _formatNodeIdDisplay(_nodeIdLive);
 
@@ -960,22 +1076,62 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                   sf: _sf,
                   bw: _bw,
                   cr: _cr,
-                  enabled: connected,
+                  enabled: connected && !_modemApplying,
                   onPreset: (p) async {
-                    if (await widget.ble.setModemPreset(p)) {
-                      setState(() => _modemPreset = p);
-                      widget.ble.getInfo();
+                    if (!mounted || _modemApplying) return;
+                    setState(() => _modemApplying = true);
+                    var sent = false;
+                    for (var i = 0; i < 2 && !sent; i++) {
+                      sent = await widget.ble.setModemPreset(p);
+                      if (!sent) await Future<void>.delayed(const Duration(milliseconds: 120));
                     }
+                    if (sent) {
+                      final applied = await _waitForModemApply(preset: p);
+                      if (mounted) {
+                        _snack(applied ? l.tr('saved') : l.tr('modem_apply_failed'));
+                      }
+                    } else {
+                      if (mounted) _snack(l.tr('error'));
+                    }
+                    if (mounted) setState(() => _modemApplying = false);
                   },
                   onCustom: (sf, bw, cr) async {
-                    if (await widget.ble.setCustomModem(sf, bw, cr)) {
-                      setState(() { _sf = sf; _bw = bw; _cr = cr; _modemPreset = 4; });
-                      widget.onSfChanged(sf);
-                      widget.ble.getInfo();
+                    if (!mounted || _modemApplying) return;
+                    setState(() => _modemApplying = true);
+                    var sent = false;
+                    for (var i = 0; i < 2 && !sent; i++) {
+                      sent = await widget.ble.setCustomModem(sf, bw, cr);
+                      if (!sent) await Future<void>.delayed(const Duration(milliseconds: 120));
                     }
+                    if (sent) {
+                      final applied = await _waitForModemApply(
+                        preset: 4,
+                        sf: sf,
+                        bw: bw,
+                        cr: cr,
+                      );
+                      if (applied) {
+                        setState(() {
+                          _sf = sf;
+                          _bw = bw;
+                          _cr = cr;
+                          _modemPreset = 4;
+                        });
+                        widget.onSfChanged(sf);
+                      }
+                      if (mounted) _snack(applied ? l.tr('saved') : l.tr('modem_apply_failed'));
+                    } else {
+                      if (mounted) _snack(l.tr('error'));
+                    }
+                    if (mounted) setState(() => _modemApplying = false);
                   },
                 ),
               ),
+              if (_modemApplying)
+                const Padding(
+                  padding: EdgeInsets.only(top: 6),
+                  child: LinearProgressIndicator(minHeight: 2),
+                ),
               const SizedBox(height: 12),
               _SettingsCard(
                 title: l.tr('connection'),
@@ -1017,49 +1173,113 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       icon: const Icon(Icons.lock_reset_rounded, size: 18),
                       label: Text(l.tr('regen_pin')),
                     ),
-                    const SizedBox(height: 16),
-                    Text(
-                      l.tr('ap_access_point'),
-                      style: TextStyle(fontSize: 13, color: context.palette.onSurfaceVariant),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              _SettingsCard(
+                title: l.tr('radio_mode_title'),
+                subtitle: l.tr('radio_mode_hint'),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          _radioMode == 'wifi' ? Icons.wifi_rounded : Icons.bluetooth_rounded,
+                          size: 18,
+                          color: context.palette.primary,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          '${l.tr('radio_mode_current')}: ${_radioModeLabel(l, _radioMode)}',
+                          style: TextStyle(
+                            color: context.palette.onSurface,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 6),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: context.palette.surfaceVariant,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: context.palette.divider),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'SSID: ${_apSsid?.isNotEmpty == true ? _apSsid : '—'}',
-                            style: TextStyle(color: context.palette.onSurface),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'Pass: ${_apPassword?.isNotEmpty == true ? _apPassword : '—'}',
-                            style: TextStyle(
-                              color: context.palette.onSurface,
-                              fontFamily: 'monospace',
+                    const SizedBox(height: 12),
+                    _SegmentedPickBar(
+                      leadingIcon: Icons.swap_horiz_rounded,
+                      labels: [
+                        l.tr('radio_mode_ble'),
+                        l.tr('radio_mode_wifi_sta'),
+                      ],
+                      selectedIndex: _radioMode == 'wifi' ? 1 : 0,
+                      enabled: connected && !_radioModeApplying,
+                      onSelected: (i) async {
+                        if (i == 0) {
+                          await _switchRadioToBle();
+                          return;
+                        }
+                        await _switchRadioToWifiSta();
+                      },
+                    ),
+                    if (_radioMode == 'wifi') ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: context.palette.surfaceVariant,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: context.palette.divider),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _wifiConnected
+                                  ? l.tr('radio_mode_wifi_connected')
+                                  : l.tr('radio_mode_wifi_not_connected'),
+                              style: TextStyle(
+                                color: _wifiConnected ? context.palette.success : context.palette.onSurfaceVariant,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
-                          ),
-                        ],
+                            if (_wifiSsid != null && _wifiSsid!.isNotEmpty) ...[
+                              const SizedBox(height: 4),
+                              Text(
+                                'SSID: $_wifiSsid',
+                                style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 12),
+                              ),
+                            ],
+                            if (_wifiIp != null && _wifiIp!.isNotEmpty) ...[
+                              const SizedBox(height: 2),
+                              Text(
+                                'IP: $_wifiIp',
+                                style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 12),
+                              ),
+                            ],
+                          ],
+                        ),
                       ),
+                    ],
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _wifiSsidController,
+                      style: TextStyle(color: context.palette.onSurface),
+                      decoration: InputDecoration(labelText: l.tr('wifi_ssid')),
                     ),
                     const SizedBox(height: 10),
-                    FilledButton.tonalIcon(
-                      onPressed: connected
-                          ? () async {
-                              final ok = await widget.ble.regenerateApPass();
-                              if (ok) await widget.ble.getInfo();
-                              if (mounted) _snack(ok ? l.tr('saved') : l.tr('error'));
-                            }
-                          : null,
-                      icon: const Icon(Icons.password_rounded, size: 18),
-                      label: Text(l.tr('regen_ap_password')),
+                    TextField(
+                      controller: _wifiPassController,
+                      obscureText: true,
+                      style: TextStyle(color: context.palette.onSurface),
+                      decoration: InputDecoration(labelText: l.tr('wifi_password')),
                     ),
+                    const SizedBox(height: 12),
+                    FilledButton.icon(
+                      onPressed: connected && !_radioModeApplying ? _switchRadioToWifiSta : null,
+                      icon: const Icon(Icons.wifi_find_rounded),
+                      label: Text(l.tr('radio_mode_connect_sta')),
+                    ),
+                    if (_radioModeApplying)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 10),
+                        child: LinearProgressIndicator(minHeight: 2),
+                      ),
                   ],
                 ),
               ),
@@ -1117,114 +1337,99 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                 const SizedBox(height: 12),
               ],
               _SettingsCard(
-                title: l.tr('wifi_ota_section'),
-                subtitle: l.tr('wifi_ota_section_hint'),
+                title: l.tr('firmware_update_title'),
+                subtitle: l.tr('firmware_update_hint'),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    Row(
-                      children: [
-                        Container(
-                          width: 3,
-                          height: 14,
-                          decoration: BoxDecoration(
-                            color: context.palette.primary,
-                            borderRadius: BorderRadius.circular(2),
-                          ),
+                    if (!usingWifiTransport) ...[
+                      FilledButton.icon(
+                        onPressed: connected
+                            ? () {
+                                Navigator.push(
+                                  context,
+                                  MaterialPageRoute(builder: (_) => OtaScreen(ble: widget.ble)),
+                                );
+                              }
+                            : null,
+                        icon: const Icon(Icons.bluetooth_searching_rounded),
+                        label: Text(l.tr('firmware_update_ble')),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        l.tr('firmware_update_where_hint'),
+                        style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        l.tr('firmware_update_path'),
+                        style: TextStyle(
+                          fontFamily: 'monospace',
+                          color: context.palette.onSurfaceVariant.withOpacity(0.95),
+                          fontSize: 12,
                         ),
-                        const SizedBox(width: 10),
-                        Text(
-                          l.tr('wifi_station_block'),
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: context.palette.onSurface,
-                          ),
+                      ),
+                    ] else ...[
+                      Text(
+                        l.tr('firmware_update_wifi'),
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: context.palette.onSurface,
                         ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _wifiSsidController,
-                      style: TextStyle(color: context.palette.onSurface),
-                      decoration: InputDecoration(labelText: l.tr('wifi_ssid')),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _wifiPassController,
-                      obscureText: true,
-                      style: TextStyle(color: context.palette.onSurface),
-                      decoration: InputDecoration(labelText: l.tr('wifi_password')),
-                    ),
-                    const SizedBox(height: 16),
-                    FilledButton(
-                      onPressed: connected
-                          ? () async {
-                              final ssid = _wifiSsidController.text.trim();
-                              if (ssid.isEmpty) return;
-                              await widget.ble.setWifi(ssid: ssid, pass: _wifiPassController.text);
-                              if (mounted) _snack(l.tr('wifi_connect'));
-                            }
-                          : null,
-                      child: Text(l.tr('connect')),
-                    ),
-                    const SizedBox(height: 22),
-                    Divider(height: 1, color: context.palette.divider),
-                    const SizedBox(height: 18),
-                    Row(
-                      children: [
-                        Container(
-                          width: 3,
-                          height: 14,
-                          decoration: BoxDecoration(
-                            color: context.palette.primary,
-                            borderRadius: BorderRadius.circular(2),
-                          ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        l.tr('firmware_update_where_hint'),
+                        style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        l.tr('firmware_update_path'),
+                        style: TextStyle(
+                          fontFamily: 'monospace',
+                          color: context.palette.onSurfaceVariant.withOpacity(0.95),
+                          fontSize: 12,
                         ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            l.tr('wifi_ota_upload_block'),
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                              color: context.palette.onSurface,
+                      ),
+                    ],
+                    if (!usingWifiTransport && _radioMode != 'wifi') ...[
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Icon(Icons.info_outline_rounded, size: 16, color: context.palette.onSurfaceVariant),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              l.tr('firmware_update_wifi_requires_wifi_mode'),
+                              style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
                             ),
                           ),
-                        ),
-                        Icon(Icons.system_update_alt, size: 18, color: context.palette.primary.withOpacity(0.9)),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      l.tr('ota_start_hint'),
-                      style: TextStyle(
-                        fontSize: 12,
-                        height: 1.35,
-                        color: context.palette.onSurfaceVariant.withOpacity(0.95),
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    FilledButton.tonal(
-                      style: FilledButton.styleFrom(
-                        foregroundColor: context.palette.onSurface,
-                        backgroundColor: context.palette.primary.withOpacity(0.18),
-                      ),
-                      onPressed: connected
-                          ? () async {
-                              HapticFeedback.lightImpact();
-                              final ok = await widget.ble.sendOta();
-                              if (mounted) _snack(ok ? l.tr('ota_started') : l.tr('ota_failed'));
-                            }
-                          : null,
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.system_update_alt, size: 20, color: context.palette.primary),
-                          const SizedBox(width: 8),
-                          Text(l.tr('ota_title'), style: const TextStyle(fontWeight: FontWeight.w600)),
                         ],
                       ),
+                    ],
+                    if (usingWifiTransport || _radioMode == 'wifi') ...[
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Icon(Icons.check_circle_outline_rounded, size: 16, color: context.palette.success),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              l.tr('firmware_update_wifi_mode_ready'),
+                              style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: connected && !_radioModeApplying && _radioMode != 'ble'
+                          ? _switchRadioToBle
+                          : null,
+                      icon: const Icon(Icons.bluetooth_rounded),
+                      label: Text(l.tr('radio_mode_back_to_ble')),
                     ),
                   ],
                 ),

@@ -416,26 +416,27 @@ void setCustomModem(uint8_t sf, float bw, uint8_t cr) {
   Serial.printf("[RiftLink] Modem custom: SF%u BW%.0f CR4/%u\n", sf, bw, cr);
 }
 
-void requestModemPreset(ModemPreset p) {
-  if (p >= MODEM_PRESET_COUNT || !radioCmdQueue) return;
+bool requestModemPreset(ModemPreset p) {
+  if (p >= MODEM_PRESET_COUNT || !radioCmdQueue) return false;
   RadioCmd cmd;
   cmd.type = RadioCmdType::ApplyModem;
-  cmd.priority = false;
+  cmd.priority = true;
   cmd.u.modem.preset = (uint8_t)p;
   cmd.u.modem.sf = 0; cmd.u.modem.bw10 = 0; cmd.u.modem.cr = 0;
-  (void)xQueueSend(radioCmdQueue, &cmd, 0);
+  return xQueueSendToFront(radioCmdQueue, &cmd, pdMS_TO_TICKS(5)) == pdTRUE;
 }
 
-void requestCustomModem(uint8_t sf, float bw, uint8_t cr) {
-  if (sf < 7 || sf > 12 || cr < 5 || cr > 8 || !radioCmdQueue) return;
+bool requestCustomModem(uint8_t sf, float bw, uint8_t cr) {
+  if (sf < 7 || sf > 12 || cr < 5 || cr > 8 || !radioCmdQueue) return false;
+  if (!isValidBw(bw)) return false;
   RadioCmd cmd;
   cmd.type = RadioCmdType::ApplyModem;
-  cmd.priority = false;
+  cmd.priority = true;
   cmd.u.modem.preset = (uint8_t)MODEM_CUSTOM;
   cmd.u.modem.sf = sf;
   cmd.u.modem.bw10 = (uint16_t)(bw * 10.0f + 0.5f);
   cmd.u.modem.cr = cr;
-  (void)xQueueSend(radioCmdQueue, &cmd, 0);
+  return xQueueSendToFront(radioCmdQueue, &cmd, pdMS_TO_TICKS(5)) == pdTRUE;
 }
 
 ModemPreset getModemPreset() { return s_preset; }
@@ -465,9 +466,9 @@ void applyHardwareModem(uint8_t sf, float bw, uint8_t cr) {
   s_hwSf = sf;
 }
 
-void requestSpreadingFactor(uint8_t sf) {
-  if (sf < 7 || sf > 12) return;
-  requestCustomModem(sf, s_bw, s_cr);
+bool requestSpreadingFactor(uint8_t sf) {
+  if (sf < 7 || sf > 12) return false;
+  return requestCustomModem(sf, s_bw, s_cr);
 }
 
 }  // namespace radio

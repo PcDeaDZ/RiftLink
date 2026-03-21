@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../theme/app_theme.dart';
@@ -15,6 +16,7 @@ import '../l10n/app_localizations.dart';
 import '../locale_notifier.dart';
 import '../theme/theme_notifier.dart';
 import '../recent_devices/recent_devices_service.dart';
+import '../wifi/mdns_discovery.dart';
 import '../widgets/rift_dialogs.dart';
 import '../widgets/app_popover_menu.dart';
 import 'chat_screen.dart';
@@ -40,6 +42,7 @@ String _formatBleError(BuildContext context, Object e) {
 
 class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
   RiftLinkBle get _ble => RiftLinkBleScope.of(context);
+  final Connectivity _connectivity = Connectivity();
   bool _scanning = false;
   bool _meshAnimationEnabled = true;
   AnimationController? _meshAnimController;
@@ -52,11 +55,26 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
   StreamSubscription? _scanSub;
   Completer<void>? _scanCompleter;
   bool _scanStoppedByUser = false;
+  bool _wifiConnecting = false;
+  int _transportTab = 0; // 0=BLE, 1=Wi-Fi
+  late final TextEditingController _wifiIpController;
+  List<String> _recentWifiIps = [];
+  List<MdnsNode> _mdnsNodes = [];
+  bool _wifiDiscovering = false;
+  bool _wifiNetworkAvailable = false;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
+  int? _wifiActionFlash; // 0 = last IP, 1 = mDNS
+  Timer? _wifiActionFlashTimer;
+  bool _wifiIpTouched = false;
 
   @override
   void initState() {
     super.initState();
+    _wifiIpController = TextEditingController(text: '192.168.4.1');
+    _wifiIpController.addListener(_onWifiIpChanged);
+    _bindConnectivity();
     _loadRecent();
+    _loadRecentWifiIps();
     _loadMeshPrefs();
     if (widget.initialMessage != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -70,10 +88,40 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
   @override
   void dispose() {
     _scanSub?.cancel();
+    _connectivitySub?.cancel();
+    _wifiActionFlashTimer?.cancel();
     _scanSub = null;
     RiftLinkBle.stopScan();  // fire-and-forget, очистка при закрытии
+    _wifiIpController.removeListener(_onWifiIpChanged);
+    _wifiIpController.dispose();
     _meshAnimController?.dispose();
     super.dispose();
+  }
+
+  bool _isWifiConnected(List<ConnectivityResult> results) {
+    return results.contains(ConnectivityResult.wifi);
+  }
+
+  Future<void> _bindConnectivity() async {
+    try {
+      final current = await _connectivity.checkConnectivity();
+      if (!mounted) return;
+      setState(() => _wifiNetworkAvailable = _isWifiConnected(current));
+    } catch (_) {}
+    _connectivitySub = _connectivity.onConnectivityChanged.listen((results) {
+      if (!mounted) return;
+      final available = _isWifiConnected(results);
+      if (!available && _transportTab == 1) {
+        setState(() {
+          _transportTab = 0;
+          _wifiNetworkAvailable = false;
+          _mdnsNodes = [];
+        });
+        _snack(context.l10n.tr('wifi_tab_locked'));
+        return;
+      }
+      setState(() => _wifiNetworkAvailable = available);
+    });
   }
 
   Future<void> _loadMeshPrefs() async {
@@ -101,6 +149,107 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
   Future<void> _loadRecent() async {
     final list = await RecentDevicesService.load();
     if (mounted) setState(() => _recent = list);
+  }
+
+  Future<void> _loadRecentWifiIps() async {
+    final list = await RecentDevicesService.loadRecentWifiIps();
+    if (!mounted) return;
+    setState(() => _recentWifiIps = list);
+    if (list.isNotEmpty && (_wifiIpController.text.trim().isEmpty || _wifiIpController.text.trim() == '192.168.4.1')) {
+      _wifiIpController.text = list.first;
+      _wifiIpController.selection = TextSelection.collapsed(offset: _wifiIpController.text.length);
+    }
+  }
+
+  void _onWifiIpChanged() {
+    if (!_wifiIpTouched) {
+      setState(() => _wifiIpTouched = true);
+      return;
+    }
+    if (mounted) setState(() {});
+  }
+
+  bool get _wifiIpValid {
+    final ip = _wifiIpController.text.trim();
+    final ipv4 = RegExp(r'^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$');
+    return ipv4.hasMatch(ip);
+  }
+
+  String? _wifiIpFieldError(BuildContext context) {
+    final ip = _wifiIpController.text.trim();
+    if (!_wifiIpTouched) return null;
+    if (ip.isEmpty) return context.l10n.tr('wifi_ip_required');
+    if (!_wifiIpValid) return context.l10n.tr('wifi_ip_invalid');
+    return null;
+  }
+
+  void _useLastWifiIp() {
+    if (_recentWifiIps.isEmpty) return;
+    final last = _recentWifiIps.first;
+    _wifiIpController.text = last;
+    _wifiIpController.selection = TextSelection.collapsed(offset: last.length);
+    setState(() => _wifiIpTouched = true);
+  }
+
+  void _useWifiIp(String ip) {
+    _wifiIpController.text = ip;
+    _wifiIpController.selection = TextSelection.collapsed(offset: ip.length);
+    setState(() => _wifiIpTouched = true);
+  }
+
+  Future<void> _removeWifiIp(String ip) async {
+    await RecentDevicesService.removeRecentWifiIp(ip);
+    if (!mounted) return;
+    final updated = await RecentDevicesService.loadRecentWifiIps();
+    if (!mounted) return;
+    setState(() => _recentWifiIps = updated);
+  }
+
+  void _flashWifiAction(int index) {
+    _wifiActionFlashTimer?.cancel();
+    setState(() => _wifiActionFlash = index);
+    _wifiActionFlashTimer = Timer(const Duration(milliseconds: 240), () {
+      if (!mounted) return;
+      setState(() => _wifiActionFlash = null);
+    });
+  }
+
+  Future<void> _discoverWifiNodes() async {
+    if (!_wifiNetworkAvailable) {
+      _snack(context.l10n.tr('wifi_tab_locked'));
+      return;
+    }
+    if (_wifiDiscovering) return;
+    setState(() {
+      _wifiDiscovering = true;
+      _error = null;
+    });
+    try {
+      final nodes = await discoverRiftLinkMdns();
+      if (!mounted) return;
+      setState(() {
+        _mdnsNodes = nodes;
+        if (nodes.isNotEmpty) {
+          _wifiIpController.text = nodes.first.ip;
+          _wifiIpController.selection = TextSelection.collapsed(offset: nodes.first.ip.length);
+          _wifiIpTouched = true;
+        }
+      });
+      if (nodes.isEmpty) {
+        _snack(context.l10n.tr('wifi_mdns_none'));
+      } else {
+        _snack('${context.l10n.tr('wifi_mdns_found')}: ${nodes.length}');
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '${context.l10n.tr('wifi_mdns_scan')}: $e');
+    } finally {
+      if (mounted) setState(() => _wifiDiscovering = false);
+    }
+  }
+
+  void _snack(String message) {
+    showAppSnackBar(context, message);
   }
 
   Future<void> _startScan({String? connectToRemoteId, String? connectToDeviceName}) async {
@@ -197,6 +346,50 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
       }
     } catch (e) {
       if (mounted) setState(() { _error = _formatBleError(context, e); _connectingToRemoteId = null; _connectingToDeviceName = null; });
+    }
+  }
+
+  Future<void> _connectWifi() async {
+    if (!_wifiNetworkAvailable) {
+      setState(() => _error = context.l10n.tr('wifi_tab_locked'));
+      return;
+    }
+    final ip = _wifiIpController.text.trim();
+    if (!_wifiIpValid) {
+      setState(() {
+        _wifiIpTouched = true;
+        _error = context.l10n.tr(ip.isEmpty ? 'wifi_ip_required' : 'wifi_ip_invalid');
+      });
+      return;
+    }
+    if (_scanning) {
+      _scanStoppedByUser = true;
+      _scanCompleter?.complete();
+    }
+    setState(() {
+      _wifiConnecting = true;
+      _error = null;
+      _connectingToRemoteId = null;
+      _connectingToDeviceName = null;
+    });
+    try {
+      final ok = await _ble.connectWifi(ip);
+      if (!mounted) return;
+      if (ok) {
+        await RecentDevicesService.addRecentWifiIp(ip);
+        if (mounted) {
+          final updated = await RecentDevicesService.loadRecentWifiIps();
+          if (mounted) setState(() => _recentWifiIps = updated);
+        }
+        Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => ChatScreen(ble: _ble)));
+      } else {
+        setState(() => _error = context.l10n.tr('wifi_connect_failed'));
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '${context.l10n.tr('wifi_connect_failed')}: $e');
+    } finally {
+      if (mounted) setState(() => _wifiConnecting = false);
     }
   }
 
@@ -321,10 +514,104 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                   const SizedBox(height: 20),
-                  Icon(Icons.bluetooth_searching, size: 56, color: context.palette.primary),
+                  Icon(_transportTab == 0 ? Icons.bluetooth_searching : Icons.wifi_find_rounded, size: 56, color: context.palette.primary),
                   const SizedBox(height: 12),
-                  Text(l10n.tr('find_device'), style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: context.palette.onSurface), textAlign: TextAlign.center),
+                  Text(
+                    _transportTab == 0 ? l10n.tr('find_device') : l10n.tr('wifi_connect_title'),
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: context.palette.onSurface),
+                    textAlign: TextAlign.center,
+                  ),
                   const SizedBox(height: 12),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: context.palette.surfaceVariant,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: context.palette.divider),
+                      ),
+                      padding: const EdgeInsets.all(4),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(8),
+                              onTap: () => setState(() => _transportTab = 0),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(vertical: 10),
+                                decoration: BoxDecoration(
+                                  color: _transportTab == 0 ? context.palette.primary.withOpacity(0.2) : Colors.transparent,
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: _transportTab == 0 ? Border.all(color: context.palette.primary.withOpacity(0.55)) : null,
+                                ),
+                                child: Text(
+                                  l10n.tr('transport_ble'),
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: _transportTab == 0 ? context.palette.primary : context.palette.onSurfaceVariant,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(8),
+                              onTap: () {
+                                if (!_wifiNetworkAvailable) {
+                                  _snack(l10n.tr('wifi_tab_locked'));
+                                  return;
+                                }
+                                if (_scanning) {
+                                  _scanStoppedByUser = true;
+                                  _scanCompleter?.complete();
+                                }
+                                setState(() => _transportTab = 1);
+                                if (_recentWifiIps.isNotEmpty && (_wifiIpController.text.trim().isEmpty || _wifiIpController.text.trim() == '192.168.4.1')) {
+                                  _useLastWifiIp();
+                                }
+                              },
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(vertical: 10),
+                                decoration: BoxDecoration(
+                                  color: _transportTab == 1
+                                      ? context.palette.primary.withOpacity(0.2)
+                                      : (_wifiNetworkAvailable ? Colors.transparent : context.palette.onSurfaceVariant.withOpacity(0.08)),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: _transportTab == 1 ? Border.all(color: context.palette.primary.withOpacity(0.55)) : null,
+                                ),
+                                child: Text(
+                                  l10n.tr('transport_wifi'),
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: _transportTab == 1
+                                        ? context.palette.primary
+                                        : (_wifiNetworkAvailable
+                                            ? context.palette.onSurfaceVariant
+                                            : context.palette.onSurfaceVariant.withOpacity(0.45)),
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  if (!_wifiNetworkAvailable)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: Text(
+                        l10n.tr('wifi_tab_locked'),
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                      ),
+                    ),
+                  if (!_wifiNetworkAvailable) const SizedBox(height: 8),
                   if (_error != null)
                     Container(
                       margin: const EdgeInsets.symmetric(horizontal: 24),
@@ -354,59 +641,332 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                     ),
                   if (_error != null) const SizedBox(height: 12),
                   const SizedBox(height: 12),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24),
-                    child: SizedBox(
-                      width: double.infinity,
-                      height: 48,
-                      child: ElevatedButton.icon(
-                        onPressed: _connectingToRemoteId != null ? null : () {
-                          if (_scanning) {
-                            _scanStoppedByUser = true;
-                            _scanCompleter?.complete();
-                            return;
-                          }
-                          _startScan();
-                        },
-                        icon: SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: (_scanning || _connectingToRemoteId != null) && _connectingToRemoteId == null
-                              ? const CircularProgressIndicator(strokeWidth: 2, color: Colors.white)
-                              : _connectingToRemoteId != null
-                                  ? const Icon(Icons.bluetooth_searching, color: Colors.white, size: 20)
-                                  : const Icon(Icons.search, color: Colors.white, size: 20),
-                        ),
-                        label: Builder(
-                          builder: (_) {
-                            String labelText = l10n.tr('search_devices');
-                            if (_connectingToRemoteId != null) {
-                              String name = _connectingToDeviceName ?? '';
-                              final rid = _connectingToRemoteId!;
-                              if (name.isEmpty) {
-                                final norm = (String s) => s.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
-                                final d = _recent.where((x) => norm(x.remoteId) == norm(rid)).firstOrNull;
-                                name = d != null ? (d.displayName.isNotEmpty ? d.displayName : d.nodeId.isNotEmpty ? d.nodeId : d.remoteId) : '';
-                              }
-                              if (name.isEmpty) name = rid.length > 16 ? rid.substring(rid.length - 16) : rid;
-                              if (name.isEmpty) name = l10n.tr('device');
-                              labelText = l10n.tr('connecting_to', {'name': name});
-                            } else if (_scanning) {
-                              labelText = l10n.tr('stop_scan');
+                  if (_transportTab == 0) ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: SizedBox(
+                        width: double.infinity,
+                        height: 48,
+                        child: ElevatedButton.icon(
+                          onPressed: _connectingToRemoteId != null ? null : () {
+                            if (_scanning) {
+                              _scanStoppedByUser = true;
+                              _scanCompleter?.complete();
+                              return;
                             }
-                            return SizedBox(width: double.infinity, child: Center(child: Text(labelText, style: TextStyle(color: Colors.white, fontSize: 15), textAlign: TextAlign.center)));
+                            _startScan();
                           },
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: context.palette.primary,
-                          disabledBackgroundColor: context.palette.primary.withOpacity(0.5),
-                          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          icon: SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: (_scanning || _connectingToRemoteId != null) && _connectingToRemoteId == null
+                                ? const CircularProgressIndicator(strokeWidth: 2, color: Colors.white)
+                                : _connectingToRemoteId != null
+                                    ? const Icon(Icons.bluetooth_searching, color: Colors.white, size: 20)
+                                    : const Icon(Icons.search, color: Colors.white, size: 20),
+                          ),
+                          label: Builder(
+                            builder: (_) {
+                              String labelText = l10n.tr('search_devices');
+                              if (_connectingToRemoteId != null) {
+                                String name = _connectingToDeviceName ?? '';
+                                final rid = _connectingToRemoteId!;
+                                if (name.isEmpty) {
+                                  final norm = (String s) => s.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+                                  final d = _recent.where((x) => norm(x.remoteId) == norm(rid)).firstOrNull;
+                                  name = d != null ? (d.displayName.isNotEmpty ? d.displayName : d.nodeId.isNotEmpty ? d.nodeId : d.remoteId) : '';
+                                }
+                                if (name.isEmpty) name = rid.length > 16 ? rid.substring(rid.length - 16) : rid;
+                                if (name.isEmpty) name = l10n.tr('device');
+                                labelText = l10n.tr('connecting_to', {'name': name});
+                              } else if (_scanning) {
+                                labelText = l10n.tr('stop_scan');
+                              }
+                              return SizedBox(width: double.infinity, child: Center(child: Text(labelText, style: TextStyle(color: Colors.white, fontSize: 15), textAlign: TextAlign.center)));
+                            },
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: context.palette.primary,
+                            disabledBackgroundColor: context.palette.primary.withOpacity(0.5),
+                            padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  if (_recent.isNotEmpty) ...[
+                  ] else ...[
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: Text(
+                        l10n.tr('wifi_connect_hint'),
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 13, color: context.palette.onSurfaceVariant),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: TextField(
+                        controller: _wifiIpController,
+                        enabled: !_wifiConnecting,
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        decoration: InputDecoration(
+                          labelText: l10n.tr('wifi_ip'),
+                          hintText: '192.168.4.1',
+                          errorText: _wifiIpFieldError(context),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: Container(
+                        height: 44,
+                        decoration: BoxDecoration(
+                          color: context.palette.surfaceVariant,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: context.palette.divider),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 170),
+                                curve: Curves.easeOutCubic,
+                                decoration: BoxDecoration(
+                                  color: _wifiActionFlash == 0
+                                      ? context.palette.primary.withOpacity(0.14)
+                                      : Colors.transparent,
+                                  borderRadius: const BorderRadius.horizontal(left: Radius.circular(11)),
+                                ),
+                                child: Material(
+                                  color: Colors.transparent,
+                                  child: InkWell(
+                                    borderRadius: const BorderRadius.horizontal(left: Radius.circular(11)),
+                                    onTap: (_wifiConnecting || _recentWifiIps.isEmpty)
+                                        ? null
+                                        : () {
+                                            _flashWifiAction(0);
+                                            _useLastWifiIp();
+                                          },
+                                    child: Row(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        Icon(
+                                          Icons.history_rounded,
+                                          size: 17,
+                                          color: (_wifiConnecting || _recentWifiIps.isEmpty)
+                                              ? context.palette.onSurfaceVariant.withOpacity(0.45)
+                                              : context.palette.primary,
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Flexible(
+                                          child: Text(
+                                            l10n.tr('wifi_last_ip'),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.w600,
+                                              color: (_wifiConnecting || _recentWifiIps.isEmpty)
+                                                  ? context.palette.onSurfaceVariant.withOpacity(0.45)
+                                                  : context.palette.onSurface,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            VerticalDivider(width: 1, thickness: 1, color: context.palette.divider),
+                            Expanded(
+                              child: AnimatedContainer(
+                                duration: const Duration(milliseconds: 170),
+                                curve: Curves.easeOutCubic,
+                                decoration: BoxDecoration(
+                                  color: _wifiActionFlash == 1
+                                      ? context.palette.primary.withOpacity(0.14)
+                                      : Colors.transparent,
+                                  borderRadius: const BorderRadius.horizontal(right: Radius.circular(11)),
+                                ),
+                                child: Material(
+                                  color: Colors.transparent,
+                                  child: InkWell(
+                                    borderRadius: const BorderRadius.horizontal(right: Radius.circular(11)),
+                                    onTap: (_wifiConnecting || _wifiDiscovering)
+                                        ? null
+                                        : () {
+                                            _flashWifiAction(1);
+                                            _discoverWifiNodes();
+                                          },
+                                    child: Row(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        _wifiDiscovering
+                                            ? SizedBox(
+                                                width: 14,
+                                                height: 14,
+                                                child: CircularProgressIndicator(
+                                                  strokeWidth: 2,
+                                                  color: context.palette.primary,
+                                                ),
+                                              )
+                                            : Icon(
+                                                Icons.travel_explore_rounded,
+                                                size: 17,
+                                                color: _wifiConnecting
+                                                    ? context.palette.onSurfaceVariant.withOpacity(0.45)
+                                                    : context.palette.primary,
+                                              ),
+                                        const SizedBox(width: 6),
+                                        Flexible(
+                                          child: Text(
+                                            _wifiDiscovering ? l10n.tr('wifi_mdns_scanning') : l10n.tr('wifi_mdns_scan'),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.w600,
+                                              color: _wifiConnecting
+                                                  ? context.palette.onSurfaceVariant.withOpacity(0.45)
+                                                  : context.palette.onSurface,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    if (_mdnsNodes.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            l10n.tr('wifi_mdns_found'),
+                            style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          itemCount: _mdnsNodes.length,
+                          separatorBuilder: (_, __) => const SizedBox(height: 8),
+                          itemBuilder: (_, i) {
+                            final node = _mdnsNodes[i];
+                            return Material(
+                              color: context.palette.surfaceVariant.withOpacity(0.7),
+                              borderRadius: BorderRadius.circular(10),
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(10),
+                                onTap: _wifiConnecting ? null : () => _useWifiIp(node.ip),
+                                child: ListTile(
+                                  dense: true,
+                                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                                  leading: Icon(Icons.router_rounded, color: context.palette.primary, size: 18),
+                                  title: Text(node.ip, style: TextStyle(color: context.palette.onSurface, fontFamily: 'monospace')),
+                                  subtitle: Text('${node.host}:${node.port}', style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 11)),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                    if (_recentWifiIps.isNotEmpty) ...[
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            l10n.tr('wifi_recent_ips'),
+                            style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 24),
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          itemCount: _recentWifiIps.length,
+                          separatorBuilder: (_, __) => const SizedBox(height: 8),
+                          itemBuilder: (_, i) {
+                            final ip = _recentWifiIps[i];
+                            return Dismissible(
+                              key: ValueKey('wifi-ip-$ip'),
+                              direction: DismissDirection.endToStart,
+                              background: Container(
+                                alignment: Alignment.centerRight,
+                                padding: const EdgeInsets.symmetric(horizontal: 14),
+                                decoration: BoxDecoration(
+                                  color: context.palette.error.withOpacity(0.2),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: context.palette.error.withOpacity(0.7)),
+                                ),
+                                child: Icon(Icons.delete_outline_rounded, color: context.palette.error),
+                              ),
+                              onDismissed: (_) {
+                                _removeWifiIp(ip);
+                              },
+                              child: Material(
+                                color: context.palette.surfaceVariant.withOpacity(0.75),
+                                borderRadius: BorderRadius.circular(10),
+                                child: InkWell(
+                                  borderRadius: BorderRadius.circular(10),
+                                  onTap: _wifiConnecting ? null : () => _useWifiIp(ip),
+                                  child: ListTile(
+                                    dense: true,
+                                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                                    leading: Icon(Icons.wifi_rounded, color: context.palette.primary, size: 18),
+                                    title: Text(ip, style: TextStyle(color: context.palette.onSurface, fontFamily: 'monospace')),
+                                    trailing: Icon(Icons.swipe_left_rounded, color: context.palette.onSurfaceVariant, size: 18),
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: SizedBox(
+                        width: double.infinity,
+                        height: 48,
+                        child: ElevatedButton.icon(
+                          onPressed: (_wifiConnecting || !_wifiIpValid) ? null : _connectWifi,
+                          icon: _wifiConnecting
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                )
+                              : const Icon(Icons.wifi_rounded, color: Colors.white),
+                          label: Text(_wifiConnecting ? l10n.tr('connecting') : l10n.tr('connect')),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: context.palette.primary,
+                            disabledBackgroundColor: context.palette.primary.withOpacity(0.5),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                  if (_transportTab == 0 && _recent.isNotEmpty) ...[
                     const SizedBox(height: 24),
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -493,14 +1053,15 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                       ),
                     ),
                   ],
-                  if (_recent.isEmpty && !_scanning) ...[
+                  if (_transportTab == 0 && _recent.isEmpty && !_scanning) ...[
                     const SizedBox(height: 12),
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 24),
                       child: Text(l10n.tr('recent_empty'), textAlign: TextAlign.center, style: TextStyle(fontSize: 13, color: context.palette.onSurfaceVariant)),
                     ),
                   ],
-                  Builder(builder: (_) {
+                  if (_transportTab == 0)
+                    Builder(builder: (_) {
                     final filtered = _results.where((r) => !_recent.any((d) => d.remoteId == r.device.remoteId.toString())).toList();
                     if (filtered.isEmpty) return const SizedBox.shrink();
                     return Column(
@@ -540,7 +1101,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                         ),
                       ],
                     );
-                  }),
+                    }),
                   if (_results.isEmpty) const SizedBox(height: 48),
                   const SizedBox(height: 24),
                 ],

@@ -20,12 +20,18 @@ class _ContactsScreenState extends State<ContactsScreen> {
   List<Contact> _contacts = [];
   bool _loading = true;
 
+  String _normalizeId(String raw) =>
+      raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+
   @override
   void initState() { super.initState(); _load(); }
 
   Future<void> _load() async {
     setState(() => _loading = true);
-    final list = await ContactsService.load();
+    final list = (await ContactsService.load())
+        .map((c) => Contact(id: _normalizeId(c.id), nickname: c.nickname))
+        .where((c) => c.id.length >= 8)
+        .toList();
     list.sort((a, b) {
       final an = a.nickname.trim().toLowerCase();
       final bn = b.nickname.trim().toLowerCase();
@@ -38,7 +44,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
   }
 
   void _showAddDialog({String? prefilledId}) {
-    final raw = prefilledId?.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase() ?? '';
+    final raw = _normalizeId(prefilledId ?? '');
     final existing = raw.isNotEmpty ? _contacts.where((c) => c.id == raw).firstOrNull : null;
     final idC = TextEditingController(text: raw.length > 8 ? raw.substring(0, 8) : raw);
     final nickC = TextEditingController(text: existing?.nickname ?? '');
@@ -96,7 +102,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                     textStyle: const TextStyle(fontWeight: FontWeight.w600),
                   ),
                   onPressed: () async {
-                    final id = idC.text.trim().toUpperCase();
+                    final id = _normalizeId(idC.text.trim());
                     if (id.length != 8) {
                       showAppSnackBar(context, l.tr('invalid_hex'), kind: AppSnackKind.error);
                       return;
@@ -112,10 +118,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           ],
         ),
       ),
-    ).then((_) {
-      idC.dispose();
-      nickC.dispose();
-    });
+    );
   }
 
   void _showEditDialog(Contact c) {
@@ -162,7 +165,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                   ),
                   onPressed: () async {
                     Navigator.pop(ctx);
-                    await ContactsService.add(Contact(id: c.id, nickname: nickC.text.trim()));
+                    await ContactsService.add(Contact(id: _normalizeId(c.id), nickname: nickC.text.trim()));
                     await _load();
                   },
                   child: Text(l.tr('ok')),
@@ -172,7 +175,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           ],
         ),
       ),
-    ).then((_) => nickC.dispose());
+    );
   }
 
   Future<void> _delete(Contact c) async {
@@ -239,7 +242,10 @@ class _ContactsScreenState extends State<ContactsScreen> {
                             Wrap(
                               spacing: 8,
                               runSpacing: 8,
-                              children: widget.neighbors.map((id) {
+                              children: widget.neighbors
+                                  .map(_normalizeId)
+                                  .where((id) => id.isNotEmpty)
+                                  .map((id) {
                                 final shortId = id.length > 8 ? id.substring(0, 8) : id;
                                 final existing = _contacts.where((c) => c.id == shortId).firstOrNull;
                                 return Material(
@@ -310,7 +316,10 @@ class _ContactsScreenState extends State<ContactsScreen> {
                                             radius: 22,
                                             backgroundColor: context.palette.primary.withOpacity(0.14),
                                             child: Text(
-                                              (c.nickname.isNotEmpty ? c.nickname[0] : c.id[0]).toUpperCase(),
+                                              (c.nickname.isNotEmpty
+                                                      ? c.nickname[0]
+                                                      : (c.id.isNotEmpty ? c.id[0] : '?'))
+                                                  .toUpperCase(),
                                               style: TextStyle(color: context.palette.primary, fontWeight: FontWeight.w700, fontSize: 18),
                                             ),
                                           ),
@@ -352,6 +361,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
     final body = widget.embedded ? inner : MeshBackgroundWrapper(child: inner);
 
     final fab = FloatingActionButton(
+      heroTag: widget.embedded ? 'contacts_embedded_fab' : 'contacts_screen_fab',
       backgroundColor: context.palette.primary,
       foregroundColor: Colors.white,
       onPressed: () => _showAddDialog(),

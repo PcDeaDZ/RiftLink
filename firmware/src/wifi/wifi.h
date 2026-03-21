@@ -18,17 +18,11 @@ bool ensureInit();
 /** WiFi доступен (init успешен)? */
 bool isAvailable();
 bool setCredentials(const char* ssid, const char* pass);
-void connect();
+/** Запуск подключения STA с пред-проверкой SSID/auth. false = старт невозможен. */
+bool connect();
 void disconnect();
 bool isConnected();
 void getStatus(char* ssid, size_t ssidLen, char* ip, size_t ipLen);
 bool hasCredentials();
-
-/** SSID для AP-режима (RL-XXXX на основе node ID). */
-const char* getApSsid();
-/** Пароль для AP-режима (случайный 8 символов, хранится в NVS). */
-const char* getApPassword();
-/** Перегенерировать AP-пароль и сохранить в NVS. */
-void regenerateApPassword();
 
 }  // namespace wifi

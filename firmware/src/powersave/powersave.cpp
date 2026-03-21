@@ -5,7 +5,7 @@
 #include "powersave.h"
 #include "radio/radio.h"
 #include "ble/ble.h"
-#include "ota/ota.h"
+#include "radio_mode/radio_mode.h"
 #include "ui/display.h"
 #include "locale/locale.h"
 #include <driver/gpio.h>
@@ -50,7 +50,10 @@ bool canSleep() {
   // E-Ink: light sleep может нарушать SPI/дисплей после пробуждения — отключаем.
   return false;
 #else
-  return s_enabled && !ble::isConnected() && !ota::isActive();
+  return s_enabled &&
+      !ble::isConnected() &&
+      !radio_mode::isSwitching() &&
+      radio_mode::current() == radio_mode::BLE;
 #endif
 }
 

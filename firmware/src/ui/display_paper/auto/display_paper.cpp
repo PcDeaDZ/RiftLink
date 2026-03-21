@@ -14,7 +14,6 @@
 #include "region/region.h"
 #include "neighbors/neighbors.h"
 #include "wifi/wifi.h"
-#include "ota/ota.h"
 #include "powersave/powersave.h"
 #include "radio/radio.h"
 #include "radio_mode/radio_mode.h"
@@ -181,7 +180,6 @@ static uint32_t computeContentHash(int tab) {
   } else if (ct == display_tabs::CT_NET) {
     h ^= (uint32_t)radio_mode::current() * 37;
     h ^= ble::isConnected() ? 0xBBBB : 0;
-    h ^= ota::isActive() ? 0x1234 : 0;
     if (radio_mode::current() == radio_mode::WIFI) {
       char ssid[24] = {0}, ip[20] = {0};
       wifi::getStatus(ssid, sizeof(ssid), ip, sizeof(ip));
@@ -932,13 +930,7 @@ static void drawContentNet() {
     drawContentLine(2, ble::isConnected() ? locale::getForDisplay("connected") : "...");
     drawContentLine(6, locale::getForDisplay("hold_wifi"));
   } else {
-    if (ota::isActive()) {
-      drawContentLine(0, locale::getForDisplay("wifi_mode"));
-      drawContentLine(1, wifi::getApSsid());
-      drawContentLine(2, "192.168.4.1");
-      snprintf(buf, sizeof(buf), "%s %s", locale::getForDisplay("pass"), wifi::getApPassword());
-      drawTruncRaw(CONTENT_X, CONTENT_Y + 2 + 3 * LINE_H, buf, MAX_LINE_CHARS);
-    } else if (wifi::isConnected()) {
+    if (wifi::isConnected()) {
       char ssid[24] = {0}, ip[20] = {0};
       wifi::getStatus(ssid, sizeof(ssid), ip, sizeof(ip));
       drawContentLine(0, locale::getForDisplay("connected"));
@@ -946,9 +938,8 @@ static void drawContentNet() {
       drawContentLine(2, ip[0] ? ip : "-");
     } else {
       drawContentLine(0, locale::getForDisplay("wifi_mode"));
-      drawContentLine(1, wifi::getApSsid());
-      snprintf(buf, sizeof(buf), "%s %s", locale::getForDisplay("pass"), wifi::getApPassword());
-      drawContentLine(2, buf);
+      drawContentLine(1, "not connected");
+      drawContentLine(2, "...");
     }
     drawContentLine(6, locale::getForDisplay("hold_ble"));
   }

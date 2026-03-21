@@ -1,22 +1,21 @@
 /**
- * RiftLink OTA — Over-the-Air обновление прошивки
- * WiFi AP + ArduinoOTA. Запуск по BLE команде {"cmd":"ota"}
+ * Legacy update stub kept for compatibility.
  */
 
 #pragma once
 
 namespace ota {
 
-/** Запустить OTA режим: WiFi AP + ArduinoOTA */
-void start();
+/** Запуск отключён (всегда false). */
+bool start();
 
-/** Остановить OTA (если нужно) */
+/** Совместимость: no-op. */
 void stop();
 
-/** Вызывать из loop() — обрабатывает OTA и yield */
+/** Совместимость: no-op. */
 void update();
 
-/** OTA активен? */
+/** Всегда false. */
 bool isActive();
 
 }  // namespace ota

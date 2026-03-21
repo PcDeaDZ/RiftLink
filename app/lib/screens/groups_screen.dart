@@ -208,7 +208,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
           ),
         );
       },
-    ).then((_) => c.dispose());
+    );
   }
 
   Future<void> _removeGroup(int gid) async {
@@ -364,6 +364,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
     final body = widget.embedded ? inner : MeshBackgroundWrapper(child: inner);
 
     final fab = FloatingActionButton(
+      heroTag: widget.embedded ? 'groups_embedded_fab' : 'groups_screen_fab',
       backgroundColor: context.palette.primary,
       foregroundColor: Colors.white,
       onPressed: widget.ble.isConnected ? _showAddSheet : null,

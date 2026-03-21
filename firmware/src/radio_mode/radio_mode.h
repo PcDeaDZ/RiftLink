@@ -11,26 +11,26 @@ namespace radio_mode {
 
 enum Mode : uint8_t {
   BLE,   // default: телефон по GATT, BLE OTA
-  WIFI   // on-demand: ESP-NOW, WebSocket, WiFi OTA, mDNS
+  WIFI   // on-demand: ESP-NOW, WebSocket, mDNS
 };
 
 enum WifiVariant : uint8_t {
-  AP,    // собственная точка (192.168.4.1)
   STA    // подключение к внешней сети
 };
 
 /** Текущий активный режим. */
 Mode current();
+WifiVariant currentWifiVariant();
 
 /** Идёт ли сейчас переключение (brief coexistence). */
 bool isSwitching();
 
 /**
  * Переключить на target.
- * Для WIFI: variant определяет AP или STA; ssid/pass для STA.
+ * Для WIFI: поддерживается только STA; ssid/pass опциональны (можно использовать сохранённые credentials).
  * Возвращает true если переключение запущено.
  */
-bool switchTo(Mode target, WifiVariant variant = AP,
+bool switchTo(Mode target, WifiVariant variant = STA,
               const char* ssid = nullptr, const char* pass = nullptr);
 
 /** Вызвать из loop() — обработка отложенных переключений. */

@@ -35,7 +35,12 @@ class RecentDevice {
 
 class RecentDevicesService {
   static const _key = 'riftlink_recent_devices';
+  static const _wifiIpKey = 'riftlink_recent_wifi_ips';
   static const _maxCount = 10;
+  static const _maxWifiIpCount = 6;
+  static final RegExp _ipv4 = RegExp(
+    r'^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$',
+  );
 
   static Future<List<RecentDevice>> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -97,5 +102,42 @@ class RecentDevicesService {
     );
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_key, jsonEncode(list.map((d) => d.toJson()).toList()));
+  }
+
+  static Future<List<String>> loadRecentWifiIps() async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = prefs.getStringList(_wifiIpKey) ?? const <String>[];
+    final cleaned = list
+        .map((ip) => ip.trim())
+        .where((ip) => ip.isNotEmpty && _ipv4.hasMatch(ip))
+        .toList();
+    if (cleaned.length != list.length) {
+      await prefs.setStringList(_wifiIpKey, cleaned.take(_maxWifiIpCount).toList());
+    }
+    return cleaned;
+  }
+
+  static Future<void> addRecentWifiIp(String ip) async {
+    final clean = ip.trim();
+    if (clean.isEmpty || !_ipv4.hasMatch(clean)) return;
+    final prefs = await SharedPreferences.getInstance();
+    final list = (prefs.getStringList(_wifiIpKey) ?? <String>[])
+        .map((v) => v.trim())
+        .where((v) => v.isNotEmpty && _ipv4.hasMatch(v) && v != clean)
+        .map((v) => v.trim())
+        .toList();
+    list.insert(0, clean);
+    final trimmed = list.take(_maxWifiIpCount).toList();
+    await prefs.setStringList(_wifiIpKey, trimmed);
+  }
+
+  static Future<void> removeRecentWifiIp(String ip) async {
+    final clean = ip.trim();
+    final prefs = await SharedPreferences.getInstance();
+    final list = (prefs.getStringList(_wifiIpKey) ?? <String>[])
+        .map((v) => v.trim())
+        .where((v) => v.isNotEmpty && v != clean)
+        .toList();
+    await prefs.setStringList(_wifiIpKey, list);
   }
 }

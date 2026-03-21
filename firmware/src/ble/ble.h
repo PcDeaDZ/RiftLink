@@ -36,7 +36,6 @@ void notifyNeighbors();  // evt "neighbors" — список соседей
 void requestNeighborsNotify();  // отложить в update() — снизить стек в handlePacket
 void notifyRoutes();    // evt "routes" — маршруты (dest, nextHop, hops, rssi) для mesh-визуализации
 void notifyGroups();    // evt "groups" — список групп
-void notifyOta(const char* ip, const char* ssid, const char* password);
 void notifyWifi(bool connected, const char* ssid, const char* ip);
 void notifyRegion(const char* code, float freq, int power, int channel = -1);
 void notifyGps(bool present, bool enabled, bool hasFix, int rx, int tx, int en);

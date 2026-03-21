@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:crypto/crypto.dart' as crypto_lib;
 
 import '../ble/riftlink_ble.dart';
+import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
 import '../widgets/mesh_background.dart';
 
@@ -27,6 +28,7 @@ class _OtaScreenState extends State<OtaScreen> {
   int _chunkSize = 509;
   String? _errorMsg;
   StreamSubscription? _evtSub;
+  Timer? _startTimeout;
 
   @override
   void initState() {
@@ -37,11 +39,14 @@ class _OtaScreenState extends State<OtaScreen> {
   @override
   void dispose() {
     _evtSub?.cancel();
+    _startTimeout?.cancel();
     super.dispose();
   }
 
   void _onEvent(RiftLinkEvent evt) {
+    if (!mounted) return;
     if (evt is RiftLinkBleOtaReadyEvent) {
+      _startTimeout?.cancel();
       setState(() {
         _chunkSize = evt.chunkSize;
         _state = _OtaState.uploading;
@@ -55,7 +60,7 @@ class _OtaScreenState extends State<OtaScreen> {
           _state = _OtaState.done;
         } else {
           _state = _OtaState.error;
-          _errorMsg = evt.reason ?? 'OTA failed';
+          _errorMsg = evt.reason ?? context.l10n.tr('ota_error_title');
         }
       });
     }
@@ -86,7 +91,7 @@ class _OtaScreenState extends State<OtaScreen> {
     if (_fileBytes == null || _fileBytes!.isEmpty) {
       setState(() {
         _state = _OtaState.error;
-        _errorMsg = 'Could not read file';
+        _errorMsg = context.l10n.tr('ota_file_read_error');
       });
       return;
     }
@@ -99,7 +104,23 @@ class _OtaScreenState extends State<OtaScreen> {
     final md5 = crypto_lib.md5.convert(_fileBytes!).toString();
 
     setState(() => _state = _OtaState.starting);
-    await widget.ble.startBleOta(size: _fileSize, md5: md5);
+    _startTimeout?.cancel();
+    _startTimeout = Timer(const Duration(seconds: 8), () {
+      if (!mounted || _state != _OtaState.starting) return;
+      setState(() {
+        _state = _OtaState.error;
+        _errorMsg = context.l10n.tr('ota_start_timeout');
+      });
+    });
+    final started = await widget.ble.startBleOta(size: _fileSize, md5: md5);
+    if (!mounted) return;
+    if (!started) {
+      _startTimeout?.cancel();
+      setState(() {
+        _state = _OtaState.error;
+        _errorMsg = context.l10n.tr('ota_start_failed');
+      });
+    }
   }
 
   Future<void> _doUpload() async {
@@ -107,33 +128,37 @@ class _OtaScreenState extends State<OtaScreen> {
 
     int offset = 0;
     while (offset < _fileBytes!.length) {
-      if (_state != _OtaState.uploading) return;
+      if (!mounted || _state != _OtaState.uploading) return;
 
       final end = (offset + _chunkSize).clamp(0, _fileBytes!.length);
       final chunk = _fileBytes!.sublist(offset, end);
 
       final ok = await widget.ble.sendBleOtaChunk(chunk);
       if (!ok) {
+        if (!mounted) return;
         setState(() {
           _state = _OtaState.error;
-          _errorMsg = 'Failed to send chunk at offset $offset';
+          _errorMsg = context.l10n.tr('ota_chunk_send_error', {'offset': '$offset'});
         });
         return;
       }
 
       offset = end;
-      setState(() => _bytesWritten = offset);
+      if (mounted) setState(() => _bytesWritten = offset);
 
-      // Throttle: BLE throughput ~10-15 KB/s, small delay between chunks
+      // Small pacing between chunks keeps upload stable across BLE/Wi-Fi.
       await Future<void>.delayed(const Duration(milliseconds: 10));
     }
 
+    if (!mounted) return;
     setState(() => _state = _OtaState.verifying);
     await widget.ble.endBleOta();
   }
 
   Future<void> _abort() async {
+    _startTimeout?.cancel();
     await widget.ble.abortBleOta();
+    if (!mounted) return;
     setState(() {
       _state = _OtaState.idle;
       _fileBytes = null;
@@ -146,29 +171,27 @@ class _OtaScreenState extends State<OtaScreen> {
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
+    final l = context.l10n;
     return Scaffold(
       backgroundColor: palette.surface,
       appBar: AppBar(
-        title: const Text('Firmware Update'),
+        title: Text(l.tr('firmware_update_title')),
         backgroundColor: palette.surface,
         foregroundColor: palette.onSurface,
         elevation: 0,
       ),
-      body: Stack(
-        children: [
-          const MeshBackground(),
-          Center(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: _buildBody(palette),
-            ),
+      body: MeshBackgroundWrapper(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: _buildBody(palette, l),
           ),
-        ],
+        ),
       ),
     );
   }
 
-  Widget _buildBody(AppPalette palette) {
+  Widget _buildBody(AppPalette palette, AppLocalizations l) {
     switch (_state) {
       case _OtaState.idle:
         return Column(
@@ -177,12 +200,12 @@ class _OtaScreenState extends State<OtaScreen> {
             Icon(Icons.system_update_alt, size: 64, color: palette.primary),
             const SizedBox(height: 16),
             Text(
-              'BLE Firmware Update',
+              l.tr('firmware_update_title'),
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: palette.onSurface),
             ),
             const SizedBox(height: 8),
             Text(
-              'Select a .bin firmware file to upload over BLE.',
+              l.tr('ota_ble_intro_desc'),
               style: TextStyle(color: palette.onSurfaceVariant),
               textAlign: TextAlign.center,
             ),
@@ -190,7 +213,7 @@ class _OtaScreenState extends State<OtaScreen> {
             FilledButton.icon(
               onPressed: _pickAndStart,
               icon: const Icon(Icons.file_open),
-              label: const Text('Select Firmware'),
+              label: Text(l.tr('ota_select_firmware')),
             ),
           ],
         );
@@ -204,7 +227,7 @@ class _OtaScreenState extends State<OtaScreen> {
           children: [
             const CircularProgressIndicator(),
             const SizedBox(height: 16),
-            Text('Starting OTA...', style: TextStyle(color: palette.onSurface)),
+            Text(l.tr('ota_state_starting'), style: TextStyle(color: palette.onSurface)),
             if (_fileName != null) ...[
               const SizedBox(height: 8),
               Text(
@@ -245,7 +268,7 @@ class _OtaScreenState extends State<OtaScreen> {
             ),
             const SizedBox(height: 20),
             Text(
-              'Uploading firmware...',
+              l.tr('ota_state_uploading'),
               style: TextStyle(fontSize: 16, color: palette.onSurface),
             ),
             const SizedBox(height: 4),
@@ -256,7 +279,7 @@ class _OtaScreenState extends State<OtaScreen> {
             const SizedBox(height: 24),
             OutlinedButton(
               onPressed: _abort,
-              child: const Text('Cancel'),
+              child: Text(l.tr('ota_cancel')),
             ),
           ],
         );
@@ -267,7 +290,7 @@ class _OtaScreenState extends State<OtaScreen> {
           children: [
             const CircularProgressIndicator(),
             const SizedBox(height: 16),
-            Text('Verifying & applying...', style: TextStyle(color: palette.onSurface)),
+            Text(l.tr('ota_state_verifying'), style: TextStyle(color: palette.onSurface)),
           ],
         );
 
@@ -278,19 +301,19 @@ class _OtaScreenState extends State<OtaScreen> {
             Icon(Icons.check_circle, size: 64, color: palette.success),
             const SizedBox(height: 16),
             Text(
-              'Update Successful!',
+              l.tr('ota_done_title'),
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: palette.success),
             ),
             const SizedBox(height: 8),
             Text(
-              'Device is rebooting. Reconnect in a few seconds.',
+              l.tr('ota_done_desc'),
               style: TextStyle(color: palette.onSurfaceVariant),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 24),
             FilledButton(
               onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Done'),
+              child: Text(l.tr('ota_done_button')),
             ),
           ],
         );
@@ -302,12 +325,12 @@ class _OtaScreenState extends State<OtaScreen> {
             Icon(Icons.error_outline, size: 64, color: palette.error),
             const SizedBox(height: 16),
             Text(
-              'Update Failed',
+              l.tr('ota_error_title'),
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: palette.error),
             ),
             const SizedBox(height: 8),
             Text(
-              _errorMsg ?? 'Unknown error',
+              _errorMsg ?? l.tr('ota_unknown_error'),
               style: TextStyle(color: palette.onSurfaceVariant),
               textAlign: TextAlign.center,
             ),
@@ -321,7 +344,7 @@ class _OtaScreenState extends State<OtaScreen> {
                   _errorMsg = null;
                 });
               },
-              child: const Text('Try Again'),
+              child: Text(l.tr('ota_try_again')),
             ),
           ],
         );

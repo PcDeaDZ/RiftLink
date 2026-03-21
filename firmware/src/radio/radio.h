@@ -61,8 +61,8 @@ void setModemPreset(ModemPreset p);
 /** Применить ручные SF/BW/CR и сохранить как CUSTOM в NVS. Вызов под mutex. */
 void setCustomModem(uint8_t sf, float bw, uint8_t cr);
 /** Постановка в radioCmdQueue — безопасно из любого контекста. */
-void requestModemPreset(ModemPreset p);
-void requestCustomModem(uint8_t sf, float bw, uint8_t cr);
+bool requestModemPreset(ModemPreset p);
+bool requestCustomModem(uint8_t sf, float bw, uint8_t cr);
 
 ModemPreset getModemPreset();
 uint8_t getSpreadingFactor();
@@ -76,7 +76,7 @@ void applyHardwareSpreadingFactor(uint8_t sf);
 /** Только чип (для сканера) — меняет SF+BW+CR без NVS и mesh state. */
 void applyHardwareModem(uint8_t sf, float bw, uint8_t cr);
 /** Запрос смены SF из BLE/UI — постановка в `radioCmdQueue`. */
-void requestSpreadingFactor(uint8_t sf);
+bool requestSpreadingFactor(uint8_t sf);
 
 uint32_t getTimeOnAir(size_t len);       // мкс, для duty cycle
 /** CAD (mutex + SPI). Предпочтительно не вызывать из прикладного кода — CSMA в планировщике при TX. */

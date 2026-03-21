@@ -4,11 +4,9 @@
 
 #include "wifi.h"
 #include "esp_now_slots/esp_now_slots.h"
-#include "node/node.h"
 #include <WiFi.h>
 #include <esp_heap_caps.h>
 #include <esp_wifi.h>
-#include <esp_random.h>
 #include <cstring>
 #include <nvs.h>
 #include <nvs_flash.h>
@@ -16,44 +14,54 @@
 #define NVS_NAMESPACE "riftlink"
 #define NVS_KEY_SSID "wifi_ssid"
 #define NVS_KEY_PASS "wifi_pass"
-#define NVS_KEY_AP_PASS "ap_pass"
 
 namespace wifi {
 
 static bool s_inited = false;
 static bool s_available = false;
-static bool s_apCredsInited = false;
-static char s_apSsid[16] = {0};
-static char s_apPass[12] = {0};
 
-static void generateRandomApPassword() {
-  static const char CHARSET[] = "abcdefghjkmnpqrstuvwxyz23456789";
-  for (int i = 0; i < 8; i++) {
-    s_apPass[i] = CHARSET[esp_random() % (sizeof(CHARSET) - 1)];
-  }
-  s_apPass[8] = '\0';
+static bool isEnterpriseAuth(wifi_auth_mode_t mode) {
+#ifdef WIFI_AUTH_WPA2_ENTERPRISE
+  if (mode == WIFI_AUTH_WPA2_ENTERPRISE) return true;
+#endif
+  return false;
 }
 
-static void ensureApCreds() {
-  if (s_apCredsInited) return;
-  s_apCredsInited = true;
-  const uint8_t* id = node::getId();
-  snprintf(s_apSsid, sizeof(s_apSsid), "RL-%02X%02X%02X%02X", id[0], id[1], id[2], id[3]);
-
-  nvs_handle_t h;
-  if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
-    char buf[12] = {0};
-    size_t len = sizeof(buf);
-    if (nvs_get_str(h, NVS_KEY_AP_PASS, buf, &len) == ESP_OK && buf[0]) {
-      strncpy(s_apPass, buf, sizeof(s_apPass) - 1);
-    } else {
-      generateRandomApPassword();
-      nvs_set_str(h, NVS_KEY_AP_PASS, s_apPass);
-      nvs_commit(h);
+static bool scanSsidAuth(const char* ssid, wifi_auth_mode_t* outAuth, int8_t* outRssi) {
+  if (!ssid || !ssid[0]) return false;
+  wifi_scan_config_t cfg = {};
+  cfg.show_hidden = true;
+  cfg.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+  cfg.scan_time.active.min = 80;
+  cfg.scan_time.active.max = 180;
+  if (esp_wifi_scan_start(&cfg, true) != ESP_OK) return false;
+  uint16_t count = 20;
+  wifi_ap_record_t aps[20];
+  if (esp_wifi_scan_get_ap_records(&count, aps) != ESP_OK) return false;
+  for (uint16_t i = 0; i < count; i++) {
+    if (strcmp((const char*)aps[i].ssid, ssid) == 0) {
+      if (outAuth) *outAuth = aps[i].authmode;
+      if (outRssi) *outRssi = aps[i].rssi;
+      return true;
     }
-    nvs_close(h);
-  } else {
-    generateRandomApPassword();
+  }
+  return false;
+}
+
+static const char* authToStr(wifi_auth_mode_t mode) {
+  switch (mode) {
+    case WIFI_AUTH_OPEN: return "OPEN";
+    case WIFI_AUTH_WEP: return "WEP";
+    case WIFI_AUTH_WPA_PSK: return "WPA_PSK";
+    case WIFI_AUTH_WPA2_PSK: return "WPA2_PSK";
+    case WIFI_AUTH_WPA_WPA2_PSK: return "WPA_WPA2_PSK";
+#ifdef WIFI_AUTH_WPA3_PSK
+    case WIFI_AUTH_WPA3_PSK: return "WPA3_PSK";
+#endif
+#ifdef WIFI_AUTH_WPA2_WPA3_PSK
+    case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2_WPA3_PSK";
+#endif
+    default: return "UNKNOWN";
   }
 }
 
@@ -110,6 +118,11 @@ bool init() {
 void deinit() {
   if (!s_inited) return;
   Serial.println("[WiFi] Deinit...");
+  // Stop STA session and force radio off before low-level deinit.
+  WiFi.disconnect(true, true);
+  delay(40);
+  WiFi.mode(WIFI_OFF);
+  delay(40);
   esp_wifi_stop();
   esp_wifi_deinit();
   s_inited = false;
@@ -147,29 +160,67 @@ bool setCredentials(const char* ssid, const char* pass) {
   return true;
 }
 
-void connect() {
-  if (!s_available) return;
+bool connect() {
+  if (!s_available) return false;
   nvs_handle_t h;
   char ssid[64] = {0};
   char pass[64] = {0};
   size_t len;
 
-  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return;
+  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
   len = sizeof(ssid);
   if (nvs_get_str(h, NVS_KEY_SSID, ssid, &len) != ESP_OK) {
     nvs_close(h);
-    return;
+    return false;
   }
   len = sizeof(pass);
   nvs_get_str(h, NVS_KEY_PASS, pass, &len);
   nvs_close(h);
 
-  if (ssid[0] == '\0') return;
+  if (ssid[0] == '\0') return false;
 
   if (WiFi.getMode() != WIFI_STA) {
-    WiFi.mode(WIFI_STA);
+    if (!WiFi.mode(WIFI_STA)) {
+      Serial.println("[WiFi] WiFi.mode(WIFI_STA) failed");
+      return false;
+    }
   }
-  WiFi.begin(ssid, pass[0] ? pass : nullptr);
+  WiFi.setSleep(false);
+  delay(40);
+  // Очистка предыдущей сессии уже после перевода в STA (иначе "STA not started").
+  WiFi.disconnect(true, true);
+  delay(80);
+  esp_err_t stErr = esp_wifi_start();
+  if (stErr != ESP_OK) {
+    Serial.printf("[WiFi] esp_wifi_start before scan: %s (0x%x)\n", esp_err_to_name(stErr), (unsigned)stErr);
+  }
+  wifi_auth_mode_t auth = WIFI_AUTH_MAX;
+  int8_t rssi = 0;
+  const bool found = scanSsidAuth(ssid, &auth, &rssi);
+  Serial.printf("[WiFi] STA target='%s', found=%s, auth=%s, rssi=%d, pass_len=%u\n",
+      ssid,
+      found ? "yes" : "no",
+      found ? authToStr(auth) : "N/A",
+      (int)rssi,
+      (unsigned)strlen(pass));
+  if (found && isEnterpriseAuth(auth)) {
+    Serial.printf("[WiFi] SSID '%s' uses enterprise auth (unsupported), rssi=%d\n", ssid, (int)rssi);
+    return false;
+  }
+#ifdef WIFI_AUTH_WPA2_PSK
+  // Некоторые роутеры в mixed WPA2/WPA3 режиме на ESP32 стабильнее с минимумом WPA2.
+  if (found && auth != WIFI_AUTH_OPEN) {
+    WiFi.setMinSecurity(WIFI_AUTH_WPA2_PSK);
+  }
+#endif
+  const bool openNet = found && auth == WIFI_AUTH_OPEN;
+  wl_status_t st = WiFi.begin(ssid, openNet ? nullptr : (pass[0] ? pass : nullptr));
+  if (st == WL_CONNECT_FAILED) {
+    Serial.printf("[WiFi] WiFi.begin failed to start STA (ssid_len=%u)\n",
+        (unsigned)strlen(ssid));
+    return false;
+  }
+  return true;
 }
 
 void disconnect() {
@@ -207,28 +258,6 @@ bool hasCredentials() {
   bool ok = (nvs_get_str(h, NVS_KEY_SSID, ssid, &len) == ESP_OK && ssid[0] != '\0');
   nvs_close(h);
   return ok;
-}
-
-const char* getApSsid() {
-  ensureApCreds();
-  return s_apSsid;
-}
-
-const char* getApPassword() {
-  ensureApCreds();
-  return s_apPass;
-}
-
-void regenerateApPassword() {
-  ensureApCreds();
-  generateRandomApPassword();
-  nvs_handle_t h;
-  if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
-    nvs_set_str(h, NVS_KEY_AP_PASS, s_apPass);
-    nvs_commit(h);
-    nvs_close(h);
-  }
-  Serial.printf("[WiFi] New AP password: %s\n", s_apPass);
 }
 
 }  // namespace wifi

@@ -35,7 +35,6 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include "compress/compress.h"
 #include "frag/frag.h"
 #include "telemetry/telemetry.h"
-#include "ota/ota.h"
 #include "region/region.h"
 #include "collision_slots/collision_slots.h"
 #include "beacon_sync/beacon_sync.h"
@@ -271,7 +270,11 @@ static void pollButtonAndQueue() {
       powersave::deepSleep();
     } else if (hold >= RADIO_MODE_PRESS_MS) {
       if (radio_mode::current() == radio_mode::BLE) {
-        radio_mode::switchTo(radio_mode::WIFI, radio_mode::AP);
+        if (wifi::hasCredentials()) {
+          radio_mode::switchTo(radio_mode::WIFI, radio_mode::STA);
+        } else {
+          Serial.println("[RadioMode] Button switch skipped: no STA credentials");
+        }
       } else {
         radio_mode::switchTo(radio_mode::BLE);
       }
@@ -1309,26 +1312,21 @@ void loop() {
     vTaskDelay(pdMS_TO_TICKS(1));
     return;
   }
-  if (ota::isActive()) {
-    ota::update();
-    pollButtonAndQueue();
-    radio_mode::update();
-    displayUpdate();
-    s_loopCooldownUntil = millis() + 10;
-    return;
-  }
-
-  // HELLO: 0 сосед — backoff 8с -> 15с -> 30с; 1+ сосед — 30с; 6+ — 24с (меньше спама)
-  // Фазирование по слоту (beacon_sync): при 0 соседях каждый узел смещён на свой слот — меньше storm
-  // Дедлайн следующего HELLO + один джиттер на период. Раньше: новый esp_random() каждый проход loop
-  // → при millis()-lastHello чуть выше минимума ~1/6 попыток каждые 10 ms проходили → шторм «HELLO sent».
-  if ((int32_t)(millis() - s_nextHelloDueMs) >= 0) {
-    scheduleHelloTx();
-  }
-  // POLL нужен в mesh. При 0 соседях он только зашумляет эфир и мешает discovery на SF12.
-  if (nNeigh > 1 && millis() - lastPoll > POLL_INTERVAL_MS) {
-    sendPoll();
-    lastPoll = millis();
+  // Во время handoff BLE<->WiFi убираем периодический mesh-трафик:
+  // это снижает фрагментацию heap и повышает шанс успешного BLE re-init.
+  if (!radio_mode::isSwitching()) {
+    // HELLO: 0 сосед — backoff 8с -> 15с -> 30с; 1+ сосед — 30с; 6+ — 24с (меньше спама)
+    // Фазирование по слоту (beacon_sync): при 0 соседях каждый узел смещён на свой слот — меньше storm
+    // Дедлайн следующего HELLO + один джиттер на период. Раньше: новый esp_random() каждый проход loop
+    // → при millis()-lastHello чуть выше минимума ~1/6 попыток каждые 10 ms проходили → шторм «HELLO sent».
+    if ((int32_t)(millis() - s_nextHelloDueMs) >= 0) {
+      scheduleHelloTx();
+    }
+    // POLL нужен в mesh. При 0 соседях он только зашумляет эфир и мешает discovery на SF12.
+    if (nNeigh > 1 && millis() - lastPoll > POLL_INTERVAL_MS) {
+      sendPoll();
+      lastPoll = millis();
+    }
   }
   if (millis() - lastTelemetry > TELEM_INTERVAL_MS) {
     telemetry::send();
@@ -1506,11 +1504,10 @@ void loop() {
         Serial.println("[RiftLink] gps pins <rx> <tx> [en]");
       }
     } else if (cmd == "powersave") {
-      Serial.printf("[RiftLink] Power save: %s (enabled=%s, BLE %s, OTA %s)\n",
+      Serial.printf("[RiftLink] Power save: %s (enabled=%s, BLE %s)\n",
           powersave::canSleep() ? "active" : "inactive",
           powersave::isEnabled() ? "yes" : "no",
-          ble::isConnected() ? "connected" : "disconnected",
-          ota::isActive() ? "active" : "idle");
+          ble::isConnected() ? "connected" : "disconnected");
     } else if (cmd == "powersave on") {
       powersave::setEnabled(true);
       Serial.println("[RiftLink] Power save enabled");
