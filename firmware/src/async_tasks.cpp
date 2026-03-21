@@ -464,6 +464,8 @@ static void deliverRxToPacketQueue(uint8_t* rxBuf, int n, int rssi, uint8_t sf) 
         if (t - s_packetRxDropLogTick >= pdMS_TO_TICKS(5000)) {
           s_packetRxDropLogTick = t;
           uint8_t op = (n > 2 && rxBuf[0] == protocol::SYNC_BYTE) ? rxBuf[2] : 0xFF;
+          RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_rx_queue action=drop reason=queue_full queue=packetQueue len=%u rssi=%d sf=%u op=0x%02X",
+              (unsigned)n, rssi, (unsigned)sf, (unsigned)op);
           RIFTLINK_DIAG("QUEUE", "event=RX_DROP queue=packetQueue len=%u rssi=%d sf=%u op=0x%02X",
               (unsigned)n, rssi, (unsigned)sf, (unsigned)op);
           RIFTLINK_LOG_ERR("[RiftLink] packetQueue full, drop\n");
@@ -471,6 +473,8 @@ static void deliverRxToPacketQueue(uint8_t* rxBuf, int n, int rssi, uint8_t sf) 
       }
     }
   } else {
+    RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_rx_queue action=direct reason=no_packet_task len=%u rssi=%d sf=%u",
+        (unsigned)n, rssi, (unsigned)sf);
     handlePacket(rxBuf, (size_t)n, rssi, sf);
   }
 }

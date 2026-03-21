@@ -22,6 +22,7 @@ static esp_err_t wsHandler(httpd_req_t* req) {
   if (req->method == HTTP_GET) {
     // WebSocket handshake — accept
     s_wsFd = httpd_req_to_sockfd(req);
+    Serial.printf("[BLE_CHAIN] stage=fw_ws action=client_connected fd=%d\n", s_wsFd);
     Serial.printf("[WS] Client connected, fd=%d\n", s_wsFd);
     return ESP_OK;
   }
@@ -112,7 +113,10 @@ bool hasClient() {
 }
 
 void sendEvent(const char* json, int len) {
-  if (!s_server || s_wsFd < 0 || !json || len <= 0) return;
+  if (!s_server || s_wsFd < 0 || !json || len <= 0) {
+    Serial.printf("[BLE_CHAIN] stage=fw_ws action=send_skip reason=no_client fd=%d len=%d\n", s_wsFd, len);
+    return;
+  }
 
   httpd_ws_frame_t frame;
   memset(&frame, 0, sizeof(frame));
@@ -122,8 +126,12 @@ void sendEvent(const char* json, int len) {
 
   esp_err_t ret = httpd_ws_send_frame_async(s_server, s_wsFd, &frame);
   if (ret != ESP_OK) {
+    Serial.printf("[BLE_CHAIN] stage=fw_ws action=send_fail reason=%s fd=%d len=%d\n",
+        esp_err_to_name(ret), s_wsFd, len);
     Serial.printf("[WS] Send failed: %s, closing fd=%d\n", esp_err_to_name(ret), s_wsFd);
     s_wsFd = -1;
+  } else {
+    Serial.printf("[BLE_CHAIN] stage=fw_ws action=send_ok fd=%d len=%d\n", s_wsFd, len);
   }
 }
 

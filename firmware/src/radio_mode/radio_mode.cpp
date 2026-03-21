@@ -69,6 +69,8 @@ bool isSwitching() { return s_switching; }
 
 static void doSwitchToWifi(WifiVariant variant, const char* ssid, const char* pass) {
   s_switching = true;
+  Serial.printf("[BLE_CHAIN] stage=fw_mode_switch action=to_wifi_start mode=ble->wifi heap=%u\n",
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   Serial.printf("[RadioMode] BLE → WiFi (STA), heap before=%u\n",
       (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
@@ -84,6 +86,7 @@ static void doSwitchToWifi(WifiVariant variant, const char* ssid, const char* pa
 
   // 2) Поднимаем WiFi.
   if (!wifi::init()) {
+    Serial.println("[BLE_CHAIN] stage=fw_mode_switch action=to_wifi_fail reason=wifi_init");
     Serial.println("[RadioMode] WiFi init FAILED, restoring BLE");
     ble::init();
     s_switching = false;
@@ -95,6 +98,7 @@ static void doSwitchToWifi(WifiVariant variant, const char* ssid, const char* pa
     wifi::setCredentials(ssid, pass);
   }
   if (!wifi::connect()) {
+    Serial.println("[BLE_CHAIN] stage=fw_mode_switch action=to_wifi_fail reason=sta_connect_start");
     Serial.println("[RadioMode] STA connect start refused, restoring BLE");
     wifi::deinit();
     s_mode = WIFI;
@@ -113,6 +117,8 @@ static void doSwitchToWifi(WifiVariant variant, const char* ssid, const char* pa
   s_wifiVariant = STA;
   s_staConnectPending = true;
   s_staConnectDeadlineMs = millis() + 10000;
+  Serial.printf("[BLE_CHAIN] stage=fw_mode_switch action=to_wifi_pending deadlineMs=%u\n",
+      (unsigned)s_staConnectDeadlineMs);
   Serial.println("[RadioMode] STA connect started (non-blocking)");
 }
 
@@ -122,6 +128,8 @@ static void doSwitchToBle() {
   s_staConnectPending = false;
   s_staConnectDeadlineMs = 0;
   s_bleInitRetryCount = 0;
+  Serial.printf("[BLE_CHAIN] stage=fw_mode_switch action=to_ble_start mode=wifi->ble heap=%u\n",
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   Serial.printf("[RadioMode] WiFi → BLE, heap before=%u\n",
       (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
@@ -191,12 +199,16 @@ void update() {
       s_staConnectPending = false;
       s_staConnectDeadlineMs = 0;
       s_switching = false;
+      Serial.printf("[BLE_CHAIN] stage=fw_mode_switch action=to_wifi_ready ip=%s heap=%u\n",
+          ip[0] ? ip : "0.0.0.0",
+          (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       Serial.printf("[RadioMode] Now in WiFi mode (STA), IP=%s, heap=%u\n",
           ip[0] ? ip : "0.0.0.0",
           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       return;
     }
     if ((int32_t)(millis() - s_staConnectDeadlineMs) >= 0) {
+      Serial.println("[BLE_CHAIN] stage=fw_mode_switch action=to_wifi_timeout fallback=to_ble");
       Serial.println("[RadioMode] STA connect failed, switching back to BLE");
       s_staConnectPending = false;
       s_staConnectDeadlineMs = 0;
@@ -246,6 +258,8 @@ void update() {
       s_mode = BLE;
       s_wifiVariant = STA;
       s_switching = false;
+      Serial.printf("[BLE_CHAIN] stage=fw_mode_switch action=to_ble_ready heap=%u\n",
+          (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       Serial.printf("[RadioMode] Now in BLE mode, heap=%u\n",
           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       return;

@@ -32,19 +32,26 @@ class RiftLinkBle {
     onCancel: _onEventsStreamCancel,
   );
 
+  void _trace(String message) {
+    debugPrint('[BLE_CHAIN] $message');
+  }
+
   void _onEventsStreamListen() {
     _eventsStreamListeners++;
+    _trace('stage=app_stream action=listen listeners=$_eventsStreamListeners buffered=${_preListenBuffer.length}');
     if (_eventsStreamListeners == 1 && _preListenBuffer.isNotEmpty) {
       final batch = List<RiftLinkEvent>.from(_preListenBuffer);
       _preListenBuffer.clear();
       for (final e in batch) {
         if (!_eventBus.isClosed) _eventBus.add(e);
       }
+      _trace('stage=app_stream action=flush_prelisten count=${batch.length}');
     }
   }
 
   void _onEventsStreamCancel() {
     if (_eventsStreamListeners > 0) _eventsStreamListeners--;
+    _trace('stage=app_stream action=cancel listeners=$_eventsStreamListeners');
   }
 
   StreamSubscription<OnCharacteristicReceivedEvent>? _rxSub;
@@ -262,24 +269,16 @@ class RiftLinkBle {
     _rxSub = FlutterBluePlus.events.onCharacteristicReceived.listen(
       (OnCharacteristicReceivedEvent event) {
         final c = event.characteristic;
-        if (kDebugMode) {
-          debugPrint(
-            'RiftLinkBle: chrReceived ${event.value.length}b remote=${c.remoteId.str} chr=${c.characteristicUuid}',
-          );
-        }
+        _trace(
+          'stage=app_rx action=chr_received mode=ble len=${event.value.length} remote=${c.remoteId.str} chr=${c.characteristicUuid}',
+        );
         if (event.error != null && event.value.isEmpty) return;
         if (!RiftLinkBle.remoteIdsMatch(c.remoteId.str, devId.str)) {
-          if (kDebugMode) {
-            debugPrint('RiftLinkBle: chrReceived skipped (remoteId) want=${devId.str} got=${c.remoteId.str}');
-          }
+          _trace('stage=app_rx action=skip reason=remote_id want=${devId.str} got=${c.remoteId.str}');
           return;
         }
         if (!RiftLinkBle.characteristicUuidsMatch(c.characteristicUuid, rx.characteristicUuid)) {
-          if (kDebugMode) {
-            debugPrint(
-              'RiftLinkBle: chrReceived skipped (uuid) want=${rx.characteristicUuid} got=${c.characteristicUuid}',
-            );
-          }
+          _trace('stage=app_rx action=skip reason=uuid want=${rx.characteristicUuid} got=${c.characteristicUuid}');
           return;
         }
         _feedRxChunk(event.value);
@@ -289,6 +288,7 @@ class RiftLinkBle {
           debugPrint('RiftLinkBle: onCharacteristicReceived error $e');
           return true;
         }());
+        _trace('stage=app_rx action=error reason=onCharacteristicReceived err=$e');
       },
     );
 
@@ -297,10 +297,12 @@ class RiftLinkBle {
 
   void _feedRxChunk(List<int> chunk) {
     if (chunk.isEmpty) return;
+    _trace('stage=app_rx action=chunk len=${chunk.length} accum_before=${_rxAccum.length}');
     _rxAccum.addAll(chunk);
     const maxAccum = 16384;
     if (_rxAccum.length > maxAccum) {
       debugPrint('RiftLinkBle: RX buffer overflow (${_rxAccum.length} bytes), clearing');
+      _trace('stage=app_rx action=drop reason=overflow bufferLen=${_rxAccum.length}');
       _rxAccum.clear();
       _rxAccumTimeout?.cancel();
       return;
@@ -309,6 +311,7 @@ class RiftLinkBle {
     _rxAccumTimeout = Timer(const Duration(seconds: 5), () {
       if (_rxAccum.isNotEmpty) {
         debugPrint('RiftLinkBle: RX timeout, discarding ${_rxAccum.length} incomplete bytes');
+        _trace('stage=app_rx action=drop reason=timeout bufferLen=${_rxAccum.length}');
         _rxAccum.clear();
         _lastRxIncompleteLogLen = 0;
       }
@@ -317,11 +320,13 @@ class RiftLinkBle {
   }
 
   void _emitParsedJson(Map<String, dynamic> json) {
+    _trace('stage=app_parse action=json evt=${json['evt']} keys=${json.keys.length}');
     RiftLinkEvent? evt;
     try {
       evt = _jsonToEvent(json);
     } catch (e, st) {
       debugPrint('RiftLinkBle: _jsonToEvent FAILED evt=${json['evt']}: $e\n$st');
+      _trace('stage=app_parse action=parse_error evt=${json['evt']} reason=json_to_event err=$e');
       return;
     }
     if (evt is RiftLinkInfoEvent) {
@@ -334,16 +339,19 @@ class RiftLinkBle {
           'RiftLinkBle: JSON без известного evt keys=${json.keys.toList()} evt=${json['evt']}',
         );
       }
+      _trace('stage=app_parse action=drop reason=unknown_evt evt=${json['evt']}');
       return;
     }
 
-    debugPrint('RiftLinkBle: evt ${evt.runtimeType}'); // отладка: видно в I/flutter, что парсинг доходит до Dart
     if (_eventsStreamListeners == 0) {
       _preListenBuffer.add(evt);
+      _trace('stage=app_event_bus action=prelisten_add evt=${evt.runtimeType} size=${_preListenBuffer.length}');
       if (_preListenBuffer.length > _maxPreListenBuffer) {
         _preListenBuffer.removeAt(0);
+        _trace('stage=app_event_bus action=prelisten_drop reason=overflow limit=$_maxPreListenBuffer');
       }
     } else {
+      _trace('stage=app_event_bus action=emit evt=${evt.runtimeType} listeners=$_eventsStreamListeners');
       _eventBus.add(evt);
     }
   }
@@ -388,6 +396,7 @@ class RiftLinkBle {
         }
       } catch (e) {
         if (kDebugMode) debugPrint('RiftLinkBle: NDJSON parse error: $e');
+        _trace('stage=app_parse action=parse_error reason=ndjson err=$e');
       }
     }
     return tail;
@@ -451,6 +460,7 @@ class RiftLinkBle {
       } catch (e) {
         // Неполный JSON или несколько объектов подряд — разбираем ниже
         if (kDebugMode && s.length < 256) debugPrint('RiftLinkBle: single-object parse: $e');
+        _trace('stage=app_parse action=single_object_retry err=$e len=${s.length}');
       }
 
       final objs = _extractTopLevelJsonObjects(s);
@@ -493,6 +503,7 @@ class RiftLinkBle {
           _emitParsedJson(Map<String, dynamic>.from(decoded as Map));
         } catch (e) {
           if (kDebugMode) debugPrint('RiftLinkBle: extracted object parse error: $e');
+          _trace('stage=app_parse action=parse_error reason=extracted_object err=$e');
         }
       }
       final tailBytes = utf8.encode(objs.tail);
@@ -509,6 +520,7 @@ class RiftLinkBle {
     await old?.cancel();
     _rxAccum.clear();
     _lastRxIncompleteLogLen = 0;
+    _trace('stage=app_rx action=dispatcher_stopped');
   }
 
   /// Отправка геолокации (broadcast), опционально с geofence и expiry.
@@ -664,6 +676,7 @@ class RiftLinkBle {
     _isWifiMode = true;
     _wifiIp = ip;
     _wifiRxSub = _wifiTransport!.rawJsonStream.listen((raw) {
+      _trace('stage=app_rx action=ws_raw mode=wifi len=${raw.length}');
       try {
         final decoded = jsonDecode(raw);
         if (decoded is Map) {
@@ -671,6 +684,7 @@ class RiftLinkBle {
         }
       } catch (e) {
         if (kDebugMode) debugPrint('RiftLinkBle: WiFi JSON parse error: $e');
+        _trace('stage=app_parse action=parse_error mode=wifi reason=json err=$e');
       }
     });
     // Wi-Fi transport does not push initial state automatically like BLE connect flow.

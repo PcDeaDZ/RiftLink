@@ -152,6 +152,28 @@ static uint32_t s_inviteExpiryMs = 0;
 static uint8_t s_inviteToken[8] = {0};
 static bool s_inviteTokenValid = false;
 
+static int parseModemPresetValue(const JsonVariantConst& presetVar, const JsonVariantConst& valueVar) {
+  auto parseTextPreset = [](const char* s) -> int {
+    if (!s || !s[0]) return -1;
+    if (strcmp(s, "speed") == 0 || strcmp(s, "spaid") == 0) return 0;
+    if (strcmp(s, "normal") == 0) return 1;
+    if (strcmp(s, "range") == 0) return 2;
+    if (strcmp(s, "maxrange") == 0 || strcmp(s, "max_range") == 0) return 3;
+    return -1;
+  };
+
+  int p = -1;
+  if (presetVar.is<int>()) p = presetVar.as<int>();
+  else if (valueVar.is<int>()) p = valueVar.as<int>();
+  if (p >= 0 && p < 4) return p;
+
+  const char* presetText = presetVar.is<const char*>() ? presetVar.as<const char*>() : nullptr;
+  p = parseTextPreset(presetText);
+  if (p >= 0) return p;
+  const char* valueText = valueVar.is<const char*>() ? valueVar.as<const char*>() : nullptr;
+  return parseTextPreset(valueText);
+}
+
 static inline void scheduleInfoNotify(uint32_t delayMs = 0) {
   s_pendingInfo = true;
   s_pendingInfoNotBeforeMs = millis() + delayMs;
@@ -213,6 +235,26 @@ static bool bleAdvGetMfgData(const uint8_t* pl, size_t plLen, uint8_t index,
 
 static uint8_t s_notifyTxBuf[BLE_ATT_MAX_JSON_BYTES];
 
+static const char* transportModeTag() {
+  return (radio_mode::current() == radio_mode::WIFI) ? "wifi" : "ble";
+}
+
+static void extractEvtForLog(const char* payload, size_t len, char* outEvt, size_t outEvtLen) {
+  if (!outEvt || outEvtLen == 0) return;
+  outEvt[0] = '\0';
+  if (!payload || len == 0) return;
+  const char* key = "\"evt\":\"";
+  const char* pos = strstr(payload, key);
+  if (!pos) return;
+  pos += strlen(key);
+  size_t i = 0;
+  while (i + 1 < outEvtLen && (size_t)(pos - payload) < len && pos[i] && pos[i] != '"') {
+    outEvt[i] = pos[i];
+    i++;
+  }
+  outEvt[i] = '\0';
+}
+
 static bool hasActiveTransport() {
   if (radio_mode::current() == radio_mode::WIFI)
     return ws_server::hasClient();
@@ -228,19 +270,30 @@ static size_t bleNotifyMtu() {
 
 static void notifyJsonToApp(const char* payload, size_t len) {
   if (!payload || len == 0) return;
+  char evtTag[24];
+  extractEvtForLog(payload, len, evtTag, sizeof(evtTag));
+  const char* evt = evtTag[0] ? evtTag : "unknown";
 
   // WiFi mode: route to WebSocket (no size limit)
   if (radio_mode::current() == radio_mode::WIFI) {
+    Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=send mode=wifi evt=%s len=%u\n",
+        evt, (unsigned)len);
 #if BLE_LOG_TX_JSON
     Serial.print("[WS->APP] ");
     Serial.write((const uint8_t*)payload, len);
     Serial.println();
 #endif
     ws_server::sendEvent(payload, (int)len);
+    Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=sent mode=wifi evt=%s len=%u\n",
+        evt, (unsigned)len);
     return;
   }
 
-  if (!pRxChar || !s_connected) return;
+  if (!pRxChar || !s_connected) {
+    Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=skip reason=no_transport mode=%s evt=%s len=%u\n",
+        transportModeTag(), evt, (unsigned)len);
+    return;
+  }
 
 #if BLE_LOG_TX_JSON
   Serial.print("[BLE->APP] ");
@@ -248,8 +301,16 @@ static void notifyJsonToApp(const char* payload, size_t len) {
   Serial.println();
 #endif
 
-  const size_t chunkMax = bleNotifyMtu();
+  const size_t mtuChunk = bleNotifyMtu();
+  const size_t chunkMax = (mtuChunk < sizeof(s_notifyTxBuf)) ? mtuChunk : sizeof(s_notifyTxBuf);
+  if (mtuChunk > sizeof(s_notifyTxBuf)) {
+    Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=clamp reason=tx_buf_limit mtuChunk=%u txBuf=%u\n",
+        (unsigned)mtuChunk, (unsigned)sizeof(s_notifyTxBuf));
+  }
+  Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=send mode=ble evt=%s len=%u chunkMax=%u\n",
+      evt, (unsigned)len, (unsigned)chunkMax);
   size_t off = 0;
+  uint32_t chunks = 0;
   while (off < len) {
     size_t remain = len - off;
     bool lastChunk = (remain <= chunkMax);
@@ -266,9 +327,12 @@ static void notifyJsonToApp(const char* payload, size_t len) {
     pRxChar->setValue(s_notifyTxBuf, sendLen);
     pRxChar->notify();
     off += chunk;
+    chunks++;
 
     if (!lastChunk) vTaskDelay(pdMS_TO_TICKS(8));
   }
+  Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=sent mode=ble evt=%s len=%u chunks=%u\n",
+      evt, (unsigned)len, (unsigned)chunks);
 }
 
 #if !defined(RIFTLINK_DISABLE_BLS_N)
@@ -684,14 +748,23 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       return;
     }
     if (strcmp(cmd, "modemPreset") == 0) {
-      int p = doc["preset"] | doc["value"] | -1;
+      const JsonVariantConst presetVar = doc["preset"];
+      const JsonVariantConst valueVar = doc["value"];
+      int p = parseModemPresetValue(presetVar, valueVar);
+      Serial.printf("[BLE_CHAIN] stage=fw_cmd action=modem_preset_req preset=%d current=%d\n",
+          p, (int)radio::getModemPreset());
       if (p >= 0 && p < 4) {
         if (!radio::requestModemPreset((radio::ModemPreset)p)) {
+          Serial.printf("[BLE_CHAIN] stage=fw_cmd action=modem_preset_queue_busy preset=%d\n", p);
           ble::notifyError("modemPreset", "Queue busy, retry");
         } else {
+          Serial.printf("[BLE_CHAIN] stage=fw_cmd action=modem_preset_queued preset=%d\n", p);
           // Даем планировщику применить пресет до отправки info.
           scheduleInfoNotify(450);
         }
+      } else {
+        Serial.println("[BLE_CHAIN] stage=fw_cmd action=modem_preset_invalid");
+        ble::notifyError("modemPreset", "Invalid preset (0..3 or speed/normal/range/maxrange)");
       }
       return;
     }
@@ -1077,6 +1150,14 @@ void setOnLocation(void (*cb)(float lat, float lon, int16_t alt, uint16_t radius
 void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes,
     const char* lane, const char* type) {
   if (!from || !text) return;
+  if (s_pendingMsg) {
+    Serial.printf("[BLE_CHAIN] stage=fw_request_msg action=overwrite prevMsgId=%u prevFrom=%02X%02X\n",
+        (unsigned)s_pendingMsgId, s_pendingMsgFrom[0], s_pendingMsgFrom[1]);
+  }
+  size_t textLen = strnlen(text, 255);
+  Serial.printf("[BLE_CHAIN] stage=fw_request_msg action=enqueue from=%02X%02X msgId=%u len=%u rssi=%d ttl=%u lane=%s type=%s mode=%s\n",
+      from[0], from[1], (unsigned)msgId, (unsigned)textLen, rssi, (unsigned)ttlMinutes,
+      lane ? lane : "normal", type ? type : "text", transportModeTag());
   memcpy(s_pendingMsgFrom, from, 8);
   strncpy(s_pendingMsgText, text, 255);
   s_pendingMsgText[255] = '\0';
@@ -1634,6 +1715,12 @@ void update() {
     return;
   }
   if (hasActiveTransport()) {
+    if (s_pendingMsg || s_pendingInfo || s_pendingGroups || s_pendingRoutes || s_pendingNeighbors || s_pendingInvite) {
+      Serial.printf("[BLE_CHAIN] stage=fw_update action=pending mode=%s msg=%u info=%u groups=%u routes=%u neighbors=%u invite=%u\n",
+          transportModeTag(),
+          (unsigned)s_pendingMsg, (unsigned)s_pendingInfo, (unsigned)s_pendingGroups,
+          (unsigned)s_pendingRoutes, (unsigned)s_pendingNeighbors, (unsigned)s_pendingInvite);
+    }
     // Сначала применить nickname (thread-safe: main loop пишет в node)
     if (s_pendingNickname) {
       s_pendingNickname = false;

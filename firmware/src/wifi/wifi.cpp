@@ -85,6 +85,10 @@ static void applyLowFootprintWifiConfig(wifi_init_config_t* cfg) {
 
 bool init() {
   if (s_inited) return s_available;
+  Serial.printf("[BLE_CHAIN] stage=fw_wifi action=init_start free=%u largest=%u largest_dma=%u\n",
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
   // Arduino-esp32 3.x: не писать Wi‑Fi креды в NVS при каждом begin — меньше сюрпризов с порядком init
   WiFi.persistent(false);
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
@@ -100,6 +104,7 @@ bool init() {
   }
   esp_err_t err = esp_wifi_init(&cfg);
   if (err != ESP_OK) {
+    Serial.printf("[BLE_CHAIN] stage=fw_wifi action=init_fail err=0x%x\n", (unsigned)err);
     Serial.printf("[RiftLink] WiFi init failed: %s (0x%x) — OTA/ESP-NOW отключены "
         "(internal free=%u largest_int=%u largest_dma=%u)\n",
         esp_err_to_name(err), (unsigned)err,
@@ -112,6 +117,8 @@ bool init() {
   s_inited = true;
   esp_wifi_set_mode(WIFI_MODE_NULL);
   s_available = true;
+  Serial.printf("[BLE_CHAIN] stage=fw_wifi action=init_ok free=%u\n",
+      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   return true;
 }
 
@@ -178,6 +185,8 @@ bool connect() {
   nvs_close(h);
 
   if (ssid[0] == '\0') return false;
+  Serial.printf("[BLE_CHAIN] stage=fw_wifi action=connect_start ssid_len=%u pass_len=%u\n",
+      (unsigned)strlen(ssid), (unsigned)strlen(pass));
 
   if (WiFi.getMode() != WIFI_STA) {
     if (!WiFi.mode(WIFI_STA)) {
@@ -216,10 +225,12 @@ bool connect() {
   const bool openNet = found && auth == WIFI_AUTH_OPEN;
   wl_status_t st = WiFi.begin(ssid, openNet ? nullptr : (pass[0] ? pass : nullptr));
   if (st == WL_CONNECT_FAILED) {
+    Serial.println("[BLE_CHAIN] stage=fw_wifi action=connect_fail reason=begin_failed");
     Serial.printf("[WiFi] WiFi.begin failed to start STA (ssid_len=%u)\n",
         (unsigned)strlen(ssid));
     return false;
   }
+  Serial.println("[BLE_CHAIN] stage=fw_wifi action=connect_pending");
   return true;
 }
 

@@ -88,8 +88,11 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 /** После drop (очередь/CAD) не долбить sendHello каждые ~10 ms */
 #define HELLO_DROP_RETRY_MS 350
 #define HELLO_QUIET_AFTER_KEY_MS 2500  // после KEY дать эфиру окно под ответный KEY
+#define HANDSHAKE_TRAFFIC_QUIET_MS 3000  // на время handshake приглушаем HELLO/telemetry
 static uint32_t s_lastHelloAirMs = 0;
 static uint32_t s_nextHelloAfterDropMs = 0;
+static uint32_t s_handshakeQuietUntilMs = 0;
+static uint32_t s_lastObservedKeyTxMs = 0;
 /** HELLO «сразу при первом соседе» — только из loop(), не из packetTask (TX только через очередь). */
 static std::atomic<bool> s_pendingDiscoveryHello{false};
 /** HELLO в эфир только из radioSchedulerTask (loop лишь ставит флаг). */
@@ -125,6 +128,20 @@ static uint8_t s_lowBatCount = 0;
 #define LOW_BAT_CHECK_MS    30000
 #define LOW_BAT_SHUTOFF_CNT 3
 static uint8_t rxBuf[protocol::SYNC_LEN + protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+
+static inline bool isHandshakeQuietActive() {
+  return (int32_t)(s_handshakeQuietUntilMs - millis()) > 0;
+}
+
+static inline void extendHandshakeQuiet(const char* cause, uint32_t durMs = HANDSHAKE_TRAFFIC_QUIET_MS) {
+  uint32_t now = millis();
+  uint32_t until = now + durMs;
+  if ((int32_t)(until - s_handshakeQuietUntilMs) > 0) {
+    s_handshakeQuietUntilMs = until;
+  }
+  RIFTLINK_DIAG("HELLO", "event=HANDSHAKE_QUIET cause=%s quiet_ms=%lu",
+      cause ? cause : "-", (unsigned long)(s_handshakeQuietUntilMs - now));
+}
 
 #define BOOT_PHASE_WAIT_4S  0
 #define BOOT_PHASE_DONE     1
@@ -759,6 +776,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         item.rssi = (int8_t)rssi;
         item.sf = sf;
         if (xQueueSend(packetQueue, &item, 0) != pdTRUE) {
+          RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_queue action=fallback queue=packetQueue reason=full len=%u op=0x%02X rssi=%d sf=%u",
+              (unsigned)decodedLen, (unsigned)protocol::OP_XOR_RELAY, rssi, (unsigned)sf);
           handlePacket(decodedBuf, decodedLen, rssi, sf);  // fallback при полной очереди
         }
       } else {
@@ -851,6 +870,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           item.rssi = (int8_t)rssi;
           item.sf = sf;
           if (xQueueSend(packetQueue, &item, 0) != pdTRUE) {
+            RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_queue action=fallback queue=packetQueue reason=full len=%u op=0x%02X rssi=%d sf=%u",
+                (unsigned)decodedLen, (unsigned)protocol::OP_XOR_RELAY, rssi, (unsigned)sf);
             handlePacket(decodedBuf, decodedLen, rssi, sf);  // fallback при полной очереди
           }
         } else {
@@ -877,6 +898,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     if (hdr.opcode == protocol::OP_NACK && payloadLen >= 2) {
       uint16_t pktId = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
       if (pkt_cache::retransmitOverheard(hdr.from, hdr.to, pktId)) {
+        extendHandshakeQuiet("nack_retransmit_overheard");
         RIFTLINK_LOG_EVENT("[RiftLink] Overhear retransmit pktId=%u\n", (unsigned)pktId);
       }
     }
@@ -900,6 +922,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         return;
       }
       bool hadKey = x25519_keys::hasKeyFor(hdr.from);
+      extendHandshakeQuiet("key_rx_parsed");
       RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSED_OK from=%02X%02X payload=%u pktId=%u hadKey=%u",
           hdr.from[0], hdr.from[1], (unsigned)payloadLen, (unsigned)hdr.pktId, (unsigned)hadKey);
       RIFTLINK_LOG_EVENT("[RiftLink] KEY_EXCHANGE rx parsed payload=%u from %02X%02X (→ onKeyExchange)\n",
@@ -952,6 +975,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           break;
         }
         bool hadKey = x25519_keys::hasKeyFor(hdr.from);
+        extendHandshakeQuiet("key_rx_parsed");
         RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSED_OK from=%02X%02X payload=%u pktId=%u hadKey=%u",
             hdr.from[0], hdr.from[1], (unsigned)payloadLen, (unsigned)hdr.pktId, (unsigned)hadKey);
         RIFTLINK_LOG_EVENT("[RiftLink] KEY_EXCHANGE rx parsed payload=%u from %02X%02X (→ onKeyExchange)\n",
@@ -1005,6 +1029,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 
     case protocol::OP_MSG:
       if (payloadLen > 0) {
+        RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_packet action=op_msg from=%02X%02X len=%u rssi=%d sf=%u encrypted=%u",
+            hdr.from[0], hdr.from[1], (unsigned)payloadLen, rssi, (unsigned)sf, (unsigned)protocol::isEncrypted(hdr));
         if (protocol::isEncrypted(hdr)) {
           size_t decLen = 0;
           if (!crypto::decryptFrom(hdr.from, payload, payloadLen, decBuf, &decLen) || decLen >= 256) {
@@ -1069,6 +1095,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
               }
               ble::requestMsgNotify(hdr.from, msgStrBuf, msgId, rssi, ttlMinutes,
                   (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal", "text");
+              RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_packet action=request_msg_notify from=%02X%02X msgId=%u len=%u lane=%s type=text",
+                  hdr.from[0], hdr.from[1], (unsigned)msgId, (unsigned)msgLen,
+                  (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal");
               char fromHex[17];
               snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
               queueDisplayLastMsg(fromHex, msgStrBuf);
@@ -1085,6 +1114,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             }
             ble::requestMsgNotify(hdr.from, msgStrBuf, 0, rssi, 0,
                 (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal", "text");
+            RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_packet action=request_msg_notify from=%02X%02X msgId=0 len=%u lane=%s type=text",
+                hdr.from[0], hdr.from[1], (unsigned)payloadLen,
+                (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal");
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
             queueDisplayLastMsg(fromHex, msgStrBuf);
@@ -1125,6 +1157,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
                 msgStrBuf[msgLen] = '\0';
                 ble::requestMsgNotify(hdr.from, msgStrBuf, msgId, rssi, decBuf[0],
                     (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal", "text");
+                RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_packet action=request_msg_notify from=%02X%02X msgId=%u len=%u lane=%s type=text",
+                    hdr.from[0], hdr.from[1], (unsigned)msgId, (unsigned)msgLen,
+                    (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal");
                 char fromHex[17];
                 snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
                 queueDisplayLastMsg(fromHex, msgStrBuf);
@@ -1274,6 +1309,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             memcpy(msgStrBuf, decBuf + msg_queue::MSG_ID_LEN, msgLen);
             msgStrBuf[msgLen] = '\0';
             ble::requestMsgNotify(hdr.from, msgStrBuf, msgId, rssi, 0, "critical", "sos");
+            RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_packet action=request_msg_notify from=%02X%02X msgId=%u len=%u lane=critical type=sos",
+                hdr.from[0], hdr.from[1], (unsigned)msgId, (unsigned)msgLen);
           }
         }
       }
@@ -1312,6 +1349,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       if (payloadLen >= 2 && node::isForMe(hdr.to)) {
         uint16_t pktId = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
         if (pkt_cache::retransmitOnNack(hdr.from, pktId)) {
+          extendHandshakeQuiet("nack_retransmit");
           region::switchChannelOnCongestion();  // Channel Hopping при NACK
           RIFTLINK_LOG_EVENT("[RiftLink] NACK retransmit pktId=%u to %02X%02X\n",
               (unsigned)pktId, hdr.from[0], hdr.from[1]);
@@ -1390,6 +1428,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           msgStrBuf[msgLen] = '\0';
           ble::requestMsgNotify(hdr.from, msgStrBuf, 0, rssi, 0,
               (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal", "text");
+          RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_packet action=request_msg_notify from=%02X%02X msgId=0 len=%u lane=%s type=text",
+              hdr.from[0], hdr.from[1], (unsigned)msgLen,
+              (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal");
           char fromHex[17];
           snprintf(fromHex, sizeof(fromHex), "grp%u %02X%02X", (unsigned)groupId, hdr.from[0], hdr.from[1]);
           queueDisplayLastMsg(fromHex, msgStrBuf);
@@ -1407,6 +1448,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             const char* msgStr = (const char*)s_fragOutBuf;
             ble::requestMsgNotify(hdr.from, msgStr, 0, rssi, 0,
                 (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal", "text");
+            RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_packet action=request_msg_notify from=%02X%02X msgId=0 len=%u lane=%s type=text",
+                hdr.from[0], hdr.from[1], (unsigned)outLen,
+                (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal");
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
             queueDisplayLastMsg(fromHex, msgStr);
@@ -1607,6 +1651,17 @@ void loop() {
   // sendHello+armNextHelloDeadline (~+8с), а блок ниже перезаписывал s_nextHelloDueMs=millis() и во втором
   // sendHello в том же проходе срабатывал HELLO_MIN_AIR_GAP без лога («HELLO один раз и тишина»).
   int nNeigh = neighbors::getCount();
+  uint32_t keyTxMs = x25519_keys::getLastKeyTxReadyMs();
+  if (keyTxMs != 0 && keyTxMs != s_lastObservedKeyTxMs) {
+    s_lastObservedKeyTxMs = keyTxMs;
+    uint32_t now = millis();
+    uint32_t until = keyTxMs + HANDSHAKE_TRAFFIC_QUIET_MS;
+    if ((int32_t)(until - s_handshakeQuietUntilMs) > 0) {
+      s_handshakeQuietUntilMs = until;
+      RIFTLINK_DIAG("HELLO", "event=HANDSHAKE_QUIET cause=key_tx quiet_ms=%lu",
+          (unsigned long)(s_handshakeQuietUntilMs - now));
+    }
+  }
   if (nNeigh == 0) {
     if (s_zeroNeighSince == 0) s_zeroNeighSince = millis();
     s_oneNeighSince = 0;
@@ -1634,16 +1689,16 @@ void loop() {
     // Фазирование по слоту (beacon_sync): при 0 соседях каждый узел смещён на свой слот — меньше storm
     // Дедлайн следующего HELLO + один джиттер на период. Раньше: новый esp_random() каждый проход loop
     // → при millis()-lastHello чуть выше минимума ~1/6 попыток каждые 10 ms проходили → шторм «HELLO sent».
-    if ((int32_t)(millis() - s_nextHelloDueMs) >= 0) {
+    if (!isHandshakeQuietActive() && (int32_t)(millis() - s_nextHelloDueMs) >= 0) {
       scheduleHelloTx();
     }
     // POLL нужен в mesh. При 0 соседях он только зашумляет эфир и мешает discovery на SF12.
-    if (nNeigh > 1 && millis() - lastPoll > POLL_INTERVAL_MS) {
+    if (!isHandshakeQuietActive() && nNeigh > 1 && millis() - lastPoll > POLL_INTERVAL_MS) {
       sendPoll();
       lastPoll = millis();
     }
   }
-  if (millis() - lastTelemetry > TELEM_INTERVAL_MS) {
+  if (!isHandshakeQuietActive() && millis() - lastTelemetry > TELEM_INTERVAL_MS) {
     telemetry::send();
     lastTelemetry = millis();
   }

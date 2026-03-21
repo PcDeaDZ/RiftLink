@@ -63,8 +63,10 @@ class _MeshScreenState extends State<MeshScreen> {
   void initState() {
     super.initState();
     _routes = List.from(widget.routes);
+    debugPrint('[BLE_CHAIN] stage=app_listener action=mesh_subscribe');
     _sub = widget.ble.events.listen((evt) {
       if (!mounted) return;
+      debugPrint('[BLE_CHAIN] stage=app_listener action=mesh_event evt=${evt.runtimeType}');
       if (evt is RiftLinkRoutesEvent) {
         setState(() {
           _routes = evt.routes;

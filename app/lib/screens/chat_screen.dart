@@ -1019,12 +1019,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   /// Синхронная подписка: `async` + `await cancel` откладывал listen — broadcast терял notify до первого кадра.
   void _listenEvents() {
     _sub?.cancel();
+    debugPrint('[BLE_CHAIN] stage=app_listener action=chat_subscribe');
     _sub = widget.ble.events.listen((evt) {
       if (!mounted) return;
+      debugPrint('[BLE_CHAIN] stage=app_listener action=chat_event evt=${evt.runtimeType}');
       _handleBleEvent(evt);
     });
     final li = widget.ble.lastInfo;
-    if (li != null && mounted) _onInfoEvent(li);
+    if (li != null && mounted) {
+      debugPrint('[BLE_CHAIN] stage=app_listener action=chat_last_info_replay');
+      _onInfoEvent(li);
+    }
   }
 
   void _handleBleEvent(RiftLinkEvent evt) {
@@ -1128,9 +1133,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     else if (evt is RiftLinkTelemetryEvent) {
       setState(() {
         if (evt.from == _nodeId && evt.batteryMv > 0) _batteryMv = evt.batteryMv;
-        _messages.add(_Msg(from: evt.from, text: '🔋 ${(evt.batteryMv / 1000).toStringAsFixed(2)}V, ${evt.heapKb} KB', isIncoming: true));
       });
-      _scrollToBottom();
     } else if (evt is RiftLinkLocationEvent) {
       setState(() { _messages.add(_Msg(from: evt.from, text: '📍 ${evt.lat.toStringAsFixed(5)}, ${evt.lon.toStringAsFixed(5)}', isIncoming: true, isLocation: true)); });
       _scrollToBottom();
