@@ -13,12 +13,16 @@
 #include <nvs.h>
 #include <Arduino.h>
 #include <string.h>
+#include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
 #define MUTEX_TIMEOUT_MS 100
-#define KEY_READ_RETRY_COUNT 3
-#define KEY_READ_RETRY_TIMEOUT_MS 10
+// Read-path ключей не должен часто фейлиться на кратком contention:
+// при ACK/DELIVERY это даёт ложные "нет ключа"/undelivered, хотя ключ уже есть.
+// Держим короткие попытки, но увеличиваем суммарное окно ожидания.
+#define KEY_READ_RETRY_COUNT 8
+#define KEY_READ_RETRY_TIMEOUT_MS 20
 
 #define NVS_NAMESPACE "riftlink"
 #define NVS_KEY_X25519_PUB "x25519_pub"
@@ -32,9 +36,17 @@ struct PeerKey {
   bool used;
 };
 
+struct PeerKeyCacheEntry {
+  uint8_t peerId[protocol::NODE_ID_LEN];
+  uint8_t sharedKey[32];
+  bool used;
+};
+
 static uint8_t s_pubKey[X25519_PUBKEY_LEN];
 static uint8_t s_secKey[crypto_box_SECRETKEYBYTES];
 static PeerKey s_peers[X25519_MAX_PEERS];
+static PeerKeyCacheEntry s_peerKeyCache[X25519_MAX_PEERS];
+static std::atomic<uint32_t> s_peerKeyCacheSeq{0};  // even=stable, odd=writer in progress
 static uint16_t s_pktIdCounter = 0;
 static bool s_inited = false;
 static SemaphoreHandle_t s_mutex = nullptr;
@@ -49,9 +61,14 @@ static SemaphoreHandle_t s_mutex = nullptr;
 #define KEY_RESP_SLOT_BASE_MS 18
 #define KEY_RESP_SLOT_STEP_MS 70
 #define KEY_RESP_SLOT_JITTER_SPAN_MS 18
-struct ThrottleEntry { uint8_t peerId[protocol::NODE_ID_LEN]; uint32_t lastSend; };
+struct ThrottleEntry {
+  std::atomic<uint32_t> idLo;
+  std::atomic<uint32_t> idHi;
+  std::atomic<uint32_t> lastSend;
+};
 static ThrottleEntry s_throttle[4];
 static uint32_t s_lastKeyTxReadyMs = 0;
+static std::atomic<uint32_t> s_throttleSeq{0};  // even=stable, odd=writer
 
 /** Слот троттла по хэшу peerId — не round-robin: иначе 4 чужие TX затирают lastSend и дебаунс HELLO+KEY ломается */
 static int throttleSlotForPeer(const uint8_t* peerId) {
@@ -65,6 +82,55 @@ static int throttleSlotForPeer(const uint8_t* peerId) {
 
 static const char* safeReason(const char* reason) {
   return (reason && reason[0]) ? reason : "-";
+}
+
+static inline uint32_t idPartLo(const uint8_t* id) {
+  uint32_t v = 0;
+  memcpy(&v, id, sizeof(uint32_t));
+  return v;
+}
+
+static inline uint32_t idPartHi(const uint8_t* id) {
+  uint32_t v = 0;
+  memcpy(&v, id + sizeof(uint32_t), sizeof(uint32_t));
+  return v;
+}
+
+static bool throttleLastSendFor(const uint8_t* peerId, uint32_t* lastSendOut) {
+  if (!peerId || !lastSendOut) return false;
+  const uint32_t lo = idPartLo(peerId);
+  const uint32_t hi = idPartHi(peerId);
+  for (int attempt = 0; attempt < 3; attempt++) {
+    uint32_t seqStart = s_throttleSeq.load(std::memory_order_acquire);
+    if (seqStart & 1u) continue;
+    bool found = false;
+    uint32_t last = 0;
+    for (int i = 0; i < 4; i++) {
+      if (s_throttle[i].idLo.load(std::memory_order_relaxed) == lo &&
+          s_throttle[i].idHi.load(std::memory_order_relaxed) == hi) {
+        last = s_throttle[i].lastSend.load(std::memory_order_relaxed);
+        found = true;
+        break;
+      }
+    }
+    uint32_t seqEnd = s_throttleSeq.load(std::memory_order_acquire);
+    if (seqStart != seqEnd || (seqEnd & 1u)) continue;
+    if (found) *lastSendOut = last;
+    return found;
+  }
+  return false;
+}
+
+static void throttleUpdateFor(const uint8_t* peerId, uint32_t lastSend) {
+  if (!peerId) return;
+  int slot = throttleSlotForPeer(peerId);
+  const uint32_t lo = idPartLo(peerId);
+  const uint32_t hi = idPartHi(peerId);
+  s_throttleSeq.fetch_add(1, std::memory_order_release);  // writer begin
+  s_throttle[slot].idLo.store(lo, std::memory_order_relaxed);
+  s_throttle[slot].idHi.store(hi, std::memory_order_relaxed);
+  s_throttle[slot].lastSend.store(lastSend, std::memory_order_relaxed);
+  s_throttleSeq.fetch_add(1, std::memory_order_release);  // writer end
 }
 
 static uint16_t idHash16(const uint8_t* id) {
@@ -116,6 +182,45 @@ static bool takeKeyMutexWithRetry(const char* opTag, const uint8_t* peerId) {
   return false;
 }
 
+static void publishPeerKeyCacheLocked() {
+  // Seqlock-style publication: readers accept cache only on stable even sequence.
+  s_peerKeyCacheSeq.fetch_add(1, std::memory_order_release);  // writer begin (odd)
+  for (int i = 0; i < X25519_MAX_PEERS; i++) {
+    s_peerKeyCache[i].used = s_peers[i].used;
+    if (!s_peers[i].used) continue;
+    memcpy(s_peerKeyCache[i].peerId, s_peers[i].peerId, protocol::NODE_ID_LEN);
+    memcpy(s_peerKeyCache[i].sharedKey, s_peers[i].sharedKey, 32);
+  }
+  s_peerKeyCacheSeq.fetch_add(1, std::memory_order_release);  // writer end (even)
+}
+
+static bool getKeyFromCache(const uint8_t* peerId, uint8_t* keyOut, bool* hasKeyOnly) {
+  if (!peerId) return false;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    uint32_t seqStart = s_peerKeyCacheSeq.load(std::memory_order_acquire);
+    if (seqStart & 1u) continue;  // writer in progress
+    bool found = false;
+    int foundIdx = -1;
+    for (int i = 0; i < X25519_MAX_PEERS; i++) {
+      if (!s_peerKeyCache[i].used) continue;
+      if (memcmp(s_peerKeyCache[i].peerId, peerId, protocol::NODE_ID_LEN) == 0) {
+        found = true;
+        foundIdx = i;
+        break;
+      }
+    }
+    uint32_t seqEnd = s_peerKeyCacheSeq.load(std::memory_order_acquire);
+    if (seqStart != seqEnd || (seqEnd & 1u)) continue;  // unstable read, retry
+    if (!found) return false;
+    if (keyOut && foundIdx >= 0) {
+      memcpy(keyOut, s_peerKeyCache[foundIdx].sharedKey, 32);
+    }
+    if (hasKeyOnly) *hasKeyOnly = true;
+    return true;
+  }
+  return false;
+}
+
 namespace x25519_keys {
 
 void init() {
@@ -130,7 +235,14 @@ void init() {
       nvs_close(h);
       s_inited = true;
       memset(s_peers, 0, sizeof(s_peers));
-      memset(s_throttle, 0, sizeof(s_throttle));
+      memset(s_peerKeyCache, 0, sizeof(s_peerKeyCache));
+      publishPeerKeyCacheLocked();
+      for (int i = 0; i < 4; i++) {
+        s_throttle[i].idLo.store(0, std::memory_order_relaxed);
+        s_throttle[i].idHi.store(0, std::memory_order_relaxed);
+        s_throttle[i].lastSend.store(0, std::memory_order_relaxed);
+      }
+      s_throttleSeq.store(0, std::memory_order_relaxed);
       return;
     }
     nvs_close(h);
@@ -146,7 +258,14 @@ void init() {
     nvs_close(hw);
   }
   memset(s_peers, 0, sizeof(s_peers));
-  memset(s_throttle, 0, sizeof(s_throttle));
+  memset(s_peerKeyCache, 0, sizeof(s_peerKeyCache));
+  publishPeerKeyCacheLocked();
+  for (int i = 0; i < 4; i++) {
+    s_throttle[i].idLo.store(0, std::memory_order_relaxed);
+    s_throttle[i].idHi.store(0, std::memory_order_relaxed);
+    s_throttle[i].lastSend.store(0, std::memory_order_relaxed);
+  }
+  s_throttleSeq.store(0, std::memory_order_relaxed);
   s_inited = true;
 }
 
@@ -225,6 +344,7 @@ void onKeyExchange(const uint8_t* peerId, const uint8_t* theirPubKey) {
   memcpy(s_peers[idx].peerPubKey, theirPubKey, X25519_PUBKEY_LEN);
   s_peers[idx].timestamp = millis();
   s_peers[idx].used = true;
+  publishPeerKeyCacheLocked();
   xSemaphoreGive(s_mutex);
   RIFTLINK_DIAG("KEY", "event=KEY_STORE_OK peer=%02X%02X slot=%d peers_max=%d",
       peerId[0], peerId[1], idx, X25519_MAX_PEERS);
@@ -245,6 +365,9 @@ bool isPeerPubKeyMismatch(const uint8_t* peerId, const uint8_t* theirPubKey) {
 
 bool hasKeyFor(const uint8_t* peerId) {
   if (!peerId) return false;
+  bool hasKey = false;
+  if (getKeyFromCache(peerId, nullptr, &hasKey)) return hasKey;
+  // Fallback path only when cache snapshot was unstable.
   if (!takeKeyMutexWithRetry("hasKeyFor", peerId)) return false;
   bool ok = findPeer(peerId) >= 0;
   xSemaphoreGive(s_mutex);
@@ -253,13 +376,12 @@ bool hasKeyFor(const uint8_t* peerId) {
 
 bool getKeyFor(const uint8_t* peerId, uint8_t* keyOut) {
   if (!peerId || !keyOut) return false;
+  if (getKeyFromCache(peerId, keyOut, nullptr)) return true;
+  // Fallback path only when cache snapshot was unstable.
   if (!takeKeyMutexWithRetry("getKeyFor", peerId)) return false;
   int idx = findPeer(peerId);
   bool ok = (idx >= 0);
-  if (ok) {
-    memcpy(keyOut, s_peers[idx].sharedKey, 32);
-    s_peers[idx].timestamp = millis();  // активное использование — не вытеснять при eviction
-  }
+  if (ok) memcpy(keyOut, s_peers[idx].sharedKey, 32);
   xSemaphoreGive(s_mutex);
   return ok;
 }
@@ -307,14 +429,12 @@ void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, c
   // Для force-ответа на свежий KEY_EXCHANGE debounce отключаем, иначе второй узел может не получить наш ключ.
   uint32_t now = millis();
   if (!bypassDebounce) {
-    for (int i = 0; i < 4; i++) {
-      if (memcmp(s_throttle[i].peerId, peerId, protocol::NODE_ID_LEN) == 0 &&
-          now - s_throttle[i].lastSend < KEY_DEBOUNCE_MS) {
-        xSemaphoreGive(s_mutex);
-        RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=debounce peer=%02X%02X delta_ms=%lu reason=%s",
-            peerId[0], peerId[1], (unsigned long)(now - s_throttle[i].lastSend), safeReason(reason));
-        return;
-      }
+    uint32_t lastSend = 0;
+    if (throttleLastSendFor(peerId, &lastSend) && (now - lastSend < KEY_DEBOUNCE_MS)) {
+      xSemaphoreGive(s_mutex);
+      RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=debounce peer=%02X%02X delta_ms=%lu reason=%s",
+          peerId[0], peerId[1], (unsigned long)(now - lastSend), safeReason(reason));
+      return;
     }
   } else {
     RIFTLINK_DIAG("KEY", "event=KEY_TX_FORCE_RESPONSE peer=%02X%02X reason=%s",
@@ -325,24 +445,18 @@ void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, c
     // Первый ответ — без длинного троттла, пир ждёт наш ключ
   } else {
     uint32_t throttleMs = hadKeyBefore ? KEY_RESPONSE_THROTTLE_MS : KEY_EXCHANGE_THROTTLE_MS;
-    for (int i = 0; i < 4; i++) {
-      if (memcmp(s_throttle[i].peerId, peerId, protocol::NODE_ID_LEN) == 0) {
-        if (now - s_throttle[i].lastSend < throttleMs) {
-          xSemaphoreGive(s_mutex);
-          RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=throttle peer=%02X%02X delta_ms=%lu throttle_ms=%lu reason=%s",
-              peerId[0], peerId[1], (unsigned long)(now - s_throttle[i].lastSend),
-              (unsigned long)throttleMs, safeReason(reason));
-          return;  // троттл — ключ уже был, не дрочить
-        }
-        break;
-      }
+    uint32_t lastSend = 0;
+    if (throttleLastSendFor(peerId, &lastSend) && (now - lastSend < throttleMs)) {
+      xSemaphoreGive(s_mutex);
+      RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=throttle peer=%02X%02X delta_ms=%lu throttle_ms=%lu reason=%s",
+          peerId[0], peerId[1], (unsigned long)(now - lastSend),
+          (unsigned long)throttleMs, safeReason(reason));
+      return;  // троттл — ключ уже был, не дрочить
     }
   }
 
   // Записать в throttle и снять копию ключа под мьютексом; radio::send() — сеть/очереди/другие мьютексы — только после Give.
-  int tslot = throttleSlotForPeer(peerId);
-  memcpy(s_throttle[tslot].peerId, peerId, protocol::NODE_ID_LEN);
-  s_throttle[tslot].lastSend = millis();
+  throttleUpdateFor(peerId, millis());
   uint16_t pktId = ++s_pktIdCounter;
   uint8_t pubCopy[X25519_PUBKEY_LEN];
   memcpy(pubCopy, s_pubKey, X25519_PUBKEY_LEN);

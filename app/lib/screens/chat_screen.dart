@@ -24,7 +24,6 @@ import '../locale_notifier.dart';
 
 import '../theme/app_theme.dart';
 import '../theme/design_tokens.dart';
-import '../theme/theme_notifier.dart';
 import '../mesh_constants.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/app_primitives.dart';
@@ -2011,7 +2010,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         break;
       case 'settings':
         if (widget.ble.isConnected) {
-          final themeBefore = themeModeNotifier.value;
           Navigator.push(context, MaterialPageRoute(builder: (_) => SettingsHubScreen(
             ble: widget.ble, nodeId: _nodeId, nickname: _nickname, region: _region, channel: _channel,
             sf: _sf,
@@ -2025,14 +2023,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             meshAnimationEnabled: _meshAnimationEnabled,
             onMeshAnimationChanged: _onMeshAnimationChanged,
           ))).then((_) {
-            if (!mounted) return;
-            if (themeModeNotifier.value != themeBefore) {
-              Navigator.of(context).pushReplacement(
-                MaterialPageRoute(builder: (_) => ChatScreen(ble: widget.ble)),
-              );
-              return;
-            }
-            setState(() {});
+            if (mounted) setState(() {});
           });
         } else {
           _showSnack(context.l10n.tr('connect_first'));

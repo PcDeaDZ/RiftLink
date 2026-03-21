@@ -66,7 +66,8 @@ String _formatBleError(BuildContext context, Object e) {
 }
 
 class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
-  RiftLinkBle get _ble => RiftLinkBleScope.of(context);
+  late RiftLinkBle _ble;
+  bool _bleBound = false;
   final Connectivity _connectivity = Connectivity();
   bool _scanning = false;
   bool _meshAnimationEnabled = true;
@@ -109,6 +110,14 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
         }
       });
     }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_bleBound) return;
+    _ble = RiftLinkBleScope.of(context);
+    _bleBound = true;
   }
 
   @override
@@ -364,10 +373,11 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
       final ok = await _ble.connect(device);
       if (!mounted) return;
       if (ok) {
+        final bleClient = _ble;
         final rid = device.remoteId.toString();
         final nodeKey = RiftLinkBle.nodeIdHintFromDevice(device) ?? rid;
         unawaited(RecentDevicesService.addOrUpdate(remoteId: rid, nodeId: nodeKey, nickname: null));
-        Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => ChatScreen(ble: _ble)));
+        Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => ChatScreen(ble: bleClient)));
       } else {
         setState(() { _error = context.l10n.tr('ble_no_service'); _connectingToRemoteId = null; _connectingToDeviceName = null; });
       }
@@ -403,12 +413,13 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
       final ok = await _ble.connectWifi(ip);
       if (!mounted) return;
       if (ok) {
+        final bleClient = _ble;
         await RecentDevicesService.addRecentWifiIp(ip);
         if (mounted) {
           final updated = await RecentDevicesService.loadRecentWifiIps();
           if (mounted) setState(() => _recentWifiIps = updated);
         }
-        Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => ChatScreen(ble: _ble)));
+        Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => ChatScreen(ble: bleClient)));
       } else {
         setState(() => _error = context.l10n.tr('wifi_connect_failed'));
       }

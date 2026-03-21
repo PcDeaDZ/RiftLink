@@ -1197,10 +1197,6 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=bad_direction from=%02X%02X", hdr.from[0], hdr.from[1]);
         break;
       }
-      if (!neighbors::isOnline(hdr.from)) {
-        RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=from_offline from=%02X%02X", hdr.from[0], hdr.from[1]);
-        break;
-      }
       if (!protocol::isEncrypted(hdr)) {
         RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=legacy_v1_disabled from=%02X%02X", hdr.from[0], hdr.from[1]);
         break;
@@ -1216,7 +1212,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         }
         uint32_t msgId = 0;
         memcpy(&msgId, ackPlain, msg_queue::MSG_ID_LEN);
-        if (msg_queue::onAckReceived(hdr.from, ackPlain, ackPlainLen, true, true, true)) {
+        if (msg_queue::onAckReceived(hdr.from, ackPlain, ackPlainLen, false, true, true)) {
           ble::notifyDelivered(hdr.from, msgId, rssi);
         }
       }
@@ -1225,10 +1221,6 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     case protocol::OP_ACK_BATCH:
       if (!node::isForMe(hdr.to) || node::isBroadcast(hdr.to)) {
         RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=batch_bad_direction from=%02X%02X", hdr.from[0], hdr.from[1]);
-        break;
-      }
-      if (!neighbors::isOnline(hdr.from)) {
-        RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=batch_from_offline from=%02X%02X", hdr.from[0], hdr.from[1]);
         break;
       }
       if (!protocol::isEncrypted(hdr)) {
@@ -1249,14 +1241,10 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 
     case protocol::OP_ECHO:
       // Echo Protocol: broadcast msgId+originalFrom — отправитель принимает как ACK
-      if (!neighbors::isOnline(hdr.from)) {
-        RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=echo_from_offline from=%02X%02X", hdr.from[0], hdr.from[1]);
-        break;
-      }
       if (payloadLen >= 12 && memcmp(payload + msg_queue::MSG_ID_LEN, node::getId(), protocol::NODE_ID_LEN) == 0) {
         uint32_t msgId;
         memcpy(&msgId, payload, msg_queue::MSG_ID_LEN);
-        (void)msg_queue::onBroadcastAckWitness(hdr.from, msgId, true);
+        (void)msg_queue::onBroadcastAckWitness(hdr.from, msgId, false);
       } else {
         RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=echo_payload_or_target from=%02X%02X len=%u",
             hdr.from[0], hdr.from[1], (unsigned)payloadLen);
@@ -1516,6 +1504,23 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           } else {
             RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=encrypt_fail from=%02X%02X type=group_msg",
                 hdr.from[0], hdr.from[1]);
+            // Fallback witness: если pairwise-ключа нет, подтверждаем доставку через ECHO (msgId + original sender).
+            // Это сохраняет статус broadcast_delivery, когда group/broadcast принят, но ACK v2 зашифровать нечем.
+            uint8_t echoPayload[12];
+            memcpy(echoPayload, &bcMsgId, msg_queue::MSG_ID_LEN);
+            memcpy(echoPayload + msg_queue::MSG_ID_LEN, hdr.from, protocol::NODE_ID_LEN);
+            uint8_t echoPkt[protocol::PAYLOAD_OFFSET + 32];
+            size_t echoLen = protocol::buildPacket(echoPkt, sizeof(echoPkt),
+                node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_ECHO,
+                echoPayload, sizeof(echoPayload), false, false);
+            if (echoLen > 0) {
+              uint8_t echoSf = neighbors::rssiToSf(neighbors::getMinRssi());
+              if (echoSf == 0) echoSf = 12;
+              uint32_t echoDelay = 220 + (esp_random() % 160);
+              queueDeferredSend(echoPkt, echoLen, echoSf, echoDelay);
+              RIFTLINK_DIAG("ACK", "event=ACK_FALLBACK type=group_msg mode=echo from=%02X%02X delay=%lu",
+                  hdr.from[0], hdr.from[1], (unsigned long)echoDelay);
+            }
           }
         } else {
           msg = (const char*)(decBuf + GROUP_ID_LEN);

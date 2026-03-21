@@ -7,6 +7,7 @@
 #include "log.h"
 #include <Arduino.h>
 #include <string.h>
+#include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -27,14 +28,42 @@ struct Entry {
 };
 
 static Entry s_entries[NEIGHBORS_MAX];
+struct EntrySnapshot {
+  uint8_t id[protocol::NODE_ID_LEN];
+  uint32_t lastSeenMs;
+  int8_t lastRssi;
+  uint16_t batteryMv;
+  uint16_t ackSent;
+  uint16_t ackReceived;
+  bool used;
+};
+static EntrySnapshot s_snapshot[NEIGHBORS_MAX];
+static std::atomic<uint32_t> s_snapshotSeq{0};  // even=stable, odd=writer
 static bool s_inited = false;
 
 namespace neighbors {
+
+static void publishSnapshotLocked() {
+  s_snapshotSeq.fetch_add(1, std::memory_order_release);  // writer begin
+  for (int i = 0; i < NEIGHBORS_MAX; i++) {
+    s_snapshot[i].used = s_entries[i].used;
+    if (!s_entries[i].used) continue;
+    memcpy(s_snapshot[i].id, s_entries[i].id, protocol::NODE_ID_LEN);
+    s_snapshot[i].lastSeenMs = s_entries[i].lastSeenMs;
+    s_snapshot[i].lastRssi = s_entries[i].lastRssi;
+    s_snapshot[i].batteryMv = s_entries[i].batteryMv;
+    s_snapshot[i].ackSent = s_entries[i].ackSent;
+    s_snapshot[i].ackReceived = s_entries[i].ackReceived;
+  }
+  s_snapshotSeq.fetch_add(1, std::memory_order_release);  // writer end
+}
 
 void init() {
   if (s_inited) return;
   s_mutex = xSemaphoreCreateMutex();
   memset(s_entries, 0, sizeof(s_entries));
+  memset(s_snapshot, 0, sizeof(s_snapshot));
+  s_snapshotSeq.store(0, std::memory_order_relaxed);
   s_inited = true;
 }
 
@@ -92,6 +121,7 @@ bool onHello(const uint8_t* nodeId, int rssi) {
         nodeId[0], nodeId[1], rssi);
     s_entries[idx].lastDiagMs = s_entries[idx].lastSeenMs;
   }
+  publishSnapshotLocked();
   xSemaphoreGive(s_mutex);
   return wasNew;
 }
@@ -103,6 +133,7 @@ void updateRssi(const uint8_t* nodeId, int rssi) {
   if (idx >= 0) {
     s_entries[idx].lastRssi = (int8_t)rssi;
     s_entries[idx].lastSeenMs = millis();  // любой пакет — продлеваем «онлайн»
+    publishSnapshotLocked();
   }
   xSemaphoreGive(s_mutex);
 }
@@ -114,6 +145,7 @@ void updateBattery(const uint8_t* nodeId, uint16_t batteryMv) {
   if (idx >= 0) {
     s_entries[idx].batteryMv = batteryMv;
     s_entries[idx].lastSeenMs = millis();
+    publishSnapshotLocked();
   }
   xSemaphoreGive(s_mutex);
 }
@@ -138,7 +170,10 @@ void recordAckSent(const uint8_t* nodeId) {
   if (!nodeId) return;
   if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
   int idx = findSlot(nodeId);
-  if (idx >= 0 && s_entries[idx].ackSent < 65535) s_entries[idx].ackSent++;
+  if (idx >= 0 && s_entries[idx].ackSent < 65535) {
+    s_entries[idx].ackSent++;
+    publishSnapshotLocked();
+  }
   xSemaphoreGive(s_mutex);
 }
 
@@ -146,7 +181,10 @@ void recordAckReceived(const uint8_t* nodeId) {
   if (!nodeId) return;
   if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
   int idx = findSlot(nodeId);
-  if (idx >= 0 && s_entries[idx].ackReceived < 65535) s_entries[idx].ackReceived++;
+  if (idx >= 0 && s_entries[idx].ackReceived < 65535) {
+    s_entries[idx].ackReceived++;
+    publishSnapshotLocked();
+  }
   xSemaphoreGive(s_mutex);
 }
 
@@ -199,106 +237,122 @@ uint8_t rssiToSfOrthogonal(const uint8_t* nodeId) {
 
 int getRssiFor(const uint8_t* nodeId) {
   if (!nodeId) return -128;
-  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return -128;
   uint32_t now = millis();
-  int r = -128;
-  for (int i = 0; i < NEIGHBORS_MAX; i++) {
-    if (!s_entries[i].used || (now - s_entries[i].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
-    if (memcmp(s_entries[i].id, nodeId, protocol::NODE_ID_LEN) == 0) {
-      r = s_entries[i].lastRssi;
-      break;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    uint32_t seqStart = s_snapshotSeq.load(std::memory_order_acquire);
+    if (seqStart & 1u) continue;
+    int r = -128;
+    for (int i = 0; i < NEIGHBORS_MAX; i++) {
+      if (!s_snapshot[i].used || (now - s_snapshot[i].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
+      if (memcmp(s_snapshot[i].id, nodeId, protocol::NODE_ID_LEN) == 0) {
+        r = s_snapshot[i].lastRssi;
+        break;
+      }
     }
+    uint32_t seqEnd = s_snapshotSeq.load(std::memory_order_acquire);
+    if (seqStart == seqEnd && !(seqEnd & 1u)) return r;
   }
-  xSemaphoreGive(s_mutex);
-  return r;
+  return -128;
 }
 
 int getMinRssi() {
-  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return 0;
   uint32_t now = millis();
-  int minRssi = 0;
-  bool hasAny = false;
-  for (int i = 0; i < NEIGHBORS_MAX; i++) {
-    if (!s_entries[i].used || (now - s_entries[i].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
-    if (s_entries[i].lastRssi != 0) {
-      if (!hasAny || s_entries[i].lastRssi < minRssi) {
-        minRssi = s_entries[i].lastRssi;
-        hasAny = true;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    uint32_t seqStart = s_snapshotSeq.load(std::memory_order_acquire);
+    if (seqStart & 1u) continue;
+    int minRssi = 0;
+    bool hasAny = false;
+    for (int i = 0; i < NEIGHBORS_MAX; i++) {
+      if (!s_snapshot[i].used || (now - s_snapshot[i].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
+      if (s_snapshot[i].lastRssi != 0) {
+        if (!hasAny || s_snapshot[i].lastRssi < minRssi) {
+          minRssi = s_snapshot[i].lastRssi;
+          hasAny = true;
+        }
       }
     }
+    uint32_t seqEnd = s_snapshotSeq.load(std::memory_order_acquire);
+    if (seqStart == seqEnd && !(seqEnd & 1u)) return hasAny ? minRssi : 0;
   }
-  xSemaphoreGive(s_mutex);
-  return hasAny ? minRssi : 0;
+  return 0;
 }
 
 int getAverageRssi() {
-  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return -90;
   uint32_t now = millis();
-  int sum = 0;
-  int n = 0;
-  for (int i = 0; i < NEIGHBORS_MAX; i++) {
-    if (!s_entries[i].used || (now - s_entries[i].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
-    if (s_entries[i].lastRssi != 0) {
-      sum += s_entries[i].lastRssi;
-      n++;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    uint32_t seqStart = s_snapshotSeq.load(std::memory_order_acquire);
+    if (seqStart & 1u) continue;
+    int sum = 0;
+    int n = 0;
+    for (int i = 0; i < NEIGHBORS_MAX; i++) {
+      if (!s_snapshot[i].used || (now - s_snapshot[i].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
+      if (s_snapshot[i].lastRssi != 0) {
+        sum += s_snapshot[i].lastRssi;
+        n++;
+      }
     }
+    uint32_t seqEnd = s_snapshotSeq.load(std::memory_order_acquire);
+    if (seqStart == seqEnd && !(seqEnd & 1u)) return (n == 0) ? -90 : (sum / n);
   }
-  int r = (n == 0) ? -90 : (sum / n);
-  xSemaphoreGive(s_mutex);
-  return r;
+  return -90;
 }
 
 int getCount() {
-  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return 0;
   uint32_t now = millis();
-  int n = 0;
-  for (int i = 0; i < NEIGHBORS_MAX; i++) {
-    if (!s_entries[i].used) continue;
-    uint32_t age = now - s_entries[i].lastSeenMs;
-    if (age < NEIGHBOR_TIMEOUT_MS) {
-      n++;
-      s_entries[i].online = true;
-    } else if (s_entries[i].online) {
-      s_entries[i].online = false;
-      RIFTLINK_DIAG("NEIGH", "event=NEIGHBOR_OFFLINE peer=%02X%02X age_ms=%lu timeout_ms=%lu",
-          s_entries[i].id[0], s_entries[i].id[1], (unsigned long)age, (unsigned long)NEIGHBOR_TIMEOUT_MS);
+  for (int attempt = 0; attempt < 3; attempt++) {
+    uint32_t seqStart = s_snapshotSeq.load(std::memory_order_acquire);
+    if (seqStart & 1u) continue;
+    int n = 0;
+    for (int i = 0; i < NEIGHBORS_MAX; i++) {
+      if (!s_snapshot[i].used) continue;
+      uint32_t age = now - s_snapshot[i].lastSeenMs;
+      if (age < NEIGHBOR_TIMEOUT_MS) n++;
     }
+    uint32_t seqEnd = s_snapshotSeq.load(std::memory_order_acquire);
+    if (seqStart == seqEnd && !(seqEnd & 1u)) return n;
   }
-  xSemaphoreGive(s_mutex);
-  return n;
+  return 0;
 }
 
 bool isOnline(const uint8_t* nodeId) {
   if (!nodeId) return false;
-  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
   uint32_t now = millis();
-  bool ok = false;
-  for (int i = 0; i < NEIGHBORS_MAX; i++) {
-    if (!s_entries[i].used || (now - s_entries[i].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
-    if (memcmp(s_entries[i].id, nodeId, protocol::NODE_ID_LEN) == 0) {
-      ok = true;
-      break;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    uint32_t seqStart = s_snapshotSeq.load(std::memory_order_acquire);
+    if (seqStart & 1u) continue;
+    bool ok = false;
+    for (int i = 0; i < NEIGHBORS_MAX; i++) {
+      if (!s_snapshot[i].used || (now - s_snapshot[i].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
+      if (memcmp(s_snapshot[i].id, nodeId, protocol::NODE_ID_LEN) == 0) {
+        ok = true;
+        break;
+      }
     }
+    uint32_t seqEnd = s_snapshotSeq.load(std::memory_order_acquire);
+    if (seqStart == seqEnd && !(seqEnd & 1u)) return ok;
   }
-  xSemaphoreGive(s_mutex);
-  return ok;
+  return false;
 }
 
 uint32_t getFreshnessMs(const uint8_t* nodeId) {
   if (!nodeId) return UINT32_MAX;
-  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return UINT32_MAX;
   uint32_t now = millis();
-  uint32_t out = UINT32_MAX;
-  for (int i = 0; i < NEIGHBORS_MAX; i++) {
-    if (!s_entries[i].used) continue;
-    if (memcmp(s_entries[i].id, nodeId, protocol::NODE_ID_LEN) == 0) {
-      uint32_t age = now - s_entries[i].lastSeenMs;
-      if (age < NEIGHBOR_TIMEOUT_MS) out = age;
-      break;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    uint32_t seqStart = s_snapshotSeq.load(std::memory_order_acquire);
+    if (seqStart & 1u) continue;
+    uint32_t out = UINT32_MAX;
+    for (int i = 0; i < NEIGHBORS_MAX; i++) {
+      if (!s_snapshot[i].used) continue;
+      if (memcmp(s_snapshot[i].id, nodeId, protocol::NODE_ID_LEN) == 0) {
+        uint32_t age = now - s_snapshot[i].lastSeenMs;
+        if (age < NEIGHBOR_TIMEOUT_MS) out = age;
+        break;
+      }
     }
+    uint32_t seqEnd = s_snapshotSeq.load(std::memory_order_acquire);
+    if (seqStart == seqEnd && !(seqEnd & 1u)) return out;
   }
-  xSemaphoreGive(s_mutex);
-  return out;
+  return UINT32_MAX;
 }
 
 bool getId(int i, uint8_t* out) {

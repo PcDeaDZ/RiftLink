@@ -98,39 +98,46 @@ static void (*s_onBroadcastDelivery)(uint32_t msgId, int delivered, int total) =
 static void (*s_onTimeCapsuleReleased)(const uint8_t* to, uint32_t msgId, uint8_t triggerType) = nullptr;
 static std::atomic<uint8_t> s_lastSendFailReason{msg_queue::SEND_FAIL_NONE};
 struct AckReplayEntry {
-  uint8_t from[protocol::NODE_ID_LEN];
-  uint32_t msgId;
-  uint32_t seenAtMs;
+  std::atomic<uint32_t> fromLo;
+  std::atomic<uint32_t> fromHi;
+  std::atomic<uint32_t> msgId;
+  std::atomic<uint32_t> seenAtMs;
 };
 static AckReplayEntry s_ackReplayGuard[ACK_REPLAY_GUARD_SIZE];
+static std::atomic<uint32_t> s_ackReplayWriteIdx{0};
+
+static inline uint32_t idPartLo(const uint8_t* id) {
+  uint32_t v = 0;
+  memcpy(&v, id, sizeof(uint32_t));
+  return v;
+}
+
+static inline uint32_t idPartHi(const uint8_t* id) {
+  uint32_t v = 0;
+  memcpy(&v, id + sizeof(uint32_t), sizeof(uint32_t));
+  return v;
+}
 
 static bool isAckReplayAndMark(const uint8_t* from, uint32_t msgId) {
   uint32_t now = millis();
-  int freeIdx = -1;
-  int oldestIdx = 0;
-  uint32_t oldestTs = s_ackReplayGuard[0].seenAtMs;
+  const uint32_t fromLo = idPartLo(from);
+  const uint32_t fromHi = idPartHi(from);
+
   for (int i = 0; i < ACK_REPLAY_GUARD_SIZE; i++) {
-    if (s_ackReplayGuard[i].seenAtMs == 0) {
-      if (freeIdx < 0) freeIdx = i;
-      continue;
-    }
-    if ((now - s_ackReplayGuard[i].seenAtMs) > ACK_REPLAY_GUARD_MS) {
-      freeIdx = i;
-      break;
-    }
-    if (memcmp(s_ackReplayGuard[i].from, from, protocol::NODE_ID_LEN) == 0 &&
-        s_ackReplayGuard[i].msgId == msgId) {
+    uint32_t ts = s_ackReplayGuard[i].seenAtMs.load(std::memory_order_acquire);
+    if (ts == 0 || (now - ts) > ACK_REPLAY_GUARD_MS) continue;
+    if (s_ackReplayGuard[i].msgId.load(std::memory_order_relaxed) == msgId &&
+        s_ackReplayGuard[i].fromLo.load(std::memory_order_relaxed) == fromLo &&
+        s_ackReplayGuard[i].fromHi.load(std::memory_order_relaxed) == fromHi) {
       return true;
     }
-    if (s_ackReplayGuard[i].seenAtMs < oldestTs) {
-      oldestTs = s_ackReplayGuard[i].seenAtMs;
-      oldestIdx = i;
-    }
   }
-  int idx = (freeIdx >= 0) ? freeIdx : oldestIdx;
-  memcpy(s_ackReplayGuard[idx].from, from, protocol::NODE_ID_LEN);
-  s_ackReplayGuard[idx].msgId = msgId;
-  s_ackReplayGuard[idx].seenAtMs = now;
+
+  uint32_t idx = s_ackReplayWriteIdx.fetch_add(1, std::memory_order_relaxed) % ACK_REPLAY_GUARD_SIZE;
+  s_ackReplayGuard[idx].fromLo.store(fromLo, std::memory_order_relaxed);
+  s_ackReplayGuard[idx].fromHi.store(fromHi, std::memory_order_relaxed);
+  s_ackReplayGuard[idx].msgId.store(msgId, std::memory_order_relaxed);
+  s_ackReplayGuard[idx].seenAtMs.store(now, std::memory_order_release);
   return false;
 }
 
@@ -148,7 +155,13 @@ void init() {
   s_mutex = xSemaphoreCreateMutex();
   memset(s_pending, 0, sizeof(s_pending));
   memset(s_bcPending, 0, sizeof(s_bcPending));
-  memset(s_ackReplayGuard, 0, sizeof(s_ackReplayGuard));
+  for (int i = 0; i < ACK_REPLAY_GUARD_SIZE; i++) {
+    s_ackReplayGuard[i].fromLo.store(0, std::memory_order_relaxed);
+    s_ackReplayGuard[i].fromHi.store(0, std::memory_order_relaxed);
+    s_ackReplayGuard[i].msgId.store(0, std::memory_order_relaxed);
+    s_ackReplayGuard[i].seenAtMs.store(0, std::memory_order_relaxed);
+  }
+  s_ackReplayWriteIdx.store(0, std::memory_order_relaxed);
   s_msgIdCounter = (uint32_t)esp_random();
   s_inited = true;
 }
@@ -604,7 +617,7 @@ void onAckBatchReceived(const uint8_t* from, const uint8_t* payload, size_t payl
     memcpy(&msgId, payload + 1 + i * MSG_ID_LEN, MSG_ID_LEN);
     uint8_t singlePayload[MSG_ID_LEN];
     memcpy(singlePayload, &msgId, MSG_ID_LEN);
-    if (onAckReceived(from, singlePayload, MSG_ID_LEN, true, true, true) && onDelivered) {
+    if (onAckReceived(from, singlePayload, MSG_ID_LEN, false, true, true) && onDelivered) {
       onDelivered(from, msgId, rssi);
     }
   }
