@@ -320,11 +320,8 @@ class RiftLinkBle {
     RiftLinkEvent? evt;
     try {
       evt = _jsonToEvent(json);
-    } catch (e, _) {
-      assert(() {
-        debugPrint('RiftLinkBle: _jsonToEvent: $e');
-        return true;
-      }());
+    } catch (e, st) {
+      debugPrint('RiftLinkBle: _jsonToEvent FAILED evt=${json['evt']}: $e\n$st');
       return;
     }
     if (evt is RiftLinkInfoEvent) {

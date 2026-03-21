@@ -86,7 +86,7 @@ int modemScan(ScanResult* results, int maxResults) {
 
   if (!radio::takeMutex(pdMS_TO_TICKS(2000))) return 0;
 
-  uint8_t rxBuf[256];
+  static uint8_t rxBuf[256];
 
   for (int bi = 0; bi < 2 && found < maxResults; bi++) {
     for (int si = 0; si < 6 && found < maxResults; si++) {

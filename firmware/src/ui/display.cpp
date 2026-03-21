@@ -377,7 +377,7 @@ static void displayRunModemScan() {
   drawTruncRaw(4, 20, "~36s ...", 18);
   disp->display();
 
-  selftest::ScanResult res[6];
+  static selftest::ScanResult res[6];
   int found = selftest::modemScan(res, 6);
 
   disp->clearDisplay();

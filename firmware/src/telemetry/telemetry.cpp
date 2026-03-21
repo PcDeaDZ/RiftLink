@@ -34,6 +34,7 @@ void init() {
 #else
   pinMode(BAT_ADC_CTRL, OUTPUT);
   digitalWrite(BAT_ADC_CTRL, HIGH);   // включить делитель батареи (active HIGH)
+  analogReadMilliVolts(BAT_ADC_PIN);  // инициализировать канал до установки аттенюации
   analogSetPinAttenuation(BAT_ADC_PIN, ADC_11db);
 #endif
   s_inited = true;

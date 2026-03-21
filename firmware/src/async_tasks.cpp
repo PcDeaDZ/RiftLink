@@ -45,7 +45,7 @@ static inline void queueSendReason(char* buf, size_t buflen, const char* msg) {
 #if defined(USE_EINK)
 #define PACKET_TASK_STACK 32768
 #else
-#define PACKET_TASK_STACK 16384
+#define PACKET_TASK_STACK 4096
 #endif
 #define DISPLAY_TASK_STACK 8192   // 12KB — create FAIL (heap), 8KB — минимум для создания
 #define PACKET_TASK_PRIO 2
@@ -139,7 +139,7 @@ bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf, bool priority,
 }
 
 #define DEFERRED_ACK_SLOTS 8   // broadcast: несколько соседей шлют ACK почти одновременно
-#define DEFERRED_SEND_SLOTS 24   // MSG copy2–3, broadcast 2–3, KEY_EXCHANGE — burst 1–15
+#define DEFERRED_SEND_SLOTS 16   // MSG copy2–3, broadcast 2–3, KEY_EXCHANGE — burst 1–15
 #define HEARD_RELAY_SIZE 8   // Managed flooding: отмена relay при услышанной ретрансляции
 struct DeferredSlot {
   uint8_t buf[PACKET_BUF_SIZE];
@@ -641,6 +641,10 @@ static void displayTask(void* arg) {
     uint32_t now = millis();
     if (now - lastHeartbeat >= DISPLAY_HEARTBEAT_MS) {
       lastHeartbeat = now;
+      unsigned wm = (unsigned)uxTaskGetStackHighWaterMark(nullptr);
+      if (wm < 512) {
+        Serial.printf("[displayTask] stack watermark LOW: %u B\n", wm);
+      }
     }
   }
 }

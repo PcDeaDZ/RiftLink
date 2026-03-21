@@ -11,8 +11,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-#define PRIORITY_SLOTS 4   // ACK — обслуживаются первыми
-#define NORMAL_SLOTS 8     // MSG, KEY_EXCHANGE и т.п.
+#define PRIORITY_SLOTS 2   // ACK — обслуживаются первыми
+#define NORMAL_SLOTS 4     // MSG, KEY_EXCHANGE и т.п.
 #define MUTEX_TIMEOUT_MS 50
 
 struct OverflowSlot {

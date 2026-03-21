@@ -138,6 +138,7 @@ class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
   int _espCh = 1;
   bool _espAdapt = false;
   StreamSubscription<RiftLinkEvent>? _sub;
+  Timer? _infoPollTimer;
 
   void _apply(RiftLinkInfoEvent e) {
     if (!mounted) return;
@@ -200,6 +201,10 @@ class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
       if (c != null) _apply(c);
       widget.ble.getInfo();
     });
+    _infoPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (!mounted || !widget.ble.isConnected) return;
+      widget.ble.getInfo();
+    });
   }
 
   @override
@@ -219,6 +224,7 @@ class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _infoPollTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _sub?.cancel();
     super.dispose();
@@ -520,6 +526,7 @@ class _DevicePageState extends State<_DevicePage> {
         }
       }
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isConnected) widget.ble.getInfo(); });
   }
 
   @override
@@ -994,6 +1001,7 @@ class _SecurityPageState extends State<_SecurityPage> {
         setState(() { _invErr = true; _invSt = mapped; });
       }
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isConnected) widget.ble.getInfo(); });
   }
 
   @override
@@ -1146,6 +1154,7 @@ class _EnergyThemePageState extends State<_EnergyThemePage> {
       if (evt is RiftLinkInfoEvent) setState(() { _ps = evt.powersave; _gpsPresent = evt.gpsPresent; _gpsOn = evt.gpsEnabled; _gpsFix = evt.gpsFix; });
       else if (evt is RiftLinkGpsEvent) setState(() { _gpsPresent = evt.present; _gpsOn = evt.enabled; _gpsFix = evt.hasFix; });
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isConnected) widget.ble.getInfo(); });
   }
 
   @override
