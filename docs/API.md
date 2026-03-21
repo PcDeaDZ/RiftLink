@@ -192,7 +192,7 @@ Baseline anti-spoof на приёмнике: координаты вне диа�
 ### 2.14 setGroupKey / clearGroupKey / getGroupKey — приватные группы
 
 ```json
-{"cmd":"setGroupKey","group":42,"key":"base64_32_bytes"}
+{"cmd":"setGroupKey","group":42,"key":"base64_32_bytes","keyVersion":3}
 {"cmd":"clearGroupKey","group":42}
 {"cmd":"getGroupKey","group":42}
 ```
@@ -286,10 +286,10 @@ Baseline anti-spoof на приёмнике: координаты вне диа�
 ### 3.10.1 groups — список групп с признаком private/public
 
 ```json
-{"evt":"groups","groups":[42,77],"groupsPrivate":[true,false]}
+{"evt":"groups","groups":[42,77],"groupsPrivate":[true,false],"groupsKeyVersion":[3,0]}
 ```
 
-`groupsPrivate[i]` соответствует `groups[i]`.
+`groupsPrivate[i]` и `groupsKeyVersion[i]` соответствуют `groups[i]`.
 
 ### 3.11 voice — голосовое сообщение (чанками)
 
@@ -352,7 +352,7 @@ Baseline anti-spoof на приёмнике: координаты вне диа�
 ### 3.17 groupKey — выдача ключа группы (по `getGroupKey`)
 
 ```json
-{"evt":"groupKey","group":42,"key":"base64_32_bytes"}
+{"evt":"groupKey","group":42,"key":"base64_32_bytes","keyVersion":3}
 ```
 
 ---

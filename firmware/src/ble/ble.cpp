@@ -773,6 +773,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     if (strcmp(cmd, "setGroupKey") == 0) {
       uint32_t gid = doc["group"] | 0;
       const char* keyB64 = doc["key"];
+      uint16_t keyVersion = (uint16_t)(doc["keyVersion"] | 0);
       if (gid == 0 || !keyB64 || !keyB64[0]) {
         ble::notifyError("group_key_bad", "Missing group/key");
         return;
@@ -783,7 +784,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         ble::notifyError("group_key_bad", "Bad group key");
         return;
       }
-      if (!groups::setGroupKey(gid, key)) {
+      if (!groups::setGroupKey(gid, key, keyVersion)) {
         ble::notifyError("group_key_set_failed", "Failed to set group key");
         return;
       }
@@ -820,6 +821,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       ev["evt"] = "groupKey";
       ev["group"] = gid;
       ev["key"] = keyB64;
+      ev["keyVersion"] = groups::getGroupKeyVersion(gid);
       char buf[140];
       size_t len = serializeJson(ev, buf);
       notifyJsonToApp(buf, len);
@@ -1210,7 +1212,7 @@ void notifyTelemetry(const uint8_t* from, uint16_t batteryMv, uint16_t heapKb, i
   doc["battery"] = batteryMv;
   doc["heapKb"] = heapKb;
   if (rssi != 0) doc["rssi"] = rssi;
-  char buf[220];
+  char buf[320];
   size_t len = serializeJson(doc, buf);
   notifyJsonToApp(buf, len);
 }
@@ -1308,10 +1310,12 @@ void notifyInfo() {
 
   JsonArray grpArr = doc["groups"].to<JsonArray>();
   JsonArray grpPrivArr = doc["groupsPrivate"].to<JsonArray>();
+  JsonArray grpVerArr = doc["groupsKeyVersion"].to<JsonArray>();
   int ng = groups::getCount();
   for (int i = 0; i < ng; i++) {
     grpArr.add((uint32_t)groups::getId(i));
     grpPrivArr.add(groups::isPrivateAt(i));
+    grpVerArr.add((uint32_t)groups::keyVersionAt(i));
   }
 
   JsonArray arr = doc["neighbors"].to<JsonArray>();
@@ -1438,10 +1442,12 @@ void notifyGroups() {
   doc["evt"] = "groups";
   JsonArray arr = doc["groups"].to<JsonArray>();
   JsonArray arrPriv = doc["groupsPrivate"].to<JsonArray>();
+  JsonArray arrVer = doc["groupsKeyVersion"].to<JsonArray>();
   int n = groups::getCount();
   for (int i = 0; i < n; i++) {
     arr.add((uint32_t)groups::getId(i));
     arrPriv.add(groups::isPrivateAt(i));
+    arrVer.add((uint32_t)groups::keyVersionAt(i));
   }
 
   char buf[120];

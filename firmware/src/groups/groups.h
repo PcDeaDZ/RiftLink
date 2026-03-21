@@ -20,19 +20,23 @@ bool addGroup(uint32_t groupId);
 /** Удалить группу */
 void removeGroup(uint32_t groupId);
 /** Установить/обновить приватный ключ группы (32 байта). */
-bool setGroupKey(uint32_t groupId, const uint8_t* key32);
+bool setGroupKey(uint32_t groupId, const uint8_t* key32, uint16_t keyVersion = 0);
 /** Удалить приватный ключ группы (группа становится public). */
 bool clearGroupKey(uint32_t groupId);
 /** Есть ли приватный ключ у группы. */
 bool hasGroupKey(uint32_t groupId);
 /** Получить приватный ключ группы. */
 bool getGroupKey(uint32_t groupId, uint8_t* out32);
+/** Текущая версия ключа группы (0 если ключ не задан). */
+uint16_t getGroupKeyVersion(uint32_t groupId);
 /** Количество групп */
 int getCount();
 /** ID группы по индексу (0..getCount()-1) */
 uint32_t getId(int index);
 /** Наличие приватного ключа у группы по индексу. */
 bool isPrivateAt(int index);
+/** Версия ключа группы по индексу. */
+uint16_t keyVersionAt(int index);
 /** Служебный id широковещательных OP_GROUP_MSG в mesh; не хранится в списке подписок пользователя */
 constexpr uint32_t GROUP_ALL = 1;
 

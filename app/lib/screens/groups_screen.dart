@@ -34,6 +34,7 @@ class GroupsScreen extends StatefulWidget {
 class _GroupsScreenState extends State<GroupsScreen> {
   List<int> _groups = [];
   final Map<int, bool> _groupPrivate = <int, bool>{};
+  final Map<int, int> _groupKeyVersion = <int, int>{};
   bool _loading = false;
   StreamSubscription<RiftLinkEvent>? _sub;
 
@@ -43,19 +44,26 @@ class _GroupsScreenState extends State<GroupsScreen> {
     return out;
   }
 
-  void _applyGroups(Iterable<int> groups, [List<bool>? privateFlags]) {
+  void _applyGroups(Iterable<int> groups, [List<bool>? privateFlags, List<int>? keyVersions]) {
     final normalized = _normalizeGroups(groups);
     final nextPriv = <int, bool>{};
+    final nextVer = <int, int>{};
     for (var i = 0; i < normalized.length; i++) {
       final gid = normalized[i];
       bool isPriv = _groupPrivate[gid] ?? false;
+      int ver = _groupKeyVersion[gid] ?? 0;
       if (privateFlags != null && i < privateFlags.length) isPriv = privateFlags[i];
+      if (keyVersions != null && i < keyVersions.length) ver = keyVersions[i];
       nextPriv[gid] = isPriv;
+      nextVer[gid] = ver;
     }
     _groups = normalized;
     _groupPrivate
       ..clear()
       ..addAll(nextPriv);
+    _groupKeyVersion
+      ..clear()
+      ..addAll(nextVer);
   }
 
   @override
@@ -66,9 +74,9 @@ class _GroupsScreenState extends State<GroupsScreen> {
       if (!mounted) return;
       // Ответ на getGroups — и поле groups в evt:info (как в чате), иначе список не обновлялся без отдельного notify.
       if (evt is RiftLinkGroupsEvent) {
-        setState(() => _applyGroups(evt.groups, evt.groupsPrivate));
+        setState(() => _applyGroups(evt.groups, evt.groupsPrivate, evt.groupsKeyVersion));
       } else if (evt is RiftLinkInfoEvent) {
-        setState(() => _applyGroups(evt.groups, evt.groupsPrivate));
+        setState(() => _applyGroups(evt.groups, evt.groupsPrivate, evt.groupsKeyVersion));
       }
     });
     _refresh();
@@ -93,6 +101,16 @@ class _GroupsScreenState extends State<GroupsScreen> {
     return base64Encode(bytes);
   }
 
+  String _generateInviteTokenHex() {
+    final rnd = Random.secure();
+    final bytes = List<int>.generate(8, (_) => rnd.nextInt(256));
+    final sb = StringBuffer();
+    for (final b in bytes) {
+      sb.write(b.toRadixString(16).padLeft(2, '0'));
+    }
+    return sb.toString().toUpperCase();
+  }
+
   Future<void> _setGroupPrivate(int gid, bool privateMode) async {
     final l = context.l10n;
     if (!widget.ble.isConnected) return;
@@ -101,8 +119,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
       final ok = await widget.ble.setGroupKey(gid, keyB64);
       if (ok && mounted) {
         _snack(l.tr('group_set_private', {'id': '$gid'}));
-        await Clipboard.setData(ClipboardData(text: jsonEncode({'group': gid, 'groupKey': keyB64})));
-        _snack(l.tr('group_invite_copied', {'id': '$gid'}));
+        await _copyInvite(gid);
       } else if (mounted) {
         _snack(l.tr('error'), backgroundColor: context.palette.error);
       }
@@ -119,12 +136,13 @@ class _GroupsScreenState extends State<GroupsScreen> {
 
   Future<void> _rotatePrivateKey(int gid) async {
     final l = context.l10n;
+    final currentVer = _groupKeyVersion[gid] ?? 0;
+    final nextVer = currentVer > 0 ? currentVer + 1 : 1;
     final keyB64 = _generateGroupKeyB64();
-    final ok = await widget.ble.setGroupKey(gid, keyB64);
+    final ok = await widget.ble.setGroupKey(gid, keyB64, keyVersion: nextVer);
     if (ok && mounted) {
-      await Clipboard.setData(ClipboardData(text: jsonEncode({'group': gid, 'groupKey': keyB64})));
       _snack(l.tr('group_key_rotated', {'id': '$gid'}));
-      _snack(l.tr('group_invite_copied', {'id': '$gid'}));
+      await _copyInvite(gid);
       await _refresh();
     } else if (mounted) {
       _snack(l.tr('error'), backgroundColor: context.palette.error);
@@ -144,7 +162,15 @@ class _GroupsScreenState extends State<GroupsScreen> {
           .cast<RiftLinkGroupKeyEvent>()
           .first
           .timeout(const Duration(seconds: 3));
-      await Clipboard.setData(ClipboardData(text: jsonEncode({'group': gid, 'groupKey': evt.key})));
+      final expiryEpochSec = DateTime.now().millisecondsSinceEpoch ~/ 1000 + 10 * 60;
+      final token = _generateInviteTokenHex();
+      await Clipboard.setData(ClipboardData(text: jsonEncode({
+        'group': gid,
+        'groupKey': evt.key,
+        'keyVersion': evt.keyVersion > 0 ? evt.keyVersion : (_groupKeyVersion[gid] ?? 0),
+        'inviteToken': token,
+        'inviteExpiryEpochSec': expiryEpochSec,
+      })));
       if (mounted) _snack(l.tr('group_invite_copied', {'id': '$gid'}));
     } catch (_) {
       if (mounted) _snack(l.tr('error'), backgroundColor: context.palette.error);
@@ -164,10 +190,18 @@ class _GroupsScreenState extends State<GroupsScreen> {
       if (m is! Map) throw Exception('bad');
       final group = int.tryParse('${m['group'] ?? ''}') ?? 0;
       final key = (m['groupKey'] as String?)?.trim();
+      final keyVersion = int.tryParse('${m['keyVersion'] ?? ''}') ?? 0;
+      final token = (m['inviteToken'] as String?)?.trim() ?? '';
+      final expiryEpochSec = int.tryParse('${m['inviteExpiryEpochSec'] ?? ''}') ?? 0;
       if (group <= 1) throw Exception('bad');
+      if (token.length != 16 || !RegExp(r'^[0-9A-Fa-f]{16}$').hasMatch(token)) throw Exception('bad');
+      if (expiryEpochSec <= 0 || (DateTime.now().millisecondsSinceEpoch ~/ 1000) > expiryEpochSec) {
+        _snack(l.tr('group_invite_expired'), backgroundColor: context.palette.error);
+        return;
+      }
       await widget.ble.addGroup(group);
       if (key != null && key.isNotEmpty) {
-        await widget.ble.setGroupKey(group, key);
+        await widget.ble.setGroupKey(group, key, keyVersion: keyVersion > 0 ? keyVersion : null);
       }
       await _refresh();
       if (mounted) _snack(l.tr('group_invite_joined', {'id': '$group'}));
@@ -470,7 +504,9 @@ class _GroupsScreenState extends State<GroupsScreen> {
                                         ),
                                         const SizedBox(height: 2),
                                         Text(
-                                          _groupPrivate[gid] == true ? l.tr('group_private') : l.tr('group_public'),
+                                          _groupPrivate[gid] == true
+                                              ? '${l.tr('group_private')}  v${_groupKeyVersion[gid] ?? 0}'
+                                              : l.tr('group_public'),
                                           style: TextStyle(
                                             color: _groupPrivate[gid] == true ? context.palette.primary : context.palette.onSurfaceVariant,
                                             fontSize: 12,

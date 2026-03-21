@@ -577,8 +577,15 @@ class RiftLinkBle {
       groupId <= 0 ? false : _sendCmd({'cmd': 'removeGroup', 'group': groupId});
 
   /// Установить/обновить приватный ключ группы (base64, 32 байта).
-  Future<bool> setGroupKey(int groupId, String keyB64) async =>
-      groupId <= 0 || keyB64.trim().isEmpty ? false : _sendCmd({'cmd': 'setGroupKey', 'group': groupId, 'key': keyB64.trim()});
+  Future<bool> setGroupKey(int groupId, String keyB64, {int? keyVersion}) async =>
+      groupId <= 0 || keyB64.trim().isEmpty
+          ? false
+          : _sendCmd({
+              'cmd': 'setGroupKey',
+              'group': groupId,
+              'key': keyB64.trim(),
+              if (keyVersion != null && keyVersion > 0) 'keyVersion': keyVersion,
+            });
 
   /// Удалить приватный ключ группы (группа станет public).
   Future<bool> clearGroupKey(int groupId) async =>
@@ -1035,6 +1042,8 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     final groupsPrivate = grpPrivList is List
         ? (grpPrivList as List).map((e) => e == true || e == 1).toList()
         : <bool>[];
+    final grpVerList = json['groupsKeyVersion'];
+    final groupsKeyVersion = grpVerList is List ? (grpVerList as List).map(_jsonInt).toList() : <int>[];
     final routesList = json['routes'];
     final routes = <Map<String, dynamic>>[];
     if (routesList is List) {
@@ -1069,6 +1078,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       neighborsHasKey: neighborsHasKey,
       groups: groups,
       groupsPrivate: groupsPrivate,
+      groupsKeyVersion: groupsKeyVersion,
       routes: routes,
       sf: _jsonIntNullable(json['sf']),
       bw: _jsonDoubleNullable(json['bw']),
@@ -1106,17 +1116,20 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
   if (evt == 'groups') {
     final grpList = json['groups'];
     final grpPrivList = json['groupsPrivate'];
+    final grpVerList = json['groupsKeyVersion'];
     return RiftLinkGroupsEvent(
       groups: grpList is List ? (grpList as List).map(_jsonInt).toList() : <int>[],
       groupsPrivate: grpPrivList is List
           ? (grpPrivList as List).map((e) => e == true || e == 1).toList()
           : <bool>[],
+      groupsKeyVersion: grpVerList is List ? (grpVerList as List).map(_jsonInt).toList() : <int>[],
     );
   }
   if (evt == 'groupKey') {
     return RiftLinkGroupKeyEvent(
       group: _jsonIntDefault(json['group'], 0),
       key: json['key']?.toString() ?? '',
+      keyVersion: _jsonIntDefault(json['keyVersion'], 0),
     );
   }
   if (evt == 'telemetry') {
@@ -1335,6 +1348,7 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
   final List<bool> neighborsHasKey;
   final List<int> groups;
   final List<bool> groupsPrivate;
+  final List<int> groupsKeyVersion;
   final List<Map<String, dynamic>> routes;
   final int? sf;
   final double? bw;
@@ -1378,6 +1392,7 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
     this.neighborsHasKey = const [],
     this.groups = const [],
     this.groupsPrivate = const [],
+    this.groupsKeyVersion = const [],
     this.routes = const [],
     this.sf,
     this.bw,
@@ -1496,13 +1511,15 @@ class RiftLinkRoutesEvent extends RiftLinkEvent {
 class RiftLinkGroupsEvent extends RiftLinkEvent {
   final List<int> groups;
   final List<bool> groupsPrivate;
-  RiftLinkGroupsEvent({required this.groups, this.groupsPrivate = const []});
+  final List<int> groupsKeyVersion;
+  RiftLinkGroupsEvent({required this.groups, this.groupsPrivate = const [], this.groupsKeyVersion = const []});
 }
 
 class RiftLinkGroupKeyEvent extends RiftLinkEvent {
   final int group;
   final String key;
-  RiftLinkGroupKeyEvent({required this.group, required this.key});
+  final int keyVersion;
+  RiftLinkGroupKeyEvent({required this.group, required this.key, this.keyVersion = 0});
 }
 
 class RiftLinkNeighborsEvent extends RiftLinkEvent {

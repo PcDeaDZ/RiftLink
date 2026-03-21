@@ -178,6 +178,7 @@ final Map<String, Map<String, String>> _strings = {
   'group_copy_invite': {'en': 'Copy invite', 'ru': 'Скопировать инвайт'},
   'group_invite_copied': {'en': 'Group {id} invite copied', 'ru': 'Инвайт группы {id} скопирован'},
   'group_invite_bad': {'en': 'Bad group invite payload', 'ru': 'Некорректный payload инвайта группы'},
+  'group_invite_expired': {'en': 'Group invite expired', 'ru': 'Инвайт группы истек'},
   'group_invite_joined': {'en': 'Joined group {id}', 'ru': 'Присоединились к группе {id}'},
   'group_set_private': {'en': 'Group {id} is private now', 'ru': 'Группа {id} теперь защищенная'},
   'group_set_public': {'en': 'Group {id} is public now', 'ru': 'Группа {id} теперь публичная'},

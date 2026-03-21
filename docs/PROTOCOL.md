@@ -46,6 +46,7 @@
 
 Следует после заголовка. Для MSG/LOCATION/TELEMETRY/GROUP_MSG/SOS используется ChaCha20-Poly1305 (encrypted payload).  
 Для `GROUP_MSG`: `public` группы шифруются channel key, `private` группы — отдельным `groupKey` (32B) на каждый `groupId`.
+Для private-group invite в приложении используется payload с `keyVersion` и коротким TTL (`inviteExpiryEpochSec`) для безопасной ротации.
 
 ### 1.4 Node ID и никнейм
 
