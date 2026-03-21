@@ -16,9 +16,7 @@
 #define MUTEX_TIMEOUT_MS 50
 
 struct OverflowSlot {
-  uint8_t buf[PACKET_BUF_SIZE];
-  uint16_t len;
-  uint8_t txSf;
+  TxRequest req;
   bool used;
 };
 
@@ -39,14 +37,14 @@ void init() {
   s_inited = true;
 }
 
-bool push(const uint8_t* buf, size_t len, uint8_t txSf, bool priority) {
-  if (!s_inited || !buf || len > PACKET_BUF_SIZE) return false;
+bool push(const TxRequest& req) {
+  if (!s_inited || req.len == 0 || req.len > PACKET_BUF_SIZE) return false;
   if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
 
-  OverflowSlot* arr = priority ? s_priority : s_normal;
-  int cap = priority ? PRIORITY_SLOTS : NORMAL_SLOTS;
-  uint8_t* tail = priority ? &s_priTail : &s_normTail;
-  uint8_t* count = priority ? &s_priCount : &s_normCount;
+  OverflowSlot* arr = req.priority ? s_priority : s_normal;
+  int cap = req.priority ? PRIORITY_SLOTS : NORMAL_SLOTS;
+  uint8_t* tail = req.priority ? &s_priTail : &s_normTail;
+  uint8_t* count = req.priority ? &s_priCount : &s_normCount;
 
   if (*count >= cap) {
     xSemaphoreGive(s_mutex);
@@ -54,9 +52,8 @@ bool push(const uint8_t* buf, size_t len, uint8_t txSf, bool priority) {
   }
 
   OverflowSlot* slot = &arr[*tail];
-  memcpy(slot->buf, buf, len);
-  slot->len = (uint16_t)len;
-  slot->txSf = (txSf >= 7 && txSf <= 12) ? txSf : 0;
+  slot->req = req;
+  slot->req.txSf = (req.txSf >= 7 && req.txSf <= 12) ? req.txSf : 0;
   slot->used = true;
   *tail = (*tail + 1) % cap;
   (*count)++;
@@ -64,8 +61,8 @@ bool push(const uint8_t* buf, size_t len, uint8_t txSf, bool priority) {
   return true;
 }
 
-bool pop(SendQueueItem* item) {
-  if (!s_inited || !item) return false;
+bool pop(TxRequest* req) {
+  if (!s_inited || !req) return false;
   if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
 
   OverflowSlot* slot = nullptr;
@@ -89,9 +86,7 @@ bool pop(SendQueueItem* item) {
     return false;
   }
 
-  memcpy(item->buf, slot->buf, slot->len);
-  item->len = slot->len;
-  item->txSf = slot->txSf;
+  *req = slot->req;
   slot->used = false;
   *head = (*head + 1) % cap;
   xSemaphoreGive(s_mutex);
@@ -121,20 +116,27 @@ void drainApplyCommandsFromRadioQueue(void) {
   }
 }
 
-bool getNextTxPacket(SendQueueItem* item) {
-  if (!item) return false;
+bool getNextTxRequest(QueueHandle_t txRequestQueue, TxRequest* req) {
+  if (!req) return false;
   drainApplyCommandsFromRadioQueue();
+  if (txRequestQueue && xQueueReceive(txRequestQueue, req, 0) == pdTRUE) {
+    return true;
+  }
   RadioCmd cmd;
   if (radioCmdQueue && xQueueReceive(radioCmdQueue, &cmd, 0) == pdTRUE) {
     if (cmd.type == RadioCmdType::Tx) {
-      memcpy(item->buf, cmd.u.tx.buf, cmd.u.tx.len);
-      item->len = cmd.u.tx.len;
-      item->txSf = cmd.u.tx.txSf;
+      memset(req, 0, sizeof(*req));
+      memcpy(req->buf, cmd.u.tx.buf, cmd.u.tx.len);
+      req->len = cmd.u.tx.len;
+      req->txSf = cmd.u.tx.txSf;
+      req->priority = cmd.priority;
+      req->klass = TxRequestClass::data;
+      req->enqueueMs = millis();
       return true;
     }
     xQueueSendToFront(radioCmdQueue, &cmd, 0);
   }
-  return pop(item);
+  return pop(req);
 }
 
 }  // namespace send_overflow

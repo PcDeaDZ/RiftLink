@@ -104,6 +104,8 @@ static inline void scheduleHelloTx() {
 #define GPS_LOC_INTERVAL_MS 60000  // интервал отправки локации с GPS
 #define SF_ADAPT_INTERVAL_MS 30000 // адаптивный SF по качеству связи
 #define POLL_INTERVAL_MS   5000    // RIT: «присылайте пакеты для меня» каждые 5с (pipelining)
+#define POLL_JITTER_BASE_MS 20
+#define POLL_JITTER_SPAN_MS 220
 
 static uint32_t lastHello = 0;
 /** Абсолютное время следующего HELLO — джиттер задаётся один раз на период (не каждый проход loop). */
@@ -163,6 +165,33 @@ static void bcDedupAdd(const uint8_t* from, uint32_t msgId) {
   s_bcDedup[s_bcDedupIdx].from[1] = from[1];
   s_bcDedup[s_bcDedupIdx].msgId = msgId;
   s_bcDedupIdx = (s_bcDedupIdx + 1) % BC_DEDUP_SIZE;
+}
+
+#define PING_REPLY_GUARD_SIZE 16
+#define PING_REPLY_GUARD_MS 800
+struct PingReplyGuardEntry {
+  uint8_t from[2];
+  uint16_t pktId;
+  uint32_t seenMs;
+};
+static PingReplyGuardEntry s_pingReplyGuard[PING_REPLY_GUARD_SIZE];
+static uint8_t s_pingReplyGuardIdx = 0;
+
+static bool pingReplySeenRecently(const uint8_t* from, uint16_t pktId, uint32_t nowMs) {
+  for (int i = 0; i < PING_REPLY_GUARD_SIZE; i++) {
+    if (s_pingReplyGuard[i].from[0] != from[0] || s_pingReplyGuard[i].from[1] != from[1]) continue;
+    if (s_pingReplyGuard[i].pktId != pktId) continue;
+    if ((nowMs - s_pingReplyGuard[i].seenMs) <= PING_REPLY_GUARD_MS) return true;
+  }
+  return false;
+}
+
+static void pingReplyMarkSeen(const uint8_t* from, uint16_t pktId, uint32_t nowMs) {
+  s_pingReplyGuard[s_pingReplyGuardIdx].from[0] = from[0];
+  s_pingReplyGuard[s_pingReplyGuardIdx].from[1] = from[1];
+  s_pingReplyGuard[s_pingReplyGuardIdx].pktId = pktId;
+  s_pingReplyGuard[s_pingReplyGuardIdx].seenMs = nowMs;
+  s_pingReplyGuardIdx = (s_pingReplyGuardIdx + 1) % PING_REPLY_GUARD_SIZE;
 }
 
 #define UC_DEDUP_SIZE 32
@@ -450,6 +479,17 @@ struct HelloPlan {
   uint32_t phaseOffset;
 };
 
+static uint16_t shortId16(const uint8_t* id) {
+  return (uint16_t)(((uint16_t)id[0] << 8) | (uint16_t)id[1]);
+}
+
+static uint32_t computePollJitterMs() {
+  const uint8_t* self = node::getId();
+  uint16_t sid = shortId16(self);
+  uint32_t salt = (uint32_t)(self[2] ^ self[5] ^ (sid & 0xFF));
+  return POLL_JITTER_BASE_MS + (salt % POLL_JITTER_SPAN_MS);
+}
+
 /** Параметры периода HELLO (должны совпадать с логикой в loop до вызова sendHello). */
 static HelloPlan computeHelloPlan() {
   HelloPlan p;
@@ -466,8 +506,12 @@ static HelloPlan computeHelloPlan() {
     p.phaseOffset = beacon_sync::getSlotFor(node::getId()) * 400u;
   } else if (nNeigh == 1) {
     p.intervalMs = HELLO_INTERVAL_ONE_NEIGH_MS;
+    p.phaseOffset = beacon_sync::getSlotFor(node::getId()) * 240u;
   } else if (nNeigh >= 6) {
     p.intervalMs = 24000;
+    p.phaseOffset = beacon_sync::getSlotFor(node::getId()) * 140u;
+  } else {
+    p.phaseOffset = beacon_sync::getSlotFor(node::getId()) * 180u;
   }
   return p;
 }
@@ -579,7 +623,10 @@ void sendPoll() {
       node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_POLL, nullptr, 0);
   if (len == 0) return;
   uint8_t txSf = getDiscoverySf();
-  radio::send(pkt, len, txSf, false);
+  uint32_t jitterMs = computePollJitterMs();
+  queueDeferredSend(pkt, len, txSf, jitterMs);
+  RIFTLINK_DIAG("HELLO", "event=POLL_TX_DEFER sf=%u delay_ms=%lu",
+      (unsigned)txSf, (unsigned long)jitterMs);
 }
 
 void sendMsg(const uint8_t* to, const char* text, uint8_t ttlMinutes = 0,
@@ -676,6 +723,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 
   // from=broadcast — некорректно, отбрасываем
   if (node::isBroadcast(hdr.from) || node::isInvalidNodeId(hdr.from)) return;
+  // Любые self-echo из эфира игнорируем централизованно, чтобы не разгонять ping/hello/key loops.
+  if (node::isForMe(hdr.from)) {
+    RIFTLINK_DIAG("RADIO", "event=RX_DROP_DUP cause=self_from op=0x%02X pktId=%u",
+        (unsigned)hdr.opcode, (unsigned)hdr.pktId);
+    return;
+  }
 
   // OP_XOR_RELAY: попытка декодировать (если есть один из пакетов в кэше)
   if (hdr.opcode == protocol::OP_XOR_RELAY) {
@@ -1227,6 +1280,18 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 
     case protocol::OP_PING:
       if (node::isForMe(hdr.to) || node::isBroadcast(hdr.to)) {
+        uint32_t nowMs = millis();
+        uint16_t pingKey = hdr.pktId;
+        // Для старых ping без pktId используем fallback-ключ, чтобы не отвечать штормом.
+        if (pingKey == 0) {
+          pingKey = (uint16_t)(((uint16_t)hdr.from[0] << 8) | (uint16_t)hdr.from[1]);
+        }
+        if (pingReplySeenRecently(hdr.from, pingKey, nowMs)) {
+          RIFTLINK_DIAG("QUEUE", "event=TX_DROP cause=ping_dup_guard from=%02X%02X pktId=%u",
+              hdr.from[0], hdr.from[1], (unsigned)pingKey);
+          break;
+        }
+        pingReplyMarkSeen(hdr.from, pingKey, nowMs);
         uint8_t pongPkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
         size_t pongLen = protocol::buildPacket(pongPkt, sizeof(pongPkt),
             node::getId(), hdr.from, 31, protocol::OP_PONG, nullptr, 0);

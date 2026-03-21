@@ -296,12 +296,10 @@ static bool selectDisplaySPI() {
 #if defined(USE_EINK)
   // Сначала пауза радио в планировщике (standby), затем один takeMutex на время SPI E-Ink.
   if (asyncRequestDisplaySpiSession(pdMS_TO_TICKS(5000))) {
-    if (!radio::takeMutex(pdMS_TO_TICKS(5000))) {
-      asyncSignalDisplaySpiSessionDone();
-      Serial.println("[RiftLink] E-Ink SPI: radio mutex timeout after pause, skip reconfig");
-      return false;
-    }
-    s_einkSpiRadioLocked = true;
+    // RADIO_FSM_V2: арбитр уже перевёл радио в безопасное DISPLAY_HOLD окно.
+    // Здесь не удерживаем radio mutex на весь refresh (секунды), чтобы не блокировать RX/TX path.
+    radio::setArbiterHold(true);
+    s_einkSpiRadioLocked = false;
     s_einkDisplaySpiSessionActive = true;
   } else
 #endif
@@ -329,6 +327,7 @@ static void releaseDisplaySPI() {
 #if defined(USE_EINK)
   if (s_einkDisplaySpiSessionActive) {
     s_einkDisplaySpiSessionActive = false;
+    radio::setArbiterHold(false);
     asyncSignalDisplaySpiSessionDone();
   }
 #endif

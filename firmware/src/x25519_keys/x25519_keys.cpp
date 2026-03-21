@@ -41,8 +41,12 @@ static SemaphoreHandle_t s_mutex = nullptr;
 #define KEY_EXCHANGE_THROTTLE_MS 8000    // первичный обмен без ключа: быстрее retry, чтобы не застрять в deadlock
 #define KEY_RESPONSE_THROTTLE_MS 60000  // ответ когда ключ уже был — макс. раз в 60с (пир может повторить)
 #define KEY_DEBOUNCE_MS 1500             // мин. пауза между отправками одному пиру (HELLO+KEY_EXCHANGE подряд → 1 пакет)
-#define KEY_INITIAL_JITTER_MIN_MS 25
-#define KEY_INITIAL_JITTER_SPAN_MS 180
+#define KEY_HELLO_SLOT_BASE_MS 35
+#define KEY_HELLO_SLOT_STEP_MS 110
+#define KEY_HELLO_SLOT_JITTER_SPAN_MS 25
+#define KEY_RESP_SLOT_BASE_MS 18
+#define KEY_RESP_SLOT_STEP_MS 70
+#define KEY_RESP_SLOT_JITTER_SPAN_MS 18
 struct ThrottleEntry { uint8_t peerId[protocol::NODE_ID_LEN]; uint32_t lastSend; };
 static ThrottleEntry s_throttle[4];
 static uint32_t s_lastKeyTxReadyMs = 0;
@@ -61,15 +65,30 @@ static const char* safeReason(const char* reason) {
   return (reason && reason[0]) ? reason : "-";
 }
 
-static uint32_t computeInitialJitterMs(const uint8_t* peerId) {
+static uint16_t shortId16(const uint8_t* id) {
+  return (uint16_t)(((uint16_t)id[0] << 8) | (uint16_t)id[1]);
+}
+
+static uint32_t computeHelloSlotJitterMs(const uint8_t* peerId) {
   if (!peerId) return 0;
   const uint8_t* self = node::getId();
-  uint32_t h = 2166136261u;
-  for (int i = 0; i < protocol::NODE_ID_LEN; i++) {
-    h ^= (uint32_t)(peerId[i] ^ self[i]);
-    h *= 16777619u;
-  }
-  return KEY_INITIAL_JITTER_MIN_MS + (h % KEY_INITIAL_JITTER_SPAN_MS);
+  uint16_t selfShort = shortId16(self);
+  uint16_t peerShort = shortId16(peerId);
+  uint32_t slot = (selfShort < peerShort) ? 0u : 1u;
+  uint32_t salt = (uint32_t)(self[7] ^ peerId[7] ^ self[3] ^ peerId[3]);
+  uint32_t jitter = salt % KEY_HELLO_SLOT_JITTER_SPAN_MS;
+  return KEY_HELLO_SLOT_BASE_MS + (slot * KEY_HELLO_SLOT_STEP_MS) + jitter;
+}
+
+static uint32_t computeKeyResponseSlotJitterMs(const uint8_t* peerId) {
+  if (!peerId) return 0;
+  const uint8_t* self = node::getId();
+  uint16_t selfShort = shortId16(self);
+  uint16_t peerShort = shortId16(peerId);
+  uint32_t slot = (selfShort < peerShort) ? 0u : 1u;
+  uint32_t salt = (uint32_t)(self[6] ^ peerId[6] ^ self[1] ^ peerId[1]);
+  uint32_t jitter = salt % KEY_RESP_SLOT_JITTER_SPAN_MS;
+  return KEY_RESP_SLOT_BASE_MS + (slot * KEY_RESP_SLOT_STEP_MS) + jitter;
 }
 
 namespace x25519_keys {
@@ -314,20 +333,30 @@ void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, c
   // Всегда текущий mesh SF (txSf=0) — без отдельного SF12 для KEY при фиксированном SF в настройках.
   if (len > 0) {
     pkt_cache::add(peerId, pktId, pkt, len);
-    // Для первичного handshake (до готового ключа) разводим симметричные TX по времени:
-    // оба узла одновременно шлют KEY после HELLO и часто коллизят.
-    if (!forceSend && !hadKeyBefore) {
-      uint32_t jitterMs = computeInitialJitterMs(peerId);
+    // Для первичного handshake (до готового ключа) всегда используем асимметрию по shortId,
+    // чтобы hello/retry не уходили одновременно на двух узлах.
+    bool primaryPath = (!forceSend && !hadKeyBefore);
+    bool keyRxResponse = (forceSend && reason && strcmp(reason, "key_rx") == 0);
+    if (primaryPath) {
+      uint32_t jitterMs = computeHelloSlotJitterMs(peerId);
       queueDeferredSend(pkt, len, 0, jitterMs);
       s_lastKeyTxReadyMs = millis();
-      RIFTLINK_DIAG("KEY", "event=KEY_TX_DEFER peer=%02X%02X pktId=%u len=%u delay_ms=%lu reason=%s",
-          peerId[0], peerId[1], (unsigned)pktId, (unsigned)len, (unsigned long)jitterMs, safeReason(reason));
+      RIFTLINK_DIAG("KEY", "event=KEY_TX_DEFER peer=%02X%02X pktId=%u len=%u delay_ms=%lu reason=%s slot_mode=%s",
+          peerId[0], peerId[1], (unsigned)pktId, (unsigned)len, (unsigned long)jitterMs,
+          safeReason(reason), "shortid_primary");
+    } else if (keyRxResponse) {
+      uint32_t jitterMs = computeKeyResponseSlotJitterMs(peerId);
+      queueDeferredSend(pkt, len, 0, jitterMs);
+      s_lastKeyTxReadyMs = millis();
+      RIFTLINK_DIAG("KEY", "event=KEY_TX_DEFER peer=%02X%02X pktId=%u len=%u delay_ms=%lu reason=%s slot_mode=%s",
+          peerId[0], peerId[1], (unsigned)pktId, (unsigned)len, (unsigned long)jitterMs,
+          safeReason(reason), "shortid_keyrx");
     } else {
       char reasonBuf[40];
       RIFTLINK_DIAG("KEY", "event=KEY_TX_READY peer=%02X%02X pktId=%u len=%u txSf=mesh priority=1",
           peerId[0], peerId[1], (unsigned)pktId, (unsigned)len);
       // priority: не теряться за ACK/очередью — иначе «Sending KEY_EXCHANGE» без фактического TX и залипания.
-      if (!radio::send(pkt, len, 0, true, reasonBuf, sizeof(reasonBuf))) {
+      if (!queueTxPacket(pkt, len, 0, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
         RIFTLINK_DIAG("KEY", "event=KEY_TX_NOT_QUEUED peer=%02X%02X pktId=%u cause=%s",
             peerId[0], peerId[1], (unsigned)pktId, reasonBuf[0] ? reasonBuf : "?");
         RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE tx NOT queued (%s) to %02X%02X pktId=%u\n",

@@ -98,7 +98,7 @@ static void flushEntry(FusionEntry* e) {
       if (s_onSingleFlush) s_onSingleFlush(e->to, e->msgId[0], pkt, pktLen, txSf);
       if (bls_n::sendRtsBeforeLora(e->to, pktLen)) delay(50);
       if (esp_now_slots::sendRtsBeforeLora(e->to, pktLen)) delay(50);
-      radio::send(pkt, pktLen, txSf);
+      (void)queueTxPacket(pkt, pktLen, txSf, false, TxRequestClass::data);
     }
   } else {
     uint8_t batchPayload[protocol::MAX_PAYLOAD];
@@ -124,7 +124,7 @@ static void flushEntry(FusionEntry* e) {
         if (bls_n::shouldDeferTx(e->to) || esp_now_slots::shouldDeferTx(e->to)) return;  // retry next flush
         if (bls_n::sendRtsBeforeLora(e->to, pktLen)) delay(50);
         if (esp_now_slots::sendRtsBeforeLora(e->to, pktLen)) delay(50);
-        radio::send(pkt, pktLen, txSf);
+        (void)queueTxPacket(pkt, pktLen, txSf, false, TxRequestClass::data);
         if (s_onBatchSent) s_onBatchSent(e->to, e->msgId, e->count);
       }
     }

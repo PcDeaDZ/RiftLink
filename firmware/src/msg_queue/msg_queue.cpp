@@ -258,7 +258,8 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
     if (esp_now_slots::sendRtsBeforeLora(to, slot->pktLen)) delay(50);
 
     // Unicast: только одна отправка. Повтор — только при отсутствии ACK (update), не слепые копии
-    bool ok = radio::send(slot->pkt, slot->pktLen, txSf, critical);
+    bool ok = queueTxPacket(slot->pkt, slot->pktLen, txSf, critical,
+        critical ? TxRequestClass::critical : TxRequestClass::data);
     if (!ok) {
       RIFTLINK_LOG_ERR("[RiftLink] MSG radioCmdQueue full, to %02X%02X — retry via update\n", to[0], to[1]);
     }
@@ -306,7 +307,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
     xSemaphoreGive(s_mutex);
     if (len > 0) {
       uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
-      if (!radio::send(pkt, len, sf)) {
+      if (!queueTxPacket(pkt, len, sf, false, TxRequestClass::data)) {
         RIFTLINK_LOG_ERR("[RiftLink] MSG broadcast radioCmdQueue full, drop\n");
         return false;
       }
@@ -376,7 +377,7 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
   xSemaphoreGive(s_mutex);
   if (len > 0) {
     uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
-    if (!radio::send(pkt, len, sf)) {
+    if (!queueTxPacket(pkt, len, sf, false, TxRequestClass::data)) {
       RIFTLINK_LOG_ERR("[RiftLink] MSG group radioCmdQueue full, drop\n");
       return false;
     }
@@ -423,7 +424,7 @@ bool enqueueSos(const char* text) {
   if (len == 0) return false;
   uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
   if (sf == 0) sf = 12;
-  if (!radio::send(pkt, len, sf, true)) return false;
+  if (!queueTxPacket(pkt, len, sf, true, TxRequestClass::critical)) return false;
   if (s_onBroadcastSent) s_onBroadcastSent(msgId);
   return true;
 }
@@ -581,7 +582,8 @@ void update() {
         if (esp_now_slots::sendRtsBeforeLora(p->to, p->pktLen)) delay(50);
         p->retries++;
         p->lastSendTime = now;
-        radio::send(p->pkt, p->pktLen, p->txSf, true);
+        (void)queueTxPacket(p->pkt, p->pktLen, p->txSf, true,
+            p->critical ? TxRequestClass::critical : TxRequestClass::data);
       }
       continue;
     }
@@ -621,7 +623,8 @@ void update() {
     p->retries++;
     p->lastSendTime = now;
     neighbors::recordAckSent(p->to);
-    radio::send(p->pkt, p->pktLen, p->txSf, p->critical);
+    (void)queueTxPacket(p->pkt, p->pktLen, p->txSf, p->critical,
+        p->critical ? TxRequestClass::critical : TxRequestClass::data);
   }
   xSemaphoreGive(s_mutex);
 }

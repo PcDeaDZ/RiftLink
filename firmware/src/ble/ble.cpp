@@ -43,6 +43,7 @@
 #include <nvs.h>
 #include <esp_random.h>
 #include <esp_wifi.h>
+#include <esp_log.h>
 
 #define NVS_BLE_NAMESPACE "riftlink"
 #define NVS_KEY_BLE_PIN   "ble_pin"
@@ -1063,6 +1064,9 @@ bool init() {
     Serial.println("[BLE] NimBLEDevice::init FAILED — устройство не будет видно в скане BLE");
     return false;
   }
+  // Reduce NimBLE scan log spam (and stack pressure in nimble_host logging path).
+  esp_log_level_set("NimBLEScan", ESP_LOG_WARN);
+  esp_log_level_set("NimBLEDevice", ESP_LOG_WARN);
   NimBLEDevice::setPower(ESP_PWR_LVL_P3);
   NimBLEDevice::setMTU(517);
 
@@ -1786,7 +1790,9 @@ void update() {
         ;  // ждём перед повторной попыткой
       else {
         if (s_blsScanEnded) s_blsScanEnded = false;
-        pScan->setScanCallbacks(&s_blsScanCallbacks, true);
+        // Do not request duplicate scan callbacks; duplicates create callback storms and can
+        // overflow nimble_host stack on dense RF environments.
+        pScan->setScanCallbacks(&s_blsScanCallbacks, false);
         if (pScan->start(BLS_SCAN_DURATION_SEC, false, false)) {
           s_blsScanActive = true;
           s_blsScanLastStart = millis();

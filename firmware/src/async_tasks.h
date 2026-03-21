@@ -7,6 +7,7 @@
 
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
+#include "async_queues.h"
 
 /** Очереди + задачи + async radio/display — по первому использованию (экономия heap на старте). */
 bool asyncInfraEnsure();
@@ -33,13 +34,35 @@ void asyncSignalDisplaySpiSessionDone(void);
 bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf = 0, bool priority = false,
     char* reasonBuf = nullptr, size_t reasonLen = 0);
 
+enum class TxRequestClass : uint8_t {
+  critical = 0,
+  control = 1,
+  data = 2,
+  voice = 3,
+};
+
+struct TxRequest {
+  uint8_t buf[PACKET_BUF_SIZE];
+  uint16_t len = 0;
+  uint8_t txSf = 0;
+  bool priority = false;
+  TxRequestClass klass = TxRequestClass::data;
+  uint32_t enqueueMs = 0;
+};
+
+/** Единая постановка TX-запроса в пайплайн Radio FSM (v2) или legacy scheduler (fallback). */
+bool queueTxRequest(const TxRequest& req, char* reasonBuf = nullptr, size_t reasonLen = 0);
+/** Удобный helper для существующих мест: автоматически собирает TxRequest. */
+bool queueTxPacket(const uint8_t* buf, size_t len, uint8_t txSf, bool priority, TxRequestClass klass,
+    char* reasonBuf = nullptr, size_t reasonLen = 0);
+
 /** ACK с задержкой — без блокировки packetTask, RX window для следующего MSG */
-void queueDeferredAck(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs = 50);
+void queueDeferredAck(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs = 50, bool applyAsym = true);
 /** Любой пакет с задержкой — MSG copy2, broadcast 2–3, KEY_EXCHANGE jitter */
-void queueDeferredSend(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs);
+void queueDeferredSend(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs, bool applyAsym = true);
 /** Relay с задержкой — Managed flooding: отмена при услышанной ретрансляции */
 void queueDeferredRelay(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t delayMs,
-    const uint8_t* from, uint32_t payloadHash);
+    const uint8_t* from, uint32_t payloadHash, bool applyAsym = true);
 /** Уведомить: услышали ретрансляцию (from+hash) — отменить наш pending relay */
 void relayHeard(const uint8_t* from, uint32_t payloadHash);
 /** Переносит готовые deferred ACK/send в radioCmdQueue (RadioCmd::Tx). Вызывается из radioSchedulerTask. */
@@ -60,3 +83,7 @@ void queueDisplayLongPress(uint8_t screen);
 void queueDisplayWake();
 /** Поставить CMD_BLINK_LED — мигание без блокировки loop */
 void queueDisplayLedBlink();
+
+/** Feature flag Radio FSM v2 (continuous RX + arbiter). */
+bool asyncIsRadioFsmV2Enabled();
+void asyncSetRadioFsmV2Enabled(bool enabled);

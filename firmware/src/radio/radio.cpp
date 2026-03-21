@@ -30,6 +30,12 @@ static inline void radioSendReason(char* buf, size_t buflen, const char* msg) {
 static SemaphoreHandle_t s_radioMutex = nullptr;
 /** Планировщик/loop в окне RX (чип слушает эфир) — CAD не должен делать standby поверх RX. */
 static std::atomic<bool> s_rxListenActive{false};
+static std::atomic<bool> s_arbiterHold{false};
+static std::atomic<uint32_t> s_dio1IrqCount{0};
+
+static void IRAM_ATTR onDio1Rise() {
+  s_dio1IrqCount.fetch_add(1, std::memory_order_relaxed);
+}
 
 // Heltec WiFi LoRa 32 V3/V4 pins (Meshtastic variant.h)
 #define LORA_NSS   8
@@ -203,6 +209,8 @@ bool init() {
 
   lora->setCRC(2);  // CRC 2 bytes
   lora->setSyncWord(0x12);  // Private network
+  pinMode(LORA_DIO1, INPUT);
+  attachInterrupt(digitalPinToInterrupt(LORA_DIO1), onDio1Rise, RISING);
   s_meshSf = initSf;
   s_hwSf = initSf;
   s_bw = initBw;
@@ -216,11 +224,20 @@ bool init() {
 
 bool takeMutex(TickType_t timeout) {
   if (!s_radioMutex) return true;
+  if (s_arbiterHold.load(std::memory_order_relaxed)) return false;
   return xSemaphoreTake(s_radioMutex, timeout) == pdTRUE;
 }
 
 void releaseMutex() {
   if (s_radioMutex) xSemaphoreGive(s_radioMutex);
+}
+
+void setArbiterHold(bool on) {
+  s_arbiterHold.store(on, std::memory_order_relaxed);
+}
+
+bool isArbiterHold() {
+  return s_arbiterHold.load(std::memory_order_relaxed);
 }
 
 void setRxListenActive(bool on) {
@@ -257,6 +274,7 @@ void notifyCongestion() {
 void setAsyncMode(bool on) { s_asyncMode = on; }
 
 bool sendDirectInternal(const uint8_t* data, size_t len, char* reasonBuf, size_t reasonLen) {
+  s_dio1IrqCount.store(0, std::memory_order_relaxed);  // не читать старые TX/RX IRQ как "новый RX"
   if (!lora || len > RADIOLIB_SX126X_MAX_PACKET_LENGTH) {
     radioSendReason(reasonBuf, reasonLen, !lora ? "no_lora" : "pkt_too_long");
     RIFTLINK_DIAG("RADIO", "event=TX_RESULT ok=0 cause=%s len=%u",
@@ -385,6 +403,33 @@ int receiveAsync(uint8_t* buf, size_t maxLen) {
   if (st < 0) return -1;
   lora->standby();  // гарантировать standby после RX — иначе следующий TX может дать -705
   return (int)len;
+}
+
+bool isRxPacketReadyUnderMutex() {
+  if (!lora) return false;
+  size_t len = lora->getPacketLength();
+  return len > 0;
+}
+
+int readReceivedPacketUnderMutex(uint8_t* buf, size_t maxLen) {
+  if (!lora || !buf || maxLen == 0) return -1;
+  size_t len = lora->getPacketLength();
+  if (len == 0) return 0;
+  if (len > maxLen) {
+    lora->standby();
+    return -1;
+  }
+  int16_t st = lora->readData(buf, len);
+  if (st == RADIOLIB_ERR_RX_TIMEOUT) return 0;
+  if (st < 0) return -1;
+  return (int)len;
+}
+
+bool consumeIrqEvent() {
+  // Coalesce IRQ burst: one logical RX event per scheduler turn.
+  // This prevents repeated processing of the same latched packet on noisy/bouncy DIO1.
+  uint32_t cnt = s_dio1IrqCount.exchange(0, std::memory_order_relaxed);
+  return cnt > 0;
 }
 
 int getLastRssi() {

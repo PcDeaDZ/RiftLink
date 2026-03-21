@@ -41,6 +41,9 @@ bool sendDirectInternal(const uint8_t* data, size_t len, char* reasonBuf = nullp
 /** Только: планировщик радио, E-Ink SPI (Paper). CAD — внутри `sendDirectInternal`. */
 bool takeMutex(TickType_t timeout);
 void releaseMutex();
+/** Внешний арбитр (RadioFSM DISPLAY_HOLD) временно запрещает любой новый захват radio mutex. */
+void setArbiterHold(bool on);
+bool isArbiterHold();
 /** Планировщик: между startReceive и receiveAsync mutex отпускается на delay/sleep. */
 void setRxListenActive(bool on);
 /** Только под `takeMutex`: перевести SX1262 в standby (перед переключением SPI на E-Ink). */
@@ -49,6 +52,12 @@ int receive(uint8_t* buf, size_t maxLen);
 /** Асинхронный приём: startReceiveWithTimeout + readData. Для power save с light sleep. */
 bool startReceiveWithTimeout(uint32_t timeoutMs);
 int receiveAsync(uint8_t* buf, size_t maxLen);
+/** Проверка готовности RX пакета (только под takeMutex). */
+bool isRxPacketReadyUnderMutex();
+/** Чтение готового RX пакета без принудительного standby (только под takeMutex). */
+int readReceivedPacketUnderMutex(uint8_t* buf, size_t maxLen);
+/** true один раз на новое DIO1-событие (RX/TX IRQ), затем сбрасывается. */
+bool consumeIrqEvent();
 /** RSSI последнего принятого пакета (dBm), 0 если недоступно */
 int getLastRssi();
 void applyRegion(float freq, int power);  // низкоуровнево; из приложения — requestApplyRegion

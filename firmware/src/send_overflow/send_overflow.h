@@ -7,6 +7,7 @@
 #pragma once
 
 #include "async_queues.h"
+#include "async_tasks.h"
 #include <cstddef>
 #include <cstdint>
 
@@ -14,14 +15,14 @@ namespace send_overflow {
 
 void init();
 /** Добавить пакет. priority=true — ACK, идёт в приоритетные слоты. */
-bool push(const uint8_t* buf, size_t len, uint8_t txSf, bool priority);
-/** Забрать следующий пакет для TX (приоритетные первыми). Возвращает true если есть. */
-bool pop(SendQueueItem* item);
+bool push(const TxRequest& req);
+/** Забрать следующий TX_Request (приоритетные первыми). */
+bool pop(TxRequest* req);
 
 /** Снять с головы radioCmdQueue все ApplyRegion/ApplySf до первого Tx. Только под mutex радио. */
 void drainApplyCommandsFromRadioQueue(void);
 
-/** Единый источник: radioCmdQueue (только Tx) или send_overflow. */
-bool getNextTxPacket(SendQueueItem* item);
+/** Единый источник: txRequestQueue/radioCmdQueue(Tx legacy) или send_overflow. */
+bool getNextTxRequest(QueueHandle_t txRequestQueue, TxRequest* req);
 
 }  // namespace send_overflow
