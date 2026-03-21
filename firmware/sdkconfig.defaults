@@ -2,7 +2,7 @@
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 
 # NimBLE host: IDF default 4096. Безопасно при LOG_LEVEL ≤ 1 (verbose log расходует стек).
-CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=4096
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192
 
 # NimBLE heap reduction (V3 OLED без PSRAM — всё в internal SRAM):
 # 1 connection (телефон ↔ устройство), 1 bond, 2 CCCD (1 NOTIFY char), MSYS 8 блоков (MTU 517)

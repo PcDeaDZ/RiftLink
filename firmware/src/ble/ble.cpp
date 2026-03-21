@@ -38,6 +38,7 @@
 #include <mbedtls/base64.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/queue.h>
 #include <esp_heap_caps.h>
 #include <stdlib.h>
 #include <nvs.h>
@@ -120,6 +121,7 @@ static RiftTxCharacteristic* pTxChar = nullptr;
 static bool s_connected = false;
 static bool s_bleInited = false;
 static bool s_bleDeinitInProgress = false;
+static uint32_t s_advRetryNotBeforeMs = 0;
 // Отложенные ответы — тяжёлые notify вызываем из main loop, не из callback (Stack canary)
 static volatile bool s_pendingInfo = false;
 static uint32_t s_pendingInfoNotBeforeMs = 0;
@@ -195,6 +197,9 @@ static uint8_t s_voiceTo[protocol::NODE_ID_LEN];
 static bool s_blsScanActive = false;
 static bool s_blsScanEnded = false;
 static uint32_t s_blsScanLastStart = 0;
+// Stability-first default: scanning during active GATT session may overload nimble_host
+// in dense BLE environments. Keep off unless explicitly needed for BLS tuning.
+static constexpr bool BLS_SCAN_DURING_GATT_SESSION = false;
 #define BLS_SCAN_DURATION_SEC 15
 #define BLS_SCAN_RESTART_DELAY_MS 500
 /** NimBLE scan резервирует internal heap; при ~1KB после Wi‑Fi+async — BLE_INIT: Malloc failed */
@@ -235,6 +240,11 @@ static bool bleAdvGetMfgData(const uint8_t* pl, size_t plLen, uint8_t index,
 #endif /* !RIFTLINK_DISABLE_BLS_N */
 
 static uint8_t s_notifyTxBuf[BLE_ATT_MAX_JSON_BYTES];
+struct BleCmdQueueItem {
+  uint16_t len;
+  uint8_t data[BLE_ATT_MAX_JSON_BYTES];
+};
+static QueueHandle_t s_bleCmdQueue = nullptr;
 
 static const char* transportModeTag() {
   return (radio_mode::current() == radio_mode::WIFI) ? "wifi" : "ble";
@@ -367,6 +377,14 @@ static BlsScanCallbacks s_blsScanCallbacks;
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
     s_connected = true;
+#if !defined(RIFTLINK_DISABLE_BLS_N)
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+    if (pScan && pScan->isScanning()) {
+      pScan->stop();
+      s_blsScanActive = false;
+      s_blsScanEnded = true;
+    }
+#endif
     displayWakeRequest();
     vTaskDelay(pdMS_TO_TICKS(5));   // краткая пауза для GATT
   }
@@ -385,9 +403,12 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 #endif
     vTaskDelay(pdMS_TO_TICKS(50));  // дать стеку освободить соединение
     NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
-    if (!pAdv->isAdvertising()) {
-      pAdv->start();
-      Serial.println("[BLE] Advertising restarted after disconnect");
+    if (!pAdv->isAdvertising() && millis() >= s_advRetryNotBeforeMs) {
+      if (pAdv->start()) {
+        Serial.println("[BLE] Advertising restarted after disconnect");
+      } else {
+        s_advRetryNotBeforeMs = millis() + 2000;
+      }
     }
   }
 };
@@ -406,8 +427,19 @@ class RiftTxCharacteristic : public NimBLECharacteristic {
  protected:
   void writeEvent(const uint8_t* val, uint16_t len, NimBLEConnInfo& connInfo) override {
     (void)connInfo;
-    setValue(val, len);
-    bleHandleTxJson(val, len);
+    if (!val || len == 0 || len > BLE_ATT_MAX_JSON_BYTES) return;
+    if (!s_bleCmdQueue) return;
+    BleCmdQueueItem item{};
+    item.len = len;
+    memcpy(item.data, val, len);
+    if (xQueueSend(s_bleCmdQueue, &item, 0) != pdTRUE) {
+      static uint32_t s_lastCmdDropLogMs = 0;
+      uint32_t now = millis();
+      if (now - s_lastCmdDropLogMs >= 2000) {
+        s_lastCmdDropLogMs = now;
+        Serial.println("[BLE] cmd queue full, drop");
+      }
+    }
   }
 };
 
@@ -1065,8 +1097,11 @@ bool init() {
     return false;
   }
   // Reduce NimBLE scan log spam (and stack pressure in nimble_host logging path).
+  esp_log_level_set("NimBLE", ESP_LOG_WARN);
   esp_log_level_set("NimBLEScan", ESP_LOG_WARN);
   esp_log_level_set("NimBLEDevice", ESP_LOG_WARN);
+  esp_log_level_set("NimBLEServer", ESP_LOG_WARN);
+  esp_log_level_set("NimBLEAdvertising", ESP_LOG_WARN);
   NimBLEDevice::setPower(ESP_PWR_LVL_P3);
   NimBLEDevice::setMTU(517);
 
@@ -1075,6 +1110,14 @@ bool init() {
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
   NimBLEDevice::setSecurityPasskey(s_passkey);
   Serial.printf("[BLE] Passkey: %06u\n", (unsigned)s_passkey);
+  if (!s_bleCmdQueue) {
+    s_bleCmdQueue = xQueueCreate(6, sizeof(BleCmdQueueItem));
+    if (!s_bleCmdQueue) {
+      Serial.println("[BLE] cmd queue alloc FAILED");
+      NimBLEDevice::deinit(true);
+      return false;
+    }
+  }
 
   pServer = NimBLEDevice::createServer();
   ServerCallbacks* serverCallbacks = new (std::nothrow) ServerCallbacks();
@@ -1136,6 +1179,10 @@ void deinit() {
   pRxChar = nullptr;
   pServer = nullptr;
   NimBLEDevice::deinit(true);
+  if (s_bleCmdQueue) {
+    vQueueDelete(s_bleCmdQueue);
+    s_bleCmdQueue = nullptr;
+  }
   s_bleInited = false;
   s_bleDeinitInProgress = false;
   Serial.printf("[BLE] Deinit done, heap free=%u\n",
@@ -1703,6 +1750,14 @@ void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen) {
 }
 
 void update() {
+  if (s_bleCmdQueue) {
+    BleCmdQueueItem cmdItem{};
+    // Parse commands outside nimble_host context to avoid stack canary under heavy app traffic.
+    for (int i = 0; i < 3; i++) {
+      if (xQueueReceive(s_bleCmdQueue, &cmdItem, 0) != pdTRUE) break;
+      bleHandleTxJson(cmdItem.data, cmdItem.len);
+    }
+  }
   // GPS: применить в main loop (thread-safe: setPins удаляет s_serial, main читает в gps::update)
   if (s_pendingGps) {
     s_pendingGps = false;
@@ -1764,8 +1819,10 @@ void update() {
       radio_mode::current() == radio_mode::BLE &&
       pServer && !s_connected && pServer->getConnectedCount() == 0) {
     NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
-    if (!pAdv->isAdvertising()) {
-      pAdv->start();
+    if (!pAdv->isAdvertising() && millis() >= s_advRetryNotBeforeMs) {
+      if (!pAdv->start()) {
+        s_advRetryNotBeforeMs = millis() + 2000;
+      }
     }
   }
 
@@ -1774,6 +1831,16 @@ void update() {
   // OLED + Wi‑Fi: после esp_wifi_init остаётся мало internal — не стартуем scan без порога (иначе NimBLE BLE_INIT).
 #if !defined(USE_EINK) && !defined(RIFTLINK_DISABLE_BLS_N)
   if (s_connected) {
+    // Hard safety: never keep BLE scan active during live GATT session.
+    // In dense RF this can overflow nimble_host stack (stack canary).
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+    if (pScan && pScan->isScanning()) {
+      pScan->stop();
+      s_blsScanActive = false;
+      s_blsScanEnded = true;
+    }
+  }
+  if (s_connected && BLS_SCAN_DURING_GATT_SESSION) {
     static uint32_t s_blsHeapSkipLogMs = 0;
     if (!blsScanHeapOk()) {
       if (millis() - s_blsHeapSkipLogMs > 60000) {
