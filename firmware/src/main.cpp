@@ -79,11 +79,12 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #define PENDING_REDRAW_RETRY_MS 2500  // retry смены вкладки, если дисплей не принял за 2.5с
 
 #define HELLO_INTERVAL_MS  30000  // 30с — спокойный режим (Meshtastic: position 15мин, telemetry 30мин)
-#define HELLO_INTERVAL_AGGRESSIVE_MS 8000   // 8с — быстрый discovery при 0 соседях
+#define HELLO_INTERVAL_AGGRESSIVE_MS 9000   // 9с — быстрый discovery при 0 соседях
+#define HELLO_INTERVAL_ONE_NEIGH_MS 20000   // 20с при наличии одного соседа
 #define HELLO_JITTER_MS    3000   // ±3с — при 1+ соседях
 #define HELLO_JITTER_ZERO_MS 500  // ±0.5с при 0 соседях — меньше разброс для быстрого discovery
-/** Минимум между попытками HELLO в эфир: loop (core 0) и handlePacket/packetTask (core 1) без mutex → иначе пачки «HELLO sent» и коллизии. */
-#define HELLO_MIN_AIR_GAP_MS 1800
+/** Жёсткий rate-limit HELLO: даже при баге дедлайна не шумим чаще, чем раз в 8с. */
+#define HELLO_HARD_MIN_INTERVAL_MS 8000
 /** После drop (очередь/CAD) не долбить sendHello каждые ~10 ms */
 #define HELLO_DROP_RETRY_MS 350
 #define HELLO_QUIET_AFTER_KEY_MS 2500  // после KEY дать эфиру окно под ответный KEY
@@ -441,14 +442,13 @@ static HelloPlan computeHelloPlan() {
   int nNeigh = neighbors::getCount();
   if (nNeigh == 0) {
     uint32_t zeroElapsed = (s_zeroNeighSince == 0) ? 0 : (millis() - s_zeroNeighSince);
-    if (zeroElapsed >= 300000) p.intervalMs = 30000;
-    else if (zeroElapsed >= 120000) p.intervalMs = 15000;
+    if (zeroElapsed >= 300000) p.intervalMs = 15000;
+    else if (zeroElapsed >= 120000) p.intervalMs = 12000;
     else p.intervalMs = HELLO_INTERVAL_AGGRESSIVE_MS;
     p.jitterMs = HELLO_JITTER_ZERO_MS;
     p.phaseOffset = beacon_sync::getSlotFor(node::getId()) * 400u;
   } else if (nNeigh == 1) {
-    uint32_t oneElapsed = (s_oneNeighSince == 0) ? 0 : (millis() - s_oneNeighSince);
-    p.intervalMs = (oneElapsed < 120000) ? HELLO_INTERVAL_AGGRESSIVE_MS : HELLO_INTERVAL_MS;
+    p.intervalMs = HELLO_INTERVAL_ONE_NEIGH_MS;
   } else if (nNeigh >= 6) {
     p.intervalMs = 24000;
   }
@@ -483,10 +483,11 @@ static bool sendHello() {
     s_nextHelloDueMs = s_nextHelloAfterDropMs;
     return false;
   }
-  // Минимум между реальными HELLO в эфире; иначе due «в прошлом», sendHello вызывается бесконечно и молча
-  // возвращает false — пользователь видит «HELLO перестали», хотя просто AIR_GAP.
-  if (s_lastHelloAirMs != 0 && (now - s_lastHelloAirMs) < HELLO_MIN_AIR_GAP_MS) {
-    s_nextHelloDueMs = s_lastHelloAirMs + HELLO_MIN_AIR_GAP_MS;
+  // Абсолютный лимит HELLO, чтобы исключить любой шторм при пересчётах дедлайна.
+  if (s_lastHelloAirMs != 0 && (now - s_lastHelloAirMs) < HELLO_HARD_MIN_INTERVAL_MS) {
+    s_nextHelloDueMs = s_lastHelloAirMs + HELLO_HARD_MIN_INTERVAL_MS;
+    RIFTLINK_DIAG("HELLO", "event=HELLO_HOLD cause=hard_rate_limit quiet_ms=%lu",
+        (unsigned long)(s_nextHelloDueMs - now));
     return false;
   }
   uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
@@ -1616,12 +1617,7 @@ void loop() {
     s_zeroNeighSince = 0;  // появился сосед — сбросить backoff
     s_oneNeighSince = 0;
   }
-  if (nNeigh != s_helloPlannerLastN) {
-    s_helloPlannerLastN = nNeigh;
-    if (s_nextHelloDueMs == 0) {
-      s_nextHelloDueMs = millis();
-    }
-  }
+  if (nNeigh != s_helloPlannerLastN) s_helloPlannerLastN = nNeigh;
 
   // Отложенный discovery HELLO (см. OP_HELLO в handlePacket) — постановка в radioSchedulerTask.
   if (s_pendingDiscoveryHello.exchange(false, std::memory_order_acq_rel)) {
