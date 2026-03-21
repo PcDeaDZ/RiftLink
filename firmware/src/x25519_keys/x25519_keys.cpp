@@ -17,6 +17,8 @@
 #include <freertos/semphr.h>
 
 #define MUTEX_TIMEOUT_MS 100
+#define KEY_READ_RETRY_COUNT 3
+#define KEY_READ_RETRY_TIMEOUT_MS 10
 
 #define NVS_NAMESPACE "riftlink"
 #define NVS_KEY_X25519_PUB "x25519_pub"
@@ -65,16 +67,22 @@ static const char* safeReason(const char* reason) {
   return (reason && reason[0]) ? reason : "-";
 }
 
-static uint16_t shortId16(const uint8_t* id) {
-  return (uint16_t)(((uint16_t)id[0] << 8) | (uint16_t)id[1]);
+static uint16_t idHash16(const uint8_t* id) {
+  if (!id) return 0;
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < protocol::NODE_ID_LEN; i++) {
+    h ^= id[i];
+    h *= 16777619u;
+  }
+  return (uint16_t)((h >> 16) ^ (h & 0xFFFFu));
 }
 
 static uint32_t computeHelloSlotJitterMs(const uint8_t* peerId) {
   if (!peerId) return 0;
   const uint8_t* self = node::getId();
-  uint16_t selfShort = shortId16(self);
-  uint16_t peerShort = shortId16(peerId);
-  uint32_t slot = (selfShort < peerShort) ? 0u : 1u;
+  uint16_t selfHash = idHash16(self);
+  uint16_t peerHash = idHash16(peerId);
+  uint32_t slot = (selfHash < peerHash) ? 0u : 1u;
   uint32_t salt = (uint32_t)(self[7] ^ peerId[7] ^ self[3] ^ peerId[3]);
   uint32_t jitter = salt % KEY_HELLO_SLOT_JITTER_SPAN_MS;
   return KEY_HELLO_SLOT_BASE_MS + (slot * KEY_HELLO_SLOT_STEP_MS) + jitter;
@@ -83,12 +91,29 @@ static uint32_t computeHelloSlotJitterMs(const uint8_t* peerId) {
 static uint32_t computeKeyResponseSlotJitterMs(const uint8_t* peerId) {
   if (!peerId) return 0;
   const uint8_t* self = node::getId();
-  uint16_t selfShort = shortId16(self);
-  uint16_t peerShort = shortId16(peerId);
-  uint32_t slot = (selfShort < peerShort) ? 0u : 1u;
+  uint16_t selfHash = idHash16(self);
+  uint16_t peerHash = idHash16(peerId);
+  uint32_t slot = (selfHash < peerHash) ? 0u : 1u;
   uint32_t salt = (uint32_t)(self[6] ^ peerId[6] ^ self[1] ^ peerId[1]);
   uint32_t jitter = salt % KEY_RESP_SLOT_JITTER_SPAN_MS;
   return KEY_RESP_SLOT_BASE_MS + (slot * KEY_RESP_SLOT_STEP_MS) + jitter;
+}
+
+static bool takeKeyMutexWithRetry(const char* opTag, const uint8_t* peerId) {
+  if (!s_mutex) return false;
+  for (int i = 0; i < KEY_READ_RETRY_COUNT; i++) {
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(KEY_READ_RETRY_TIMEOUT_MS)) == pdTRUE) {
+      return true;
+    }
+    if (i + 1 < KEY_READ_RETRY_COUNT) {
+      RIFTLINK_DIAG("KEY", "event=KEY_BUSY_RETRY op=%s peer=%02X%02X attempt=%u",
+          opTag ? opTag : "?", peerId ? peerId[0] : 0, peerId ? peerId[1] : 0, (unsigned)(i + 1));
+      vTaskDelay(pdMS_TO_TICKS(1));
+    }
+  }
+  RIFTLINK_DIAG("KEY", "event=KEY_BUSY_GIVEUP op=%s peer=%02X%02X",
+      opTag ? opTag : "?", peerId ? peerId[0] : 0, peerId ? peerId[1] : 0);
+  return false;
 }
 
 namespace x25519_keys {
@@ -219,16 +244,18 @@ bool isPeerPubKeyMismatch(const uint8_t* peerId, const uint8_t* theirPubKey) {
 }
 
 bool hasKeyFor(const uint8_t* peerId) {
-  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
+  if (!peerId) return false;
+  if (!takeKeyMutexWithRetry("hasKeyFor", peerId)) return false;
   bool ok = findPeer(peerId) >= 0;
   xSemaphoreGive(s_mutex);
   return ok;
 }
 
 bool getKeyFor(const uint8_t* peerId, uint8_t* keyOut) {
-  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
+  if (!peerId || !keyOut) return false;
+  if (!takeKeyMutexWithRetry("getKeyFor", peerId)) return false;
   int idx = findPeer(peerId);
-  bool ok = (idx >= 0 && keyOut);
+  bool ok = (idx >= 0);
   if (ok) {
     memcpy(keyOut, s_peers[idx].sharedKey, 32);
     s_peers[idx].timestamp = millis();  // активное использование — не вытеснять при eviction

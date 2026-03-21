@@ -51,8 +51,8 @@ static inline void queueSendReason(char* buf, size_t buflen, const char* msg) {
 
 struct TxAsymMeta {
   uint8_t opcode = 0xFF;
-  uint16_t selfShort = 0;
-  uint16_t peerShort = 0;
+  uint16_t selfHash = 0;
+  uint16_t peerHash = 0;
   uint8_t slot = 0;
   bool broadcast = false;
   TxRequestClass klass = TxRequestClass::data;
@@ -92,23 +92,29 @@ static TxRequestClass classifyOpcode(uint8_t op) {
   }
 }
 
-static uint16_t shortIdOf(const uint8_t* id) {
-  return (uint16_t)(((uint16_t)id[0] << 8) | (uint16_t)id[1]);
+static uint16_t idHash16Of(const uint8_t* id) {
+  if (!id) return 0;
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < protocol::NODE_ID_LEN; i++) {
+    h ^= id[i];
+    h *= 16777619u;
+  }
+  return (uint16_t)((h >> 16) ^ (h & 0xFFFFu));
 }
 
 static bool decodeTxAsymMeta(const uint8_t* buf, size_t len, TxAsymMeta* out) {
   if (!buf || !out) return false;
   const uint8_t* self = node::getId();
-  out->selfShort = shortIdOf(self);
+  out->selfHash = idHash16Of(self);
   if (len < 3 || buf[0] != protocol::SYNC_BYTE) {
-    out->slot = (uint8_t)(out->selfShort & 0x01);
+    out->slot = (uint8_t)(out->selfHash & 0x01);
     out->klass = TxRequestClass::data;
     return false;
   }
   uint8_t ver = buf[1];
   bool isV2 = (ver & 0xF0) == 0x20 || (ver & 0xF0) == 0x30;
   if (!isV2) {
-    out->slot = (uint8_t)(out->selfShort & 0x01);
+    out->slot = (uint8_t)(out->selfHash & 0x01);
     out->klass = TxRequestClass::data;
     return false;
   }
@@ -118,16 +124,19 @@ static bool decodeTxAsymMeta(const uint8_t* buf, size_t len, TxAsymMeta* out) {
   out->opcode = buf[2];
   out->klass = classifyOpcode(out->opcode);
   if (isBroadcast) {
-    out->peerShort = shortIdOf(buf + (hasPktId ? 5 : 3));  // from shortId as salt
-    out->slot = (uint8_t)(out->selfShort & 0x01);
+    size_t fromOff = hasPktId ? 5u : 3u;
+    if (len >= fromOff + protocol::NODE_ID_LEN) {
+      out->peerHash = idHash16Of(buf + fromOff);
+    }
+    out->slot = (uint8_t)(out->selfHash & 0x01);
     return true;
   }
   size_t toOff = hasPktId ? 13u : 11u;
-  if (len >= toOff + 2) {
-    out->peerShort = shortIdOf(buf + toOff);
-    out->slot = (out->selfShort < out->peerShort) ? 0u : 1u;
+  if (len >= toOff + protocol::NODE_ID_LEN) {
+    out->peerHash = idHash16Of(buf + toOff);
+    out->slot = (out->selfHash < out->peerHash) ? 0u : 1u;
   } else {
-    out->slot = (uint8_t)(out->selfShort & 0x01);
+    out->slot = (uint8_t)(out->selfHash & 0x01);
   }
   return true;
 }
@@ -654,6 +663,11 @@ void asyncMemoryDiagLogStacks(void) {
 static SemaphoreHandle_t s_displaySpiGranted = nullptr;
 static SemaphoreHandle_t s_displaySpiDone = nullptr;
 static std::atomic<bool> s_displaySpiRequested{false};
+static std::atomic<bool> s_displaySpiSessionActive{false};
+static std::atomic<uint32_t> s_displaySpiRetryNotBeforeMs{0};
+static std::atomic<uint32_t> s_displayGrantCount{0};
+static std::atomic<uint32_t> s_displayDoneCount{0};
+static std::atomic<uint32_t> s_displaySkipBusyCount{0};
 
 bool asyncRequestDisplaySpiSession(TickType_t timeoutTicks) {
   if (!s_displaySpiGranted || !s_displaySpiDone) {
@@ -839,28 +853,66 @@ static void radioSchedulerTask(void* arg) {
       if (useFsmV2) {
         RIFTLINK_DIAG("FSM", "event=FSM_STATS recovery=%lu tx_wait_to_air_max_ms=%lu rx_event_to_handle_max_ms=%lu",
             (unsigned long)fsmRecoveryCount, (unsigned long)txWaitToAirMaxMs, (unsigned long)rxEventToHandleMaxMs);
+#if defined(USE_EINK)
+        RIFTLINK_DIAG("FSM", "event=FSM_HOLD_STATS requested=%u active=%u grant=%lu done=%lu skip_busy=%lu",
+            (unsigned)s_displaySpiRequested.load(std::memory_order_relaxed),
+            (unsigned)s_displaySpiSessionActive.load(std::memory_order_relaxed),
+            (unsigned long)s_displayGrantCount.load(std::memory_order_relaxed),
+            (unsigned long)s_displayDoneCount.load(std::memory_order_relaxed),
+            (unsigned long)s_displaySkipBusyCount.load(std::memory_order_relaxed));
+#endif
       }
     }
     flushDeferredSends();
     mainDrainHelloFromScheduler();
 #if defined(USE_EINK)
-    if (s_displaySpiGranted && s_displaySpiDone &&
-        s_displaySpiRequested.load(std::memory_order_acquire)) {
-      if (useFsmV2) fsmTransition(&fsmState, RadioFsmState::DisplayHold, "display_req");
-      if (radio::takeMutex(pdMS_TO_TICKS(200)) == pdTRUE) {
-        s_displaySpiRequested.store(false, std::memory_order_release);
-        send_overflow::drainApplyCommandsFromRadioQueue();
-        radio::setRxListenActive(false);
-        radio::standbyChipUnderMutex();
-        radio::releaseMutex();
-        xSemaphoreGive(s_displaySpiGranted);
-        if (xSemaphoreTake(s_displaySpiDone, pdMS_TO_TICKS(120000)) != pdTRUE) {
-          RIFTLINK_LOG_ERR("[RiftLink] E-Ink SPI: session end timeout (scheduler)\n");
+    bool displaySessionActive = s_displaySpiSessionActive.load(std::memory_order_acquire);
+    uint32_t nowDisplay = millis();
+    // Non-blocking DISPLAY_HOLD arbitration:
+    // request -> grant (when mutex available) -> done (poll semaphore), without blocking scheduler task.
+    if (s_displaySpiGranted && s_displaySpiDone) {
+      if (!displaySessionActive && s_displaySpiRequested.load(std::memory_order_acquire)) {
+        uint32_t notBefore = s_displaySpiRetryNotBeforeMs.load(std::memory_order_relaxed);
+        if ((int32_t)(nowDisplay - notBefore) >= 0) {
+          if (radio::takeMutex(pdMS_TO_TICKS(20)) == pdTRUE) {
+            // Clear stale done token from previous sessions.
+            while (xSemaphoreTake(s_displaySpiDone, 0) == pdTRUE) {}
+            s_displaySpiRequested.store(false, std::memory_order_release);
+            send_overflow::drainApplyCommandsFromRadioQueue();
+            radio::setRxListenActive(false);
+            radio::standbyChipUnderMutex();
+            radio::releaseMutex();
+            s_displaySpiSessionActive.store(true, std::memory_order_release);
+            s_displayGrantCount.fetch_add(1, std::memory_order_relaxed);
+            if (useFsmV2) fsmTransition(&fsmState, RadioFsmState::DisplayHold, "display_grant");
+            xSemaphoreGive(s_displaySpiGranted);
+            displaySessionActive = true;
+          } else {
+            s_displaySpiRetryNotBeforeMs.store(nowDisplay + 40, std::memory_order_relaxed);
+            s_displaySkipBusyCount.fetch_add(1, std::memory_order_relaxed);
+            if (useFsmV2) {
+              static uint32_t s_lastDisplaySkipLogMs = 0;
+              if (nowDisplay - s_lastDisplaySkipLogMs >= 1000) {
+                s_lastDisplaySkipLogMs = nowDisplay;
+                RIFTLINK_DIAG("FSM", "event=FSM_HOLD_SKIPPED reason=mutex_busy");
+              }
+            }
+          }
         }
+      }
+      if (displaySessionActive && xSemaphoreTake(s_displaySpiDone, 0) == pdTRUE) {
+        s_displaySpiSessionActive.store(false, std::memory_order_release);
+        s_displayDoneCount.fetch_add(1, std::memory_order_relaxed);
         if (useFsmV2) {
           RIFTLINK_DIAG("FSM", "event=FSM_HOLD source=display done=1");
           fsmTransition(&fsmState, RadioFsmState::RXListen, "display_done");
         }
+        displaySessionActive = false;
+      }
+      if (displaySessionActive) {
+        // Do not compete for radio mutex while display session owns SPI path.
+        vTaskDelay(pdMS_TO_TICKS(5));
+        continue;
       }
     }
 #endif
@@ -913,6 +965,15 @@ static void radioSchedulerTask(void* arg) {
       continue;
     }
     if (useFsmV2) {
+      #if defined(USE_EINK)
+      if (s_displaySpiSessionActive.load(std::memory_order_acquire)) {
+        if (fsmState != RadioFsmState::DisplayHold) {
+          fsmTransition(&fsmState, RadioFsmState::DisplayHold, "display_active");
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+        continue;
+      }
+      #endif
       // Continuous RX: держим RX включенным постоянно, preempt только под TX/display/recovery.
       if (!contRxArmed) {
         if (radio::takeMutex(pdMS_TO_TICKS(120)) == pdTRUE) {

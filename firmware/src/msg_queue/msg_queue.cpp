@@ -21,9 +21,11 @@
 #include "packet_fusion/packet_fusion.h"
 #include "bls_n/bls_n.h"
 #include "esp_now_slots/esp_now_slots.h"
+#include "x25519_keys/x25519_keys.h"
 #include <Arduino.h>
 #include <esp_random.h>
 #include <string.h>
+#include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -38,6 +40,10 @@
 #endif
 #define BROADCAST_ACK_TIMEOUT_MS 12000  // 12 с — ждём ACK от соседей
 #define MUTEX_TIMEOUT_MS 100
+#define ACK_REPLAY_GUARD_SIZE 16
+#define ACK_REPLAY_GUARD_MS 60000
+#define MSG_ENCRYPT_RETRY_COUNT 3
+#define MSG_ENCRYPT_RETRY_DELAY_MS 2
 
 // ACK timeout с учётом SF: SF7 быстрее, SF12 дольше (ToA, relay в mesh)
 static uint32_t getAckTimeoutMs(uint8_t txSf) {
@@ -90,13 +96,59 @@ static void (*s_onUnicastUndelivered)(const uint8_t* to, uint32_t msgId) = nullp
 static void (*s_onBroadcastSent)(uint32_t msgId) = nullptr;
 static void (*s_onBroadcastDelivery)(uint32_t msgId, int delivered, int total) = nullptr;
 static void (*s_onTimeCapsuleReleased)(const uint8_t* to, uint32_t msgId, uint8_t triggerType) = nullptr;
+static std::atomic<uint8_t> s_lastSendFailReason{msg_queue::SEND_FAIL_NONE};
+struct AckReplayEntry {
+  uint8_t from[protocol::NODE_ID_LEN];
+  uint32_t msgId;
+  uint32_t seenAtMs;
+};
+static AckReplayEntry s_ackReplayGuard[ACK_REPLAY_GUARD_SIZE];
+
+static bool isAckReplayAndMark(const uint8_t* from, uint32_t msgId) {
+  uint32_t now = millis();
+  int freeIdx = -1;
+  int oldestIdx = 0;
+  uint32_t oldestTs = s_ackReplayGuard[0].seenAtMs;
+  for (int i = 0; i < ACK_REPLAY_GUARD_SIZE; i++) {
+    if (s_ackReplayGuard[i].seenAtMs == 0) {
+      if (freeIdx < 0) freeIdx = i;
+      continue;
+    }
+    if ((now - s_ackReplayGuard[i].seenAtMs) > ACK_REPLAY_GUARD_MS) {
+      freeIdx = i;
+      break;
+    }
+    if (memcmp(s_ackReplayGuard[i].from, from, protocol::NODE_ID_LEN) == 0 &&
+        s_ackReplayGuard[i].msgId == msgId) {
+      return true;
+    }
+    if (s_ackReplayGuard[i].seenAtMs < oldestTs) {
+      oldestTs = s_ackReplayGuard[i].seenAtMs;
+      oldestIdx = i;
+    }
+  }
+  int idx = (freeIdx >= 0) ? freeIdx : oldestIdx;
+  memcpy(s_ackReplayGuard[idx].from, from, protocol::NODE_ID_LEN);
+  s_ackReplayGuard[idx].msgId = msgId;
+  s_ackReplayGuard[idx].seenAtMs = now;
+  return false;
+}
 
 namespace msg_queue {
+
+static inline void setLastSendFail(SendFailReason reason) {
+  s_lastSendFailReason.store((uint8_t)reason, std::memory_order_relaxed);
+}
+
+SendFailReason getLastSendFailReason() {
+  return (SendFailReason)s_lastSendFailReason.load(std::memory_order_relaxed);
+}
 
 void init() {
   s_mutex = xSemaphoreCreateMutex();
   memset(s_pending, 0, sizeof(s_pending));
   memset(s_bcPending, 0, sizeof(s_bcPending));
+  memset(s_ackReplayGuard, 0, sizeof(s_ackReplayGuard));
   s_msgIdCounter = (uint32_t)esp_random();
   s_inited = true;
 }
@@ -155,12 +207,19 @@ constexpr size_t MSG_TTL_LEN = 1;
 
 bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
     bool critical, TriggerType triggerType, uint32_t triggerValueMs) {
-  if (!s_inited) return false;
-  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
+  setLastSendFail(SEND_FAIL_NONE);
+  if (!s_inited) {
+    setLastSendFail(SEND_FAIL_NOT_READY);
+    return false;
+  }
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
+    setLastSendFail(SEND_FAIL_MUTEX_BUSY);
+    return false;
+  }
 
   const bool isUnicast = !node::isBroadcast(to);
   size_t textLen = strlen(text);
-  if (textLen == 0) { xSemaphoreGive(s_mutex); return false; }  // пустые — не отправлять
+  if (textLen == 0) { xSemaphoreGive(s_mutex); setLastSendFail(SEND_FAIL_EMPTY); return false; }  // пустые — не отправлять
 
   // Длинные сообщения — фрагментация (без ACK для MVP)
   size_t ttlOverhead = (ttlMinutes > 0) ? MSG_TTL_LEN : 0;
@@ -202,6 +261,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
     if (!slot) {
       RIFTLINK_LOG_ERR("[RiftLink] MSG pending slots full (max %d)\n", MAX_PENDING);
       xSemaphoreGive(s_mutex);
+      setLastSendFail(SEND_FAIL_PENDING_FULL);
       return false;
     }
 
@@ -215,8 +275,28 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
 
     uint8_t encBuf[protocol::MAX_PAYLOAD + crypto::OVERHEAD];
     size_t encLen = sizeof(encBuf);
-    if (!crypto::encryptFor(to, toEncrypt, toEncryptLen, encBuf, &encLen)) {
-      RIFTLINK_LOG_ERR("[RiftLink] MSG encrypt FAIL (no key for %02X%02X)\n", to[0], to[1]);
+    bool encOk = false;
+    for (int encTry = 0; encTry < MSG_ENCRYPT_RETRY_COUNT; encTry++) {
+      encLen = sizeof(encBuf);
+      if (crypto::encryptFor(to, toEncrypt, toEncryptLen, encBuf, &encLen)) {
+        encOk = true;
+        break;
+      }
+      if (encTry + 1 < MSG_ENCRYPT_RETRY_COUNT) {
+        vTaskDelay(pdMS_TO_TICKS(MSG_ENCRYPT_RETRY_DELAY_MS));
+      }
+    }
+    if (!encOk) {
+      bool hasKeyNow = x25519_keys::hasKeyFor(to);
+      if (!hasKeyNow) {
+        RIFTLINK_LOG_ERR("[RiftLink] MSG encrypt FAIL (no key for %02X%02X)\n", to[0], to[1]);
+        setLastSendFail(SEND_FAIL_NO_KEY);
+      } else {
+        RIFTLINK_DIAG("KEY", "event=KEY_BUSY_ENCRYPT peer=%02X%02X op=msg_encrypt",
+            to[0], to[1]);
+        RIFTLINK_LOG_ERR("[RiftLink] MSG encrypt FAIL (key busy for %02X%02X)\n", to[0], to[1]);
+        setLastSendFail(SEND_FAIL_KEY_BUSY);
+      }
       xSemaphoreGive(s_mutex);
       return false;
     }
@@ -228,6 +308,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
         encBuf, encLen, true, true, useCompressed, channel, pktId);
     if (pktLen == 0) {
       xSemaphoreGive(s_mutex);
+      setLastSendFail(SEND_FAIL_BUILD_PACKET);
       return false;
     }
 
@@ -294,6 +375,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
     size_t encLen = sizeof(encBuf);
     if (!crypto::encrypt(toEncrypt, toEncryptLen, encBuf, &encLen)) {
       RIFTLINK_LOG_ERR("[RiftLink] MSG broadcast encrypt FAILED\n");
+      setLastSendFail(SEND_FAIL_BUILD_PACKET);
       return false;
     }
 
@@ -309,6 +391,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
       uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
       if (!queueTxPacket(pkt, len, sf, false, TxRequestClass::data)) {
         RIFTLINK_LOG_ERR("[RiftLink] MSG broadcast radioCmdQueue full, drop\n");
+        setLastSendFail(SEND_FAIL_RADIO_QUEUE);
         return false;
       }
       if (s_onBroadcastSent) s_onBroadcastSent(bcMsgId);
@@ -449,43 +532,66 @@ void setOnUnicastUndelivered(void (*cb)(const uint8_t* to, uint32_t msgId)) {
   s_onUnicastUndelivered = cb;
 }
 
-bool onAckReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLen) {
-  if (payloadLen < MSG_ID_LEN || !from) return false;
+bool onAckReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLen,
+    bool requireOnline, bool allowUnicast, bool allowBroadcast) {
+  if (payloadLen < MSG_ID_LEN || !from || !payload) return false;
+  if (node::isInvalidNodeId(from) || node::isBroadcast(from) || node::isForMe(from)) return false;
+  if (requireOnline && !neighbors::isOnline(from)) return false;
   if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
   uint32_t msgId;
   memcpy(&msgId, payload, MSG_ID_LEN);
+  if (isAckReplayAndMark(from, msgId)) {
+    xSemaphoreGive(s_mutex);
+    return false;
+  }
   bool unicastCleared = false;
-  PendingMsg* p = findByMsgId(msgId);
-  if (p && memcmp(p->to, from, protocol::NODE_ID_LEN) == 0) {
-    if (p->lastAction >= 0) mab::reward(p->lastAction, 1);
-    p->inUse = false;
-    neighbors::recordAckReceived(from);
-    unicastCleared = true;
-  } else {
-    for (int i = 0; i < 2; i++) {
-      if (!s_batchPending[i].inUse) continue;
-      if (memcmp(s_batchPending[i].to, from, protocol::NODE_ID_LEN) != 0) continue;
-      for (int j = 0; j < s_batchPending[i].count; j++) {
-        if (s_batchPending[i].msgIds[j] == msgId && !s_batchPending[i].acked[j]) {
-          s_batchPending[i].acked[j] = 1;
-          unicastCleared = true;
-          bool allDone = true;
-          for (int k = 0; k < s_batchPending[i].count; k++) {
-            if (!s_batchPending[i].acked[k]) { allDone = false; break; }
+  if (allowUnicast) {
+    PendingMsg* p = findByMsgId(msgId);
+    if (p && memcmp(p->to, from, protocol::NODE_ID_LEN) == 0) {
+      if (p->lastAction >= 0) mab::reward(p->lastAction, 1);
+      p->inUse = false;
+      neighbors::recordAckReceived(from);
+      RIFTLINK_DIAG("ACK", "event=ACK_COUNTED mode=unicast from=%02X%02X msgId=%lu",
+          from[0], from[1], (unsigned long)msgId);
+      unicastCleared = true;
+    } else {
+      for (int i = 0; i < 2; i++) {
+        if (!s_batchPending[i].inUse) continue;
+        if (memcmp(s_batchPending[i].to, from, protocol::NODE_ID_LEN) != 0) continue;
+        for (int j = 0; j < s_batchPending[i].count; j++) {
+          if (s_batchPending[i].msgIds[j] == msgId && !s_batchPending[i].acked[j]) {
+            s_batchPending[i].acked[j] = 1;
+            unicastCleared = true;
+            bool allDone = true;
+            for (int k = 0; k < s_batchPending[i].count; k++) {
+              if (!s_batchPending[i].acked[k]) { allDone = false; break; }
+            }
+            if (allDone) s_batchPending[i].inUse = false;
+            RIFTLINK_DIAG("ACK", "event=ACK_COUNTED mode=batch from=%02X%02X msgId=%lu",
+                from[0], from[1], (unsigned long)msgId);
+            break;
           }
-          if (allDone) s_batchPending[i].inUse = false;
-          break;
         }
+        if (unicastCleared) break;
       }
-      if (unicastCleared) break;
     }
   }
-  if (!unicastCleared) {
+  if (allowBroadcast && !unicastCleared) {
     PendingBroadcast* pb = findBroadcastByMsgId(msgId);
-    if (pb) addBroadcastAck(pb, from);
+    if (pb && (!requireOnline || neighbors::isOnline(from))) {
+      addBroadcastAck(pb, from);
+      RIFTLINK_DIAG("ACK", "event=ACK_COUNTED mode=broadcast from=%02X%02X msgId=%lu delivered=%u total=%u",
+          from[0], from[1], (unsigned long)msgId, (unsigned)pb->ackedCount, (unsigned)pb->totalNeighbors);
+    }
   }
   xSemaphoreGive(s_mutex);
   return unicastCleared;
+}
+
+bool onBroadcastAckWitness(const uint8_t* from, uint32_t msgId, bool requireOnline) {
+  uint8_t payload[MSG_ID_LEN];
+  memcpy(payload, &msgId, MSG_ID_LEN);
+  return onAckReceived(from, payload, MSG_ID_LEN, requireOnline, false, true);
 }
 
 void onAckBatchReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLen, int rssi,
@@ -498,7 +604,7 @@ void onAckBatchReceived(const uint8_t* from, const uint8_t* payload, size_t payl
     memcpy(&msgId, payload + 1 + i * MSG_ID_LEN, MSG_ID_LEN);
     uint8_t singlePayload[MSG_ID_LEN];
     memcpy(singlePayload, &msgId, MSG_ID_LEN);
-    if (onAckReceived(from, singlePayload, MSG_ID_LEN) && onDelivered) {
+    if (onAckReceived(from, singlePayload, MSG_ID_LEN, true, true, true) && onDelivered) {
       onDelivered(from, msgId, rssi);
     }
   }

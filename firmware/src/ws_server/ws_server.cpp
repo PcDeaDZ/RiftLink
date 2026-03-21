@@ -66,7 +66,8 @@ void start() {
   mdns_init();
   char hostname[32];
   const uint8_t* id = node::getId();
-  snprintf(hostname, sizeof(hostname), "riftlink-%02x%02x%02x%02x", id[0], id[1], id[2], id[3]);
+  snprintf(hostname, sizeof(hostname), "riftlink-%02x%02x%02x%02x%02x%02x%02x%02x",
+      id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7]);
   mdns_hostname_set(hostname);
   mdns_instance_name_set("RiftLink Node");
   mdns_service_add("RiftLink", "_riftlink", "_tcp", 80, nullptr, 0);

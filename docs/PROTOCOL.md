@@ -50,7 +50,8 @@
 
 ### 1.4 Node ID и никнейм
 
-- **Node ID:** 8 байт, генерируется при первом запуске, хранится в NVS. Broadcast = все 0xFF.
+- **Node ID:** 8 байт (16 hex), генерируется при первом запуске, хранится в NVS. Broadcast = все 0xFF.
+- **Legacy short-id (8 hex) не поддерживается** в API/CLI и клиентских командах.
 - **Никнейм:** до 16 символов, опционально, хранится в NVS. Отображается в приложении вместо/вместе с ID.
 
 ### 1.5 Channel / Lane
@@ -189,7 +190,7 @@ AODV-подобный поиск маршрута:
 - **ROUTE_REQ** (broadcast): target[8], req_id[4], hops[1], sender[8]. Цель отвечает ROUTE_REPLY.
 - **ROUTE_REPLY** (unicast): target[8], req_id[4], hops[1], originator[8]. Пересылается по обратному пути.
 - Таблица маршрутов: до 16 записей, TTL 2 мин.
-- Serial: `route <hex8>` — запрос маршрута до узла.
+- Serial: `route <hex16>` — запрос маршрута до узла.
 
 ---
 
@@ -210,9 +211,9 @@ AODV-подобный поиск маршрута:
 | Команда | Описание |
 |---------|----------|
 | send &lt;text&gt; | Broadcast сообщение |
-| send &lt;hex8&gt; &lt;text&gt; | Unicast на узел (hex8 = 8 hex-символов ID) |
-| ping &lt;hex8&gt; | Проверка связи (отправить PING, ждать PONG) |
-| route &lt;hex8&gt; | Запросить маршрут до узла (ROUTE_REQ) |
+| send &lt;hex16&gt; &lt;text&gt; | Unicast на узел (hex16 = 16 hex-символов полного ID) |
+| ping &lt;hex16&gt; | Проверка связи (отправить PING, ждать PONG) |
+| route &lt;hex16&gt; | Запросить маршрут до узла (ROUTE_REQ) |
 | region EU\|UK\|RU\|US\|AU | Установить регион |
 
 ---

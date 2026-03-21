@@ -149,20 +149,19 @@ static inline void extendHandshakeQuiet(const char* cause, uint32_t durMs = HAND
 #define BOOT_PHASE_DONE     1
 
 #define BC_DEDUP_SIZE 32
-struct BcDedupEntry { uint8_t from[2]; uint32_t msgId; };
+struct BcDedupEntry { uint8_t from[protocol::NODE_ID_LEN]; uint32_t msgId; };
 static BcDedupEntry s_bcDedup[BC_DEDUP_SIZE];
 static uint8_t s_bcDedupIdx = 0;
 
 static bool bcDedupSeen(const uint8_t* from, uint32_t msgId) {
   for (int i = 0; i < BC_DEDUP_SIZE; i++) {
-    if (s_bcDedup[i].from[0] == from[0] && s_bcDedup[i].from[1] == from[1] && s_bcDedup[i].msgId == msgId)
+    if (memcmp(s_bcDedup[i].from, from, protocol::NODE_ID_LEN) == 0 && s_bcDedup[i].msgId == msgId)
       return true;
   }
   return false;
 }
 static void bcDedupAdd(const uint8_t* from, uint32_t msgId) {
-  s_bcDedup[s_bcDedupIdx].from[0] = from[0];
-  s_bcDedup[s_bcDedupIdx].from[1] = from[1];
+  memcpy(s_bcDedup[s_bcDedupIdx].from, from, protocol::NODE_ID_LEN);
   s_bcDedup[s_bcDedupIdx].msgId = msgId;
   s_bcDedupIdx = (s_bcDedupIdx + 1) % BC_DEDUP_SIZE;
 }
@@ -170,7 +169,7 @@ static void bcDedupAdd(const uint8_t* from, uint32_t msgId) {
 #define PING_REPLY_GUARD_SIZE 16
 #define PING_REPLY_GUARD_MS 800
 struct PingReplyGuardEntry {
-  uint8_t from[2];
+  uint8_t from[protocol::NODE_ID_LEN];
   uint16_t pktId;
   uint32_t seenMs;
 };
@@ -179,7 +178,7 @@ static uint8_t s_pingReplyGuardIdx = 0;
 
 static bool pingReplySeenRecently(const uint8_t* from, uint16_t pktId, uint32_t nowMs) {
   for (int i = 0; i < PING_REPLY_GUARD_SIZE; i++) {
-    if (s_pingReplyGuard[i].from[0] != from[0] || s_pingReplyGuard[i].from[1] != from[1]) continue;
+    if (memcmp(s_pingReplyGuard[i].from, from, protocol::NODE_ID_LEN) != 0) continue;
     if (s_pingReplyGuard[i].pktId != pktId) continue;
     if ((nowMs - s_pingReplyGuard[i].seenMs) <= PING_REPLY_GUARD_MS) return true;
   }
@@ -187,8 +186,7 @@ static bool pingReplySeenRecently(const uint8_t* from, uint16_t pktId, uint32_t 
 }
 
 static void pingReplyMarkSeen(const uint8_t* from, uint16_t pktId, uint32_t nowMs) {
-  s_pingReplyGuard[s_pingReplyGuardIdx].from[0] = from[0];
-  s_pingReplyGuard[s_pingReplyGuardIdx].from[1] = from[1];
+  memcpy(s_pingReplyGuard[s_pingReplyGuardIdx].from, from, protocol::NODE_ID_LEN);
   s_pingReplyGuard[s_pingReplyGuardIdx].pktId = pktId;
   s_pingReplyGuard[s_pingReplyGuardIdx].seenMs = nowMs;
   s_pingReplyGuardIdx = (s_pingReplyGuardIdx + 1) % PING_REPLY_GUARD_SIZE;
@@ -479,13 +477,19 @@ struct HelloPlan {
   uint32_t phaseOffset;
 };
 
-static uint16_t shortId16(const uint8_t* id) {
-  return (uint16_t)(((uint16_t)id[0] << 8) | (uint16_t)id[1]);
+static uint16_t idHash16(const uint8_t* id) {
+  if (!id) return 0;
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < protocol::NODE_ID_LEN; i++) {
+    h ^= id[i];
+    h *= 16777619u;
+  }
+  return (uint16_t)((h >> 16) ^ (h & 0xFFFFu));
 }
 
 static uint32_t computePollJitterMs() {
   const uint8_t* self = node::getId();
-  uint16_t sid = shortId16(self);
+  uint16_t sid = idHash16(self);
   uint32_t salt = (uint32_t)(self[2] ^ self[5] ^ (sid & 0xFF));
   return POLL_JITTER_BASE_MS + (salt % POLL_JITTER_SPAN_MS);
 }
@@ -636,11 +640,24 @@ void sendMsg(const uint8_t* to, const char* text, uint8_t ttlMinutes = 0,
     ble::notifyError("send_empty", "Пустое сообщение не отправляется");
     return;
   }
+  const bool isBroadcastTo = (to && memcmp(to, protocol::BROADCAST_ID, protocol::NODE_ID_LEN) == 0);
+  // Важно: не блокируем отправку ранним hasKeyFor(), иначе при mutex contention получаем ложный waiting_key.
+  // Сначала пытаемся enqueue/шифрование, затем по факту классифицируем причину fail.
   bool ok = isSos ? msg_queue::enqueueSos(text)
                   : msg_queue::enqueue(to, text, ttlMinutes, critical,
                       (msg_queue::TriggerType)triggerType, triggerValueMs);
   if (!ok) {
-    ble::notifyError("send_failed", "Очередь полна или нет ключа шифрования");
+    msg_queue::SendFailReason reason = msg_queue::getLastSendFailReason();
+    if (!isSos && !isBroadcastTo && to &&
+        reason == msg_queue::SEND_FAIL_NO_KEY) {
+      x25519_keys::sendKeyExchange(to, true, false, "send_wait_key");
+      ble::notifyWaitingKey(to);
+    } else if (!isSos && !isBroadcastTo && to &&
+        reason == msg_queue::SEND_FAIL_KEY_BUSY) {
+      ble::notifyError("send_key_busy", "Ключ занят, повторите отправку");
+    } else {
+      ble::notifyError("send_queue_busy", "Очередь отправки занята, повторите");
+    }
   }
   // broadcast "sent" с msgId — через setOnBroadcastSent (сопоставление с delivery)
 }
@@ -858,10 +875,15 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 
   if (!node::isForMe(hdr.to) && !node::isBroadcast(hdr.to)) {
     if (hdr.opcode == protocol::OP_NACK && payloadLen >= 2) {
-      uint16_t pktId = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
-      if (pkt_cache::retransmitOverheard(hdr.from, hdr.to, pktId)) {
-        extendHandshakeQuiet("nack_retransmit_overheard");
-        RIFTLINK_LOG_EVENT("[RiftLink] Overhear retransmit pktId=%u\n", (unsigned)pktId);
+      if (neighbors::isOnline(hdr.from) && !node::isInvalidNodeId(hdr.to)) {
+        uint16_t pktId = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
+        if (pkt_cache::retransmitOverheard(hdr.from, hdr.to, pktId)) {
+          extendHandshakeQuiet("nack_retransmit_overheard");
+          RIFTLINK_LOG_EVENT("[RiftLink] Overhear retransmit pktId=%u\n", (unsigned)pktId);
+        }
+      } else {
+        RIFTLINK_DIAG("NACK", "event=NACK_REJECT reason=overhear_source_invalid from=%02X%02X to=%02X%02X",
+            hdr.from[0], hdr.from[1], hdr.to[0], hdr.to[1]);
       }
     }
     if (hdr.opcode == protocol::OP_ROUTE_REQ) {
@@ -962,14 +984,16 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       // SF beacon не используется в режиме фиксированного SF.
       break;
 
-    case protocol::OP_HELLO:
+    case protocol::OP_HELLO: {
       RIFTLINK_DIAG("HELLO", "event=HELLO_RX from=%02X%02X rssi=%d sf=%u heap=%u",
           hdr.from[0], hdr.from[1], rssi, (unsigned)sf, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       Serial.printf("[RiftLink] HELLO rx from %02X%02X rssi=%d heap=%u\n",
           hdr.from[0], hdr.from[1], rssi, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       clock_drift::onHelloReceived(hdr.from);
       offline_queue::onNodeOnline(hdr.from);
+      bool rediscoveredPeer = false;
       {
+        bool wasOnlineBefore = neighbors::isOnline(hdr.from);
         int nBefore = neighbors::getCount();
         if (neighbors::onHello(hdr.from, rssi)) {
           Serial.printf("[RiftLink] Discovery: new neighbor %02X%02X heap=%u\n",
@@ -982,12 +1006,22 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           ble::requestNeighborsNotify();
           queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info при новом соседе
           RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
+        } else if (!wasOnlineBefore) {
+          ble::requestNeighborsNotify();
+          rediscoveredPeer = true;
+          RIFTLINK_DIAG("NEIGH", "event=NEIGHBOR_REDISCOVER peer=%02X%02X had_key=%u",
+              hdr.from[0], hdr.from[1], (unsigned)x25519_keys::hasKeyFor(hdr.from));
         }
       }
       if (!x25519_keys::hasKeyFor(hdr.from)) {
         x25519_keys::sendKeyExchange(hdr.from, false, false, "hello");  // троттл 60с в x25519_keys
+      } else if (rediscoveredPeer) {
+        RIFTLINK_DIAG("KEY", "event=KEY_REUSE_ATTEMPT peer=%02X%02X reason=hello_rediscover",
+            hdr.from[0], hdr.from[1]);
+        x25519_keys::sendKeyExchange(hdr.from, true, true, "hello_rediscover");
       }
       break;
+    }
 
     case protocol::OP_MSG:
       if (payloadLen > 0) {
@@ -1061,7 +1095,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
                   hdr.from[0], hdr.from[1], (unsigned)msgId, (unsigned)msgLen,
                   (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal");
               char fromHex[17];
-              snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
+              snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X%02X%02X%02X%02X",
+                  hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3], hdr.from[4], hdr.from[5], hdr.from[6], hdr.from[7]);
               queueDisplayLastMsg(fromHex, msgStrBuf);
             }
           }
@@ -1080,7 +1115,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
                 hdr.from[0], hdr.from[1], (unsigned)payloadLen,
                 (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal");
             char fromHex[17];
-            snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
+            snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X%02X%02X%02X%02X",
+                hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3], hdr.from[4], hdr.from[5], hdr.from[6], hdr.from[7]);
             queueDisplayLastMsg(fromHex, msgStrBuf);
           }
         }
@@ -1123,7 +1159,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
                     hdr.from[0], hdr.from[1], (unsigned)msgId, (unsigned)msgLen,
                     (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal");
                 char fromHex[17];
-                snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
+                snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X%02X%02X%02X%02X",
+                    hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3], hdr.from[4], hdr.from[5], hdr.from[6], hdr.from[7]);
                 queueDisplayLastMsg(fromHex, msgStrBuf);
               }
             }
@@ -1133,11 +1170,18 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             ackBatchPayload[0] = ackCount;
             for (uint8_t j = 0; j < ackCount; j++)
               memcpy(ackBatchPayload + 1 + j * msg_queue::MSG_ID_LEN, &ackMsgIds[j], msg_queue::MSG_ID_LEN);
-            size_t ackBatchLen = 1 + ackCount * msg_queue::MSG_ID_LEN;
-            uint8_t ackPkt[protocol::PAYLOAD_OFFSET + 33];
+            size_t ackBatchPlainLen = 1 + ackCount * msg_queue::MSG_ID_LEN;
+            uint8_t ackBatchEnc[1 + 4 * 4 + crypto::OVERHEAD];
+            size_t ackBatchEncLen = sizeof(ackBatchEnc);
+            if (!crypto::encryptFor(hdr.from, ackBatchPayload, ackBatchPlainLen, ackBatchEnc, &ackBatchEncLen)) {
+              RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=encrypt_fail from=%02X%02X type=batch",
+                  hdr.from[0], hdr.from[1]);
+              break;
+            }
+            uint8_t ackPkt[protocol::PAYLOAD_OFFSET + 96];
             size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
                 node::getId(), hdr.from, 31, protocol::OP_ACK_BATCH,
-                ackBatchPayload, ackBatchLen, false, false);
+                ackBatchEnc, ackBatchEncLen, true, false);
             if (ackLen > 0) {
               uint8_t txSf = neighbors::rssiToSfOrthogonal(hdr.from);
               if (txSf == 0) txSf = 12;
@@ -1149,29 +1193,73 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       break;
 
     case protocol::OP_ACK:
-      if (payloadLen >= msg_queue::MSG_ID_LEN) {
-        uint32_t msgId;
-        memcpy(&msgId, payload, msg_queue::MSG_ID_LEN);
-        if (msg_queue::onAckReceived(hdr.from, payload, payloadLen)) {
+      if (!node::isForMe(hdr.to) || node::isBroadcast(hdr.to)) {
+        RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=bad_direction from=%02X%02X", hdr.from[0], hdr.from[1]);
+        break;
+      }
+      if (!neighbors::isOnline(hdr.from)) {
+        RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=from_offline from=%02X%02X", hdr.from[0], hdr.from[1]);
+        break;
+      }
+      if (!protocol::isEncrypted(hdr)) {
+        RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=legacy_v1_disabled from=%02X%02X", hdr.from[0], hdr.from[1]);
+        break;
+      }
+      if (payloadLen > 0) {
+        uint8_t ackPlain[32];
+        size_t ackPlainLen = sizeof(ackPlain);
+        if (!crypto::decryptFrom(hdr.from, payload, payloadLen, ackPlain, &ackPlainLen) ||
+            ackPlainLen != msg_queue::MSG_ID_LEN) {
+          RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=decrypt_or_len from=%02X%02X len=%u",
+              hdr.from[0], hdr.from[1], (unsigned)payloadLen);
+          break;
+        }
+        uint32_t msgId = 0;
+        memcpy(&msgId, ackPlain, msg_queue::MSG_ID_LEN);
+        if (msg_queue::onAckReceived(hdr.from, ackPlain, ackPlainLen, true, true, true)) {
           ble::notifyDelivered(hdr.from, msgId, rssi);
         }
       }
       break;
 
     case protocol::OP_ACK_BATCH:
-      if (payloadLen >= 5) {
-        msg_queue::onAckBatchReceived(hdr.from, payload, payloadLen, rssi, ble::notifyDelivered);
+      if (!node::isForMe(hdr.to) || node::isBroadcast(hdr.to)) {
+        RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=batch_bad_direction from=%02X%02X", hdr.from[0], hdr.from[1]);
+        break;
+      }
+      if (!neighbors::isOnline(hdr.from)) {
+        RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=batch_from_offline from=%02X%02X", hdr.from[0], hdr.from[1]);
+        break;
+      }
+      if (!protocol::isEncrypted(hdr)) {
+        RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=legacy_v1_disabled_batch from=%02X%02X", hdr.from[0], hdr.from[1]);
+        break;
+      }
+      if (payloadLen > 0) {
+        uint8_t batchPlain[64];
+        size_t batchPlainLen = sizeof(batchPlain);
+        if (!crypto::decryptFrom(hdr.from, payload, payloadLen, batchPlain, &batchPlainLen)) {
+          RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=batch_decrypt_fail from=%02X%02X len=%u",
+              hdr.from[0], hdr.from[1], (unsigned)payloadLen);
+          break;
+        }
+        msg_queue::onAckBatchReceived(hdr.from, batchPlain, batchPlainLen, rssi, ble::notifyDelivered);
       }
       break;
 
     case protocol::OP_ECHO:
       // Echo Protocol: broadcast msgId+originalFrom — отправитель принимает как ACK
+      if (!neighbors::isOnline(hdr.from)) {
+        RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=echo_from_offline from=%02X%02X", hdr.from[0], hdr.from[1]);
+        break;
+      }
       if (payloadLen >= 12 && memcmp(payload + msg_queue::MSG_ID_LEN, node::getId(), protocol::NODE_ID_LEN) == 0) {
         uint32_t msgId;
         memcpy(&msgId, payload, msg_queue::MSG_ID_LEN);
-        if (msg_queue::onAckReceived(hdr.from, payload, msg_queue::MSG_ID_LEN)) {
-          ble::notifyDelivered(hdr.from, msgId, rssi);
-        }
+        (void)msg_queue::onBroadcastAckWitness(hdr.from, msgId, true);
+      } else {
+        RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=echo_payload_or_target from=%02X%02X len=%u",
+            hdr.from[0], hdr.from[1], (unsigned)payloadLen);
       }
       break;
 
@@ -1198,7 +1286,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           memcpy(&batteryMv, tbuf, 2);
           memcpy(&heapKb, tbuf + 2, 2);
           neighbors::updateBattery(hdr.from, batteryMv);
-          ble::notifyTelemetry(hdr.from, batteryMv, heapKb, rssi);
+          if (node::isForMe(hdr.from)) {
+            ble::notifyTelemetry(hdr.from, batteryMv, heapKb, rssi);
+          } else {
+            RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_filter action=skip evt=telemetry from=%02X%02X",
+                hdr.from[0], hdr.from[1]);
+          }
         }
       }
       break;
@@ -1254,7 +1347,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           }
           if (inGeo) {
             rememberLocationTrust(hdr.from, lat, lon, nowMs);
-            ble::notifyLocation(hdr.from, lat, lon, alt, rssi);
+            if (node::isForMe(hdr.from)) {
+              ble::notifyLocation(hdr.from, lat, lon, alt, rssi);
+            } else {
+              RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_filter action=skip evt=location from=%02X%02X",
+                  hdr.from[0], hdr.from[1]);
+            }
           }
         }
       }
@@ -1321,6 +1419,10 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 
     case protocol::OP_NACK:
       if (payloadLen >= 2 && node::isForMe(hdr.to)) {
+        if (!neighbors::isOnline(hdr.from)) {
+          RIFTLINK_DIAG("NACK", "event=NACK_REJECT reason=from_offline from=%02X%02X", hdr.from[0], hdr.from[1]);
+          break;
+        }
         uint16_t pktId = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
         if (pkt_cache::retransmitOnNack(hdr.from, pktId)) {
           extendHandshakeQuiet("nack_retransmit");
@@ -1328,6 +1430,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           RIFTLINK_LOG_EVENT("[RiftLink] NACK retransmit pktId=%u to %02X%02X\n",
               (unsigned)pktId, hdr.from[0], hdr.from[1]);
         }
+      } else if (payloadLen >= 2) {
+        RIFTLINK_DIAG("NACK", "event=NACK_REJECT reason=bad_direction from=%02X%02X", hdr.from[0], hdr.from[1]);
       }
       break;
 
@@ -1381,17 +1485,37 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           bcDedupAdd(hdr.from, bcMsgId);
           msg = (const char*)(decBuf + GROUP_ID_LEN + msg_queue::MSG_ID_LEN);
           msgLen = decLen - GROUP_ID_LEN - msg_queue::MSG_ID_LEN;
-          // ACK отправителю — для статуса delivered X/Y
-          uint8_t ackPayload[msg_queue::MSG_ID_LEN];
-          memcpy(ackPayload, &bcMsgId, msg_queue::MSG_ID_LEN);
-          uint8_t ackPkt[protocol::PAYLOAD_OFFSET + msg_queue::MSG_ID_LEN];
-          size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
-              node::getId(), hdr.from, 31, protocol::OP_ACK, ackPayload, msg_queue::MSG_ID_LEN, false, false);
-          if (ackLen > 0) {
-            uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(hdr.from));
-            // 250–400 ms — после burst копий 1–2 (0, 220ms), jitter чтобы несколько получателей не коллидировали
-            uint32_t ackDelay = 250 + (esp_random() % 150);
-            queueDeferredAck(ackPkt, ackLen, txSf, ackDelay);
+          // ACK v2 отправителю — для статуса delivered X/Y.
+          // В режиме strict v2-only legacy ACK (plain 4B) не принимаются.
+          uint8_t ackPlain[msg_queue::MSG_ID_LEN];
+          memcpy(ackPlain, &bcMsgId, msg_queue::MSG_ID_LEN);
+          uint8_t ackCipher[msg_queue::MSG_ID_LEN + crypto::OVERHEAD];
+          size_t ackCipherLen = sizeof(ackCipher);
+          if (crypto::encryptFor(hdr.from, ackPlain, sizeof(ackPlain), ackCipher, &ackCipherLen)) {
+            uint8_t ackPkt[protocol::PAYLOAD_OFFSET + msg_queue::MSG_ID_LEN + crypto::OVERHEAD + 8];
+            size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
+                node::getId(), hdr.from, 31, protocol::OP_ACK, ackCipher, ackCipherLen, true, false);
+            if (ackLen > 0) {
+              uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(hdr.from));
+              const int neighCount = neighbors::getCount();
+              const bool weakRssi = (rssi <= -90);
+              const bool highSf = (sf >= 10);
+              const bool crowded = (neighCount > 1);
+              const bool useDualAck = weakRssi || highSf || crowded;
+              // После burst отправителя отложенный ACK слышится лучше; в риск-условиях шлем 2 копии.
+              uint32_t ackDelay1 = 340 + (esp_random() % 180);
+              queueDeferredAck(ackPkt, ackLen, txSf, ackDelay1);
+              if (useDualAck) {
+                uint32_t ackDelay2 = ackDelay1 + 220 + (esp_random() % 120);
+                queueDeferredAck(ackPkt, ackLen, txSf, ackDelay2);
+              }
+              RIFTLINK_DIAG("ACK", "event=ACK_PLAN type=group_msg mode=%s from=%02X%02X rssi=%d sf=%u neigh=%d delay1=%lu",
+                  useDualAck ? "dual" : "single", hdr.from[0], hdr.from[1], rssi, (unsigned)sf, neighCount,
+                  (unsigned long)ackDelay1);
+            }
+          } else {
+            RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=encrypt_fail from=%02X%02X type=group_msg",
+                hdr.from[0], hdr.from[1]);
           }
         } else {
           msg = (const char*)(decBuf + GROUP_ID_LEN);
@@ -1426,7 +1550,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
                 hdr.from[0], hdr.from[1], (unsigned)outLen,
                 (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal");
             char fromHex[17];
-            snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
+            snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X%02X%02X%02X%02X",
+                hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3], hdr.from[4], hdr.from[5], hdr.from[6], hdr.from[7]);
             queueDisplayLastMsg(fromHex, msgStr);
           }
         }
@@ -1697,51 +1822,50 @@ void loop() {
     lastGpsLoc = millis();
   }
 
-  // Serial: "send <text>" = broadcast; "send <hex8> <text>" = to node
+  // Serial: "send <text>" = broadcast; "send <hex16> <text>" = to node
   if (Serial.available()) {
     Serial.setTimeout(50);  // не блокировать 1s — displayUpdate должен вызываться чаще
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
+    auto parseNodeIdHex16 = [](const String& hex, uint8_t out[protocol::NODE_ID_LEN]) -> bool {
+      if (hex.length() != (int)(protocol::NODE_ID_LEN * 2)) return false;
+      for (int i = 0; i < (int)hex.length(); i++) {
+        char c = hex.charAt(i);
+        bool ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+        if (!ok) return false;
+      }
+      for (int i = 0; i < (int)protocol::NODE_ID_LEN; i++) {
+        out[i] = (uint8_t)strtoul(hex.substring(i * 2, i * 2 + 2).c_str(), nullptr, 16);
+      }
+      return true;
+    };
     if (cmd.startsWith("send ")) {
       String rest = cmd.substring(5);
       int sp = rest.indexOf(' ');
       String tok1 = sp >= 0 ? rest.substring(0, sp) : rest;
       String text = sp >= 0 ? rest.substring(sp + 1) : "";
-      bool isHex = (tok1.length() == 8);
-      for (int i = 0; isHex && i < 8; i++) {
-        char c = tok1.charAt(i);
-        isHex = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
-      }
-      if (isHex && text.length() > 0) {
-        uint8_t to[protocol::NODE_ID_LEN];
-        memset(to, 0xFF, protocol::NODE_ID_LEN);
-        for (int i = 0; i < 4; i++) {
-          to[i] = (uint8_t)strtoul(tok1.substring(i * 2, i * 2 + 2).c_str(), nullptr, 16);
-        }
+      uint8_t to[protocol::NODE_ID_LEN];
+      bool isHex16 = parseNodeIdHex16(tok1, to);
+      if (isHex16 && text.length() > 0) {
         sendMsg(to, text.c_str(), 0);
       } else if (rest.length() > 0) {
         sendMsg(protocol::BROADCAST_ID, rest.c_str(), 0);
       }
     } else if (cmd.startsWith("ping ")) {
-      String hex8 = cmd.substring(5);
-      hex8.trim();
-      if (hex8.length() == 8) {
-        bool ok = true;
-        uint8_t to[protocol::NODE_ID_LEN];
-        memset(to, 0xFF, protocol::NODE_ID_LEN);
-        for (int i = 0; i < 4; i++) {
-          to[i] = (uint8_t)strtoul(hex8.substring(i * 2, i * 2 + 2).c_str(), nullptr, 16);
-        }
+      String hex16 = cmd.substring(5);
+      hex16.trim();
+      uint8_t to[protocol::NODE_ID_LEN];
+      if (parseNodeIdHex16(hex16, to)) {
         uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
         size_t len = protocol::buildPacket(pkt, sizeof(pkt),
             node::getId(), to, 31, protocol::OP_PING, nullptr, 0);
         if (len > 0 && radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(to)))) {
-          Serial.printf("[RiftLink] PING sent to %s\n", hex8.c_str());
+          Serial.printf("[RiftLink] PING sent to %s\n", hex16.c_str());
         } else {
           Serial.println("[RiftLink] PING failed");
         }
       } else {
-        Serial.println("[RiftLink] ping <hex8>");
+        Serial.println("[RiftLink] ping <hex16>");
       }
     } else if (cmd.startsWith("region ")) {
       String r = cmd.substring(7);
@@ -1797,17 +1921,13 @@ void loop() {
         Serial.println("[RiftLink] nickname <name> (max 16 chars)");
       }
     } else if (cmd.startsWith("route ")) {
-      String hex8 = cmd.substring(6);
-      hex8.trim();
-      if (hex8.length() == 8) {
-        uint8_t target[protocol::NODE_ID_LEN];
-        memset(target, 0xFF, protocol::NODE_ID_LEN);
-        for (int i = 0; i < 4; i++) {
-          target[i] = (uint8_t)strtoul(hex8.substring(i * 2, i * 2 + 2).c_str(), nullptr, 16);
-        }
+      String hex16 = cmd.substring(6);
+      hex16.trim();
+      uint8_t target[protocol::NODE_ID_LEN];
+      if (parseNodeIdHex16(hex16, target)) {
         routing::requestRoute(target);
       } else {
-        Serial.println("[RiftLink] route <hex8>");
+        Serial.println("[RiftLink] route <hex16>");
       }
     } else if (cmd.startsWith("lang ")) {
       String l = cmd.substring(5);

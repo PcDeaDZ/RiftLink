@@ -83,11 +83,11 @@ RiftLinkEvent? parseEvent(Map<String, dynamic> json) {
 void main() {
   group('parseEvent: msg', () {
     test('parses msg event', () {
-      final json = jsonDecode('{"evt":"msg","from":"A1B2C3D4","text":"Hello","msgId":42}') as Map<String, dynamic>;
+      final json = jsonDecode('{"evt":"msg","from":"A1B2C3D4E5F60708","text":"Hello","msgId":42}') as Map<String, dynamic>;
       final e = parseEvent(json);
       expect(e, isA<RiftLinkMsgEvent>());
       final m = e as RiftLinkMsgEvent;
-      expect(m.from, 'A1B2C3D4');
+      expect(m.from, 'A1B2C3D4E5F60708');
       expect(m.text, 'Hello');
       expect(m.msgId, 42);
       expect(m.lane, 'normal');
@@ -116,11 +116,11 @@ void main() {
 
   group('parseEvent: invite', () {
     test('parses invite with channelKey', () {
-      final json = jsonDecode('{"evt":"invite","id":"A1B2C3D4","pubKey":"pk","channelKey":"ck","inviteToken":"AABBCCDD00112233","inviteTtlMs":600000}') as Map<String, dynamic>;
+      final json = jsonDecode('{"evt":"invite","id":"A1B2C3D4E5F60708","pubKey":"pk","channelKey":"ck","inviteToken":"AABBCCDD00112233","inviteTtlMs":600000}') as Map<String, dynamic>;
       final e = parseEvent(json);
       expect(e, isA<RiftLinkInviteEvent>());
       final i = e as RiftLinkInviteEvent;
-      expect(i.id, 'A1B2C3D4');
+      expect(i.id, 'A1B2C3D4E5F60708');
       expect(i.pubKey, 'pk');
       expect(i.channelKey, 'ck');
       expect(i.inviteToken, 'AABBCCDD00112233');

@@ -48,9 +48,13 @@ void showThemeModeSheet(BuildContext context) {
             return ListTile(
               title: Text(title, style: TextStyle(color: p.onSurface)),
               trailing: themeModeNotifier.value == mode ? Icon(Icons.check, color: p.primary) : null,
-              onTap: () {
-                setThemeMode(mode);
-                Navigator.pop(ctx);
+              onTap: () async {
+                if (themeModeNotifier.value != mode) {
+                  await setThemeMode(mode);
+                }
+                if (ctx.mounted && Navigator.of(ctx).canPop()) {
+                  Navigator.of(ctx).pop();
+                }
               },
             );
           }

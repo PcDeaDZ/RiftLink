@@ -7,11 +7,14 @@
 #include "radio/radio.h"
 #include "neighbors/neighbors.h"
 #include "async_queues.h"
+#include "log.h"
 #include <string.h>
 
 #define CACHE_SIZE 4
 #define OVERHEAR_SIZE 2
 #define BATCH_CACHE_SIZE 1
+#define NACK_GUARD_SIZE 8
+#define NACK_GUARD_MS 800
 
 struct CachedPkt {
   uint8_t to[protocol::NODE_ID_LEN];
@@ -43,6 +46,42 @@ static CachedPkt s_cache[CACHE_SIZE];
 static OverhearEntry s_overhear[OVERHEAR_SIZE];
 static BatchEntry s_batchCache[BATCH_CACHE_SIZE];
 static bool s_inited = false;
+struct NackGuardEntry {
+  uint8_t peer[protocol::NODE_ID_LEN];
+  uint16_t pktId;
+  uint32_t ts;
+};
+static NackGuardEntry s_nackGuard[NACK_GUARD_SIZE];
+
+static bool nackRateLimitHit(const uint8_t* peer, uint16_t pktId) {
+  uint32_t now = millis();
+  int freeIdx = -1;
+  int oldestIdx = 0;
+  uint32_t oldestTs = s_nackGuard[0].ts;
+  for (int i = 0; i < NACK_GUARD_SIZE; i++) {
+    if (s_nackGuard[i].ts == 0) {
+      if (freeIdx < 0) freeIdx = i;
+      continue;
+    }
+    if ((now - s_nackGuard[i].ts) > NACK_GUARD_MS) {
+      freeIdx = i;
+      break;
+    }
+    if (memcmp(s_nackGuard[i].peer, peer, protocol::NODE_ID_LEN) == 0 &&
+        s_nackGuard[i].pktId == pktId) {
+      return true;
+    }
+    if (s_nackGuard[i].ts < oldestTs) {
+      oldestTs = s_nackGuard[i].ts;
+      oldestIdx = i;
+    }
+  }
+  int idx = (freeIdx >= 0) ? freeIdx : oldestIdx;
+  memcpy(s_nackGuard[idx].peer, peer, protocol::NODE_ID_LEN);
+  s_nackGuard[idx].pktId = pktId;
+  s_nackGuard[idx].ts = now;
+  return false;
+}
 
 namespace pkt_cache {
 
@@ -51,6 +90,7 @@ void init() {
   for (int i = 0; i < CACHE_SIZE; i++) s_cache[i].inUse = false;
   for (int i = 0; i < OVERHEAR_SIZE; i++) s_overhear[i].inUse = false;
   for (int i = 0; i < BATCH_CACHE_SIZE; i++) s_batchCache[i].inUse = false;
+  memset(s_nackGuard, 0, sizeof(s_nackGuard));
   s_inited = true;
 }
 
@@ -74,6 +114,13 @@ void add(const uint8_t* to, uint16_t pktId, const uint8_t* pkt, size_t len) {
 
 bool retransmitOnNack(const uint8_t* from, uint16_t pktId) {
   if (!s_inited || !from) return false;
+  if (node::isInvalidNodeId(from) || node::isBroadcast(from) || node::isForMe(from)) return false;
+  if (!neighbors::isOnline(from)) return false;
+  if (nackRateLimitHit(from, pktId)) {
+    RIFTLINK_DIAG("NACK", "event=NACK_REJECT reason=rate_limit from=%02X%02X pktId=%u",
+        from[0], from[1], (unsigned)pktId);
+    return false;
+  }
   radio::notifyCongestion();  // NACK = коллизия/потеря — увеличить BEB CW
   if (retransmitBatchOnNack(from, pktId)) return true;
   for (int i = 0; i < CACHE_SIZE; i++) {
@@ -109,6 +156,13 @@ void addOverheard(const uint8_t* from, const uint8_t* to, uint16_t pktId, const 
 
 bool retransmitOverheard(const uint8_t* nackFrom, const uint8_t* nackTo, uint16_t pktId) {
   if (!s_inited || !nackFrom || !nackTo || pktId == 0) return false;
+  if (!neighbors::isOnline(nackFrom)) return false;
+  if (node::isInvalidNodeId(nackTo) || node::isBroadcast(nackTo) || node::isForMe(nackTo)) return false;
+  if (nackRateLimitHit(nackFrom, pktId)) {
+    RIFTLINK_DIAG("NACK", "event=NACK_REJECT reason=overhear_rate_limit from=%02X%02X pktId=%u",
+        nackFrom[0], nackFrom[1], (unsigned)pktId);
+    return false;
+  }
   for (int i = 0; i < OVERHEAR_SIZE; i++) {
     if (!s_overhear[i].inUse) continue;
     if (memcmp(s_overhear[i].from, nackTo, protocol::NODE_ID_LEN) != 0) continue;

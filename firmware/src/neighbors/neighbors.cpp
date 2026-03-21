@@ -47,16 +47,6 @@ static int findSlot(const uint8_t* nodeId) {
   return -1;
 }
 
-// Поиск по short ID (первые 4 байта) — ghost от коррупции 1 байта в from
-static int findSlotByShortId(const uint8_t* nodeId) {
-  for (int i = 0; i < NEIGHBORS_MAX; i++) {
-    if (s_entries[i].used && memcmp(s_entries[i].id, nodeId, 4) == 0) {
-      return i;
-    }
-  }
-  return -1;
-}
-
 static int findFreeSlot() {
   for (int i = 0; i < NEIGHBORS_MAX; i++) {
     if (!s_entries[i].used) return i;
@@ -80,12 +70,7 @@ bool onHello(const uint8_t* nodeId, int rssi) {
   int idx = findSlot(nodeId);
   bool wasNew = (idx < 0);
   if (idx < 0) {
-    int shortIdx = findSlotByShortId(nodeId);
-    if (shortIdx >= 0) {
-      idx = shortIdx;  // ghost: коррупция 1 байта — обновляем существующий слот
-    } else {
-      idx = findFreeSlot();
-    }
+    idx = findFreeSlot();
   }
 
   memcpy(s_entries[idx].id, nodeId, protocol::NODE_ID_LEN);

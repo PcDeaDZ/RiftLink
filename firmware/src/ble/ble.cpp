@@ -122,6 +122,7 @@ static bool s_connected = false;
 static bool s_bleInited = false;
 static bool s_bleDeinitInProgress = false;
 static uint32_t s_advRetryNotBeforeMs = 0;
+static constexpr uint32_t BLE_ADV_RESTART_BACKOFF_MS = 2000;
 // Отложенные ответы — тяжёлые notify вызываем из main loop, не из callback (Stack canary)
 static volatile bool s_pendingInfo = false;
 static uint32_t s_pendingInfoNotBeforeMs = 0;
@@ -177,6 +178,21 @@ static int parseModemPresetValue(const JsonVariantConst& presetVar, const JsonVa
   return parseTextPreset(valueText);
 }
 
+static bool parseFullNodeIdHex(const char* hexId, uint8_t out[protocol::NODE_ID_LEN]) {
+  if (!hexId || !out) return false;
+  if (strlen(hexId) != protocol::NODE_ID_LEN * 2) return false;
+  for (int i = 0; i < protocol::NODE_ID_LEN; i++) {
+    char hi = hexId[i * 2];
+    char lo = hexId[i * 2 + 1];
+    bool hiOk = (hi >= '0' && hi <= '9') || (hi >= 'a' && hi <= 'f') || (hi >= 'A' && hi <= 'F');
+    bool loOk = (lo >= '0' && lo <= '9') || (lo >= 'a' && lo <= 'f') || (lo >= 'A' && lo <= 'F');
+    if (!hiOk || !loOk) return false;
+    char hex[3] = { hi, lo, 0 };
+    out[i] = (uint8_t)strtoul(hex, nullptr, 16);
+  }
+  return true;
+}
+
 static inline void scheduleInfoNotify(uint32_t delayMs = 0) {
   s_pendingInfo = true;
   s_pendingInfoNotBeforeMs = millis() + delayMs;
@@ -197,9 +213,8 @@ static uint8_t s_voiceTo[protocol::NODE_ID_LEN];
 static bool s_blsScanActive = false;
 static bool s_blsScanEnded = false;
 static uint32_t s_blsScanLastStart = 0;
-// Stability-first default: scanning during active GATT session may overload nimble_host
-// in dense BLE environments. Keep off unless explicitly needed for BLS tuning.
-static constexpr bool BLS_SCAN_DURING_GATT_SESSION = false;
+// Policy: keep BLS scan enabled during active GATT session.
+static constexpr bool BLS_SCAN_DURING_GATT_SESSION = true;
 #define BLS_SCAN_DURATION_SEC 15
 #define BLS_SCAN_RESTART_DELAY_MS 500
 /** NimBLE scan резервирует internal heap; при ~1KB после Wi‑Fi+async — BLE_INIT: Malloc failed */
@@ -353,15 +368,18 @@ class BlsScanCallbacks : public NimBLEScanCallbacks {
     const auto& pl = advertisedDevice->getPayload();
     const uint8_t* d = nullptr;
     size_t mfrLen = 0;
-    if (!bleAdvGetMfgData(pl.data(), pl.size(), 0, &d, &mfrLen) || mfrLen < 19) return;
+    constexpr size_t kRtsMfgLen = 2 + 3 + protocol::NODE_ID_LEN + protocol::NODE_ID_LEN + 2 + 4;
+    if (!bleAdvGetMfgData(pl.data(), pl.size(), 0, &d, &mfrLen) || mfrLen < kRtsMfgLen) return;
     if (d[0] != 0x4C || d[1] != 0x52) return;  // company ID 0x524C little-endian
     if (d[2] != 0x52 || d[3] != 0x54 || d[4] != 0x53) return;  // "RTS"
-    uint8_t from4[4], to4[4];
-    memcpy(from4, d + 5, 4);
-    memcpy(to4, d + 9, 4);
-    uint16_t len = (uint16_t)d[13] << 8 | d[14];
-    uint32_t txAt = (uint32_t)d[15] << 24 | (uint32_t)d[16] << 16 | (uint32_t)d[17] << 8 | d[18];
-    bls_n::addReceivedRts(from4, to4, len, txAt);
+    uint8_t fromId[protocol::NODE_ID_LEN], toId[protocol::NODE_ID_LEN];
+    memcpy(fromId, d + 5, protocol::NODE_ID_LEN);
+    memcpy(toId, d + 5 + protocol::NODE_ID_LEN, protocol::NODE_ID_LEN);
+    size_t lenOff = 5 + protocol::NODE_ID_LEN + protocol::NODE_ID_LEN;
+    uint16_t len = (uint16_t)d[lenOff + 0] << 8 | d[lenOff + 1];
+    uint32_t txAt = (uint32_t)d[lenOff + 2] << 24 | (uint32_t)d[lenOff + 3] << 16 |
+        (uint32_t)d[lenOff + 4] << 8 | d[lenOff + 5];
+    bls_n::addReceivedRts(fromId, toId, len, txAt);
   }
   void onScanEnd(const NimBLEScanResults& scanResults, int reason) override {
     (void)scanResults;
@@ -377,14 +395,6 @@ static BlsScanCallbacks s_blsScanCallbacks;
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
     s_connected = true;
-#if !defined(RIFTLINK_DISABLE_BLS_N)
-    NimBLEScan* pScan = NimBLEDevice::getScan();
-    if (pScan && pScan->isScanning()) {
-      pScan->stop();
-      s_blsScanActive = false;
-      s_blsScanEnded = true;
-    }
-#endif
     displayWakeRequest();
     vTaskDelay(pdMS_TO_TICKS(5));   // краткая пауза для GATT
   }
@@ -407,7 +417,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
       if (pAdv->start()) {
         Serial.println("[BLE] Advertising restarted after disconnect");
       } else {
-        s_advRetryNotBeforeMs = millis() + 2000;
+        s_advRetryNotBeforeMs = millis() + BLE_ADV_RESTART_BACKOFF_MS;
       }
     }
   }
@@ -610,7 +620,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
           }
         }
       }
-      if (idStr && strlen(idStr) >= 8 && pubKeyB64) {
+      if (idStr && pubKeyB64) {
         if (channelKeyB64) {
           size_t decLen;
           uint8_t chKey[32];
@@ -619,11 +629,9 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
           }
         }
         uint8_t nodeId[protocol::NODE_ID_LEN];
-        memset(nodeId, 0xFF, protocol::NODE_ID_LEN);
-        int n = (strlen(idStr) >= 16) ? 8 : 4;
-        for (int i = 0; i < n; i++) {
-          char hex[3] = { idStr[i*2], idStr[i*2+1], 0 };
-          nodeId[i] = (uint8_t)strtoul(hex, nullptr, 16);
+        if (!parseFullNodeIdHex(idStr, nodeId)) {
+          ble::notifyError("id_bad", "id must be full 16 hex node id");
+          return;
         }
         size_t decLen;
         uint8_t pubKey[32];
@@ -672,10 +680,10 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         uint8_t to[protocol::NODE_ID_LEN];
         memset(to, 0xFF, protocol::NODE_ID_LEN);
         const char* toStr = doc["to"];
-        if (toStr && strlen(toStr) >= 8) {
-          for (int i = 0; i < 4; i++) {
-            char hex[3] = { toStr[i*2], toStr[i*2+1], 0 };
-            to[i] = (uint8_t)strtoul(hex, nullptr, 16);
+        if (toStr && toStr[0]) {
+          if (!parseFullNodeIdHex(toStr, to)) {
+            ble::notifyError("send_to_bad", "to must be full 16 hex node id");
+            return;
           }
         }
         uint8_t ttl = (doc["ttl"] | 0) & 0xFF;
@@ -992,13 +1000,11 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
 
     if (strcmp(cmd, "traceroute") == 0) {
       const char* toStr = doc["to"];
-      if (toStr && strlen(toStr) >= 8) {
+      if (toStr && toStr[0]) {
         uint8_t target[protocol::NODE_ID_LEN];
-        memset(target, 0xFF, protocol::NODE_ID_LEN);
-        int n = (strlen(toStr) >= 16) ? 8 : 4;
-        for (int i = 0; i < n; i++) {
-          char hex[3] = { toStr[i*2], toStr[i*2+1], 0 };
-          target[i] = (uint8_t)strtoul(hex, nullptr, 16);
+        if (!parseFullNodeIdHex(toStr, target)) {
+          ble::notifyError("traceroute_to_bad", "to must be full 16 hex node id");
+          return;
         }
         routing::requestRoute(target);
         s_pendingRoutes = true;
@@ -1009,12 +1015,11 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     if (strcmp(cmd, "read") == 0) {
       const char* fromStr = doc["from"];
       uint32_t msgId = doc["msgId"] | 0u;
-      if (fromStr && strlen(fromStr) >= 8 && msgId != 0) {
+      if (fromStr && fromStr[0] && msgId != 0) {
         uint8_t to[protocol::NODE_ID_LEN];
-        memset(to, 0xFF, protocol::NODE_ID_LEN);
-        for (int i = 0; i < 4; i++) {
-          char hex[3] = { fromStr[i*2], fromStr[i*2+1], 0 };
-          to[i] = (uint8_t)strtoul(hex, nullptr, 16);
+        if (!parseFullNodeIdHex(fromStr, to)) {
+          ble::notifyError("read_from_bad", "from must be full 16 hex node id");
+          return;
         }
         uint8_t payload[4];
         memcpy(payload, &msgId, 4);
@@ -1030,12 +1035,9 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       const char* toStr = doc["to"];
       uint8_t to[protocol::NODE_ID_LEN];
       memset(to, 0xFF, protocol::NODE_ID_LEN);
-      if (toStr && strlen(toStr) >= 8) {
-        int n = (strlen(toStr) >= 16) ? 8 : 4;
-        for (int i = 0; i < n; i++) {
-          char hex[3] = { toStr[i*2], toStr[i*2+1], 0 };
-          to[i] = (uint8_t)strtoul(hex, nullptr, 16);
-        }
+      if (toStr && toStr[0] && !parseFullNodeIdHex(toStr, to)) {
+        ble::notifyError("ping_to_bad", "to must be full 16 hex node id");
+        return;
       }
       uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
       size_t len = protocol::buildPacket(pkt, sizeof(pkt),
@@ -1049,14 +1051,12 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       const char* dataStr = doc["data"];
       int chunk = doc["chunk"] | -1;
       int total = doc["total"] | -1;
-      if (!toStr || strlen(toStr) < 8 || !dataStr || chunk < 0 || total <= 0) return;
+      if (!toStr || !toStr[0] || !dataStr || chunk < 0 || total <= 0) return;
       if (strlen(dataStr) > BLE_VOICE_CHUNK_B64_BUF) return;  // иначе не влезает в 512 B одной записи
 
-      memset(s_voiceTo, 0, protocol::NODE_ID_LEN);
-      int n = (strlen(toStr) >= 16) ? 8 : 4;
-      for (int i = 0; i < n; i++) {
-        char hex[3] = { toStr[i*2], toStr[i*2+1], 0 };
-        s_voiceTo[i] = (uint8_t)strtoul(hex, nullptr, 16);
+      if (!parseFullNodeIdHex(toStr, s_voiceTo)) {
+        ble::notifyError("voice_to_bad", "to must be full 16 hex node id");
+        return;
       }
 
       if (chunk == 0) {
@@ -1143,14 +1143,15 @@ bool init() {
   pService->start();
 
   NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
-  // UUID в main packet, имя RL-12AB34CD в scan response (лимит 31 байт на пакет)
+  // UUID в main packet, имя RL-<full-id> в scan response (лимит 31 байт на пакет).
   NimBLEAdvertisementData advData;
   advData.setFlags(BLE_HS_ADV_F_DISC_GEN);  // general discoverable — иначе Android не видит
   advData.addServiceUUID(SERVICE_UUID);
   NimBLEAdvertisementData scanData;
-  char advName[12];
+  char advName[20];
   const uint8_t* id = node::getId();
-  snprintf(advName, sizeof(advName), "RL-%02X%02X%02X%02X", id[0], id[1], id[2], id[3]);
+  snprintf(advName, sizeof(advName), "RL-%02X%02X%02X%02X%02X%02X%02X%02X",
+      id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7]);
   scanData.setName(advName);
   pAdvertising->setAdvertisementData(advData);
   pAdvertising->setScanResponseData(scanData);
@@ -1286,6 +1287,20 @@ void notifySent(const uint8_t* to, uint32_t msgId) {
   doc["msgId"] = msgId;
 
   char buf[80];
+  size_t len = serializeJson(doc, buf);
+  notifyJsonToApp(buf, len);
+}
+
+void notifyWaitingKey(const uint8_t* to) {
+  if (!pRxChar || !s_connected || !to) return;
+
+  JsonDocument doc(&s_bleJsonAllocator);
+  doc["evt"] = "waiting_key";
+  char toHex[17] = {0};
+  for (int i = 0; i < 8; i++) snprintf(toHex + i * 2, 3, "%02X", to[i]);
+  doc["to"] = toHex;
+
+  char buf[96];
   size_t len = serializeJson(doc, buf);
   notifyJsonToApp(buf, len);
 }
@@ -1821,7 +1836,7 @@ void update() {
     NimBLEAdvertising* pAdv = NimBLEDevice::getAdvertising();
     if (!pAdv->isAdvertising() && millis() >= s_advRetryNotBeforeMs) {
       if (!pAdv->start()) {
-        s_advRetryNotBeforeMs = millis() + 2000;
+        s_advRetryNotBeforeMs = millis() + BLE_ADV_RESTART_BACKOFF_MS;
       }
     }
   }
@@ -1830,16 +1845,6 @@ void update() {
   // Paper: отключено — BLE scan вызывает Malloc failed при heap ~10KB (много advertisers)
   // OLED + Wi‑Fi: после esp_wifi_init остаётся мало internal — не стартуем scan без порога (иначе NimBLE BLE_INIT).
 #if !defined(USE_EINK) && !defined(RIFTLINK_DISABLE_BLS_N)
-  if (s_connected) {
-    // Hard safety: never keep BLE scan active during live GATT session.
-    // In dense RF this can overflow nimble_host stack (stack canary).
-    NimBLEScan* pScan = NimBLEDevice::getScan();
-    if (pScan && pScan->isScanning()) {
-      pScan->stop();
-      s_blsScanActive = false;
-      s_blsScanEnded = true;
-    }
-  }
   if (s_connected && BLS_SCAN_DURING_GATT_SESSION) {
     static uint32_t s_blsHeapSkipLogMs = 0;
     if (!blsScanHeapOk()) {

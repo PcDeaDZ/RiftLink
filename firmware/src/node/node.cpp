@@ -50,8 +50,8 @@ void init() {
   for (size_t i = 0; i < protocol::NODE_ID_LEN; i++) {
     s_nodeId[i] = (uint8_t)(esp_random() & 0xFF);
   }
-  Serial.printf("[RiftLink] Node ID: %02X%02X%02X%02X... (new)\n",
-      s_nodeId[0], s_nodeId[1], s_nodeId[2], s_nodeId[3]);
+  Serial.printf("[RiftLink] Node ID: %02X%02X%02X%02X%02X%02X%02X%02X (new)\n",
+      s_nodeId[0], s_nodeId[1], s_nodeId[2], s_nodeId[3], s_nodeId[4], s_nodeId[5], s_nodeId[6], s_nodeId[7]);
 
   nvs_handle_t hw;
   if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &hw) == ESP_OK) {
@@ -81,11 +81,10 @@ bool isBroadcast(const uint8_t* to) {
   return true;
 }
 
-// 4 байта: при коррупции 1 байта в from (A653..5801→A653..5802) isForMe не сработает,
-// но short ID совпадёт — отсекаем ghost «себя». LoRa CRC (2B) уже проверяет целостность.
+// Full-ID only: для self-check используем весь NODE_ID_LEN.
 bool isSameShortId(const uint8_t* id) {
   if (!id) return false;
-  return memcmp(id, s_nodeId, 4) == 0;
+  return memcmp(id, s_nodeId, protocol::NODE_ID_LEN) == 0;
 }
 
 bool isInvalidNodeId(const uint8_t* id) {

@@ -42,8 +42,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
   Future<void> _load() async {
     setState(() => _loading = true);
     final list = (await ContactsService.load())
-        .map((c) => Contact(id: _normalizeId(c.id), nickname: c.nickname))
-        .where((c) => c.id.length >= 8)
+        .map((c) => Contact(id: _normalizeId(c.id), nickname: c.nickname, legacy: c.legacy))
+        .where((c) => c.id.length == 16 || c.id.length == 8)
         .toList();
     list.sort((a, b) {
       final an = a.nickname.trim().toLowerCase();
@@ -83,7 +83,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
   void _showAddDialog({String? prefilledId}) {
     final raw = _normalizeId(prefilledId ?? '');
     final existing = raw.isNotEmpty ? _contacts.where((c) => c.id == raw).firstOrNull : null;
-    final idC = TextEditingController(text: raw.length > 8 ? raw.substring(0, 8) : raw);
+    final idC = TextEditingController(text: raw);
     final nickC = TextEditingController(text: existing?.nickname ?? '');
     final l = context.l10n;
     FocusScope.of(context).unfocus();
@@ -154,11 +154,11 @@ class _ContactsScreenState extends State<ContactsScreen> {
                         controller: idC,
                         autofocus: prefilledId == null,
                         style: TextStyle(color: p.onSurface, fontSize: 16),
-                        maxLength: 8,
+                        maxLength: 16,
                         enabled: prefilledId == null,
                         decoration: InputDecoration(
                           labelText: l.tr('node_id_hex'),
-                          hintText: 'A1B2C3D4',
+                          hintText: 'A1B2C3D4E5F60708',
                           filled: true,
                           fillColor: p.surfaceVariant.withOpacity(0.55),
                           border: OutlineInputBorder(
@@ -196,7 +196,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                       AppPrimaryButton(
                         onPressed: () async {
                           final id = _normalizeId(idC.text.trim());
-                          if (id.length != 8) {
+                          if (id.length != 16) {
                             showAppSnackBar(context, l.tr('invalid_hex'), kind: AppSnackKind.error);
                             return;
                           }
@@ -303,20 +303,19 @@ class _ContactsScreenState extends State<ContactsScreen> {
       runSpacing: AppSpacing.sm,
       children: widget.neighbors
           .map(_normalizeId)
-          .where((id) => id.isNotEmpty)
+          .where((id) => id.length == 16)
           .map((id) {
-        final shortId = id.length > 8 ? id.substring(0, 8) : id;
-        final existing = _contacts.where((c) => c.id == shortId).firstOrNull;
+        final existing = _contacts.where((c) => c.id == id).firstOrNull;
         return Material(
           color: p.surfaceVariant.withOpacity(0.85),
           borderRadius: BorderRadius.circular(AppRadius.md),
           child: InkWell(
             borderRadius: BorderRadius.circular(AppRadius.md),
-            onTap: () => _showAddDialog(prefilledId: shortId),
+            onTap: () => _showAddDialog(prefilledId: id),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
               child: Text(
-                existing != null && existing.nickname.isNotEmpty ? '${existing.nickname} · $shortId' : shortId,
+                existing != null && existing.nickname.isNotEmpty ? '${existing.nickname} · $id' : id,
                 style: AppTypography.chipBase().copyWith(
                   fontFamily: 'monospace',
                   fontWeight: FontWeight.w500,

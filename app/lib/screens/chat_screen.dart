@@ -116,7 +116,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _loadContactNicknames();
     _loadMeshPrefs();
     localeNotifier.addListener(_onLocaleChanged);
-    themeModeNotifier.addListener(_onThemeChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _sendReadForUnread();
       _sendLangToFirmware();
@@ -151,10 +150,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     });
     // GPS sync от телефона: UTC + координаты для beacon-sync (устройство без GPS)
     _gpsSyncTimer = Timer.periodic(const Duration(seconds: 15), (_) => _sendGpsSyncFromPhone());
-  }
-
-  void _onThemeChanged() {
-    if (mounted) setState(() {});
   }
 
   void _onTextChanged() {
@@ -198,7 +193,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _connStateSub?.cancel();
     _controller.removeListener(_onTextChanged);
     localeNotifier.removeListener(_onLocaleChanged);
-    themeModeNotifier.removeListener(_onThemeChanged);
     _ttlTimer?.cancel();
     _voiceRxCleanupTimer?.cancel();
     _neighborsPollTimer?.cancel();
@@ -263,6 +257,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     if (!mounted) return;
     setState(() => _reconnecting = false);
     await widget.ble.disconnect();
+    if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute(builder: (_) => ScanScreen(initialMessage: l.tr('reconnect_failed'))),
       (r) => false,
@@ -485,34 +480,34 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     setState(() {
       final m = <String, String>{};
       for (final c in contacts) {
-        m[c.id] = c.nickname;
-        if (c.id.length >= 8) {
-          m[c.id.substring(0, 8).toUpperCase()] = c.nickname;
-        }
+        final id = _normNodeId(c.id);
+        if (id.isNotEmpty && c.nickname.trim().isNotEmpty) m[id] = c.nickname.trim();
       }
       _contactNicknames = m;
     });
   }
 
   String? _nicknameForId(String id) {
-    final n = _contactNicknames[id];
+    final norm = _normNodeId(id);
+    if (norm.isEmpty) return null;
+    final n = _contactNicknames[norm];
     if (n != null && n.isNotEmpty) return n;
-    final short = id.length >= 8 ? id.substring(0, 8).toUpperCase() : id.toUpperCase();
-    final n2 = _contactNicknames[short];
-    if (n2 != null && n2.isNotEmpty) return n2;
     return null;
   }
 
-  String _normId8(String id) =>
-      id.length >= 8 ? id.substring(0, 8).toUpperCase() : id.toUpperCase();
+  String _normNodeId(String id) {
+    final norm = id.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+    return norm.length == 16 ? norm : '';
+  }
 
   String _recipientPillLabel(AppLocalizations l) {
     if (_group > 0) return 'G$_group';
     if (_unicastTo != null) {
-      final id = _unicastTo!;
+      final id = _normNodeId(_unicastTo!);
+      if (id.isEmpty) return 'BC';
       final nick = _nicknameForId(id);
       if (nick != null) return nick;
-      return _normId8(id);
+      return id;
     }
     return 'BC';
   }
@@ -532,8 +527,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     final l = context.l10n;
     final contacts = await ContactsService.load();
     if (!mounted) return;
-    final neighborNorm = _neighbors.map(_normId8).toSet();
-    final contactsOnly = contacts.where((c) => !neighborNorm.contains(_normId8(c.id))).toList();
+    final neighborNorm = _neighbors.map(_normNodeId).where((id) => id.isNotEmpty).toSet();
+    final contactsOnly = contacts
+        .where((c) => !neighborNorm.contains(_normNodeId(c.id)))
+        .toList();
 
     await showAppModalBottomSheet<void>(
       context: context,
@@ -581,15 +578,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             final neighTiles = <Widget>[];
             for (var i = 0; i < _neighbors.length; i++) {
               final id = _neighbors[i];
+              final idNorm = _normNodeId(id);
+              if (idNorm.isEmpty) continue;
               final rssi = i < _neighborsRssi.length ? _neighborsRssi[i] : 0;
               final hasKey = i < _neighborsHasKey.length ? _neighborsHasKey[i] : true;
-              final nick = _nicknameForId(id);
-              if (!rowMatch(id, nick, [if (rssi != 0) '$rssi'])) continue;
-              final sel = _unicastTo == id && _group == 0;
-              final title = nick ?? _normId8(id);
+              final nick = _nicknameForId(idNorm);
+              if (!rowMatch(idNorm, nick, [if (rssi != 0) '$rssi'])) continue;
+              final sel = _normNodeId(_unicastTo ?? '') == idNorm && _group == 0;
+              final title = nick ?? idNorm;
               final sub = nick != null
                   ? Text(
-                      id,
+                      idNorm,
                       style: AppTypography.labelBase().copyWith(
                         fontSize: 12,
                         fontFamily: 'monospace',
@@ -623,21 +622,22 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                     }
                     Navigator.pop(ctx);
                     setState(() {
-                      _unicastTo = _unicastTo == id ? null : id;
+                      _unicastTo = _normNodeId(_unicastTo ?? '') == idNorm ? null : idNorm;
                       _group = 0;
                     });
                   },
-                  onLongPress: hasKey ? () => _showAddContactDialog(id) : null,
+                  onLongPress: hasKey ? () => _showAddContactDialog(idNorm) : null,
                 ),
               );
             }
 
             final extraTiles = <Widget>[];
             for (final c in contactsOnly) {
-              final id = c.id.length >= 8 ? c.id.substring(0, 8).toUpperCase() : c.id.toUpperCase();
+              final id = _normNodeId(c.id);
+              if (id.isEmpty) continue;
               final nick = c.nickname.trim().isNotEmpty ? c.nickname : null;
               if (!rowMatch(id, nick, [id])) continue;
-              final sel = _unicastTo != null && _normId8(_unicastTo!) == id && _group == 0;
+              final sel = _normNodeId(_unicastTo ?? '') == id && _group == 0;
               extraTiles.add(
                 ListTile(
                   leading: Icon(Icons.bookmark_outline, color: sel ? context.palette.primary : context.palette.onSurfaceVariant),
@@ -803,9 +803,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   bool _sameNodeId(String? a, String? b) {
     if (a == null || b == null || a.isEmpty || b.isEmpty) return false;
-    final an = a.toUpperCase();
-    final bn = b.toUpperCase();
-    return an == bn || an.startsWith(bn) || bn.startsWith(an);
+    final an = _normNodeId(a);
+    final bn = _normNodeId(b);
+    if (an.isEmpty || bn.isEmpty) return false;
+    return an == bn;
   }
 
   void _cleanupStaleVoiceAssemblies() {
@@ -964,12 +965,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   void _onInfoEvent(RiftLinkInfoEvent evt) {
     final bleDev = widget.ble.device;
     if (bleDev != null) _currentBleRemoteId = bleDev.remoteId.toString();
-    var resolvedId = evt.id.isNotEmpty ? evt.id : _nodeId;
+    var resolvedId = _normNodeId(evt.id.isNotEmpty ? evt.id : _nodeId);
     if (resolvedId.isEmpty) {
-      resolvedId = RiftLinkBle.nodeIdHintFromDevice(bleDev) ?? '';
-    }
-    if (resolvedId.isEmpty && bleDev != null) {
-      resolvedId = bleDev.remoteId.toString();
+      resolvedId = _normNodeId(RiftLinkBle.nodeIdHintFromDevice(bleDev) ?? '');
     }
     setState(() {
       if (resolvedId.isNotEmpty) _nodeId = resolvedId;
@@ -995,7 +993,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _groups = _filterUserGroups(evt.groups);
       if (_group > 0 && !_groups.contains(_group)) _group = 0;
     });
-    if (bleDev != null) {
+    if (bleDev != null && resolvedId.isNotEmpty) {
       RecentDevicesService.addOrUpdate(
         remoteId: bleDev.remoteId.toString(),
         nodeId: resolvedId,
@@ -1010,6 +1008,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           nodeId: resolvedId,
           nickname: evt.nickname?.isNotEmpty == true ? evt.nickname : null,
         );
+      }
+    }
+    if (resolvedId.isNotEmpty) {
+      ContactsService.promoteLegacy(resolvedId);
+    }
+    for (final n in evt.neighbors) {
+      final norm = _normNodeId(n);
+      if (norm.isNotEmpty) {
+        ContactsService.promoteLegacy(norm);
       }
     }
   }
@@ -1051,7 +1058,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         final toMatch = evt.to.isEmpty ? null : evt.to;
         for (var i = _messages.length - 1; i >= 0; i--) {
           final m = _messages[i];
-          if (!m.isIncoming && m.msgId == null && m.to == toMatch) {
+          final sameTo = (m.to == null && toMatch == null) || _sameNodeId(m.to, toMatch);
+          if (!m.isIncoming && m.msgId == null && sameTo) {
             _messages[i] = m.copyWith(msgId: evt.msgId, to: evt.to, status: _St.sent);
             break;
           }
@@ -1061,7 +1069,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       setState(() {
         for (var i = 0; i < _messages.length; i++) {
           final m = _messages[i];
-          if (!m.isIncoming && m.to == evt.from && m.msgId == evt.msgId) {
+          if (!m.isIncoming && _sameNodeId(m.to, evt.from) && m.msgId == evt.msgId) {
             var updated = m.copyWith(status: _St.delivered);
             if (_shouldEmitCriticalSummary(updated, _St.delivered)) {
               updated = updated.copyWith(relaySummarySent: true);
@@ -1076,7 +1084,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       setState(() {
         for (var i = 0; i < _messages.length; i++) {
           final m = _messages[i];
-          if (!m.isIncoming && m.to == evt.from && m.msgId == evt.msgId) {
+          if (!m.isIncoming && _sameNodeId(m.to, evt.from) && m.msgId == evt.msgId) {
             var updated = m.copyWith(status: _St.read);
             if (_shouldEmitCriticalSummary(updated, _St.read)) {
               updated = updated.copyWith(relaySummarySent: true);
@@ -1092,8 +1100,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         for (var i = 0; i < _messages.length; i++) {
           final m = _messages[i];
           if (!m.isIncoming && m.msgId == evt.msgId) {
-            final isBroadcast = evt.to.isEmpty || m.to == _broadcastTo;
-            if (isBroadcast || m.to == evt.to) {
+            final isBroadcast = evt.to.isEmpty || _sameNodeId(m.to, _broadcastTo);
+            if (isBroadcast || _sameNodeId(m.to, evt.to)) {
               var updated = m.copyWith(status: _St.undelivered, delivered: evt.delivered ?? 0, total: evt.total ?? 0);
               if (_shouldEmitCriticalSummary(updated, _St.undelivered)) {
                 updated = updated.copyWith(relaySummarySent: true);
@@ -1140,8 +1148,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     } else if (evt is RiftLinkRegionEvent) { setState(() { _region = evt.region; _channel = evt.channel; }); }
     else if (evt is RiftLinkNeighborsEvent) { setState(() { _neighbors = evt.neighbors; _neighborsRssi = evt.rssi; _neighborsHasKey = evt.hasKey; }); }
     else if (evt is RiftLinkPongEvent) {
-      final fromNorm = evt.from.length >= 8 ? evt.from.substring(0, 8).toUpperCase() : evt.from.toUpperCase();
-      _pendingPings.remove(fromNorm);
+      final fromNorm = _normNodeId(evt.from);
+      if (fromNorm.isNotEmpty) _pendingPings.remove(fromNorm);
       _showSnack('✓ ${context.l10n.tr('link_ok', {'from': evt.from})}', backgroundColor: context.palette.success, duration: const Duration(seconds: 4));
     }
     else if (evt is RiftLinkErrorEvent) {
@@ -1152,6 +1160,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         msg = context.l10n.tr('invite_status_token_bad');
       }
       _showSnack('${context.l10n.tr('error')}: $msg', backgroundColor: context.palette.error);
+    }
+    else if (evt is RiftLinkWaitingKeyEvent) {
+      _showSnack(context.l10n.tr('waiting_key'));
     }
     else if (evt is RiftLinkWifiEvent) {
       _showSnack(
@@ -1165,8 +1176,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _showInviteDialog(evt.id, evt.pubKey, evt.channelKey, evt.inviteToken, evt.inviteExpiresMs, evt.inviteTtlMs);
     }
     else if (evt is RiftLinkRelayProofEvent) {
-      final from4 = evt.from.length >= 4 ? evt.from.substring(0, 4) : evt.from;
-      final to4 = evt.to.length >= 4 ? evt.to.substring(0, 4) : evt.to;
       setState(() {
         for (var i = _messages.length - 1; i >= 0; i--) {
           final m = _messages[i];
@@ -1174,9 +1183,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           if (!_sameNodeId(m.to, evt.to)) continue;
           final pktId = m.msgId! & 0xFFFF;
           if (pktId == evt.pktId) {
-            final shortRelay = evt.relayedBy.length >= 4 ? evt.relayedBy.substring(0, 4).toUpperCase() : evt.relayedBy.toUpperCase();
+            final shortRelay = _normNodeId(evt.relayedBy);
             final nextPeers = List<String>.from(m.relayPeers);
-            if (!nextPeers.contains(shortRelay) && nextPeers.length < 5) nextPeers.add(shortRelay);
+            if (shortRelay.isNotEmpty && !nextPeers.contains(shortRelay) && nextPeers.length < 5) nextPeers.add(shortRelay);
             _messages[i] = m.copyWith(
               relayCount: (m.relayCount ?? 0) + 1,
               relayPeers: nextPeers,
@@ -1186,7 +1195,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         }
         _messages.add(_Msg(
           from: evt.relayedBy,
-          text: context.l10n.tr('relay_proof_line', {'from': from4, 'to': to4, 'pkt': '${evt.pktId}'}),
+          text: context.l10n.tr('relay_proof_line', {'from': _normNodeId(evt.from), 'to': _normNodeId(evt.to), 'pkt': '${evt.pktId}'}),
           isIncoming: true,
           lane: 'normal',
           type: 'relayProof',
@@ -1557,6 +1566,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   Future<int?> _pickVoiceTtlDialog() => _pickTtlMinutes();
 
   void _showSnack(String text, {Color? backgroundColor, Duration duration = const Duration(seconds: 3)}) {
+    if (!mounted) return;
     var kind = AppSnackKind.neutral;
     if (backgroundColor == context.palette.error) {
       kind = AppSnackKind.error;
@@ -1624,7 +1634,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           final ok = await widget.ble.sendPing(id);
           if (!mounted) return;
           if (!ok) { _showSnack(context.l10n.tr('error')); return; }
-          final idNorm = id.length >= 8 ? id.substring(0, 8).toUpperCase() : id.toUpperCase();
+          final idNorm = _normNodeId(id);
+          if (idNorm.isEmpty) return;
           _pendingPings.add(idNorm);
           _showSnack(context.l10n.tr('ping_sent', {'id': id}));
           Future.delayed(const Duration(seconds: 20), () {
@@ -2000,6 +2011,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         break;
       case 'settings':
         if (widget.ble.isConnected) {
+          final themeBefore = themeModeNotifier.value;
           Navigator.push(context, MaterialPageRoute(builder: (_) => SettingsHubScreen(
             ble: widget.ble, nodeId: _nodeId, nickname: _nickname, region: _region, channel: _channel,
             sf: _sf,
@@ -2013,10 +2025,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             meshAnimationEnabled: _meshAnimationEnabled,
             onMeshAnimationChanged: _onMeshAnimationChanged,
           ))).then((_) {
-            if (mounted) setState(() {});
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) setState(() {});
-            });
+            if (!mounted) return;
+            if (themeModeNotifier.value != themeBefore) {
+              Navigator.of(context).pushReplacement(
+                MaterialPageRoute(builder: (_) => ChatScreen(ble: widget.ble)),
+              );
+              return;
+            }
+            setState(() {});
           });
         } else {
           _showSnack(context.l10n.tr('connect_first'));
@@ -2729,7 +2745,7 @@ class _PingDialogContentState extends State<_PingDialogContent> {
 
   Future<void> _doPing() async {
     final id = _controller.text.trim().toUpperCase();
-    if (id.length != 8) {
+    if (!RegExp(r'^[0-9A-F]{16}$').hasMatch(id)) {
       showAppSnackBar(
         context,
         widget.l.tr('ping_invalid'),
@@ -2785,8 +2801,8 @@ class _PingDialogContentState extends State<_PingDialogContent> {
                 ),
                 child: CupertinoTextField(
                   controller: _controller,
-                  placeholder: 'A1B2C3D4',
-                  maxLength: 8,
+                  placeholder: 'A1B2C3D4E5F60708',
+                  maxLength: 16,
                   style: AppTypography.bodyBase().copyWith(fontFamily: 'monospace', color: context.palette.onSurface),
                   padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm + 2),
                   decoration: const BoxDecoration(color: Colors.transparent),

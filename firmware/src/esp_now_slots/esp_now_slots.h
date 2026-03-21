@@ -1,7 +1,7 @@
 /**
  * ESP-NOW Slot Negotiation — 50–250 м
  * Slot negotiation через ESP-NOW без LoRa.
- * Формат RTS совместим с BLS-N: company 0x524C, "RTS", from(4), to(4), len(2), txAt(4).
+ * Формат RTS совместим с BLS-N: company 0x524C, "RTS", from(8), to(8), len(2), txAt(4).
  *
  * Сборка с -DRIFTLINK_DISABLE_ESP_NOW: без esp_now_* (нет RTS/слотов по Wi‑Fi), остальной код без изменений.
  */

@@ -124,8 +124,13 @@ class RiftLinkBle {
   static String? nodeIdHintFromDevice(BluetoothDevice? dev) {
     if (dev == null) return null;
     final name = dev.platformName.isNotEmpty ? dev.platformName : dev.advName;
-    final m = RegExp(r'RL-([0-9A-Fa-f]{8})').firstMatch(name);
+    final m = RegExp(r'RL-([0-9A-Fa-f]{16})').firstMatch(name);
     return m != null ? m.group(1)!.toUpperCase() : null;
+  }
+
+  static bool isValidFullNodeId(String id) {
+    final norm = id.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+    return RegExp(r'^[0-9A-F]{16}$').hasMatch(norm);
   }
 
   Future<bool> _sendCmd(Map<String, dynamic> payload) async {
@@ -579,7 +584,7 @@ class RiftLinkBle {
 
   /// Отправить голосовое сообщение (Opus/AAC, base64 чанками)
   Future<bool> sendVoice({required String to, required List<String> chunks}) async {
-    if (to.length < 8 || chunks.isEmpty) return false;
+    if (!isValidFullNodeId(to) || chunks.isEmpty) return false;
     for (var i = 0; i < chunks.length; i++) {
       final ok = await _sendCmd({
         'cmd': 'voice',
@@ -595,7 +600,7 @@ class RiftLinkBle {
 
   /// Отправить подтверждение прочтения (unicast)
   Future<bool> sendRead({required String from, required int msgId}) async {
-    if (from.length < 8 || msgId == 0) return false;
+    if (!isValidFullNodeId(from) || msgId == 0) return false;
     return _sendCmd({'cmd': 'read', 'from': from, 'msgId': msgId});
   }
 
@@ -634,7 +639,7 @@ class RiftLinkBle {
 
   /// Отправить PING на узел (проверка связи)
   Future<bool> sendPing(String to) async =>
-      to.length < 8 ? false : _sendCmd({'cmd': 'ping', 'to': to});
+      !isValidFullNodeId(to) ? false : _sendCmd({'cmd': 'ping', 'to': to});
 
   // --- Radio Mode Switching (Time-sharing BLE ↔ WiFi) ---
 
@@ -742,7 +747,7 @@ class RiftLinkBle {
 
   /// Трассировка: запрос маршрута до узла (ответ evt:routes)
   Future<bool> traceroute(String to) async =>
-      to.length < 8 ? false : _sendCmd({'cmd': 'traceroute', 'to': to});
+      !isValidFullNodeId(to) ? false : _sendCmd({'cmd': 'traceroute', 'to': to});
 
   /// ESP-NOW: канал 1..13 (для WiFi-режима)
   Future<bool> setEspNowChannel(int channel) async {
@@ -780,6 +785,7 @@ class RiftLinkBle {
     String? channelKey,
     String? inviteToken,
   }) async {
+    if (!isValidFullNodeId(id) || pubKey.trim().isEmpty) return false;
     final payload = <String, dynamic>{'cmd': 'acceptInvite', 'id': id, 'pubKey': pubKey};
     if (channelKey != null && channelKey.isNotEmpty) payload['channelKey'] = channelKey;
     if (inviteToken != null && inviteToken.isNotEmpty) payload['inviteToken'] = inviteToken;
@@ -802,7 +808,7 @@ class RiftLinkBle {
     String? trigger,
     int? triggerAtMs,
   }) async {
-    final payload = group != null && group > 0
+    final Map<String, dynamic>? payload = group != null && group > 0
         ? {
             'cmd': 'send',
             'group': group,
@@ -813,15 +819,17 @@ class RiftLinkBle {
             if (triggerAtMs != null) 'triggerAtMs': triggerAtMs,
           }
         : to != null
-            ? {
-                'cmd': 'send',
-                'to': to,
-                'text': text,
-                if (ttlMinutes > 0) 'ttl': ttlMinutes,
-                if (lane != 'normal') 'lane': lane,
-                if (trigger != null && trigger.isNotEmpty) 'trigger': trigger,
-                if (triggerAtMs != null) 'triggerAtMs': triggerAtMs,
-              }
+            ? (!isValidFullNodeId(to)
+                ? null
+                : {
+                    'cmd': 'send',
+                    'to': to,
+                    'text': text,
+                    if (ttlMinutes > 0) 'ttl': ttlMinutes,
+                    if (lane != 'normal') 'lane': lane,
+                    if (trigger != null && trigger.isNotEmpty) 'trigger': trigger,
+                    if (triggerAtMs != null) 'triggerAtMs': triggerAtMs,
+                  })
             : {
                 'cmd': 'send',
                 'text': text,
@@ -830,6 +838,7 @@ class RiftLinkBle {
                 if (trigger != null && trigger.isNotEmpty) 'trigger': trigger,
                 if (triggerAtMs != null) 'triggerAtMs': triggerAtMs,
               };
+    if (payload == null) return false;
     return _sendCmd(payload);
   }
 
@@ -1230,6 +1239,11 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       msg: json['msg'] as String? ?? '',
     );
   }
+  if (evt == 'waiting_key') {
+    return RiftLinkWaitingKeyEvent(
+      to: json['to'] as String? ?? '',
+    );
+  }
   if (evt == 'voice') {
     return RiftLinkVoiceEvent(
       from: json['from'] as String? ?? '',
@@ -1622,6 +1636,11 @@ class RiftLinkErrorEvent extends RiftLinkEvent {
   final String code;
   final String msg;
   RiftLinkErrorEvent({required this.code, required this.msg});
+}
+
+class RiftLinkWaitingKeyEvent extends RiftLinkEvent {
+  final String to;
+  RiftLinkWaitingKeyEvent({required this.to});
 }
 
 class RiftLinkVoiceEvent extends RiftLinkEvent {

@@ -250,10 +250,10 @@ size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadca
     case OP_PONG:
       return (payloadLen == 0) ? hdrLen : 0;
     case OP_ACK:
+    case OP_ACK_BATCH:
+      return 0;  // ACK v2 payload может быть зашифрован и переменной длины
     case OP_READ:
       return (payloadLen == 4) ? (hdrLen + 4) : 0;
-    case OP_ACK_BATCH:
-      return (payloadLen >= 5 && payloadLen <= 33 && (payloadLen - 1) % 4 == 0) ? (hdrLen + payloadLen) : 0;
     case OP_KEY_EXCHANGE:
       if (hasPktId) {
         size_t h = isBroadcast ? HEADER_LEN_BROADCAST_PKTID : HEADER_LEN_PKTID;
@@ -284,12 +284,18 @@ bool getExpectedPayloadRange(uint8_t opcode, size_t* minOut, size_t* maxOut) {
       *minOut = *maxOut = 0;
       return true;
     case OP_ACK:
+      // v1 ACK(4B) допускаем только для явного reject в main.cpp;
+      // v2 ACK — зашифрованный payload (nonce+tag+plain).
+      *minOut = 4;
+      *maxOut = 96;
+      return true;
     case OP_READ:
       *minOut = *maxOut = 4;
       return true;
     case OP_ACK_BATCH:
-      *minOut = 5;   // count(1) + msgId(4)
-      *maxOut = 33;  // count(1) + msgId(4)*8
+      // v1 ACK_BATCH оставляем в parser для диагностики/explicit reject.
+      *minOut = 5;
+      *maxOut = 96;
       return true;
     case OP_KEY_EXCHANGE:
       *minOut = *maxOut = 32;

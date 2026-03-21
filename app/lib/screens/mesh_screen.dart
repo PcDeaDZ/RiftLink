@@ -421,8 +421,7 @@ class _MeshScreenState extends State<MeshScreen> {
   }
 
   String _shortId(String id) {
-    if (id.length <= 8) return id.toUpperCase();
-    return id.substring(0, 8).toUpperCase();
+    return id.toUpperCase();
   }
 }
 
@@ -511,8 +510,7 @@ class _GraphTab extends StatelessWidget {
   }
 
   String _shortId(String id) {
-    if (id.length <= 8) return id;
-    return '${id.substring(0, 4)}…';
+    return id.toUpperCase();
   }
 }
 
@@ -561,7 +559,7 @@ class _ListTab extends StatelessWidget {
     required this.hasData,
   });
 
-  String _idLabel(String id) => id.length >= 8 ? id.substring(0, 8).toUpperCase() : id.toUpperCase();
+  String _idLabel(String id) => id.toUpperCase();
 
   String _modemPresetLabel(AppLocalizations l, int preset) {
     return switch (preset) {
@@ -823,7 +821,7 @@ class _MeshPainter extends CustomPainter {
           ..strokeWidth = 2,
       );
 
-      final short = id.length >= 8 ? '${id.substring(0, 4)}…' : id;
+      final short = id.length >= 16 ? '${id.substring(0, 4)}…${id.substring(id.length - 4)}' : id;
       _drawText(canvas, short, Offset(pos.dx, pos.dy + r + 10), 11, palette.onSurface);
       if (n.rssi != 0) {
         _drawText(canvas, '${n.rssi} dBm', Offset(pos.dx, pos.dy + r + 24), 10, palette.onSurfaceVariant);

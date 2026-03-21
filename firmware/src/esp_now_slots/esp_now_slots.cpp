@@ -1,7 +1,7 @@
 /**
  * ESP-NOW Slot Negotiation — 50–250 м
  * WiFi STA без подключения к AP + ESP-NOW broadcast RTS.
- * Формат RTS совместим с BLS-N: company 0x524C, "RTS", from(4), to(4), len(2), txAt(4).
+ * Формат RTS совместим с BLS-N: company 0x524C, "RTS", from(8), to(8), len(2), txAt(4).
  */
 
 #include "esp_now_slots.h"
@@ -32,8 +32,8 @@
 namespace esp_now_slots {
 
 struct RtsEntry {
-  uint8_t from[4];
-  uint8_t to[4];
+  uint8_t from[protocol::NODE_ID_LEN];
+  uint8_t to[protocol::NODE_ID_LEN];
   uint16_t len;
   uint32_t txAt;
   uint32_t receivedAt;
@@ -139,17 +139,20 @@ static void pruneRtsCache() {
 
 static void recvCb(const esp_now_recv_info_t* recv_info, const uint8_t* data, int len) {
   (void)recv_info;
-  if (!data || len < 19) return;
+  constexpr int kRtsLen = 2 + 3 + (int)protocol::NODE_ID_LEN + (int)protocol::NODE_ID_LEN + 2 + 4;
+  if (!data || len < kRtsLen) return;
   if (data[0] != (RTS_COMPANY_ID & 0xFF) || data[1] != ((RTS_COMPANY_ID >> 8) & 0xFF)) return;
   if (data[2] != 0x52 || data[3] != 0x54 || data[4] != 0x53) return;  // "RTS"
 
-  uint8_t from[4], to[4];
+  uint8_t from[protocol::NODE_ID_LEN], to[protocol::NODE_ID_LEN];
   uint16_t plen;
   uint32_t txAt;
-  memcpy(from, data + 5, 4);
-  memcpy(to, data + 9, 4);
-  plen = (uint16_t)data[13] | ((uint16_t)data[14] << 8);
-  txAt = (uint32_t)data[15] | ((uint32_t)data[16] << 8) | ((uint32_t)data[17] << 16) | ((uint32_t)data[18] << 24);
+  memcpy(from, data + 5, protocol::NODE_ID_LEN);
+  memcpy(to, data + 5 + protocol::NODE_ID_LEN, protocol::NODE_ID_LEN);
+  size_t lenOff = 5 + protocol::NODE_ID_LEN + protocol::NODE_ID_LEN;
+  plen = (uint16_t)data[lenOff + 0] | ((uint16_t)data[lenOff + 1] << 8);
+  txAt = (uint32_t)data[lenOff + 2] | ((uint32_t)data[lenOff + 3] << 8) |
+      ((uint32_t)data[lenOff + 4] << 16) | ((uint32_t)data[lenOff + 5] << 24);
 
   addReceivedRts(from, to, plen, txAt);
 }
@@ -267,8 +270,8 @@ void addReceivedRts(const uint8_t* from, const uint8_t* to, uint16_t len, uint32
     s_rtsCount = RTS_CACHE_MAX - 1;
   }
   RtsEntry* e = &s_rtsCache[s_rtsCount];
-  memcpy(e->from, from, 4);
-  memcpy(e->to, to, 4);
+  memcpy(e->from, from, protocol::NODE_ID_LEN);
+  memcpy(e->to, to, protocol::NODE_ID_LEN);
   e->len = len;
   e->txAt = txAt;
   e->receivedAt = millis();
@@ -281,20 +284,21 @@ bool sendRtsBeforeLora(const uint8_t* to, size_t payloadLen) {
   const uint8_t* from = node::getId();
   uint32_t txAt = millis() + 60;
 
-  uint8_t buf[19];
+  uint8_t buf[2 + 3 + protocol::NODE_ID_LEN + protocol::NODE_ID_LEN + 2 + 4];
   buf[0] = RTS_COMPANY_ID & 0xFF;
   buf[1] = (RTS_COMPANY_ID >> 8) & 0xFF;
   buf[2] = 0x52;
   buf[3] = 0x54;
   buf[4] = 0x53;
-  memcpy(buf + 5, from, 4);
-  memcpy(buf + 9, to, 4);
-  buf[13] = (uint8_t)(payloadLen & 0xFF);
-  buf[14] = (uint8_t)((payloadLen >> 8) & 0xFF);
-  buf[15] = (uint8_t)(txAt & 0xFF);
-  buf[16] = (uint8_t)((txAt >> 8) & 0xFF);
-  buf[17] = (uint8_t)((txAt >> 16) & 0xFF);
-  buf[18] = (uint8_t)((txAt >> 24) & 0xFF);
+  memcpy(buf + 5, from, protocol::NODE_ID_LEN);
+  memcpy(buf + 5 + protocol::NODE_ID_LEN, to, protocol::NODE_ID_LEN);
+  size_t lenOff = 5 + protocol::NODE_ID_LEN + protocol::NODE_ID_LEN;
+  buf[lenOff + 0] = (uint8_t)(payloadLen & 0xFF);
+  buf[lenOff + 1] = (uint8_t)((payloadLen >> 8) & 0xFF);
+  buf[lenOff + 2] = (uint8_t)(txAt & 0xFF);
+  buf[lenOff + 3] = (uint8_t)((txAt >> 8) & 0xFF);
+  buf[lenOff + 4] = (uint8_t)((txAt >> 16) & 0xFF);
+  buf[lenOff + 5] = (uint8_t)((txAt >> 24) & 0xFF);
 
   esp_err_t err = esp_now_send(s_broadcastMac, buf, sizeof(buf));
   return (err == ESP_OK);

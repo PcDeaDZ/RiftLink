@@ -884,8 +884,8 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
   bool _samePeerId(String a, String b) {
     final an = _normHex(a);
     final bn = _normHex(b);
-    if (an.isEmpty || bn.isEmpty) return false;
-    return an == bn || an.startsWith(bn) || bn.startsWith(an);
+    if (an.length != 16 || bn.length != 16) return false;
+    return an == bn;
   }
 
   bool _peerHasKey(RiftLinkInfoEvent evt, String peerId) {
@@ -1816,7 +1816,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                               final key = _inviteKeyController.text.trim();
                               final ck = _inviteChannelKeyController.text.trim();
                               final token = _inviteTokenController.text.trim().replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
-                              if (id.length < 8 || key.isEmpty) return;
+                              if (id.length != 16 || key.isEmpty) return;
                               final tokenErr = _validateInviteToken(token);
                               if (tokenErr != null) {
                                 setState(() {
@@ -1831,7 +1831,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                                 _inviteStatusText = l.tr('invite_status_handshake_pending');
                               });
                               if (await widget.ble.acceptInvite(
-                                id: id.substring(0, id.length > 16 ? 16 : id.length),
+                                id: id,
                                 pubKey: key,
                                 channelKey: ck.isEmpty ? null : ck,
                                 inviteToken: token.isEmpty ? null : token,

@@ -38,8 +38,8 @@ String _normHex(String raw) =>
 bool _samePeerId(String a, String b) {
   final an = _normHex(a);
   final bn = _normHex(b);
-  if (an.isEmpty || bn.isEmpty) return false;
-  return an == bn || an.startsWith(bn) || bn.startsWith(an);
+  if (an.length != 16 || bn.length != 16) return false;
+  return an == bn;
 }
 
 bool _peerHasKey(RiftLinkInfoEvent evt, String peerId) {
@@ -1093,15 +1093,15 @@ class _SecurityPageState extends State<_SecurityPage> {
               final key = _keyCtrl.text.trim();
               final ck = _ckCtrl.text.trim();
               final token = _tokCtrl.text.trim().replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
-              if (id.length < 8 || key.isEmpty) return;
+              if (id.length != 16 || key.isEmpty) return;
               final tokErr = _valToken(token);
               if (tokErr != null) { setState(() { _invErr = true; _invSt = tokErr; }); showAppSnackBar(context, tokErr); return; }
               setState(() { _invErr = false; _invSt = l.tr('invite_status_handshake_pending'); });
               if (await widget.ble.acceptInvite(
-                id: id.substring(0, id.length > 16 ? 16 : id.length), pubKey: key,
+                id: id, pubKey: key,
                 channelKey: ck.isEmpty ? null : ck, inviteToken: token.isEmpty ? null : token)) {
                 if (mounted) {
-                  setState(() { _invErr = false; _invSt = l.tr('invite_status_accepted_wait_key'); _pendPeer = id.substring(0, id.length > 16 ? 16 : id.length); });
+                  setState(() { _invErr = false; _invSt = l.tr('invite_status_accepted_wait_key'); _pendPeer = id; });
                   showAppSnackBar(context, l.tr('invite_accepted'));
                 }
               }

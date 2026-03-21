@@ -24,8 +24,9 @@ export function buildInviteCopyData(obj) {
 export function parseInviteJson(str) {
   try {
     const m = JSON.parse(str);
+    const id = (m?.id ?? '').replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
     return {
-      id: (m?.id ?? '').replace(/[^0-9A-Fa-f]/g, ''),
+      id: /^[0-9A-F]{16}$/.test(id) ? id : '',
       pubKey: m?.pubKey ?? '',
       channelKey: m?.channelKey ?? '',
     };

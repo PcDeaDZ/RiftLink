@@ -8,6 +8,9 @@
 #include "neighbors/neighbors.h"
 #include "msg_queue/msg_queue.h"
 #include "async_tasks.h"
+#include "crypto/crypto.h"
+#include "x25519_keys/x25519_keys.h"
+#include "log.h"
 #include <string.h>
 #include <Arduino.h>
 
@@ -67,24 +70,56 @@ static void flushEntry(AckEntry* e) {
   if (txSfOrtho != 0) txSf = txSfOrtho;
 
   if (e->count == 1) {
-    uint8_t ackPayload[msg_queue::MSG_ID_LEN];
-    memcpy(ackPayload, &e->msgIds[0], msg_queue::MSG_ID_LEN);
-    uint8_t ackPkt[protocol::PAYLOAD_OFFSET + msg_queue::MSG_ID_LEN];
+    if (!x25519_keys::hasKeyFor(e->from)) {
+      RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=no_pairwise_key from=%02X%02X type=single",
+          e->from[0], e->from[1]);
+      e->inUse = false;
+      e->count = 0;
+      return;
+    }
+    uint8_t ackPlain[msg_queue::MSG_ID_LEN];
+    memcpy(ackPlain, &e->msgIds[0], msg_queue::MSG_ID_LEN);
+    uint8_t ackPayload[msg_queue::MSG_ID_LEN + crypto::OVERHEAD];
+    size_t ackPayloadLen = sizeof(ackPayload);
+    if (!crypto::encryptFor(e->from, ackPlain, msg_queue::MSG_ID_LEN, ackPayload, &ackPayloadLen)) {
+      RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=encrypt_fail from=%02X%02X type=single",
+          e->from[0], e->from[1]);
+      e->inUse = false;
+      e->count = 0;
+      return;
+    }
+    uint8_t ackPkt[protocol::PAYLOAD_OFFSET + msg_queue::MSG_ID_LEN + crypto::OVERHEAD + 8];
     size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
         node::getId(), e->from, 31, protocol::OP_ACK,
-        ackPayload, msg_queue::MSG_ID_LEN, false, false);
+        ackPayload, ackPayloadLen, true, false);
     if (ackLen > 0)
       queueDeferredAck(ackPkt, ackLen, txSf, 50);
   } else {
+    if (!x25519_keys::hasKeyFor(e->from)) {
+      RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=no_pairwise_key from=%02X%02X type=batch",
+          e->from[0], e->from[1]);
+      e->inUse = false;
+      e->count = 0;
+      return;
+    }
     uint8_t batchPayload[1 + ACK_MSGIDS_MAX * msg_queue::MSG_ID_LEN];
     batchPayload[0] = e->count;
     for (uint8_t i = 0; i < e->count; i++)
       memcpy(batchPayload + 1 + i * msg_queue::MSG_ID_LEN, &e->msgIds[i], msg_queue::MSG_ID_LEN);
     size_t batchLen = 1 + e->count * msg_queue::MSG_ID_LEN;
-    uint8_t ackPkt[protocol::PAYLOAD_OFFSET + 33];
+    uint8_t batchEnc[1 + ACK_MSGIDS_MAX * msg_queue::MSG_ID_LEN + crypto::OVERHEAD];
+    size_t batchEncLen = sizeof(batchEnc);
+    if (!crypto::encryptFor(e->from, batchPayload, batchLen, batchEnc, &batchEncLen)) {
+      RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=encrypt_fail from=%02X%02X type=batch",
+          e->from[0], e->from[1]);
+      e->inUse = false;
+      e->count = 0;
+      return;
+    }
+    uint8_t ackPkt[protocol::PAYLOAD_OFFSET + 96];
     size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
         node::getId(), e->from, 31, protocol::OP_ACK_BATCH,
-        batchPayload, batchLen, false, false);
+        batchEnc, batchEncLen, true, false);
     if (ackLen > 0)
       queueDeferredAck(ackPkt, ackLen, txSf, 50);
   }

@@ -38,6 +38,9 @@ class RecentDevicesService {
   static const _wifiIpKey = 'riftlink_recent_wifi_ips';
   static const _maxCount = 10;
   static const _maxWifiIpCount = 6;
+  static String _normalizeNodeId(String raw) =>
+      raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+  static bool _isFullNodeId(String id) => id.length == 16;
   static final RegExp _ipv4 = RegExp(
     r'^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$',
   );
@@ -51,6 +54,12 @@ class RecentDevicesService {
       if (list == null) return [];
       return list
           .map((e) => RecentDevice.fromJson(e as Map<String, dynamic>))
+          .map((d) => RecentDevice(
+                remoteId: d.remoteId,
+                nodeId: _normalizeNodeId(d.nodeId),
+                nickname: d.nickname,
+                lastConnected: d.lastConnected,
+              ))
           .where((d) => d.remoteId.isNotEmpty)
           .toList()
         ..sort((a, b) => b.lastConnected.compareTo(a.lastConnected));
@@ -64,12 +73,14 @@ class RecentDevicesService {
     required String nodeId,
     String? nickname,
   }) async {
+    final normalizedNodeId = _normalizeNodeId(nodeId);
+    if (!_isFullNodeId(normalizedNodeId)) return;
     final list = await load();
     final now = DateTime.now();
     final idx = list.indexWhere((d) => d.remoteId == remoteId);
     final updated = RecentDevice(
       remoteId: remoteId,
-      nodeId: nodeId,
+      nodeId: normalizedNodeId,
       nickname: nickname ?? (idx >= 0 ? list[idx].nickname : null),
       lastConnected: now,
     );
@@ -170,16 +181,18 @@ class RecentDevicesService {
     required String nodeId,
     String? nickname,
   }) async {
+    final normalizedNodeId = _normalizeNodeId(nodeId);
+    if (!_isFullNodeId(normalizedNodeId)) return;
     final meta = await _loadWifiMeta();
     final dupeKey = meta.entries
-        .where((e) => e.key != ip && (e.value.nodeId == nodeId || (nickname != null && nickname.isNotEmpty && e.value.nickname == nickname)))
+        .where((e) => e.key != ip && (e.value.nodeId == normalizedNodeId || (nickname != null && nickname.isNotEmpty && e.value.nickname == nickname)))
         .map((e) => e.key)
         .toList();
     for (final k in dupeKey) {
       meta.remove(k);
       await removeRecentWifiIp(k);
     }
-    meta[ip] = WifiDeviceMeta(nodeId: nodeId, nickname: nickname);
+    meta[ip] = WifiDeviceMeta(nodeId: normalizedNodeId, nickname: nickname);
     await _saveWifiMeta(meta);
   }
 

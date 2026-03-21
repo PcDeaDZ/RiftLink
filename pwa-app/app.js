@@ -31,29 +31,65 @@ let gpsFix = false;
 let intentionalDisconnect = false;
 let reconnectingPromise = null;
 
+function normalizeNodeId(id) {
+  return String(id || '').replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
+}
+
+function isFullNodeId(id) {
+  return /^[0-9A-F]{16}$/.test(normalizeNodeId(id));
+}
+
 function loadContacts() {
   try {
-    return JSON.parse(localStorage.getItem(CONTACTS_KEY) || '[]');
+    const raw = JSON.parse(localStorage.getItem(CONTACTS_KEY) || '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .map(c => ({ id: normalizeNodeId(c?.id), nickname: String(c?.nickname || '') }))
+      .filter(c => c.id.length === 16 || c.id.length === 8);
   } catch (_) { return []; }
 }
 
 function getContactName(id) {
-  const shortId = String(id).slice(0, 8);
-  const c = loadContacts().find(x => x.id === shortId);
-  return c?.nickname || shortId;
+  const fullId = normalizeNodeId(id);
+  const contacts = loadContacts();
+  const exact = contacts.find(x => x.id === fullId);
+  if (exact?.nickname) return exact.nickname;
+  const legacy = contacts.find(x => x.id.length === 8 && fullId.startsWith(x.id));
+  return legacy?.nickname || fullId;
 }
 
 function saveContact(id, nickname) {
+  const fullId = normalizeNodeId(id);
+  if (!isFullNodeId(fullId)) return false;
   const contacts = loadContacts();
-  const idx = contacts.findIndex(x => x.id === id);
+  const idx = contacts.findIndex(x => x.id === fullId);
   if (idx >= 0) contacts[idx].nickname = nickname;
-  else contacts.push({ id: id.slice(0, 8), nickname });
+  else contacts.push({ id: fullId, nickname });
   localStorage.setItem(CONTACTS_KEY, JSON.stringify(contacts));
+  return true;
 }
 
 function removeContact(id) {
-  const contacts = loadContacts().filter(x => x.id !== id);
+  const fullId = normalizeNodeId(id);
+  const contacts = loadContacts().filter(x => x.id !== fullId);
   localStorage.setItem(CONTACTS_KEY, JSON.stringify(contacts));
+}
+
+function migrateLegacyContactsWithKnownIds(knownIds) {
+  const contacts = loadContacts();
+  let changed = false;
+  const normalizedKnown = (knownIds || []).map(normalizeNodeId).filter(isFullNodeId);
+  for (const c of contacts) {
+    if (c.id.length !== 8) continue;
+    const matches = normalizedKnown.filter(id => id.startsWith(c.id));
+    if (matches.length === 1) {
+      c.id = matches[0];
+      changed = true;
+    }
+  }
+  if (changed) {
+    localStorage.setItem(CONTACTS_KEY, JSON.stringify(contacts));
+  }
 }
 
 function addRxListener() {
@@ -186,7 +222,7 @@ function renderNeighbors() {
   }
   el.innerHTML = neighbors.map((id, i) => {
     const rssi = neighborsRssi[i];
-    const nid = id.slice(0, 8);
+    const nid = normalizeNodeId(id);
     const hasContact = loadContacts().some(c => c.id === nid);
     const telem = telemetry[nid];
     const batStr = telem?.battery ? ` ${(telem.battery / 1000).toFixed(1)}V` : '';
@@ -274,6 +310,7 @@ function handleEvent(data) {
       nickname = obj.nickname || '';
       if (Array.isArray(obj.groups)) groups = obj.groups;
       if (Array.isArray(obj.neighbors)) { neighbors = obj.neighbors; neighborsRssi = obj.neighborsRssi || obj.rssi || []; }
+      migrateLegacyContactsWithKnownIds([nodeId, ...neighbors]);
       if (Array.isArray(obj.routes)) routes = obj.routes;
       currentRegion = obj.region || '';
       currentChannel = obj.channel ?? -1;
@@ -294,7 +331,12 @@ function handleEvent(data) {
     } else if (evt === 'groups') {
       if (Array.isArray(obj.groups)) { groups = obj.groups; renderRecipient(); renderGroups(); }
     } else if (evt === 'neighbors') {
-      if (Array.isArray(obj.neighbors)) { neighbors = obj.neighbors; neighborsRssi = obj.rssi || obj.neighborsRssi || []; renderRecipient(); renderNeighbors(); }
+      if (Array.isArray(obj.neighbors)) {
+        neighbors = obj.neighbors;
+        neighborsRssi = obj.rssi || obj.neighborsRssi || [];
+        migrateLegacyContactsWithKnownIds([nodeId, ...neighbors]);
+        renderRecipient(); renderNeighbors();
+      }
     } else if (evt === 'routes') {
       if (Array.isArray(obj.routes)) { routes = obj.routes; renderRoutes(); }
     } else if (evt === 'location') {
@@ -307,7 +349,7 @@ function handleEvent(data) {
       const to = obj.to || '';
       const msgId = obj.msgId || 0;
       if (to && msgId) {
-        const m = findLastOutgoingWithoutMsgId(to.slice(0, 8));
+        const m = findLastOutgoingWithoutMsgId(normalizeNodeId(to));
         if (m) {
           m.dataset.msgid = String(msgId);
           const st = m.querySelector('.status');
@@ -315,7 +357,7 @@ function handleEvent(data) {
         }
       }
     } else if (evt === 'delivered') {
-      const from = (obj.from || '').slice(0, 8);
+      const from = normalizeNodeId(obj.from || '');
       const msgId = obj.msgId || 0;
       if (msgId) {
         const m = document.querySelector(`.msg.outgoing[data-msgid="${msgId}"]`);
@@ -325,7 +367,7 @@ function handleEvent(data) {
         }
       }
     } else if (evt === 'read') {
-      const from = (obj.from || '').slice(0, 8);
+      const from = normalizeNodeId(obj.from || '');
       const msgId = obj.msgId || 0;
       if (msgId) {
         const m = document.querySelector(`.msg.outgoing[data-msgid="${msgId}"]`);
@@ -384,7 +426,7 @@ function handleEvent(data) {
       updateChannelSection();
       updateRegionButtons();
     } else if (evt === 'telemetry') {
-      const from = (obj.from || '?').slice(0, 8);
+      const from = normalizeNodeId(obj.from || '?');
       telemetry[from] = { battery: obj.battery || 0, heapKb: obj.heapKb || 0 };
     } else if (evt === 'wifi') {
       const connected = obj.connected === true;
@@ -468,7 +510,7 @@ function updatePowersaveToggle() {
 }
 
 async function doPing(toId, btn) {
-  if (!toId || toId.length < 8) return;
+  if (!isFullNodeId(toId)) return;
   if (btn) { btn.disabled = true; btn.textContent = '...'; }
   const ok = await sendCmd({ cmd: 'ping', to: toId });
   if (btn) {
@@ -677,14 +719,14 @@ async function sendMessage() {
   let cmd;
   if (recipient.startsWith('g')) {
     cmd = { cmd: 'send', group: parseInt(recipient.slice(1), 10), text };
-  } else if (recipient.length >= 8) {
-    cmd = { cmd: 'send', to: recipient.slice(0, 8), text };
+  } else if (isFullNodeId(recipient)) {
+    cmd = { cmd: 'send', to: normalizeNodeId(recipient), text };
   } else {
     cmd = { cmd: 'send', text };
   }
   const ok = await sendCmd(cmd);
   if (ok) {
-    const recipientKey = (recipient && !recipient.startsWith('g')) ? recipient.slice(0, 8) : '';
+    const recipientKey = (recipient && !recipient.startsWith('g')) ? normalizeNodeId(recipient) : '';
     const displayName = recipient ? (recipient.startsWith('g') ? 'Группа ' + recipient.slice(1) : recipient) : 'Broadcast';
     addMessage(displayName, text, false, null, recipientKey);
     input.value = '';
@@ -820,10 +862,10 @@ function init() {
   });
 
   document.getElementById('btnAcceptInvite')?.addEventListener('click', async () => {
-    const id = (document.getElementById('acceptId')?.value || '').trim().replace(/[^0-9A-Fa-f]/g, '').slice(0, 16);
+    const id = normalizeNodeId((document.getElementById('acceptId')?.value || '').trim());
     const pubKey = (document.getElementById('acceptPubKey')?.value || '').trim();
     const channelKey = (document.getElementById('acceptChannelKey')?.value || '').trim();
-    if (id.length < 8 || !pubKey) {
+    if (!isFullNodeId(id) || !pubKey) {
       showToast('Введите ID и PubKey', 'error');
       return;
     }
@@ -837,10 +879,10 @@ function init() {
   });
 
   document.getElementById('btnAddContact')?.addEventListener('click', () => {
-    const id = (document.getElementById('contactId')?.value || '').trim().toUpperCase().replace(/[^0-9A-F]/g, '').slice(0, 8);
+    const id = normalizeNodeId((document.getElementById('contactId')?.value || '').trim());
     const nick = (document.getElementById('contactNick')?.value || '').trim().slice(0, 16);
-    if (id.length < 8) { showToast('Введите ID (8 hex)', 'error'); return; }
-    saveContact(id, nick || id);
+    if (!isFullNodeId(id)) { showToast('Введите ID (16 hex)', 'error'); return; }
+    if (!saveContact(id, nick || id)) { showToast('Ошибка контакта', 'error'); return; }
     document.getElementById('contactId').value = '';
     document.getElementById('contactNick').value = '';
     renderContacts();
@@ -851,7 +893,7 @@ function init() {
 
   document.getElementById('btnVoice')?.addEventListener('click', async () => {
     const recipient = document.getElementById('recipient')?.value || '';
-    if (!recipient || recipient.startsWith('g') || recipient.length < 8) {
+    if (!recipient || recipient.startsWith('g') || !isFullNodeId(recipient)) {
       showToast('Выберите получателя (unicast)', 'error');
       return;
     }
@@ -877,10 +919,10 @@ function init() {
         for (let i = 0; i < total; i++) {
           const slice = bytes.slice(i * CHUNK_RAW, (i + 1) * CHUNK_RAW);
           const b64 = btoa(String.fromCharCode.apply(null, slice));
-          const ok = await sendCmd({ cmd: 'voice', to: recipient.slice(0, 8), data: b64, chunk: i, total });
+          const ok = await sendCmd({ cmd: 'voice', to: normalizeNodeId(recipient), data: b64, chunk: i, total });
           if (!ok) { showToast('Ошибка отправки голоса', 'error'); break; }
         }
-        if (total > 0) addMessage(recipient.slice(0, 8), '🎤 Голос', false);
+        if (total > 0) addMessage(normalizeNodeId(recipient), '🎤 Голос', false);
       };
       btn.classList.add('recording');
       recorder.start(500);

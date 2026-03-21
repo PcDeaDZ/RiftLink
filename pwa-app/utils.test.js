@@ -3,16 +3,16 @@ import { buildInviteCopyData, parseInviteJson } from './utils.js';
 
 describe('buildInviteCopyData', () => {
   it('builds JSON without channelKey', () => {
-    const data = buildInviteCopyData({ id: 'A1B2C3D4', pubKey: 'base64key' });
+    const data = buildInviteCopyData({ id: 'A1B2C3D4E5F60708', pubKey: 'base64key' });
     const parsed = JSON.parse(data);
-    expect(parsed.id).toBe('A1B2C3D4');
+    expect(parsed.id).toBe('A1B2C3D4E5F60708');
     expect(parsed.pubKey).toBe('base64key');
     expect(parsed.channelKey).toBeUndefined();
   });
 
   it('builds JSON with channelKey', () => {
     const data = buildInviteCopyData({
-      id: 'A1B2C3D4',
+      id: 'A1B2C3D4E5F60708',
       pubKey: 'pk',
       channelKey: 'chkey32',
     });
@@ -36,20 +36,26 @@ describe('buildInviteCopyData', () => {
 
 describe('parseInviteJson', () => {
   it('parses valid JSON with channelKey', () => {
-    const r = parseInviteJson('{"id":"A1B2C3D4","pubKey":"pk","channelKey":"ck"}');
-    expect(r.id).toBe('A1B2C3D4');
+    const r = parseInviteJson('{"id":"A1B2C3D4E5F60708","pubKey":"pk","channelKey":"ck"}');
+    expect(r.id).toBe('A1B2C3D4E5F60708');
     expect(r.pubKey).toBe('pk');
     expect(r.channelKey).toBe('ck');
   });
 
   it('parses JSON without channelKey', () => {
-    const r = parseInviteJson('{"id":"DEADBEEF","pubKey":"old"}');
+    const r = parseInviteJson('{"id":"DEADBEEF00112233","pubKey":"old"}');
+    expect(r.id).toBe('DEADBEEF00112233');
     expect(r.channelKey).toBe('');
   });
 
-  it('normalizes id (hex only)', () => {
-    const r = parseInviteJson('{"id":"A1-B2-C3-D4","pubKey":"x"}');
-    expect(r.id).toBe('A1B2C3D4');
+  it('normalizes id (hex only, full length)', () => {
+    const r = parseInviteJson('{"id":"A1-B2-C3-D4-E5-F6-07-08","pubKey":"x"}');
+    expect(r.id).toBe('A1B2C3D4E5F60708');
+  });
+
+  it('rejects short id', () => {
+    const r = parseInviteJson('{"id":"A1B2C3D4","pubKey":"x"}');
+    expect(r.id).toBe('');
   });
 
   it('returns empty on invalid JSON', () => {

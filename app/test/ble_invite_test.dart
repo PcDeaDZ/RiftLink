@@ -39,7 +39,7 @@ void main() {
     });
 
     test('buildInviteJson escapes special chars', () {
-      const id = 'A1B2C3D4';
+      const id = 'A1B2C3D4E5F60708';
       const pubKey = 'key"with\\quotes';
       final map = <String, String>{'id': id, 'pubKey': pubKey};
       final data = jsonEncode(map);
@@ -51,13 +51,13 @@ void main() {
 
   group('Settings paste JSON parsing', () {
     test('parse valid invite JSON with channelKey', () {
-      const json = '{"id":"A1B2C3D4","pubKey":"base64key","channelKey":"chkey32"}';
+      const json = '{"id":"A1B2C3D4E5F60708","pubKey":"base64key","channelKey":"chkey32"}';
       final m = jsonDecode(json) as Map<String, dynamic>?;
       expect(m, isNotNull);
       final id = (m!['id'] as String?) ?? '';
       final pk = (m['pubKey'] as String?) ?? '';
       final ck = (m['channelKey'] as String?) ?? '';
-      expect(id, 'A1B2C3D4');
+      expect(id, 'A1B2C3D4E5F60708');
       expect(pk, 'base64key');
       expect(ck, 'chkey32');
     });
@@ -82,13 +82,13 @@ void main() {
   group('RiftLinkInviteEvent', () {
     test('creates with channelKey', () {
       final evt = RiftLinkInviteEvent(
-        id: 'A1B2C3D4',
+        id: 'A1B2C3D4E5F60708',
         pubKey: 'pk',
         channelKey: 'ck',
         inviteToken: 'AABB',
         inviteTtlMs: 5000,
       );
-      expect(evt.id, 'A1B2C3D4');
+      expect(evt.id, 'A1B2C3D4E5F60708');
       expect(evt.pubKey, 'pk');
       expect(evt.channelKey, 'ck');
       expect(evt.inviteToken, 'AABB');
@@ -104,7 +104,7 @@ void main() {
 
   group('acceptInvite payload logic', () {
     test('payload includes channelKey when non-empty', () {
-      const id = 'A1B2C3D4';
+      const id = 'A1B2C3D4E5F60708';
       const pubKey = 'pk';
       const channelKey = 'ck';
       final payload = <String, dynamic>{'cmd': 'acceptInvite', 'id': id, 'pubKey': pubKey};
@@ -113,7 +113,7 @@ void main() {
     });
 
     test('payload includes inviteToken when non-empty', () {
-      const id = 'A1B2C3D4';
+      const id = 'A1B2C3D4E5F60708';
       const pubKey = 'pk';
       const inviteToken = 'AABBCCDD00112233';
       final payload = <String, dynamic>{'cmd': 'acceptInvite', 'id': id, 'pubKey': pubKey};
@@ -122,7 +122,7 @@ void main() {
     });
 
     test('payload excludes channelKey when empty', () {
-      const id = 'A1B2C3D4';
+      const id = 'A1B2C3D4E5F60708';
       const pubKey = 'pk';
       const channelKey = '';
       final payload = <String, dynamic>{'cmd': 'acceptInvite', 'id': id, 'pubKey': pubKey};
@@ -131,7 +131,7 @@ void main() {
     });
 
     test('payload excludes channelKey when null', () {
-      const id = 'A1B2C3D4';
+      const id = 'A1B2C3D4E5F60708';
       const pubKey = 'pk';
       final String? channelKey = null;
       final payload = <String, dynamic>{'cmd': 'acceptInvite', 'id': id, 'pubKey': pubKey};
@@ -158,8 +158,8 @@ void main() {
     });
 
     test('unicast payload', () {
-      final payload = {'cmd': 'send', 'to': 'A1B2C3D4', 'text': 'hi'};
-      expect(payload['to'], 'A1B2C3D4');
+      final payload = {'cmd': 'send', 'to': 'A1B2C3D4E5F60708', 'text': 'hi'};
+      expect(payload['to'], 'A1B2C3D4E5F60708');
     });
 
     test('group payload', () {

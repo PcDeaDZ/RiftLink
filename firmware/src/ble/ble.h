@@ -26,6 +26,8 @@ void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi = 0);
 void notifyRead(const uint8_t* from, uint32_t msgId, int rssi = 0);
 /** evt "sent" — unicast поставлен в очередь (to, msgId) */
 void notifySent(const uint8_t* to, uint32_t msgId);
+/** evt "waiting_key" — direct unicast отложен: ждём pairwise ключ с узлом */
+void notifyWaitingKey(const uint8_t* to);
 /** evt "undelivered" — ACK не получен после всех retry (to, msgId) */
 void notifyUndelivered(const uint8_t* to, uint32_t msgId);
 /** evt "broadcast_delivery" — delivered/total (msgId, delivered, total). При total>0 и delivered=0 — undelivered */

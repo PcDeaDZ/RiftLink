@@ -109,7 +109,7 @@ class _MapScreenState extends State<MapScreen> {
               point: LatLng(e.value.lat, e.value.lon), width: 80, height: 44,
               child: Tooltip(message: e.key, child: Column(mainAxisSize: MainAxisSize.min, children: [
                 Icon(Icons.radio_button_checked, color: p.primary, size: 32),
-                Text(e.key.length > 8 ? e.key.substring(0, 8) : e.key, style: TextStyle(fontSize: 10, fontFamily: 'monospace', color: p.onSurface), overflow: TextOverflow.ellipsis),
+                Text(e.key, style: TextStyle(fontSize: 10, fontFamily: 'monospace', color: p.onSurface), overflow: TextOverflow.ellipsis),
               ])),
             )),
             if (_myLocation != null) Marker(point: _myLocation!, width: 40, height: 40, child: Icon(Icons.person_pin_circle, color: p.success, size: 40)),

@@ -19,6 +19,18 @@ enum TriggerType : uint8_t {
   TRIGGER_DELIVER_AFTER = 2,
 };
 
+enum SendFailReason : uint8_t {
+  SEND_FAIL_NONE = 0,
+  SEND_FAIL_NOT_READY,
+  SEND_FAIL_MUTEX_BUSY,
+  SEND_FAIL_EMPTY,
+  SEND_FAIL_PENDING_FULL,
+  SEND_FAIL_NO_KEY,
+  SEND_FAIL_KEY_BUSY,
+  SEND_FAIL_BUILD_PACKET,
+  SEND_FAIL_RADIO_QUEUE,
+};
+
 void init();
 void update();  // Вызывать из loop — проверка таймаутов, retransmit
 
@@ -28,13 +40,21 @@ void update();  // Вызывать из loop — проверка таймау�
 bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes = 0,
     bool critical = false, TriggerType triggerType = TRIGGER_NONE, uint32_t triggerValueMs = 0);
 
+// Последняя причина отказа enqueue (для точного BLE-статуса без догадок через hasKeyFor()).
+SendFailReason getLastSendFailReason();
+
 // Отправка в группу (group_id 4B, broadcast, без ACK)
 bool enqueueGroup(uint32_t groupId, const char* text);
 /** Emergency flood (SOS): encrypted broadcast, отдельный opcode. */
 bool enqueueSos(const char* text);
 
-// Обработка входящего ACK. from = кто прислал ACK. Возвращает true если unicast доставлен (для notifyDelivered)
-bool onAckReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLen);
+// Обработка входящего ACK.
+// Возвращает true, если подтверждён unicast (для notifyDelivered).
+bool onAckReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLen,
+    bool requireOnline = true, bool allowUnicast = true, bool allowBroadcast = true);
+
+// Witness ACK (ECHO): учитывает только broadcast delivery, unicast не подтверждает.
+bool onBroadcastAckWitness(const uint8_t* from, uint32_t msgId, bool requireOnline = true);
 
 // Обработка ACK_BATCH: count(1) + msgId(4)* — для каждого msgId вызывает onAckReceived.
 // onDelivered вызывается для каждого доставленного msgId (для ble::notifyDelivered).
