@@ -24,9 +24,23 @@ class FakeRiftLinkBle implements RiftLinkBle {
   @override
   Future<bool> getRoutes() async => false;
   @override
-  Future<bool> send({String? to, int? group, required String text, int ttlMinutes = 0}) async => false;
+  Future<bool> send({
+    String? to,
+    int? group,
+    required String text,
+    int ttlMinutes = 0,
+    String lane = 'normal',
+    String? trigger,
+    int? triggerAtMs,
+  }) async => false;
   @override
-  Future<bool> sendLocation({required double lat, required double lon, int alt = 0}) async => false;
+  Future<bool> sendLocation({
+    required double lat,
+    required double lon,
+    int alt = 0,
+    int radiusM = 0,
+    int? expiryEpochSec,
+  }) async => false;
   @override
   Future<bool> sendGpsSync({required int utcMs, required double lat, required double lon, int alt = 0}) async => false;
   @override
@@ -46,9 +60,14 @@ class FakeRiftLinkBle implements RiftLinkBle {
   @override
   Future<bool> setLang(String lang) async => false;
   @override
-  Future<bool> createInvite() async => false;
+  Future<bool> createInvite({int ttlSec = 600}) async => false;
   @override
-  Future<bool> acceptInvite({required String id, required String pubKey, String? channelKey}) async => false;
+  Future<bool> acceptInvite({
+    required String id,
+    required String pubKey,
+    String? channelKey,
+    String? inviteToken,
+  }) async => false;
   @override
   Future<bool> selftest() async => false;
   @override
@@ -65,6 +84,11 @@ class FakeRiftLinkBle implements RiftLinkBle {
   Future<bool> addGroup(int groupId) async => false;
   @override
   Future<bool> removeGroup(int groupId) async => false;
+  @override
+  bool get isWifiMode => false;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 void main() {

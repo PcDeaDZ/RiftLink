@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 
+// Согласовано с showAppDialog (app_navigator): тот же scrim и длительность overlay.
+const Duration _kOverlayMotionDuration = Duration(milliseconds: 200);
+
 /// Всплывающее меню сверху справа (как «три точки» в чате).
 /// [toolbarHeight] — фактическая высота AppBar (в чате 44, на скане обычно [kToolbarHeight]).
 class AppPopoverMenuRoute<T> extends PageRouteBuilder<T> {
@@ -8,11 +11,18 @@ class AppPopoverMenuRoute<T> extends PageRouteBuilder<T> {
     this.toolbarHeight = kToolbarHeight,
   }) : super(
           opaque: false,
-          barrierColor: Colors.black38,
+          barrierColor: Colors.black54,
           barrierDismissible: true,
+          transitionDuration: _kOverlayMotionDuration,
+          reverseTransitionDuration: _kOverlayMotionDuration,
           pageBuilder: (context, animation, secondaryAnimation) => child,
           transitionsBuilder: (context, animation, secondaryAnimation, widget) {
             final top = MediaQuery.paddingOf(context).top + toolbarHeight;
+            final curved = CurvedAnimation(
+              parent: animation,
+              curve: Curves.easeOutCubic,
+              reverseCurve: Curves.easeInCubic,
+            );
             return Stack(
               children: [
                 Positioned.fill(
@@ -25,13 +35,11 @@ class AppPopoverMenuRoute<T> extends PageRouteBuilder<T> {
                 Align(
                   alignment: Alignment.topRight,
                   child: Padding(
-                    padding: EdgeInsets.only(top: top, right: 12),
+                    padding: EdgeInsets.only(top: top, right: 16),
                     child: FadeTransition(
-                      opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
+                      opacity: curved,
                       child: ScaleTransition(
-                        scale: Tween<double>(begin: 0.9, end: 1.0).animate(
-                          CurvedAnimation(parent: animation, curve: Curves.easeOut),
-                        ),
+                        scale: Tween<double>(begin: 0.94, end: 1.0).animate(curved),
                         alignment: Alignment.topRight,
                         child: widget,
                       ),

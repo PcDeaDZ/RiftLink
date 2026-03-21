@@ -10,7 +10,9 @@ import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
 import '../prefs/mesh_prefs.dart';
 import '../theme/app_theme.dart';
+import '../theme/design_tokens.dart';
 import '../theme/theme_notifier.dart';
+import '../widgets/app_primitives.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/app_snackbar.dart';
 import 'ota_screen.dart';
@@ -58,15 +60,15 @@ class _SegmentedPickBar extends StatelessWidget {
       child: Container(
         decoration: BoxDecoration(
           color: context.palette.surfaceVariant,
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(AppRadius.lg),
           border: Border.all(color: context.palette.divider),
         ),
-        padding: const EdgeInsets.all(4),
+        padding: const EdgeInsets.all(AppSpacing.xs),
         child: Row(
           children: [
             if (leadingIcon != null) ...[
               Padding(
-                padding: const EdgeInsets.only(left: 8, right: 4),
+                padding: const EdgeInsets.only(left: AppSpacing.sm, right: AppSpacing.xs),
                 child: AnimatedSwitcher(
                   duration: const Duration(milliseconds: 260),
                   switchInCurve: Curves.easeOut,
@@ -91,7 +93,7 @@ class _SegmentedPickBar extends StatelessWidget {
                         final showPill = idx != null && idx >= 0 && idx < n;
                         final left = showPill ? segW * idx : 0.0;
                         return ClipRRect(
-                          borderRadius: BorderRadius.circular(10),
+                          borderRadius: BorderRadius.circular(AppRadius.md),
                           child: Stack(
                             clipBehavior: Clip.none,
                             children: [
@@ -107,7 +109,7 @@ class _SegmentedPickBar extends StatelessWidget {
                                   opacity: showPill ? 1 : 0,
                                   child: DecoratedBox(
                                     decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(10),
+                                      borderRadius: BorderRadius.circular(AppRadius.md),
                                       color: context.palette.primary.withOpacity(enabled ? 0.22 : 0.12),
                                       border: Border.all(
                                         color: context.palette.primary.withOpacity(enabled ? 1 : 0.45),
@@ -131,7 +133,7 @@ class _SegmentedPickBar extends StatelessWidget {
                                     child: Material(
                                       color: Colors.transparent,
                                       child: InkWell(
-                                        borderRadius: BorderRadius.circular(10),
+                                        borderRadius: BorderRadius.circular(AppRadius.md),
                                         onTap: enabled
                                             ? () {
                                                 HapticFeedback.selectionClick();
@@ -139,7 +141,7 @@ class _SegmentedPickBar extends StatelessWidget {
                                               }
                                             : null,
                                         child: Padding(
-                                          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 2),
+                                          padding: const EdgeInsets.symmetric(vertical: AppSpacing.md, horizontal: 2),
                                           child: Center(
                                             child: AnimatedDefaultTextStyle(
                                               duration: _anim,
@@ -195,7 +197,7 @@ class _SfPickGrid extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, c) {
         final w = c.maxWidth;
-        final gap = 8.0;
+        final gap = AppSpacing.sm;
         final n = _sfs.length;
         final cell = (w - gap * (n - 1)) / n;
         final minCell = 44.0;
@@ -270,9 +272,9 @@ class _SfCell extends StatelessWidget {
       alignment: Alignment.center,
       child: Material(
         color: Colors.transparent,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(AppRadius.md),
         child: InkWell(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(AppRadius.md),
           onTap: onTap == null
               ? null
               : () {
@@ -283,9 +285,9 @@ class _SfCell extends StatelessWidget {
             duration: const Duration(milliseconds: 260),
             curve: Curves.easeOutCubic,
             constraints: BoxConstraints(minWidth: minWidth, minHeight: 48),
-            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+            padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm, horizontal: AppSpacing.xs),
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(AppRadius.md),
               color: context.palette.surfaceVariant,
               border: Border.all(
                 color: selected ? context.palette.primary : context.palette.divider,
@@ -421,19 +423,19 @@ class _ModemSectionState extends State<_ModemSection> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Wrap(
-          spacing: 6,
-          runSpacing: 6,
+          spacing: AppSpacing.sm - 2,
+          runSpacing: AppSpacing.sm - 2,
           children: [
             for (var i = 0; i < 5; i++)
               _presetChip(context, i, enabled),
           ],
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: AppSpacing.sm),
         AnimatedSize(
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
           child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4),
+            padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
             child: Text(
               presetDesc[_sel],
               style: TextStyle(fontSize: 12, height: 1.4, color: pal.onSurfaceVariant.withOpacity(0.85)),
@@ -441,9 +443,9 @@ class _ModemSectionState extends State<_ModemSection> {
           ),
         ),
         if (isCustom) ...[
-          const SizedBox(height: 10),
+          const SizedBox(height: AppSpacing.sm + 2),
           Text('SF', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
-          const SizedBox(height: 4),
+          const SizedBox(height: AppSpacing.xs),
           _SfPickGrid(
             selectedSf: _cSf,
             enabled: enabled,
@@ -451,9 +453,9 @@ class _ModemSectionState extends State<_ModemSection> {
               setState(() => _cSf = sf);
             },
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: AppSpacing.sm + 2),
           Text('BW (kHz)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
-          const SizedBox(height: 4),
+          const SizedBox(height: AppSpacing.xs),
           _optionRow<double>(
             context,
             options: _bwOptions,
@@ -464,9 +466,9 @@ class _ModemSectionState extends State<_ModemSection> {
               setState(() => _cBw = v);
             },
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: AppSpacing.sm + 2),
           Text('CR', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
-          const SizedBox(height: 4),
+          const SizedBox(height: AppSpacing.xs),
           _optionRow<int>(
             context,
             options: _crOptions,
@@ -477,7 +479,7 @@ class _ModemSectionState extends State<_ModemSection> {
               setState(() => _cCr = v);
             },
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: AppSpacing.md),
           FilledButton.tonalIcon(
             onPressed: enabled ? () => widget.onCustom(_cSf, _cBw, _cCr) : null,
             icon: const Icon(Icons.tune_rounded, size: 18),
@@ -508,9 +510,9 @@ class _ModemSectionState extends State<_ModemSection> {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         constraints: const BoxConstraints(minWidth: 84),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(AppRadius.md),
           color: sel ? pal.primary.withOpacity(0.15) : pal.surfaceVariant,
           border: Border.all(
             color: sel ? pal.primary : pal.divider,
@@ -542,7 +544,7 @@ class _ModemSectionState extends State<_ModemSection> {
     return Row(
       children: [
         for (var i = 0; i < options.length; i++) ...[
-          if (i > 0) const SizedBox(width: 6),
+          if (i > 0) const SizedBox(width: AppSpacing.sm - 2),
           Expanded(
             child: GestureDetector(
               onTap: enabled ? () {
@@ -551,10 +553,10 @@ class _ModemSectionState extends State<_ModemSection> {
               } : null,
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 200),
-                padding: const EdgeInsets.symmetric(vertical: 8),
+                padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
                 alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(10),
+                  borderRadius: BorderRadius.circular(AppRadius.md),
                   color: options[i] == selected ? pal.primary.withOpacity(0.15) : pal.surfaceVariant,
                   border: Border.all(
                     color: options[i] == selected ? pal.primary : pal.divider,
@@ -1069,7 +1071,12 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
       body: MeshBackgroundWrapper(
         child: SafeArea(
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.lg,
+              AppSpacing.sm,
+              AppSpacing.lg,
+              AppSpacing.xxl + AppSpacing.sm,
+            ),
             children: [
               _SettingsCard(
                 title: l.tr('settings_device'),
@@ -1081,7 +1088,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       l.tr('settings_node_id'),
                       style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 13),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: AppSpacing.sm),
                     SelectableText(
                       idShown,
                       style: TextStyle(
@@ -1092,21 +1099,29 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         letterSpacing: 0.5,
                       ),
                     ),
-                    const SizedBox(height: 12),
-                    OutlinedButton.icon(
+                    const SizedBox(height: AppSpacing.md),
+                    AppSecondaryButton(
+                      fullWidth: true,
                       onPressed: idPlain.isEmpty
                           ? null
                           : () async {
                               await Clipboard.setData(ClipboardData(text: idPlain));
                               if (mounted) _snack(l.tr('copied'));
                             },
-                      icon: const Icon(Icons.copy, size: 18),
-                      label: Text(l.tr('copy')),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.copy, size: 18),
+                          SizedBox(width: AppSpacing.sm),
+                          Text(l.tr('copy')),
+                        ],
+                      ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               _SettingsCard(
                 title: l.tr('nickname'),
                 child: Column(
@@ -1122,8 +1137,8 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         counterText: '',
                       ),
                     ),
-                    const SizedBox(height: 12),
-                    FilledButton(
+                    const SizedBox(height: AppSpacing.md),
+                    AppPrimaryButton(
                       onPressed: connected
                           ? () async {
                               final n = _nickController.text.trim();
@@ -1138,7 +1153,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                   ],
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               _SettingsCard(
                 title: l.tr('region'),
                 subtitle: l.tr('settings_region_hint'),
@@ -1149,7 +1164,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       l.tr('region_warning'),
                       style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 12, height: 1.35),
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: AppSpacing.md + AppSpacing.xs),
                     _SegmentedPickBar(
                       leadingIcon: Icons.public_rounded,
                       labels: regions,
@@ -1164,11 +1179,11 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       },
                     ),
                     if (isEu) ...[
-                      const SizedBox(height: 18),
+                      const SizedBox(height: AppSpacing.lg + AppSpacing.xs),
                       Row(
                         children: [
                           Icon(Icons.radio_button_checked, size: 18, color: context.palette.primary.withOpacity(0.9)),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: AppSpacing.sm),
                           Text(
                             l.tr('channel_eu'),
                             style: TextStyle(
@@ -1180,7 +1195,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                           ),
                         ],
                       ),
-                      const SizedBox(height: 10),
+                      const SizedBox(height: AppSpacing.sm + 2),
                       _SegmentedPickBar(
                         leadingIcon: Icons.layers_outlined,
                         labels: const ['0', '1', '2'],
@@ -1197,7 +1212,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                   ],
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               _SettingsCard(
                 title: l.tr('settings_modem'),
                 subtitle: l.tr('settings_modem_hint'),
@@ -1259,10 +1274,10 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
               ),
               if (_modemApplying)
                 const Padding(
-                  padding: EdgeInsets.only(top: 6),
+                  padding: EdgeInsets.only(top: AppSpacing.sm - 2),
                   child: LinearProgressIndicator(minHeight: 2),
                 ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               _SettingsCard(
                 title: l.tr('connection'),
                 subtitle: l.tr('settings_connection_hint'),
@@ -1273,12 +1288,15 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       l.tr('ble_pin'),
                       style: TextStyle(fontSize: 13, color: context.palette.onSurfaceVariant),
                     ),
-                    const SizedBox(height: 6),
+                    const SizedBox(height: AppSpacing.sm - 2),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: AppSpacing.md,
+                        vertical: AppSpacing.sm + 2,
+                      ),
                       decoration: BoxDecoration(
                         color: context.palette.surfaceVariant,
-                        borderRadius: BorderRadius.circular(10),
+                        borderRadius: BorderRadius.circular(AppRadius.md),
                         border: Border.all(color: context.palette.divider),
                       ),
                       child: Text(
@@ -1291,7 +1309,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         ),
                       ),
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: AppSpacing.sm + 2),
                     FilledButton.tonalIcon(
                       onPressed: connected
                           ? () async {
@@ -1306,7 +1324,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                   ],
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               _SettingsCard(
                 title: l.tr('radio_mode_title'),
                 subtitle: l.tr('radio_mode_hint'),
@@ -1320,7 +1338,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                           size: 18,
                           color: context.palette.primary,
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: AppSpacing.sm),
                         Text(
                           '${l.tr('radio_mode_current')}: ${_radioModeLabel(l, _radioMode)}',
                           style: TextStyle(
@@ -1330,7 +1348,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         ),
                       ],
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: AppSpacing.md),
                     _SegmentedPickBar(
                       leadingIcon: Icons.swap_horiz_rounded,
                       labels: [
@@ -1348,12 +1366,12 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       },
                     ),
                     if (_radioMode == 'wifi') ...[
-                      const SizedBox(height: 10),
+                      const SizedBox(height: AppSpacing.sm + 2),
                       Container(
-                        padding: const EdgeInsets.all(10),
+                        padding: const EdgeInsets.all(AppSpacing.sm + 2),
                         decoration: BoxDecoration(
                           color: context.palette.surfaceVariant,
-                          borderRadius: BorderRadius.circular(10),
+                          borderRadius: BorderRadius.circular(AppRadius.md),
                           border: Border.all(color: context.palette.divider),
                         ),
                         child: Column(
@@ -1369,14 +1387,14 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                               ),
                             ),
                             if (_wifiSsid != null && _wifiSsid!.isNotEmpty) ...[
-                              const SizedBox(height: 4),
+                              const SizedBox(height: AppSpacing.xs),
                               Text(
                                 'SSID: $_wifiSsid',
                                 style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 12),
                               ),
                             ],
                             if (_wifiIp != null && _wifiIp!.isNotEmpty) ...[
-                              const SizedBox(height: 2),
+                              const SizedBox(height: AppSpacing.xs / 2),
                               Text(
                                 'IP: $_wifiIp',
                                 style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 12),
@@ -1386,20 +1404,20 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         ),
                       ),
                     ],
-                    const SizedBox(height: 12),
+                    const SizedBox(height: AppSpacing.md),
                     TextField(
                       controller: _wifiSsidController,
                       style: TextStyle(color: context.palette.onSurface),
                       decoration: InputDecoration(labelText: l.tr('wifi_ssid')),
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: AppSpacing.sm + 2),
                     TextField(
                       controller: _wifiPassController,
                       obscureText: true,
                       style: TextStyle(color: context.palette.onSurface),
                       decoration: InputDecoration(labelText: l.tr('wifi_password')),
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: AppSpacing.md),
                     FilledButton.icon(
                       onPressed: connected && !_radioModeApplying ? _switchRadioToWifiSta : null,
                       icon: const Icon(Icons.wifi_find_rounded),
@@ -1407,13 +1425,13 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                     ),
                     if (_radioModeApplying)
                       const Padding(
-                        padding: EdgeInsets.only(top: 10),
+                        padding: EdgeInsets.only(top: AppSpacing.sm + 2),
                         child: LinearProgressIndicator(minHeight: 2),
                       ),
                   ],
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               if (_radioMode == 'wifi') ...[
                 _SettingsCard(
                   title: l.tr('espnow_section'),
@@ -1442,7 +1460,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                               }
                             : null,
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: AppSpacing.sm),
                       SwitchListTile(
                         contentPadding: EdgeInsets.zero,
                         title: Text(
@@ -1464,7 +1482,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                     ],
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: AppSpacing.md),
               ],
               _SettingsCard(
                 title: l.tr('firmware_update_title'),
@@ -1485,12 +1503,12 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         icon: const Icon(Icons.bluetooth_searching_rounded),
                         label: Text(l.tr('firmware_update_ble')),
                       ),
-                      const SizedBox(height: 10),
+                      const SizedBox(height: AppSpacing.sm + 2),
                       Text(
                         l.tr('firmware_update_where_hint'),
                         style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
                       ),
-                      const SizedBox(height: 6),
+                      const SizedBox(height: AppSpacing.sm - 2),
                       Text(
                         l.tr('firmware_update_path'),
                         style: TextStyle(
@@ -1508,12 +1526,12 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                           color: context.palette.onSurface,
                         ),
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: AppSpacing.sm),
                       Text(
                         l.tr('firmware_update_where_hint'),
                         style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
                       ),
-                      const SizedBox(height: 6),
+                      const SizedBox(height: AppSpacing.sm - 2),
                       Text(
                         l.tr('firmware_update_path'),
                         style: TextStyle(
@@ -1524,11 +1542,11 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       ),
                     ],
                     if (!usingWifiTransport && _radioMode != 'wifi') ...[
-                      const SizedBox(height: 12),
+                      const SizedBox(height: AppSpacing.md),
                       Row(
                         children: [
                           Icon(Icons.info_outline_rounded, size: 16, color: context.palette.onSurfaceVariant),
-                          const SizedBox(width: 6),
+                          const SizedBox(width: AppSpacing.sm - 2),
                           Expanded(
                             child: Text(
                               l.tr('firmware_update_wifi_requires_wifi_mode'),
@@ -1539,11 +1557,11 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       ),
                     ],
                     if (usingWifiTransport || _radioMode == 'wifi') ...[
-                      const SizedBox(height: 12),
+                      const SizedBox(height: AppSpacing.md),
                       Row(
                         children: [
                           Icon(Icons.check_circle_outline_rounded, size: 16, color: context.palette.success),
-                          const SizedBox(width: 6),
+                          const SizedBox(width: AppSpacing.sm - 2),
                           Expanded(
                             child: Text(
                               l.tr('firmware_update_wifi_mode_ready'),
@@ -1553,19 +1571,27 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         ],
                       ),
                     ],
-                    const SizedBox(height: 12),
-                    OutlinedButton.icon(
+                    const SizedBox(height: AppSpacing.md),
+                    AppSecondaryButton(
+                      fullWidth: true,
                       onPressed: connected && !_radioModeApplying && _radioMode != 'ble'
                           ? _switchRadioToBle
                           : null,
-                      icon: const Icon(Icons.bluetooth_rounded),
-                      label: Text(l.tr('radio_mode_back_to_ble')),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.bluetooth_rounded),
+                          SizedBox(width: AppSpacing.sm),
+                          Text(l.tr('radio_mode_back_to_ble')),
+                        ],
+                      ),
                     ),
                   ],
                 ),
               ),
               if (_gpsPresent) ...[
-                const SizedBox(height: 12),
+                const SizedBox(height: AppSpacing.md),
                 _SettingsCard(
                   title: l.tr('gps_section'),
                   child: SwitchListTile(
@@ -1589,39 +1615,18 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                   ),
                 ),
               ],
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               _SettingsCard(
                 title: l.tr('settings_energy_title'),
                 subtitle: l.tr('settings_energy_hint'),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const SizedBox(height: 4),
-                    Row(
-                      children: [
-                        Container(
-                          width: 3,
-                          height: 14,
-                          decoration: BoxDecoration(
-                            color: context.palette.primary,
-                            borderRadius: BorderRadius.circular(2),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            l.tr('settings_energy_node'),
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                              color: context.palette.onSurface,
-                            ),
-                          ),
-                        ),
-                        Icon(Icons.memory_rounded, size: 18, color: context.palette.onSurfaceVariant),
-                      ],
+                    _SectionAccentHeader(
+                      text: l.tr('settings_energy_node'),
+                      trailingIcon: Icons.memory_rounded,
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: AppSpacing.sm + 2),
                     _SegmentedPickBar(
                       leadingIcon: Icons.battery_saver_outlined,
                       labels: [l.tr('powersave_mode_normal'), l.tr('powersave_mode_eco')],
@@ -1636,32 +1641,12 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         }
                       },
                     ),
-                    const SizedBox(height: 20),
-                    Row(
-                      children: [
-                        Container(
-                          width: 3,
-                          height: 14,
-                          decoration: BoxDecoration(
-                            color: context.palette.primary,
-                            borderRadius: BorderRadius.circular(2),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            l.tr('settings_energy_app'),
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                              color: context.palette.onSurface,
-                            ),
-                          ),
-                        ),
-                        Icon(Icons.smartphone_rounded, size: 18, color: context.palette.onSurfaceVariant),
-                      ],
+                    const SizedBox(height: AppSpacing.xl),
+                    _SectionAccentHeader(
+                      text: l.tr('settings_energy_app'),
+                      trailingIcon: Icons.smartphone_rounded,
                     ),
-                    const SizedBox(height: 6),
+                    const SizedBox(height: AppSpacing.sm - 2),
                     ListTile(
                       contentPadding: EdgeInsets.zero,
                       leading: Icon(Icons.dark_mode_outlined, color: context.palette.primary),
@@ -1676,7 +1661,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         showThemeModeSheet(context);
                       },
                     ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: AppSpacing.xs),
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
                       title: Text(
@@ -1700,20 +1685,24 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                   ],
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               _SettingsCard(
                 title: l.tr('e2e_invite'),
                 subtitle: l.tr('e2e_invite_hint'),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const SizedBox(height: 4),
                     OutlinedButton.icon(
                       style: OutlinedButton.styleFrom(
                         foregroundColor: context.palette.primary,
                         side: BorderSide(color: context.palette.primary, width: 1.2),
-                        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        padding: const EdgeInsets.symmetric(
+                          vertical: AppSpacing.buttonPrimaryV,
+                          horizontal: AppSpacing.lg,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(AppRadius.md),
+                        ),
                       ),
                       onPressed: connected
                           ? () {
@@ -1728,35 +1717,14 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       icon: const Icon(Icons.add_moderator_outlined, size: 22),
                       label: Text(l.tr('create_invite'), style: const TextStyle(fontWeight: FontWeight.w600)),
                     ),
-                    const SizedBox(height: 22),
-                    Row(
-                      children: [
-                        Container(
-                          width: 3,
-                          height: 16,
-                          decoration: BoxDecoration(
-                            color: context.palette.primary,
-                            borderRadius: BorderRadius.circular(2),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Text(
-                          l.tr('invite_accept_section'),
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            color: context.palette.onSurface,
-                            letterSpacing: 0.2,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
+                    SizedBox(height: AppSpacing.xl + AppSpacing.xs),
+                    _SectionAccentHeader(text: l.tr('invite_accept_section')),
+                    const SizedBox(height: AppSpacing.md),
                     Container(
-                      padding: const EdgeInsets.all(14),
+                      padding: const EdgeInsets.all(AppSpacing.md + AppSpacing.xs),
                       decoration: BoxDecoration(
                         color: context.palette.surfaceVariant.withOpacity(0.65),
-                        borderRadius: BorderRadius.circular(12),
+                        borderRadius: BorderRadius.circular(AppRadius.md),
                         border: Border.all(color: context.palette.divider),
                       ),
                       child: Column(
@@ -1798,7 +1766,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                             ),
                             maxLength: 16,
                           ),
-                          const SizedBox(height: 12),
+                          const SizedBox(height: AppSpacing.md),
                           TextField(
                             controller: _inviteKeyController,
                             style: TextStyle(color: context.palette.onSurface, fontSize: 13, height: 1.35),
@@ -1810,7 +1778,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                             maxLines: 3,
                             minLines: 2,
                           ),
-                          const SizedBox(height: 12),
+                          const SizedBox(height: AppSpacing.md),
                           TextField(
                             controller: _inviteChannelKeyController,
                             style: TextStyle(color: context.palette.onSurface, fontSize: 13, height: 1.35),
@@ -1822,7 +1790,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                             maxLines: 2,
                             minLines: 1,
                           ),
-                          const SizedBox(height: 12),
+                          const SizedBox(height: AppSpacing.md),
                           TextField(
                             controller: _inviteTokenController,
                             style: TextStyle(color: context.palette.onSurface, fontFamily: 'monospace', fontSize: 13),
@@ -1835,11 +1803,16 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         ],
                       ),
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: AppSpacing.md + AppSpacing.xs),
                     FilledButton.icon(
                       style: FilledButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 18),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        padding: const EdgeInsets.symmetric(
+                          vertical: AppSpacing.buttonPrimaryV,
+                          horizontal: AppSpacing.buttonPrimaryH - 2,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(AppRadius.md),
+                        ),
                       ),
                       onPressed: connected
                           ? () async {
@@ -1883,30 +1856,16 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       label: Text(l.tr('accept_invite'), style: const TextStyle(fontWeight: FontWeight.w600)),
                     ),
                     if (_inviteStatusText != null && _inviteStatusText!.isNotEmpty) ...[
-                      const SizedBox(height: 10),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: (_inviteStatusError ? context.palette.error : context.palette.success).withOpacity(0.12),
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(
-                            color: (_inviteStatusError ? context.palette.error : context.palette.success).withOpacity(0.35),
-                          ),
-                        ),
-                        child: Text(
-                          _inviteStatusText!,
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600,
-                            color: _inviteStatusError ? context.palette.error : context.palette.success,
-                          ),
-                        ),
+                      const SizedBox(height: AppSpacing.sm + 2),
+                      AppStateChip(
+                        label: _inviteStatusText!,
+                        kind: _inviteStatusError ? AppStateKind.error : AppStateKind.success,
                       ),
                     ],
                   ],
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               _SettingsCard(
                 title: l.tr('other'),
                 child: Column(
@@ -1919,7 +1878,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                    const SizedBox(height: 6),
+                    const SizedBox(height: AppSpacing.sm - 2),
                     Text(
                       l.tr('voice_acceptance_hint'),
                       style: TextStyle(
@@ -1927,7 +1886,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         fontSize: 12,
                       ),
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: AppSpacing.sm + 2),
                     TextField(
                       controller: _voiceAcceptAvgLossController,
                       keyboardType: TextInputType.number,
@@ -1937,7 +1896,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         labelText: l.tr('voice_acceptance_avg_loss'),
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: AppSpacing.sm),
                     TextField(
                       controller: _voiceAcceptHardLossController,
                       keyboardType: TextInputType.number,
@@ -1947,7 +1906,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         labelText: l.tr('voice_acceptance_hard_loss'),
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: AppSpacing.sm),
                     TextField(
                       controller: _voiceAcceptMinSessionsController,
                       keyboardType: TextInputType.number,
@@ -1957,7 +1916,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         labelText: l.tr('voice_acceptance_min_sessions'),
                       ),
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: AppSpacing.sm + 2),
                     FilledButton.tonalIcon(
                       onPressed: _voiceAcceptanceSaving ? null : _saveVoiceAcceptancePrefs,
                       icon: _voiceAcceptanceSaving
@@ -1972,7 +1931,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                           : const Icon(Icons.tune_rounded, size: 18),
                       label: Text(l.tr('voice_acceptance_apply')),
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: AppSpacing.md),
                     if (_offlinePending != null && _offlinePending! > 0)
                       ListTile(
                         contentPadding: EdgeInsets.zero,
@@ -2015,7 +1974,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         leading: Icon(
                           _charging ? Icons.battery_charging_full : Icons.battery_std,
                           color: _batteryPercent != null && _batteryPercent! <= 15
-                              ? Colors.red
+                              ? context.palette.error
                               : context.palette.onSurfaceVariant,
                         ),
                         title: Text(
@@ -2028,7 +1987,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                     const Divider(height: 1),
                     ListTile(
                       contentPadding: EdgeInsets.zero,
-                      leading: Icon(Icons.power_settings_new, color: Colors.redAccent),
+                      leading: Icon(Icons.power_settings_new, color: context.palette.error),
                       title: Text(l.tr('shutdown_device'), style: TextStyle(color: context.palette.onSurface)),
                       onTap: () async {
                         final confirmed = await showDialog<bool>(
@@ -2058,6 +2017,48 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
   }
 }
 
+/// Заголовок подсекции с акцентной полосой слева (единый ритм с другими экранами DS).
+class _SectionAccentHeader extends StatelessWidget {
+  final String text;
+  final IconData? trailingIcon;
+
+  const _SectionAccentHeader({
+    required this.text,
+    this.trailingIcon,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.palette;
+    return Row(
+      children: [
+        Container(
+          width: 3,
+          height: 14,
+          decoration: BoxDecoration(
+            color: p.primary,
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+        const SizedBox(width: AppSpacing.sm + 2),
+        Expanded(
+          child: Text(
+            text,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.2,
+              color: p.onSurface,
+            ),
+          ),
+        ),
+        if (trailingIcon != null)
+          Icon(trailingIcon, size: 18, color: p.onSurfaceVariant),
+      ],
+    );
+  }
+}
+
 class _SettingsCard extends StatelessWidget {
   final String title;
   final String? subtitle;
@@ -2071,39 +2072,34 @@ class _SettingsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      color: context.palette.card,
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(color: context.palette.divider, width: 1),
-      ),
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
+    return AppSectionCard(
+      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 14, AppSpacing.lg, AppSpacing.lg),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            title,
+            style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w600,
+              color: context.palette.onSurface,
+              letterSpacing: 0.2,
+            ),
+          ),
+          if (subtitle != null) ...[
+            const SizedBox(height: AppSpacing.xs),
             Text(
-              title,
+              subtitle!,
               style: TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.w600,
-                color: context.palette.onSurface,
-                letterSpacing: 0.2,
+                fontSize: 12,
+                color: context.palette.onSurfaceVariant,
+                height: 1.3,
               ),
             ),
-            if (subtitle != null) ...[
-              const SizedBox(height: 4),
-              Text(
-                subtitle!,
-                style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant, height: 1.3),
-              ),
-            ],
-            const SizedBox(height: 8),
-            child,
           ],
-        ),
+          const SizedBox(height: AppSpacing.sm),
+          child,
+        ],
       ),
     );
   }

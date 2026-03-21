@@ -10,6 +10,8 @@ import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
 import '../mesh_constants.dart';
 import '../theme/app_theme.dart';
+import '../theme/design_tokens.dart';
+import '../widgets/app_primitives.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/app_snackbar.dart';
 import '../widgets/rift_dialogs.dart';
@@ -230,19 +232,25 @@ class _GroupsScreenState extends State<GroupsScreen> {
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
       builder: (ctx) {
+        final p = context.palette;
         final bottomInset = MediaQuery.of(ctx).viewInsets.bottom;
         return Padding(
           padding: EdgeInsets.only(bottom: bottomInset),
           child: Container(
             decoration: BoxDecoration(
-              color: context.palette.card,
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+              color: p.card,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
             ),
             child: SafeArea(
               top: false,
               child: SingleChildScrollView(
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
+                  padding: const EdgeInsets.fromLTRB(
+                    AppSpacing.lg,
+                    AppSpacing.md,
+                    AppSpacing.lg,
+                    AppSpacing.xl,
+                  ),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -252,28 +260,27 @@ class _GroupsScreenState extends State<GroupsScreen> {
                           width: 36,
                           height: 3,
                           decoration: BoxDecoration(
-                            color: context.palette.onSurfaceVariant.withOpacity(0.3),
-                            borderRadius: BorderRadius.circular(2),
+                            color: p.onSurfaceVariant.withOpacity(0.3),
+                            borderRadius: BorderRadius.circular(AppRadius.sm),
                           ),
                         ),
                       ),
-                      const SizedBox(height: 12),
+                      const SizedBox(height: AppSpacing.md),
                       Row(
                         children: [
-                          Icon(Icons.group_add_rounded, color: context.palette.primary, size: 22),
-                          const SizedBox(width: 10),
+                          Icon(Icons.group_add_rounded, color: p.primary, size: 22),
+                          const SizedBox(width: AppSpacing.sm + 2),
                           Expanded(
                             child: Text(
                               l.tr('add_group'),
-                              style: TextStyle(
+                              style: AppTypography.screenTitleBase().copyWith(
                                 fontSize: 17,
-                                fontWeight: FontWeight.w700,
-                                color: context.palette.onSurface,
+                                color: p.onSurface,
                               ),
                             ),
                           ),
                           IconButton(
-                            icon: Icon(Icons.content_paste_rounded, color: context.palette.onSurfaceVariant.withOpacity(0.85)),
+                            icon: Icon(Icons.content_paste_rounded, color: p.onSurfaceVariant.withOpacity(0.85)),
                             onPressed: () async {
                               Navigator.pop(ctx);
                               await _pasteInviteAndJoin();
@@ -284,7 +291,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
                             tooltip: l.tr('paste'),
                           ),
                           IconButton(
-                            icon: Icon(Icons.close_rounded, color: context.palette.onSurfaceVariant.withOpacity(0.85)),
+                            icon: Icon(Icons.close_rounded, color: p.onSurfaceVariant.withOpacity(0.85)),
                             onPressed: () => Navigator.pop(ctx),
                             visualDensity: VisualDensity.compact,
                             padding: EdgeInsets.zero,
@@ -292,37 +299,41 @@ class _GroupsScreenState extends State<GroupsScreen> {
                           ),
                         ],
                       ),
-                      const SizedBox(height: 6),
+                      const SizedBox(height: AppSpacing.sm - 2),
                       Text(
                         l.tr('groups_add_sheet_hint'),
                         maxLines: 3,
                         overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
+                        style: AppTypography.labelBase().copyWith(
                           fontSize: 12,
                           height: 1.32,
-                          color: context.palette.onSurfaceVariant.withOpacity(0.92),
+                          fontWeight: FontWeight.w400,
+                          color: p.onSurfaceVariant.withOpacity(0.92),
                         ),
                       ),
-                      const SizedBox(height: 12),
+                      const SizedBox(height: AppSpacing.md),
                       TextField(
                         controller: c,
                         keyboardType: TextInputType.number,
                         autofocus: true,
-                        style: TextStyle(color: context.palette.onSurface, fontSize: 16),
+                        style: TextStyle(color: p.onSurface, fontSize: 16),
                         decoration: InputDecoration(
                           labelText: l.tr('group_id_hint'),
                           hintText: '42',
                           filled: true,
-                          fillColor: context.palette.surfaceVariant.withOpacity(0.55),
+                          fillColor: p.surfaceVariant.withOpacity(0.55),
                           border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12),
+                            borderRadius: BorderRadius.circular(AppRadius.md),
                             borderSide: BorderSide.none,
                           ),
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: AppSpacing.md + 2,
+                            vertical: AppSpacing.md,
+                          ),
                         ),
                       ),
-                      const SizedBox(height: 14),
-                      FilledButton(
+                      const SizedBox(height: AppSpacing.md + 2),
+                      AppPrimaryButton(
                         onPressed: () async {
                           final val = int.tryParse(c.text.trim());
                           if (val == null || val <= 0 || val > 0xFFFFFFFF) {
@@ -345,14 +356,10 @@ class _GroupsScreenState extends State<GroupsScreen> {
                             _snack('${l.tr('group')} $val ${l.tr('added')}');
                           }
                         },
-                        style: FilledButton.styleFrom(
-                          backgroundColor: context.palette.primary,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                          visualDensity: VisualDensity.standard,
+                        child: Text(
+                          l.tr('add'),
+                          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
                         ),
-                        child: Text(l.tr('add'), style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
                       ),
                     ],
                   ),
@@ -384,186 +391,201 @@ class _GroupsScreenState extends State<GroupsScreen> {
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final l = context.l10n;
-
-    final inner = Material(
-        color: Colors.transparent,
+  Widget _buildEmptyState(AppLocalizations l, AppPalette p) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xxl),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            if (widget.embedded)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(10, 0, 10, 0),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        l.tr('groups_hint'),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 12,
-                          height: 1.3,
-                          color: context.palette.onSurfaceVariant.withOpacity(0.9),
-                        ),
-                      ),
-                    ),
-                    TextButton.icon(
-                      style: TextButton.styleFrom(
-                        visualDensity: VisualDensity.compact,
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      ),
-                      onPressed: widget.ble.isConnected && !_loading ? _refresh : null,
-                      icon: _loading
-                          ? SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2, color: context.palette.primary),
-                            )
-                          : Icon(Icons.refresh_rounded, size: 18, color: context.palette.primary),
-                      label: Text(l.tr('refresh'), style: TextStyle(fontSize: 13, color: context.palette.primary, fontWeight: FontWeight.w600)),
-                    ),
-                  ],
-                ),
-              )
-            else
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 6, 16, 4),
-                child: Text(
-                  l.tr('groups_hint'),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    height: 1.3,
-                    color: context.palette.onSurfaceVariant.withOpacity(0.9),
-                  ),
-                ),
+            Icon(
+              Icons.groups_outlined,
+              size: 56,
+              color: p.onSurfaceVariant.withOpacity(0.38),
+            ),
+            const SizedBox(height: AppSpacing.md),
+            Text(
+              l.tr('no_groups'),
+              textAlign: TextAlign.center,
+              style: AppTypography.bodyBase().copyWith(
+                fontSize: 15,
+                color: p.onSurfaceVariant.withOpacity(0.92),
               ),
-            Expanded(
-              child: _groups.isEmpty
-                  ? Center(
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 24),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.group_off, size: 48, color: context.palette.onSurfaceVariant.withOpacity(0.4)),
-                            const SizedBox(height: 12),
-                            Text(
-                              l.tr('no_groups'),
-                              textAlign: TextAlign.center,
-                              style: TextStyle(color: context.palette.onSurfaceVariant.withOpacity(0.92), fontSize: 13, height: 1.3),
-                            ),
-                          ],
-                        ),
-                      ),
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.fromLTRB(10, 4, 10, 72),
-                      itemCount: _groups.length,
-                      itemBuilder: (_, i) {
-                        final gid = _groups[i];
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 6),
-                          child: Material(
-                            color: context.palette.card,
-                            elevation: 0,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
-                              side: BorderSide(color: context.palette.divider.withOpacity(0.55)),
-                            ),
-                            clipBehavior: Clip.antiAlias,
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                              child: Row(
-                                children: [
-                                  Padding(
-                                    padding: const EdgeInsets.only(left: 8),
-                                    child: CircleAvatar(
-                                      radius: 18,
-                                      backgroundColor: context.palette.primary.withOpacity(0.12),
-                                      child: Text(
-                                        '$gid',
-                                        style: TextStyle(color: context.palette.primary, fontWeight: FontWeight.w700, fontSize: 10),
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 10),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          '${l.tr('group')} $gid',
-                                          style: TextStyle(color: context.palette.onSurface, fontWeight: FontWeight.w600, fontSize: 15),
-                                        ),
-                                        const SizedBox(height: 2),
-                                        Text(
-                                          _groupPrivate[gid] == true
-                                              ? '${l.tr('group_private')}  v${_groupKeyVersion[gid] ?? 0}'
-                                              : l.tr('group_public'),
-                                          style: TextStyle(
-                                            color: _groupPrivate[gid] == true ? context.palette.primary : context.palette.onSurfaceVariant,
-                                            fontSize: 12,
-                                            fontWeight: FontWeight.w500,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  PopupMenuButton<String>(
-                                    tooltip: l.tr('settings'),
-                                    onSelected: (v) async {
-                                      if (v == 'private') await _setGroupPrivate(gid, true);
-                                      if (v == 'public') await _setGroupPrivate(gid, false);
-                                      if (v == 'rotate') await _rotatePrivateKey(gid);
-                                      if (v == 'invite') await _copyInvite(gid);
-                                    },
-                                    itemBuilder: (ctx) => [
-                                      if (_groupPrivate[gid] == true)
-                                        PopupMenuItem(value: 'invite', child: Text(l.tr('group_copy_invite')))
-                                      else
-                                        PopupMenuItem(value: 'private', child: Text(l.tr('group_make_private'))),
-                                      if (_groupPrivate[gid] == true)
-                                        PopupMenuItem(value: 'rotate', child: Text(l.tr('group_rotate_key'))),
-                                      if (_groupPrivate[gid] == true)
-                                        PopupMenuItem(value: 'public', child: Text(l.tr('group_make_public'))),
-                                    ],
-                                    icon: Icon(Icons.lock_outline_rounded, color: context.palette.onSurfaceVariant),
-                                  ),
-                                  IconButton(
-                                    visualDensity: VisualDensity.compact,
-                                    padding: const EdgeInsets.all(8),
-                                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                                    icon: Icon(Icons.remove_circle_outline_rounded, size: 22, color: context.palette.error.withOpacity(0.85)),
-                                    tooltip: l.tr('delete'),
-                                    onPressed: () => _removeGroup(gid),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        );
-                      },
-                    ),
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildGroupCard(int gid, AppLocalizations l, AppPalette p) {
+    final isPrivate = _groupPrivate[gid] == true;
+    final ver = _groupKeyVersion[gid] ?? 0;
+    return AppSectionCard(
+      margin: const EdgeInsets.only(bottom: AppSpacing.sm),
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.xs + 2),
+      child: Row(
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: AppSpacing.xs),
+            child: CircleAvatar(
+              radius: 18,
+              backgroundColor: p.primary.withOpacity(0.12),
+              child: Text(
+                '$gid',
+                style: TextStyle(color: p.primary, fontWeight: FontWeight.w700, fontSize: 10),
+              ),
+            ),
+          ),
+          const SizedBox(width: AppSpacing.sm + 2),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${l.tr('group')} $gid',
+                  style: AppTypography.bodyBase().copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: p.onSurface,
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.xs),
+                if (isPrivate)
+                  AppStateChip(
+                    label: '${l.tr('group_private')}  v$ver',
+                    kind: AppStateKind.info,
+                  )
+                else
+                  AppStateChip(
+                    label: l.tr('group_public'),
+                    kind: AppStateKind.neutral,
+                  ),
+              ],
+            ),
+          ),
+          PopupMenuButton<String>(
+            tooltip: l.tr('settings'),
+            position: PopupMenuPosition.under,
+            icon: Icon(Icons.more_vert_rounded, color: p.onSurfaceVariant),
+            onSelected: (v) async {
+              if (v == 'private') await _setGroupPrivate(gid, true);
+              if (v == 'public') await _setGroupPrivate(gid, false);
+              if (v == 'rotate') await _rotatePrivateKey(gid);
+              if (v == 'invite') await _copyInvite(gid);
+            },
+            itemBuilder: (ctx) => [
+              if (isPrivate)
+                PopupMenuItem(value: 'invite', child: Text(l.tr('group_copy_invite')))
+              else
+                PopupMenuItem(value: 'private', child: Text(l.tr('group_make_private'))),
+              if (isPrivate) PopupMenuItem(value: 'rotate', child: Text(l.tr('group_rotate_key'))),
+              if (isPrivate) PopupMenuItem(value: 'public', child: Text(l.tr('group_make_public'))),
+            ],
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            padding: const EdgeInsets.all(AppSpacing.sm),
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            icon: Icon(Icons.delete_outline_rounded, size: 22, color: p.error.withOpacity(0.88)),
+            tooltip: l.tr('delete'),
+            onPressed: () => _removeGroup(gid),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHintBanner(AppLocalizations l, AppPalette p) {
+    final hintStyle = AppTypography.labelBase().copyWith(
+      fontWeight: FontWeight.w400,
+      height: 1.3,
+      color: p.onSurfaceVariant.withOpacity(0.9),
+    );
+    if (widget.embedded) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(AppSpacing.sm + AppSpacing.xs, 0, AppSpacing.sm + AppSpacing.xs, 0),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                l.tr('groups_hint'),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: hintStyle.copyWith(fontSize: 12),
+              ),
+            ),
+            TextButton.icon(
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.xs),
+                minimumSize: Size.zero,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              onPressed: widget.ble.isConnected && !_loading ? _refresh : null,
+              icon: _loading
+                  ? SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: p.primary),
+                    )
+                  : Icon(Icons.refresh_rounded, size: 18, color: p.primary),
+              label: Text(
+                l.tr('refresh'),
+                style: TextStyle(fontSize: 13, color: p.primary, fontWeight: FontWeight.w600),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xs),
+      child: Text(
+        l.tr('groups_hint'),
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: hintStyle.copyWith(fontSize: 12),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l = context.l10n;
+    final p = context.palette;
+
+    final inner = Material(
+      color: Colors.transparent,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _buildHintBanner(l, p),
+          Expanded(
+            child: _groups.isEmpty
+                ? _buildEmptyState(l, p)
+                : ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(
+                      AppSpacing.sm + AppSpacing.xs,
+                      AppSpacing.xs,
+                      AppSpacing.sm + AppSpacing.xs,
+                      72,
+                    ),
+                    itemCount: _groups.length,
+                    itemBuilder: (_, i) => _buildGroupCard(_groups[i], l, p),
+                  ),
+          ),
+        ],
+      ),
     );
     final body = widget.embedded ? inner : MeshBackgroundWrapper(child: inner);
 
     final fab = FloatingActionButton(
       heroTag: widget.embedded ? 'groups_embedded_fab' : 'groups_screen_fab',
-      backgroundColor: context.palette.primary,
+      backgroundColor: p.primary,
       foregroundColor: Colors.white,
       onPressed: widget.ble.isConnected ? _showAddSheet : null,
       tooltip: l.tr('add_group'),
-      child: const Icon(Icons.add),
+      child: const Icon(Icons.add_rounded),
     );
 
     if (widget.embedded) {
@@ -575,10 +597,22 @@ class _GroupsScreenState extends State<GroupsScreen> {
     }
 
     return Scaffold(
-      backgroundColor: context.palette.surface,
+      backgroundColor: p.surface,
       appBar: AppBar(
-        title: Text(l.tr('groups')),
-        leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context)),
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        backgroundColor: p.surface,
+        surfaceTintColor: Colors.transparent,
+        foregroundColor: p.onSurface,
+        title: Text(
+          l.tr('groups'),
+          style: AppTypography.screenTitleBase().copyWith(color: p.onSurface),
+        ),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_rounded),
+          tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+          onPressed: () => Navigator.pop(context),
+        ),
         actions: [
           IconButton(
             onPressed: _loading ? null : _refresh,
@@ -586,9 +620,9 @@ class _GroupsScreenState extends State<GroupsScreen> {
                 ? SizedBox(
                     width: 22,
                     height: 22,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: context.palette.onSurface),
+                    child: CircularProgressIndicator(strokeWidth: 2, color: p.onSurface),
                   )
-                : const Icon(Icons.refresh),
+                : Icon(Icons.refresh_rounded, color: p.onSurface),
             tooltip: l.tr('refresh'),
           ),
         ],

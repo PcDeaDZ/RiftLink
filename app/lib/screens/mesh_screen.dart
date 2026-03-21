@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
+import '../theme/design_tokens.dart';
+import '../widgets/app_primitives.dart';
 import '../widgets/mesh_background.dart';
 
 Color _rssiColor(AppPalette palette, int rssi) {
@@ -185,7 +187,7 @@ class _MeshScreenState extends State<MeshScreen> {
             unselectedLabelColor: context.palette.onSurfaceVariant,
             indicatorColor: context.palette.primary,
             indicatorWeight: 2.5,
-            labelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+            labelStyle: AppTypography.labelBase().copyWith(fontWeight: FontWeight.w600),
             tabs: [
               Tab(icon: const Icon(Icons.account_tree, size: 20), text: l.tr('mesh_tab_graph')),
               Tab(icon: const Icon(Icons.view_list_rounded, size: 20), text: l.tr('mesh_tab_list')),
@@ -194,25 +196,14 @@ class _MeshScreenState extends State<MeshScreen> {
         ),
         body: Column(
           children: [
-            Container(
-              margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: context.palette.card,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: context.palette.divider),
-              ),
+            AppSectionCard(
+              margin: EdgeInsets.fromLTRB(AppSpacing.md, AppSpacing.sm + 2, AppSpacing.md, 0),
+              padding: const EdgeInsets.all(AppSpacing.md),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text(
-                    l.tr('mesh_tools'),
-                    style: TextStyle(
-                      color: context.palette.onSurface,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
+                  _SectionTitle(title: l.tr('mesh_tools')),
+                  SizedBox(height: AppSpacing.sm + 2),
                   Row(
                     children: [
                       Expanded(
@@ -222,7 +213,7 @@ class _MeshScreenState extends State<MeshScreen> {
                           label: Text(l.tr('mesh_signal_test')),
                         ),
                       ),
-                      const SizedBox(width: 8),
+                      SizedBox(width: AppSpacing.sm),
                       IconButton(
                         tooltip: l.tr('refresh'),
                         onPressed: () => widget.ble.getRoutes(),
@@ -231,18 +222,24 @@ class _MeshScreenState extends State<MeshScreen> {
                     ],
                   ),
                   if (_signalTestRunning || _signalRssiByNode.isNotEmpty) ...[
-                    const SizedBox(height: 10),
+                    SizedBox(height: AppSpacing.sm + 2),
                     Text(
                       _signalTestRunning
                           ? l.tr('mesh_signal_waiting')
                           : l.tr('mesh_trace_result'),
-                      style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                      style: AppTypography.chipBase().copyWith(
+                        color: context.palette.onSurfaceVariant,
+                        fontWeight: FontWeight.w400,
+                      ),
                     ),
-                    const SizedBox(height: 6),
+                    SizedBox(height: AppSpacing.sm - 2),
                     if (_signalRssiByNode.isEmpty)
                       Text(
                         l.tr('mesh_signal_no_data'),
-                        style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                        style: AppTypography.chipBase().copyWith(
+                          color: context.palette.onSurfaceVariant,
+                          fontWeight: FontWeight.w400,
+                        ),
                       )
                     else
                       Builder(
@@ -250,20 +247,26 @@ class _MeshScreenState extends State<MeshScreen> {
                           final sorted = _signalRssiByNode.entries.toList()
                             ..sort((a, b) => b.value.compareTo(a.value));
                           return Wrap(
-                            spacing: 6,
-                            runSpacing: 6,
+                            spacing: AppSpacing.sm - 2,
+                            runSpacing: AppSpacing.sm - 2,
                             children: sorted.map((e) {
                               final c = _rssiColor(context.palette, e.value);
                               return Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: AppSpacing.sm,
+                                  vertical: AppSpacing.xs,
+                                ),
                                 decoration: BoxDecoration(
                                   color: c.withOpacity(0.15),
-                                  borderRadius: BorderRadius.circular(8),
+                                  borderRadius: BorderRadius.circular(AppRadius.sm),
                                   border: Border.all(color: c.withOpacity(0.5)),
                                 ),
                                 child: Text(
                                   '${_shortId(e.key)} ${e.value} dBm',
-                                  style: TextStyle(fontSize: 11, color: context.palette.onSurface),
+                                  style: AppTypography.chipBase().copyWith(
+                                    color: context.palette.onSurface,
+                                    fontWeight: FontWeight.w500,
+                                  ),
                                 ),
                               );
                             }).toList(),
@@ -271,7 +274,7 @@ class _MeshScreenState extends State<MeshScreen> {
                         },
                       ),
                   ],
-                  const SizedBox(height: 12),
+                  SizedBox(height: AppSpacing.md),
                   Row(
                     children: [
                       Expanded(
@@ -292,7 +295,7 @@ class _MeshScreenState extends State<MeshScreen> {
                           onChanged: (v) => setState(() => _traceTarget = v),
                         ),
                       ),
-                      const SizedBox(width: 8),
+                      SizedBox(width: AppSpacing.sm),
                       FilledButton(
                         onPressed: _traceTarget == null ? null : _runTraceroute,
                         child: Text(l.tr('mesh_traceroute')),
@@ -300,10 +303,13 @@ class _MeshScreenState extends State<MeshScreen> {
                     ],
                   ),
                   if (_traceTarget != null) ...[
-                    const SizedBox(height: 8),
+                    SizedBox(height: AppSpacing.sm),
                     Text(
                       _traceSummary(context, _traceTarget!),
-                      style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                      style: AppTypography.chipBase().copyWith(
+                        color: context.palette.onSurfaceVariant,
+                        fontWeight: FontWeight.w400,
+                      ),
                     ),
                   ],
                 ],
@@ -442,17 +448,15 @@ class _GraphTab extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: context.palette.card,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: context.palette.divider),
+            padding: EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.sm),
+            child: AppSectionCard(
+              padding: EdgeInsets.symmetric(
+                horizontal: AppSpacing.lg - 2,
+                vertical: AppSpacing.sm + 2,
               ),
               child: Wrap(
-                spacing: 16,
-                runSpacing: 8,
+                spacing: AppSpacing.lg,
+                runSpacing: AppSpacing.sm,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   _LegendItem(
@@ -477,7 +481,10 @@ class _GraphTab extends StatelessWidget {
                   ),
                   Text(
                     '${l.tr('settings_node_id')}: ${_shortId(nodeId)}',
-                    style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant.withOpacity(0.95)),
+                    style: AppTypography.chipBase().copyWith(
+                      color: context.palette.onSurfaceVariant.withOpacity(0.95),
+                      fontWeight: FontWeight.w400,
+                    ),
                   ),
                 ],
               ),
@@ -527,11 +534,17 @@ class _LegendItem extends StatelessWidget {
           height: 3,
           decoration: BoxDecoration(
             color: color,
-            borderRadius: BorderRadius.circular(2),
+            borderRadius: BorderRadius.circular(AppRadius.sm / 4),
           ),
         ),
-        const SizedBox(width: 8),
-        Text(label, style: TextStyle(fontSize: 12, color: context.palette.onSurface)),
+        SizedBox(width: AppSpacing.sm),
+        Text(
+          label,
+          style: AppTypography.chipBase().copyWith(
+            color: context.palette.onSurface,
+            fontWeight: FontWeight.w400,
+          ),
+        ),
       ],
     );
   }
@@ -573,38 +586,41 @@ class _ListTab extends StatelessWidget {
         child: !hasData
             ? Center(
                 child: Padding(
-                  padding: const EdgeInsets.all(32),
+                  padding: const EdgeInsets.all(AppSpacing.xxl + AppSpacing.sm),
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.device_hub_outlined, size: 56, color: context.palette.onSurfaceVariant.withOpacity(0.45)),
-                      const SizedBox(height: 16),
+                      Icon(
+                        Icons.device_hub_outlined,
+                        size: 56,
+                        color: context.palette.onSurfaceVariant.withOpacity(0.45),
+                      ),
+                      SizedBox(height: AppSpacing.lg),
                       Text(
                         l.tr('mesh_empty'),
                         textAlign: TextAlign.center,
-                        style: TextStyle(color: context.palette.onSurfaceVariant.withOpacity(0.95), fontSize: 14, height: 1.4),
+                        style: AppTypography.bodyBase().copyWith(
+                          fontSize: 14,
+                          height: 1.4,
+                          color: context.palette.onSurfaceVariant.withOpacity(0.95),
+                        ),
                       ),
                     ],
                   ),
                 ),
               )
             : ListView(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+                padding: EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.xxl),
                 children: [
                   if (neighbors.isNotEmpty) ...[
                     _SectionTitle(title: l.tr('mesh_list_neighbors')),
-                    const SizedBox(height: 8),
-                    Card(
-                      color: context.palette.card,
-                      elevation: 0,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        side: BorderSide(color: context.palette.divider),
-                      ),
+                    SizedBox(height: AppSpacing.sm),
+                    AppSectionCard(
+                      padding: EdgeInsets.zero,
                       child: Column(
                         children: [
                           for (var i = 0; i < neighbors.length; i++) ...[
-                            if (i > 0) Divider(height: 1, color: context.palette.divider),
+                            if (i > 0) Divider(height: 1, thickness: 1, color: context.palette.divider),
                             ListTile(
                               leading: CircleAvatar(
                                 backgroundColor: context.palette.primary.withOpacity(0.2),
@@ -612,33 +628,36 @@ class _ListTab extends StatelessWidget {
                               ),
                               title: Text(
                                 _idLabel(neighbors[i]),
-                                style: TextStyle(fontFamily: 'monospace', fontSize: 14, fontWeight: FontWeight.w600, color: context.palette.onSurface),
+                                style: TextStyle(
+                                  fontFamily: 'monospace',
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: context.palette.onSurface,
+                                ),
                               ),
                               subtitle: Text(
                                 '${l.tr('neighbors')} · RSSI ${i < neighborsRssi.length ? neighborsRssi[i] : '—'}',
-                                style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant.withOpacity(0.95)),
+                                style: AppTypography.chipBase().copyWith(
+                                  color: context.palette.onSurfaceVariant.withOpacity(0.95),
+                                  fontWeight: FontWeight.w400,
+                                ),
                               ),
                             ),
                           ],
                         ],
                       ),
                     ),
-                    const SizedBox(height: 20),
+                    SizedBox(height: AppSpacing.xl),
                   ],
                   if (validRoutes.isNotEmpty) ...[
                     _SectionTitle(title: l.tr('mesh_list_routes')),
-                    const SizedBox(height: 8),
-                    Card(
-                      color: context.palette.card,
-                      elevation: 0,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        side: BorderSide(color: context.palette.divider),
-                      ),
+                    SizedBox(height: AppSpacing.sm),
+                    AppSectionCard(
+                      padding: EdgeInsets.zero,
                       child: Column(
                         children: [
                           for (var i = 0; i < validRoutes.length; i++) ...[
-                            if (i > 0) Divider(height: 1, color: context.palette.divider),
+                            if (i > 0) Divider(height: 1, thickness: 1, color: context.palette.divider),
                             Builder(
                               builder: (_) {
                                 final r = validRoutes[i];
@@ -664,11 +683,19 @@ class _ListTab extends StatelessWidget {
                                   ),
                                   title: Text(
                                     _idLabel(dest),
-                                    style: TextStyle(fontFamily: 'monospace', fontSize: 14, fontWeight: FontWeight.w600, color: context.palette.onSurface),
+                                    style: TextStyle(
+                                      fontFamily: 'monospace',
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w600,
+                                      color: context.palette.onSurface,
+                                    ),
                                   ),
                                   subtitle: Text(
                                     '${l.tr('mesh_col_next')}: ${next.isNotEmpty ? _idLabel(next) : '—'} · $hops ${l.tr('mesh_route_hops')}${rssi != 0 ? ' · RSSI $rssi' : ''}${modem != null ? ' · ${l.tr('mesh_modem')}: $modem' : ''}${trust != null ? ' · trust $trust' : ''}',
-                                    style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant.withOpacity(0.95)),
+                                    style: AppTypography.chipBase().copyWith(
+                                      color: context.palette.onSurfaceVariant.withOpacity(0.95),
+                                      fontWeight: FontWeight.w400,
+                                    ),
                                   ),
                                 );
                               },
@@ -695,17 +722,16 @@ class _SectionTitle extends StatelessWidget {
       children: [
         Container(
           width: 3,
-          height: 16,
+          height: AppSpacing.lg,
           decoration: BoxDecoration(
             color: context.palette.primary,
-            borderRadius: BorderRadius.circular(2),
+            borderRadius: BorderRadius.circular(AppRadius.sm / 4),
           ),
         ),
-        const SizedBox(width: 10),
+        SizedBox(width: AppSpacing.sm + 2),
         Text(
           title,
-          style: TextStyle(
-            fontSize: 14,
+          style: AppTypography.labelBase().copyWith(
             fontWeight: FontWeight.w600,
             color: context.palette.onSurface,
             letterSpacing: 0.2,

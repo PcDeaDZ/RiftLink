@@ -5,12 +5,18 @@ import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
 
+// Те же числа, что и в app_snackbar / app_popover_menu (единый overlay-слой).
+const double _kDialogSurfaceRadius = 16;
+const double _kDialogInsetRadius = 12;
+const EdgeInsets _kDialogInsetPadding =
+    EdgeInsets.symmetric(horizontal: 24, vertical: 24);
+
 /// Общая оболочка: без «тяжёлого» AlertDialog, тонкая рамка, ограниченная ширина.
 class RiftDialogFrame extends StatelessWidget {
   const RiftDialogFrame({
     super.key,
     required this.child,
-    this.padding = const EdgeInsets.fromLTRB(22, 20, 18, 16),
+    this.padding = const EdgeInsets.fromLTRB(20, 20, 20, 16),
     this.maxWidth = 332,
   });
 
@@ -23,16 +29,16 @@ class RiftDialogFrame extends StatelessWidget {
     final p = context.palette;
     return Dialog(
       backgroundColor: Colors.transparent,
-      insetPadding: const EdgeInsets.symmetric(horizontal: 28, vertical: 22),
+      insetPadding: _kDialogInsetPadding,
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxWidth),
         child: Material(
           color: p.card,
-          elevation: 5,
+          elevation: 6,
           shadowColor: Colors.black.withOpacity(0.14),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(18),
-            side: BorderSide(color: p.divider.withOpacity(0.4)),
+            borderRadius: BorderRadius.circular(_kDialogSurfaceRadius),
+            side: BorderSide(color: p.divider.withOpacity(0.5)),
           ),
           clipBehavior: Clip.antiAlias,
           child: Padding(padding: padding, child: child),
@@ -66,7 +72,7 @@ Future<bool?> showRiftConfirmDialog({
               children: [
                 if (icon != null) ...[
                   Padding(
-                    padding: const EdgeInsets.only(top: 1, right: 10),
+                    padding: const EdgeInsets.only(top: 1, right: 12),
                     child: Icon(
                       icon,
                       size: 22,
@@ -86,7 +92,7 @@ Future<bool?> showRiftConfirmDialog({
                 ),
               ],
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 12),
             Text(
               message,
               style: TextStyle(
@@ -95,25 +101,25 @@ Future<bool?> showRiftConfirmDialog({
                 color: p.onSurfaceVariant,
               ),
             ),
-            const SizedBox(height: 18),
+            const SizedBox(height: 16),
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
                 TextButton(
                   style: TextButton.styleFrom(
                     foregroundColor: p.onSurfaceVariant,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     minimumSize: Size.zero,
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
                   onPressed: () => Navigator.pop(ctx, false),
                   child: Text(cancelText),
                 ),
-                const SizedBox(width: 4),
+                const SizedBox(width: 8),
                 TextButton(
                   style: TextButton.styleFrom(
                     foregroundColor: danger ? p.error : p.primary,
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     minimumSize: Size.zero,
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     textStyle: const TextStyle(fontWeight: FontWeight.w600),
@@ -147,7 +153,7 @@ Future<void> showRiftSelftestDialog(
       final vStr = evt.batteryMv > 0 ? (evt.batteryMv / 1000).toStringAsFixed(2) : '';
 
       return RiftDialogFrame(
-        padding: const EdgeInsets.fromLTRB(20, 18, 16, 14),
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
@@ -159,7 +165,7 @@ Future<void> showRiftSelftestDialog(
                   size: 26,
                   color: accent,
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -186,22 +192,22 @@ Future<void> showRiftSelftestDialog(
                 ),
               ],
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 16),
             Container(
               padding: const EdgeInsets.symmetric(vertical: 4),
               decoration: BoxDecoration(
-                color: p.surfaceVariant.withOpacity(0.35),
-                borderRadius: BorderRadius.circular(12),
+                color: p.surfaceVariant.withOpacity(0.4),
+                borderRadius: BorderRadius.circular(_kDialogInsetRadius),
               ),
               child: Column(
                 children: [
                   _selftestRow(context, l.tr('selftest_radio'), evt.radioOk),
-                  Divider(height: 1, thickness: 1, color: p.divider.withOpacity(0.25)),
+                  Divider(height: 1, thickness: 1, color: p.divider.withOpacity(0.35)),
                   _selftestRow(context, l.tr('selftest_antenna'), evt.antennaOk),
-                  Divider(height: 1, thickness: 1, color: p.divider.withOpacity(0.25)),
+                  Divider(height: 1, thickness: 1, color: p.divider.withOpacity(0.35)),
                   _selftestRow(context, l.tr('selftest_display'), evt.displayOk),
                   if (evt.batteryMv > 0) ...[
-                    Divider(height: 1, thickness: 1, color: p.divider.withOpacity(0.25)),
+                    Divider(height: 1, thickness: 1, color: p.divider.withOpacity(0.35)),
                     _selftestMetric(
                       context,
                       evt.charging ? Icons.battery_charging_full_rounded : Icons.battery_std_rounded,
@@ -211,7 +217,7 @@ Future<void> showRiftSelftestDialog(
                     ),
                   ],
                   if (evt.heapFree > 0) ...[
-                    Divider(height: 1, thickness: 1, color: p.divider.withOpacity(0.25)),
+                    Divider(height: 1, thickness: 1, color: p.divider.withOpacity(0.35)),
                     _selftestMetric(
                       context,
                       Icons.memory_rounded,
@@ -219,7 +225,7 @@ Future<void> showRiftSelftestDialog(
                     ),
                   ],
                   if (lastInfo != null) ...[
-                    Divider(height: 1, thickness: 1, color: p.divider.withOpacity(0.25)),
+                    Divider(height: 1, thickness: 1, color: p.divider.withOpacity(0.35)),
                     _selftestMetric(
                       context,
                       Icons.settings_input_antenna_rounded,
@@ -229,13 +235,13 @@ Future<void> showRiftSelftestDialog(
                 ],
               ),
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 8),
             Align(
               alignment: Alignment.centerRight,
               child: TextButton(
                 style: TextButton.styleFrom(
                   foregroundColor: p.primary,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   minimumSize: Size.zero,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
@@ -253,7 +259,7 @@ Future<void> showRiftSelftestDialog(
 Widget _selftestRow(BuildContext context, String label, bool passed) {
   final p = context.palette;
   return Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
     child: Row(
       children: [
         Expanded(
@@ -279,7 +285,7 @@ Widget _selftestRow(BuildContext context, String label, bool passed) {
 Widget _selftestMetric(BuildContext context, IconData icon, String text) {
   final p = context.palette;
   return Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
     child: Row(
       children: [
         Icon(icon, size: 18, color: p.onSurfaceVariant),

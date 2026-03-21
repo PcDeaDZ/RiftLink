@@ -2,6 +2,11 @@ import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
 
+// Единые токены overlay-слоёв (см. app_popover_menu, rift_dialogs).
+const double _kOverlayRadius = 16;
+const EdgeInsets _kSnackContentPadding =
+    EdgeInsets.symmetric(horizontal: 16, vertical: 14);
+
 /// Тип тоста — единая палитра по всему приложению.
 enum AppSnackKind {
   /// Обычное уведомление.
@@ -36,7 +41,7 @@ void showAppSnackBar(
       fg = Colors.white;
       break;
     case AppSnackKind.success:
-      bg = p.success.withOpacity(0.28);
+      bg = p.success.withOpacity(0.34);
       fg = p.onSurface;
       break;
     case AppSnackKind.neutral:
@@ -54,8 +59,10 @@ void showAppSnackBar(
       backgroundColor: bg,
       behavior: SnackBarBehavior.floating,
       margin: margin,
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      padding: _kSnackContentPadding,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(_kOverlayRadius),
+      ),
       elevation: 8,
       duration: duration,
     ),

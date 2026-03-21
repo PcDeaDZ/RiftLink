@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'design_tokens.dart';
+
 /// Палитра приложения (дневная / ночная) — [ThemeExtension] для доступа через [BuildContext].
 @immutable
 class AppPalette extends ThemeExtension<AppPalette> {
@@ -96,7 +98,7 @@ extension AppPaletteContext on BuildContext {
 }
 
 class AppTheme {
-  static final BorderRadius _buttonRadius = BorderRadius.circular(8);
+  static final BorderRadius _buttonRadius = BorderRadius.circular(AppRadius.sm);
 
   static ButtonStyle _primaryFilledStyle(AppPalette p) {
     return FilledButton.styleFrom(
@@ -104,7 +106,10 @@ class AppTheme {
       foregroundColor: Colors.white,
       disabledBackgroundColor: p.primary.withOpacity(0.38),
       disabledForegroundColor: Colors.white70,
-      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
+      padding: const EdgeInsets.symmetric(
+        vertical: AppSpacing.buttonPrimaryV,
+        horizontal: AppSpacing.buttonPrimaryH,
+      ),
       minimumSize: const Size(0, 48),
       shape: RoundedRectangleBorder(borderRadius: _buttonRadius),
     );
@@ -116,7 +121,10 @@ class AppTheme {
       foregroundColor: Colors.white,
       disabledBackgroundColor: p.primary.withOpacity(0.38),
       disabledForegroundColor: Colors.white70,
-      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 20),
+      padding: const EdgeInsets.symmetric(
+        vertical: AppSpacing.buttonSecondaryV,
+        horizontal: AppSpacing.buttonPrimaryH,
+      ),
       minimumSize: const Size(0, 44),
       elevation: 0,
       shape: RoundedRectangleBorder(borderRadius: _buttonRadius),
@@ -127,7 +135,10 @@ class AppTheme {
     return OutlinedButton.styleFrom(
       foregroundColor: p.primary,
       side: BorderSide(color: p.divider),
-      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+      padding: const EdgeInsets.symmetric(
+        vertical: AppSpacing.buttonSecondaryV,
+        horizontal: AppSpacing.lg,
+      ),
       minimumSize: const Size(0, 44),
       shape: RoundedRectangleBorder(borderRadius: _buttonRadius),
     );
@@ -140,7 +151,10 @@ class AppTheme {
       foregroundColor: Colors.white,
       disabledBackgroundColor: p.error.withOpacity(0.35),
       disabledForegroundColor: Colors.white70,
-      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
+      padding: const EdgeInsets.symmetric(
+        vertical: AppSpacing.buttonPrimaryV,
+        horizontal: AppSpacing.buttonPrimaryH,
+      ),
       minimumSize: const Size(0, 48),
       shape: RoundedRectangleBorder(borderRadius: _buttonRadius),
     );
@@ -166,31 +180,39 @@ class AppTheme {
         elevation: 0,
         centerTitle: false,
         iconTheme: IconThemeData(color: p.onSurface),
-        titleTextStyle: TextStyle(color: p.onSurface, fontSize: 20, fontWeight: FontWeight.w600),
+        titleTextStyle: TextStyle(
+          color: p.onSurface,
+          fontSize: AppTypography.screenTitleSize,
+          fontWeight: AppTypography.screenTitleWeight,
+        ),
       ),
       cardTheme: CardThemeData(
         color: p.card,
         elevation: 0,
-        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        margin: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.xs),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.card)),
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: p.surfaceVariant,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: p.divider)),
-        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: p.primary, width: 2)),
+        contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.inputH, vertical: AppSpacing.inputV),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.sm), borderSide: BorderSide.none),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.sm), borderSide: BorderSide(color: p.divider)),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.sm), borderSide: BorderSide(color: p.primary, width: 2)),
         hintStyle: TextStyle(color: p.onSurfaceVariant),
         labelStyle: TextStyle(color: p.onSurfaceVariant),
       ),
       snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
         backgroundColor: p.card,
-        contentTextStyle: TextStyle(color: p.onSurface, fontSize: 15, height: 1.35),
+        contentTextStyle: TextStyle(
+          color: p.onSurface,
+          fontSize: AppTypography.bodySize,
+          height: AppTypography.bodyHeight,
+        ),
         elevation: 8,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        insetPadding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
+        insetPadding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xl),
       ),
       dialogTheme: DialogThemeData(backgroundColor: p.card),
       colorScheme: isDark

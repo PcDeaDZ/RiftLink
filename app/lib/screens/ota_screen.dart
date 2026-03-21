@@ -21,6 +21,18 @@ class OtaScreen extends StatefulWidget {
 }
 
 class _OtaScreenState extends State<OtaScreen> {
+  static const double _kRadius = 12;
+  static const double _kIconSize = 64;
+  static const double _kRingSize = 120;
+  static const double _kIndeterminateSpinner = 40;
+  static const double _kUploadStroke = 6;
+  static const double _kIndeterminateStroke = 3;
+  static const double _kGapSm = 8;
+  static const double _kGapMd = 16;
+  static const double _kGapLg = 24;
+  static const double _kPanelMaxWidth = 400;
+  static const EdgeInsets _kPanelPadding = EdgeInsets.symmetric(horizontal: 24, vertical: 28);
+
   _OtaState _state = _OtaState.idle;
   String? _fileName;
   int _fileSize = 0;
@@ -168,6 +180,70 @@ class _OtaScreenState extends State<OtaScreen> {
 
   double get _progress => _fileSize > 0 ? _bytesWritten / _fileSize : 0;
 
+  TextStyle _titleStyle(AppPalette p) => TextStyle(
+        fontSize: 20,
+        fontWeight: FontWeight.w600,
+        color: p.onSurface,
+      );
+
+  TextStyle _titleStyleAccent(AppPalette p, Color accent) => TextStyle(
+        fontSize: 20,
+        fontWeight: FontWeight.w600,
+        color: accent,
+      );
+
+  TextStyle _bodyStyle(AppPalette p) => TextStyle(
+        color: p.onSurfaceVariant,
+        fontSize: 14,
+        height: 1.35,
+      );
+
+  TextStyle _captionStyle(AppPalette p) => TextStyle(
+        color: p.onSurfaceVariant,
+        fontSize: 13,
+        height: 1.3,
+      );
+
+  TextStyle _statusStyle(AppPalette p) => TextStyle(
+        fontSize: 16,
+        color: p.onSurface,
+        height: 1.3,
+      );
+
+  TextStyle _progressPercentStyle(AppPalette p) => TextStyle(
+        fontSize: 24,
+        fontWeight: FontWeight.bold,
+        color: p.onSurface,
+      );
+
+  Widget _otaPanel(AppPalette p, {required Widget child}) {
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: _kPanelMaxWidth),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: p.card,
+          borderRadius: BorderRadius.circular(_kRadius),
+          border: Border.all(color: p.divider.withOpacity(0.55)),
+        ),
+        child: Padding(
+          padding: _kPanelPadding,
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  Widget _indeterminateProgress(AppPalette p) {
+    return SizedBox(
+      width: _kIndeterminateSpinner,
+      height: _kIndeterminateSpinner,
+      child: CircularProgressIndicator(
+        strokeWidth: _kIndeterminateStroke,
+        color: p.primary,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
@@ -183,170 +259,225 @@ class _OtaScreenState extends State<OtaScreen> {
       body: MeshBackgroundWrapper(
         child: Center(
           child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: _buildBody(palette, l),
+            padding: const EdgeInsets.all(_kGapLg),
+            child: _buildBody(context, palette, l),
           ),
         ),
       ),
     );
   }
 
-  Widget _buildBody(AppPalette palette, AppLocalizations l) {
+  Widget _buildBody(BuildContext context, AppPalette palette, AppLocalizations l) {
     switch (_state) {
       case _OtaState.idle:
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.system_update_alt, size: 64, color: palette.primary),
-            const SizedBox(height: 16),
-            Text(
-              l.tr('firmware_update_title'),
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: palette.onSurface),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              l.tr('ota_ble_intro_desc'),
-              style: TextStyle(color: palette.onSurfaceVariant),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 32),
-            FilledButton.icon(
-              onPressed: _pickAndStart,
-              icon: const Icon(Icons.file_open),
-              label: Text(l.tr('ota_select_firmware')),
-            ),
-          ],
+        return _otaPanel(
+          palette,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Align(
+                alignment: Alignment.center,
+                child: Icon(Icons.system_update_alt, size: _kIconSize, color: palette.primary),
+              ),
+              SizedBox(height: _kGapMd),
+              Text(
+                l.tr('firmware_update_title'),
+                style: _titleStyle(palette),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: _kGapSm),
+              Text(
+                l.tr('ota_ble_intro_desc'),
+                style: _bodyStyle(palette),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: _kGapLg),
+              FilledButton.icon(
+                onPressed: _pickAndStart,
+                icon: const Icon(Icons.file_open),
+                label: Text(l.tr('ota_select_firmware')),
+              ),
+            ],
+          ),
         );
 
       case _OtaState.picking:
-        return const CircularProgressIndicator();
+        return _otaPanel(
+          palette,
+          child: Align(
+            alignment: Alignment.center,
+            child: _indeterminateProgress(palette),
+          ),
+        );
 
       case _OtaState.starting:
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const CircularProgressIndicator(),
-            const SizedBox(height: 16),
-            Text(l.tr('ota_state_starting'), style: TextStyle(color: palette.onSurface)),
-            if (_fileName != null) ...[
-              const SizedBox(height: 8),
+        return _otaPanel(
+          palette,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Align(alignment: Alignment.center, child: _indeterminateProgress(palette)),
+              SizedBox(height: _kGapMd),
               Text(
-                '$_fileName (${(_fileSize / 1024).toStringAsFixed(0)} KB)',
-                style: TextStyle(color: palette.onSurfaceVariant, fontSize: 13),
+                l.tr('ota_state_starting'),
+                style: _statusStyle(palette),
+                textAlign: TextAlign.center,
               ),
+              if (_fileName != null) ...[
+                SizedBox(height: _kGapSm),
+                Text(
+                  '$_fileName (${(_fileSize / 1024).toStringAsFixed(0)} KB)',
+                  style: _captionStyle(palette),
+                  textAlign: TextAlign.center,
+                ),
+              ],
             ],
-          ],
+          ),
         );
 
       case _OtaState.uploading:
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SizedBox(
-              width: 120, height: 120,
-              child: Stack(
+        return _otaPanel(
+          palette,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Align(
                 alignment: Alignment.center,
-                children: [
-                  SizedBox(
-                    width: 120, height: 120,
-                    child: CircularProgressIndicator(
-                      value: _progress,
-                      strokeWidth: 6,
-                      backgroundColor: palette.divider,
-                      color: palette.primary,
-                    ),
+                child: SizedBox(
+                  width: _kRingSize,
+                  height: _kRingSize,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      SizedBox(
+                        width: _kRingSize,
+                        height: _kRingSize,
+                        child: CircularProgressIndicator(
+                          value: _progress,
+                          strokeWidth: _kUploadStroke,
+                          backgroundColor: palette.divider,
+                          color: palette.primary,
+                        ),
+                      ),
+                      Text(
+                        '${(_progress * 100).toStringAsFixed(0)}%',
+                        style: _progressPercentStyle(palette),
+                      ),
+                    ],
                   ),
-                  Text(
-                    '${(_progress * 100).toStringAsFixed(0)}%',
-                    style: TextStyle(
-                      fontSize: 24, fontWeight: FontWeight.bold,
-                      color: palette.onSurface,
-                    ),
-                  ),
-                ],
+                ),
               ),
-            ),
-            const SizedBox(height: 20),
-            Text(
-              l.tr('ota_state_uploading'),
-              style: TextStyle(fontSize: 16, color: palette.onSurface),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              '${(_bytesWritten / 1024).toStringAsFixed(0)} / ${(_fileSize / 1024).toStringAsFixed(0)} KB',
-              style: TextStyle(color: palette.onSurfaceVariant, fontSize: 13),
-            ),
-            const SizedBox(height: 24),
-            OutlinedButton(
-              onPressed: _abort,
-              child: Text(l.tr('ota_cancel')),
-            ),
-          ],
+              SizedBox(height: _kGapMd),
+              Text(
+                l.tr('ota_state_uploading'),
+                style: _statusStyle(palette),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: _kGapSm),
+              Text(
+                '${(_bytesWritten / 1024).toStringAsFixed(0)} / ${(_fileSize / 1024).toStringAsFixed(0)} KB',
+                style: _captionStyle(palette),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: _kGapLg),
+              OutlinedButton(
+                onPressed: _abort,
+                child: Text(l.tr('ota_cancel')),
+              ),
+            ],
+          ),
         );
 
       case _OtaState.verifying:
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const CircularProgressIndicator(),
-            const SizedBox(height: 16),
-            Text(l.tr('ota_state_verifying'), style: TextStyle(color: palette.onSurface)),
-          ],
+        return _otaPanel(
+          palette,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Align(alignment: Alignment.center, child: _indeterminateProgress(palette)),
+              SizedBox(height: _kGapMd),
+              Text(
+                l.tr('ota_state_verifying'),
+                style: _statusStyle(palette),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
         );
 
       case _OtaState.done:
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.check_circle, size: 64, color: palette.success),
-            const SizedBox(height: 16),
-            Text(
-              l.tr('ota_done_title'),
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: palette.success),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              l.tr('ota_done_desc'),
-              style: TextStyle(color: palette.onSurfaceVariant),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: Text(l.tr('ota_done_button')),
-            ),
-          ],
+        return _otaPanel(
+          palette,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Align(
+                alignment: Alignment.center,
+                child: Icon(Icons.check_circle, size: _kIconSize, color: palette.success),
+              ),
+              SizedBox(height: _kGapMd),
+              Text(
+                l.tr('ota_done_title'),
+                style: _titleStyleAccent(palette, palette.success),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: _kGapSm),
+              Text(
+                l.tr('ota_done_desc'),
+                style: _bodyStyle(palette),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: _kGapLg),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: Text(l.tr('ota_done_button')),
+              ),
+            ],
+          ),
         );
 
       case _OtaState.error:
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.error_outline, size: 64, color: palette.error),
-            const SizedBox(height: 16),
-            Text(
-              l.tr('ota_error_title'),
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: palette.error),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              _errorMsg ?? l.tr('ota_unknown_error'),
-              style: TextStyle(color: palette.onSurfaceVariant),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
-            FilledButton(
-              onPressed: () {
-                setState(() {
-                  _state = _OtaState.idle;
-                  _fileBytes = null;
-                  _bytesWritten = 0;
-                  _errorMsg = null;
-                });
-              },
-              child: Text(l.tr('ota_try_again')),
-            ),
-          ],
+        return _otaPanel(
+          palette,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Align(
+                alignment: Alignment.center,
+                child: Icon(Icons.error_outline, size: _kIconSize, color: palette.error),
+              ),
+              SizedBox(height: _kGapMd),
+              Text(
+                l.tr('ota_error_title'),
+                style: _titleStyleAccent(palette, palette.error),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: _kGapSm),
+              Text(
+                _errorMsg ?? l.tr('ota_unknown_error'),
+                style: _bodyStyle(palette),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: _kGapLg),
+              FilledButton(
+                onPressed: () {
+                  setState(() {
+                    _state = _OtaState.idle;
+                    _fileBytes = null;
+                    _bytesWritten = 0;
+                    _errorMsg = null;
+                  });
+                },
+                child: Text(l.tr('ota_try_again')),
+              ),
+            ],
+          ),
         );
     }
   }

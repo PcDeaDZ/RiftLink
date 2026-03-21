@@ -7,8 +7,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
-
-const _blue = Color(0xFF1565C0);
+import '../theme/app_theme.dart';
 
 class MapScreen extends StatefulWidget {
   final RiftLinkBle ble;
@@ -42,6 +41,7 @@ class _MapScreenState extends State<MapScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final p = context.palette;
     final points = _nodes.entries.map((e) => LatLng(e.value.lat, e.value.lon)).toList();
     if (_myLocation != null) points.add(_myLocation!);
 
@@ -50,13 +50,15 @@ class _MapScreenState extends State<MapScreen> {
       center = _myLocation!;
     } else if (points.isNotEmpty) {
       double sLat = 0, sLon = 0;
-      for (final p in points) { sLat += p.latitude; sLon += p.longitude; }
+      for (final pt in points) { sLat += pt.latitude; sLon += pt.longitude; }
       center = LatLng(sLat / points.length, sLon / points.length);
     }
 
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: p.surface,
       appBar: AppBar(
+        backgroundColor: p.surfaceVariant,
+        foregroundColor: p.onSurface,
         title: Text(context.l10n.tr('map')),
         leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context)),
         actions: [
@@ -106,11 +108,11 @@ class _MapScreenState extends State<MapScreen> {
             ..._nodes.entries.map((e) => Marker(
               point: LatLng(e.value.lat, e.value.lon), width: 80, height: 44,
               child: Tooltip(message: e.key, child: Column(mainAxisSize: MainAxisSize.min, children: [
-                const Icon(Icons.radio_button_checked, color: _blue, size: 32),
-                Text(e.key.length > 8 ? e.key.substring(0, 8) : e.key, style: const TextStyle(fontSize: 10, fontFamily: 'monospace', color: Colors.black87), overflow: TextOverflow.ellipsis),
+                Icon(Icons.radio_button_checked, color: p.primary, size: 32),
+                Text(e.key.length > 8 ? e.key.substring(0, 8) : e.key, style: TextStyle(fontSize: 10, fontFamily: 'monospace', color: p.onSurface), overflow: TextOverflow.ellipsis),
               ])),
             )),
-            if (_myLocation != null) Marker(point: _myLocation!, width: 40, height: 40, child: const Icon(Icons.person_pin_circle, color: Color(0xFF388E3C), size: 40)),
+            if (_myLocation != null) Marker(point: _myLocation!, width: 40, height: 40, child: Icon(Icons.person_pin_circle, color: p.success, size: 40)),
           ]),
         ],
       ),
@@ -118,11 +120,16 @@ class _MapScreenState extends State<MapScreen> {
         ),
       bottomSheet: _nodes.isEmpty && _myLocation == null
         ? Container(
-            width: double.infinity, padding: const EdgeInsets.all(24), color: Colors.white,
+            width: double.infinity,
+            decoration: BoxDecoration(
+              color: p.card,
+              border: Border(top: BorderSide(color: p.divider)),
+            ),
+            padding: const EdgeInsets.all(24),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Icon(Icons.location_off, size: 48, color: Colors.grey.shade400),
+              Icon(Icons.location_off, size: 48, color: p.onSurfaceVariant.withOpacity(0.45)),
               const SizedBox(height: 12),
-              Text(context.l10n.tr('map_waiting'), textAlign: TextAlign.center, style: const TextStyle(color: Color(0xFF757575), fontSize: 14)),
+              Text(context.l10n.tr('map_waiting'), textAlign: TextAlign.center, style: TextStyle(color: p.onSurfaceVariant, fontSize: 14, height: 1.4)),
             ]),
           )
         : null,

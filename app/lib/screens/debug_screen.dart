@@ -18,6 +18,13 @@ class DebugScreen extends StatefulWidget {
 }
 
 class _DebugScreenState extends State<DebugScreen> {
+  static const double _kScreenPadH = 16;
+  static const double _kScreenPadV = 12;
+  static const double _kScreenPadBottom = 24;
+  static const double _kSectionGap = 20;
+  static const double _kRowGap = 8;
+  static const double _kCardRadius = 12;
+
   int _voiceAcceptMaxAvgLossPercent = 20;
   int _voiceAcceptMaxHardLossPercent = 15;
   int _voiceAcceptMinSessions = 5;
@@ -312,6 +319,148 @@ class _DebugScreenState extends State<DebugScreen> {
     return out;
   }
 
+  double _dividerOpacity(BuildContext context) {
+    return Theme.of(context).brightness == Brightness.dark ? 0.88 : 0.62;
+  }
+
+  Widget _sectionTitle(BuildContext context, String title) {
+    final p = context.palette;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Container(
+            width: 3,
+            height: 18,
+            decoration: BoxDecoration(
+              color: p.primary,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              title,
+              style: TextStyle(
+                color: p.onSurface,
+                fontWeight: FontWeight.w700,
+                fontSize: 14,
+                height: 1.25,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _monoLineCard(BuildContext context, String text) {
+    final p = context.palette;
+    final o = _dividerOpacity(context);
+    return Container(
+      margin: const EdgeInsets.only(bottom: _kRowGap),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: p.card,
+        borderRadius: BorderRadius.circular(_kCardRadius),
+        border: Border.all(color: p.divider.withOpacity(o)),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: p.onSurface,
+          fontFamily: 'monospace',
+          fontSize: 12,
+          height: 1.35,
+        ),
+      ),
+    );
+  }
+
+  Widget _voiceMetaCard(
+    BuildContext context, {
+    required String thresholdsLine,
+    required String summaryLine,
+  }) {
+    final p = context.palette;
+    final o = _dividerOpacity(context);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: p.surfaceVariant,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: p.divider.withOpacity(o)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            thresholdsLine,
+            style: TextStyle(
+              color: p.onSurfaceVariant,
+              fontSize: 11,
+              fontFamily: 'monospace',
+              height: 1.35,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            summaryLine,
+            style: TextStyle(
+              color: p.onSurfaceVariant,
+              fontSize: 11,
+              fontFamily: 'monospace',
+              height: 1.35,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _emptyEventsPlaceholder(BuildContext context) {
+    final p = context.palette;
+    final o = _dividerOpacity(context);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 16),
+      decoration: BoxDecoration(
+        color: p.surfaceVariant,
+        borderRadius: BorderRadius.circular(_kCardRadius),
+        border: Border.all(color: p.divider.withOpacity(o)),
+      ),
+      child: Text(
+        context.l10n.tr('debug_waiting_events'),
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          color: p.onSurfaceVariant,
+          fontSize: 14,
+          height: 1.35,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTraceRow(BuildContext context, _RelayTraceRow row) {
+    final relays = row.relays.isEmpty ? '-' : row.relays.join(' -> ');
+    final toShort = row.to == null || row.to!.isEmpty ? '-' : _shortId(row.to!);
+    return _monoLineCard(
+      context,
+      'msgId=${row.msgId} to=$toShort relays=$relays outcome=${row.outcome}',
+    );
+  }
+
+  Widget _buildVoiceDiagRow(BuildContext context, _VoiceRxDebugStats row) {
+    final hardLossPercent = row.sessions <= 0 ? 0 : ((row.loss * 100) / row.sessions).round();
+    final verdict = _voiceQualityVerdict(row);
+    return _monoLineCard(
+      context,
+      'from=${_shortId(row.from)} complete=${row.complete} partial=${row.partial} loss=${row.loss} chunks=${row.chunksSeen} avgLoss=${row.avgLossPercent}% hardLoss=$hardLossPercent% verdict=$verdict',
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final traceRows = _traceByMsgId.values.toList()
@@ -319,9 +468,15 @@ class _DebugScreenState extends State<DebugScreen> {
     final voiceRows = _voiceStatsByFrom.values.toList()
       ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     final voiceVerdicts = _buildVoiceVerdictSummary(voiceRows);
+    final p = context.palette;
+
     return Scaffold(
-      backgroundColor: context.palette.surface,
+      backgroundColor: p.surface,
       appBar: AppBar(
+        backgroundColor: p.surface,
+        foregroundColor: p.onSurface,
+        elevation: 0,
+        iconTheme: IconThemeData(color: p.onSurface),
         title: Text(context.l10n.tr('debug_log_title')),
         actions: [
           IconButton(
@@ -349,128 +504,36 @@ class _DebugScreenState extends State<DebugScreen> {
         ],
       ),
       body: ListView(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
+        padding: const EdgeInsets.fromLTRB(_kScreenPadH, _kScreenPadV, _kScreenPadH, _kScreenPadBottom),
         children: [
           if (traceRows.isNotEmpty) ...[
-            Text(
-              'Proof-of-Relay table (msgId)',
-              style: TextStyle(
-                color: context.palette.onSurface,
-                fontWeight: FontWeight.w700,
-                fontSize: 13,
-              ),
-            ),
-            const SizedBox(height: 6),
+            _sectionTitle(context, 'Proof-of-Relay table (msgId)'),
             ...traceRows.take(60).map((row) => _buildTraceRow(context, row)),
-            const SizedBox(height: 12),
+            const SizedBox(height: _kSectionGap),
           ],
           if (voiceRows.isNotEmpty) ...[
-            Text(
-              'Voice RX diagnostics',
-              style: TextStyle(
-                color: context.palette.onSurface,
-                fontWeight: FontWeight.w700,
-                fontSize: 13,
-              ),
+            _sectionTitle(context, 'Voice RX diagnostics'),
+            _voiceMetaCard(
+              context,
+              thresholdsLine:
+                  'avg<=${_voiceAcceptMaxAvgLossPercent}% hard<=${_voiceAcceptMaxHardLossPercent}% minSessions=$_voiceAcceptMinSessions',
+              summaryLine:
+                  'summary PASS=${voiceVerdicts['PASS']} WARN=${voiceVerdicts['WARN']} FAIL=${voiceVerdicts['FAIL']} WARMUP=${voiceVerdicts['WARMUP']}',
             ),
-            const SizedBox(height: 2),
-            Text(
-              'avg<=${_voiceAcceptMaxAvgLossPercent}% hard<=${_voiceAcceptMaxHardLossPercent}% minSessions=$_voiceAcceptMinSessions',
-              style: TextStyle(
-                color: context.palette.onSurfaceVariant,
-                fontSize: 11,
-                fontFamily: 'monospace',
-              ),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              'summary PASS=${voiceVerdicts['PASS']} WARN=${voiceVerdicts['WARN']} FAIL=${voiceVerdicts['FAIL']} WARMUP=${voiceVerdicts['WARMUP']}',
-              style: TextStyle(
-                color: context.palette.onSurfaceVariant,
-                fontSize: 11,
-                fontFamily: 'monospace',
-              ),
-            ),
-            const SizedBox(height: 6),
             ...voiceRows.take(40).map((row) => _buildVoiceDiagRow(context, row)),
-            const SizedBox(height: 12),
+            const SizedBox(height: _kSectionGap),
           ],
           if (_lines.isEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 20),
-              child: Center(
-                child: Text(
-                  context.l10n.tr('debug_waiting_events'),
-                  style: TextStyle(color: context.palette.onSurfaceVariant),
-                ),
-              ),
+              child: _emptyEventsPlaceholder(context),
             )
           else
             ...List<Widget>.generate(_lines.length, (i) {
               final line = _lines[_lines.length - 1 - i];
-              return Container(
-                margin: const EdgeInsets.only(bottom: 6),
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                decoration: BoxDecoration(
-                  color: context.palette.card,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: context.palette.divider),
-                ),
-                child: Text(
-                  line,
-                  style: TextStyle(
-                    color: context.palette.onSurface,
-                    fontFamily: 'monospace',
-                    fontSize: 12,
-                  ),
-                ),
-              );
+              return _monoLineCard(context, line);
             }),
         ],
-      ),
-    );
-  }
-
-  Widget _buildTraceRow(BuildContext context, _RelayTraceRow row) {
-    final relays = row.relays.isEmpty ? '-' : row.relays.join(' -> ');
-    final toShort = row.to == null || row.to!.isEmpty ? '-' : _shortId(row.to!);
-    return Container(
-      margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: context.palette.card,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: context.palette.divider),
-      ),
-      child: Text(
-        'msgId=${row.msgId} to=$toShort relays=$relays outcome=${row.outcome}',
-        style: TextStyle(
-          color: context.palette.onSurface,
-          fontFamily: 'monospace',
-          fontSize: 12,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildVoiceDiagRow(BuildContext context, _VoiceRxDebugStats row) {
-    final hardLossPercent = row.sessions <= 0 ? 0 : ((row.loss * 100) / row.sessions).round();
-    final verdict = _voiceQualityVerdict(row);
-    return Container(
-      margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-      decoration: BoxDecoration(
-        color: context.palette.card,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: context.palette.divider),
-      ),
-      child: Text(
-        'from=${_shortId(row.from)} complete=${row.complete} partial=${row.partial} loss=${row.loss} chunks=${row.chunksSeen} avgLoss=${row.avgLossPercent}% hardLoss=$hardLossPercent% verdict=$verdict',
-        style: TextStyle(
-          color: context.palette.onSurface,
-          fontFamily: 'monospace',
-          fontSize: 12,
-        ),
       ),
     );
   }
