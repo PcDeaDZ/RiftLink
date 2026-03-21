@@ -61,6 +61,28 @@ struct PacketHeader {
   uint8_t channel;  // Логический канал (0 = публичный)
 };
 
+enum class ParseStatus : uint8_t {
+  ok = 0,
+  no_sync,
+  bad_version,
+  bad_header,
+  invalid_opcode,
+  len_mismatch,
+  payload_range,
+  invalid_ids,
+};
+
+struct ParseResult {
+  ParseStatus status = ParseStatus::no_sync;
+  size_t startOffset = 0;
+  size_t packetLen = 0;
+  size_t expectedLen = 0;
+  uint8_t opcode = 0;
+  uint16_t pktId = 0;
+  bool hasPktId = false;
+  bool isBroadcast = false;
+};
+
 // Broadcast: все 0xFF
 extern const uint8_t BROADCAST_ID[NODE_ID_LEN];
 
@@ -73,6 +95,11 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
 
 bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr,
                 const uint8_t** payload, size_t* payloadLen);
+
+bool parsePacketEx(const uint8_t* buf, size_t len, PacketHeader* hdr,
+                  const uint8_t** payload, size_t* payloadLen, ParseResult* result);
+
+const char* parseStatusToString(ParseStatus status);
 
 /** Ожидаемая длина пакета (pLen) для opcode. 0 = неизвестно/переменная. */
 size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadcast, bool hasPktId = false);

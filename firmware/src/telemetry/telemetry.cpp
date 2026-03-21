@@ -24,6 +24,7 @@
 #endif
 
 static bool s_inited = false;
+static uint32_t s_lastBatteryRawLogMs = 0;
 
 namespace telemetry {
 
@@ -71,7 +72,13 @@ uint16_t readBatteryMv() {
   if (avgMv < 50) return 0;  // нет батареи
 
   uint16_t batMv = (uint16_t)(avgMv * BAT_DIVIDER);
-  Serial.printf("[bat] GPIO%d raw_avg=%lumV bat=%umV\n", BAT_ADC_PIN, avgMv, batMv);
+#if defined(DEBUG_BATTERY_RAW_LOG)
+  uint32_t now = millis();
+  if (now - s_lastBatteryRawLogMs >= 30000) {
+    s_lastBatteryRawLogMs = now;
+    Serial.printf("[bat] GPIO%d raw_avg=%lumV bat=%umV\n", BAT_ADC_PIN, avgMv, batMv);
+  }
+#endif
   return batMv;
 #endif
 }

@@ -60,156 +60,195 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
   return hdrLen + payloadLen;
 }
 
-constexpr int OPCODE_OFFSET_V2 = 2;  // sync(1) + version(1)
-
 static bool isValidOpcode(uint8_t op) {
   return (op >= 0x01 && op <= 0x14) || op == OP_PONG || op == OP_PING;
 }
 
-// Только v2 (0x20) и v2.1 (0x30) — все устройства на одной версии
-static int findPacketStart(const uint8_t* buf, size_t len) {
-  if (len < HEADER_LEN_BROADCAST) return -1;
-  for (int off = 0; off <= 8 && off + HEADER_LEN_BROADCAST <= (int)len; off++) {
-    if (buf[off] == SYNC_BYTE) {
-      uint8_t v = buf[off + 1];
-      if ((v & 0xF0) == 0x20 || (v & 0xF0) == 0x30) return off;
-    }
+static bool isAll(const uint8_t* id, uint8_t v) {
+  for (size_t i = 0; i < NODE_ID_LEN; i++) {
+    if (id[i] != v) return false;
   }
-  for (int i = 0; i < (int)len && i <= 32; i++) {
-    if (!isValidOpcode(buf[i])) continue;
-    int start = i - OPCODE_OFFSET_V2;
-    if (start >= 0 && start + 2 <= (int)len && buf[start] == SYNC_BYTE) {
-      uint8_t v = buf[start + 1];
-      if ((v & 0xF0) == 0x20 || (v & 0xF0) == 0x30) return start;
-    }
-  }
-  return -1;
-}
-
-bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr, const uint8_t** payload, size_t* payloadLen) {
-  if (len < HEADER_LEN_BROADCAST) return false;
-  if (len > SYNC_LEN + HEADER_LEN + MAX_PAYLOAD + 64) return false;
-
-  int off = findPacketStart(buf, len);
-  if (off < 0) return false;
-
-  const uint8_t* p = buf + off;
-  size_t pLen = len - off;
-
-  bool hasSync = (p[0] == SYNC_BYTE);
-  const uint8_t* h = hasSync ? (p + 1) : p;
-  size_t hLen = pLen - (hasSync ? 1 : 0);
-
-  uint8_t v0 = h[0];
-  size_t hdrLen;
-  bool isV2 = ((v0 & 0xF0) == 0x20 || (v0 & 0xF0) == 0x30);
-  bool hasPktId = false;
-
-  if (isV2) {
-    hasPktId = ((v0 & 0xF0) == 0x30);
-    if (hasPktId) {
-      // v2.1: opcode(1) + pktId(2) + from(8) + [to(8)?] + ttl(1) + channel(1)
-      if (hLen < 14) return false;
-      hdr->version_flags = v0;
-      hdr->opcode = h[1];
-      hdr->pktId = (uint16_t)h[2] | ((uint16_t)h[3] << 8);
-      memcpy(hdr->from, h + 4, NODE_ID_LEN);
-      if (v0 & FLAG_BROADCAST) {
-        memcpy(hdr->to, BROADCAST_ID, NODE_ID_LEN);
-        hdr->ttl = h[12];
-        hdr->channel = h[13];
-        hdrLen = 14;
-      } else {
-        if (hLen < 22) return false;
-        memcpy(hdr->to, h + 12, NODE_ID_LEN);
-        hdr->ttl = h[20];
-        hdr->channel = h[21];
-        hdrLen = 22;
-      }
-    } else {
-      // v2: opcode(1) + from(8) + [to(8)?] + ttl(1) + channel(1)
-      if (hLen < 12) return false;
-      hdr->version_flags = v0;
-      hdr->opcode = h[1];
-      hdr->pktId = 0;
-      memcpy(hdr->from, h + 2, NODE_ID_LEN);
-      if (v0 & FLAG_BROADCAST) {
-        memcpy(hdr->to, BROADCAST_ID, NODE_ID_LEN);
-        hdr->ttl = h[10];
-        hdr->channel = h[11];
-        hdrLen = 12;
-      } else {
-        if (hLen < 20) return false;
-        memcpy(hdr->to, h + 10, NODE_ID_LEN);
-        hdr->ttl = h[18];
-        hdr->channel = h[19];
-        hdrLen = 20;
-      }
-    }
-  } else {
-    return false;  // только v2/v2.1
-  }
-
-  // Ранний выход: opcodes с фиксированной длиной — сразу отсечь коррупцию (коллизия)
-  size_t expectedFullLen = 0;
-  bool isBc = (v0 & FLAG_BROADCAST) != 0;
-  switch (hdr->opcode) {
-    case OP_ACK:
-    case OP_READ:
-      expectedFullLen = isBc ? (SYNC_LEN + 12 + 4) : (SYNC_LEN + 20 + 4);  // 17 или 25
-      break;
-    case OP_NACK:
-      expectedFullLen = SYNC_LEN + HEADER_LEN + 2;  // 23
-      break;
-    case OP_KEY_EXCHANGE:
-      // v2.1 (pktId): заголовок HEADER_LEN_*PKTID уже включает SYNC в buildPacket — не смешивать с 53 B (v2)
-      if (hasPktId) {
-        expectedFullLen = isBc ? (HEADER_LEN_BROADCAST_PKTID + 32) : (HEADER_LEN_PKTID + 32);
-      } else {
-        expectedFullLen = isBc ? (HEADER_LEN_BROADCAST + 32) : (SYNC_LEN + HEADER_LEN + 32);
-      }
-      break;
-    default:
-      break;
-  }
-  if (expectedFullLen != 0 && pLen != expectedFullLen) return false;
-
-  // HELLO: строгая длина
-  if (hdr->opcode == OP_HELLO) {
-    size_t expectedLen = (hasSync ? SYNC_LEN : 0) + hdrLen;
-    if (pLen != expectedLen) return false;
-  }
-
-  size_t logicalStart = off + (hasSync ? 1 : 0);
-  size_t pl = len > logicalStart + hdrLen ? len - logicalStart - hdrLen : 0;
-  if (payload) *payload = buf + logicalStart + hdrLen;
-  if (payloadLen) *payloadLen = pl;
-
-  // Fallback: POLL (0x0F) с 32B payload — скорее KEY_EXCHANGE (0x06) с коррупцией opcode при коллизии
-  if (hdr->opcode == OP_POLL && pl == 32 && (v0 & FLAG_BROADCAST)) {
-    hdr->opcode = OP_KEY_EXCHANGE;
-  }
-
-  size_t minPl, maxPl;
-  if (getExpectedPayloadRange(hdr->opcode, &minPl, &maxPl)) {
-    if (pl < minPl || pl > maxPl) return false;
-  }
-  bool isBroadcast = (hdr->version_flags & FLAG_BROADCAST) != 0;
-  size_t expected = getExpectedPacketLength(hdr->opcode, pl, isBroadcast, hasPktId);
-  if (expected != 0 && pLen != expected) return false;
-
   return true;
 }
 
+static ParseStatus decodeHeaderCandidate(const uint8_t* p, size_t pLen, PacketHeader* hdr, size_t* hdrLenOut) {
+  if (!p || !hdr || !hdrLenOut || pLen < 3 || p[0] != SYNC_BYTE) return ParseStatus::bad_header;
+
+  uint8_t v0 = p[1];
+  uint8_t version = v0 & VERSION_MASK;
+  if (version != VERSION_V2 && version != VERSION_V2_PKTID) return ParseStatus::bad_version;
+
+  uint8_t opcode = p[2];
+  if (!isValidOpcode(opcode)) return ParseStatus::invalid_opcode;
+
+  bool hasPktId = (version == VERSION_V2_PKTID);
+  bool isBroadcast = (v0 & FLAG_BROADCAST) != 0;
+  size_t hdrLen = hasPktId
+      ? (isBroadcast ? HEADER_LEN_BROADCAST_PKTID : HEADER_LEN_PKTID)
+      : (isBroadcast ? HEADER_LEN_BROADCAST : (SYNC_LEN + HEADER_LEN));
+
+  if (pLen < hdrLen) return ParseStatus::bad_header;
+
+  hdr->version_flags = v0;
+  hdr->opcode = opcode;
+  if (hasPktId) {
+    hdr->pktId = (uint16_t)p[3] | ((uint16_t)p[4] << 8);
+    memcpy(hdr->from, p + 5, NODE_ID_LEN);
+    if (isBroadcast) {
+      memcpy(hdr->to, BROADCAST_ID, NODE_ID_LEN);
+      hdr->ttl = p[13];
+      hdr->channel = p[14];
+    } else {
+      memcpy(hdr->to, p + 13, NODE_ID_LEN);
+      hdr->ttl = p[21];
+      hdr->channel = p[22];
+    }
+  } else {
+    hdr->pktId = 0;
+    memcpy(hdr->from, p + 3, NODE_ID_LEN);
+    if (isBroadcast) {
+      memcpy(hdr->to, BROADCAST_ID, NODE_ID_LEN);
+      hdr->ttl = p[11];
+      hdr->channel = p[12];
+    } else {
+      memcpy(hdr->to, p + 11, NODE_ID_LEN);
+      hdr->ttl = p[19];
+      hdr->channel = p[20];
+    }
+  }
+
+  if (isAll(hdr->from, 0x00) || isAll(hdr->from, 0xFF)) return ParseStatus::invalid_ids;
+  if (!isBroadcast && (isAll(hdr->to, 0x00) || isAll(hdr->to, 0xFF))) return ParseStatus::invalid_ids;
+
+  *hdrLenOut = hdrLen;
+  return ParseStatus::ok;
+}
+
+const char* parseStatusToString(ParseStatus status) {
+  switch (status) {
+    case ParseStatus::ok: return "ok";
+    case ParseStatus::no_sync: return "no_sync";
+    case ParseStatus::bad_version: return "bad_version";
+    case ParseStatus::bad_header: return "bad_header";
+    case ParseStatus::invalid_opcode: return "invalid_opcode";
+    case ParseStatus::len_mismatch: return "len_mismatch";
+    case ParseStatus::payload_range: return "payload_range";
+    case ParseStatus::invalid_ids: return "invalid_ids";
+    default: return "unknown";
+  }
+}
+
+bool parsePacketEx(const uint8_t* buf, size_t len, PacketHeader* hdr,
+                   const uint8_t** payload, size_t* payloadLen, ParseResult* result) {
+  if (result) *result = ParseResult{};
+  if (!buf || !hdr || len < HEADER_LEN_BROADCAST) return false;
+  if (len > SYNC_LEN + HEADER_LEN + MAX_PAYLOAD + 64) return false;
+
+  constexpr size_t MAX_START_SCAN = 32;
+  bool sawSync = false;
+  ParseResult best;
+  best.status = ParseStatus::no_sync;
+
+  size_t maxOff = (len > 0) ? (len - 1) : 0;
+  if (maxOff > MAX_START_SCAN) maxOff = MAX_START_SCAN;
+  for (size_t off = 0; off <= maxOff; off++) {
+    if (buf[off] != SYNC_BYTE) continue;
+    sawSync = true;
+
+    PacketHeader candidateHdr{};
+    size_t hdrLen = 0;
+    size_t packetLen = len - off;
+    ParseStatus st = decodeHeaderCandidate(buf + off, packetLen, &candidateHdr, &hdrLen);
+
+    ParseResult candidateResult{};
+    candidateResult.status = st;
+    candidateResult.startOffset = off;
+    candidateResult.packetLen = packetLen;
+    candidateResult.opcode = candidateHdr.opcode;
+    candidateResult.pktId = candidateHdr.pktId;
+    candidateResult.hasPktId = (candidateHdr.version_flags & VERSION_MASK) == VERSION_V2_PKTID;
+    candidateResult.isBroadcast = (candidateHdr.version_flags & FLAG_BROADCAST) != 0;
+
+    if (st == ParseStatus::ok) {
+      size_t pl = packetLen - hdrLen;
+      if (pl > MAX_PAYLOAD) {
+        st = ParseStatus::payload_range;
+      } else {
+        bool directionOk = true;
+        switch (candidateHdr.opcode) {
+          case OP_ROUTE_REQ:
+          case OP_ECHO:
+          case OP_POLL:
+          case OP_SF_BEACON:
+            directionOk = candidateResult.isBroadcast;
+            break;
+          case OP_ROUTE_REPLY:
+          case OP_NACK:
+            directionOk = !candidateResult.isBroadcast;
+            break;
+          default:
+            break;
+        }
+        if (!directionOk) {
+          st = ParseStatus::len_mismatch;
+          candidateResult.expectedLen = hdrLen + pl;
+        }
+      }
+
+      if (st == ParseStatus::ok) {
+        size_t minPl = 0;
+        size_t maxPl = 0;
+        if (getExpectedPayloadRange(candidateHdr.opcode, &minPl, &maxPl) &&
+            (pl < minPl || pl > maxPl)) {
+          st = ParseStatus::payload_range;
+        } else {
+          size_t expected = getExpectedPacketLength(candidateHdr.opcode, pl,
+              candidateResult.isBroadcast, candidateResult.hasPktId);
+          candidateResult.expectedLen = expected;
+          if (expected != 0 && packetLen != expected) {
+            st = ParseStatus::len_mismatch;
+          }
+        }
+      }
+      candidateResult.status = st;
+    }
+
+    if (st == ParseStatus::ok) {
+      *hdr = candidateHdr;
+      if (payload) *payload = buf + off + hdrLen;
+      if (payloadLen) *payloadLen = packetLen - hdrLen;
+      if (result) *result = candidateResult;
+      return true;
+    }
+
+    if (best.status == ParseStatus::no_sync) {
+      best = candidateResult;
+    }
+  }
+
+  if (!sawSync) {
+    best.status = ParseStatus::no_sync;
+  }
+  if (result) *result = best;
+  return false;
+}
+
+bool parsePacket(const uint8_t* buf, size_t len, PacketHeader* hdr,
+                 const uint8_t** payload, size_t* payloadLen) {
+  return parsePacketEx(buf, len, hdr, payload, payloadLen, nullptr);
+}
+
 size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadcast, bool hasPktId) {
-  size_t hdrLen = isBroadcast ? HEADER_LEN_BROADCAST : (SYNC_LEN + HEADER_LEN);
+  size_t hdrLen = hasPktId
+      ? (isBroadcast ? HEADER_LEN_BROADCAST_PKTID : HEADER_LEN_PKTID)
+      : (isBroadcast ? HEADER_LEN_BROADCAST : (SYNC_LEN + HEADER_LEN));
   switch (opcode) {
     case OP_NACK:
-      return (payloadLen == 2) ? (SYNC_LEN + HEADER_LEN + 2) : 0;  // unicast
+      return (payloadLen == 2) ? (hdrLen + 2) : 0;
     case OP_HELLO:
     case OP_PING:
     case OP_PONG:
-      return 0;  // переменная: v2 broadcast=13, unicast=21
+      return (payloadLen == 0) ? hdrLen : 0;
     case OP_ACK:
     case OP_READ:
       return (payloadLen == 4) ? (hdrLen + 4) : 0;

@@ -256,16 +256,23 @@ void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, c
     return;
   }
 
-  // Debounce: HELLO и KEY_EXCHANGE приходят подряд — не слать два пакета, один уже в эфире
+  const bool bypassDebounce = forceSend && !hadKeyBefore;
+  // Debounce: HELLO и KEY_EXCHANGE приходят подряд — не слать два пакета, один уже в эфире.
+  // Для force-ответа на свежий KEY_EXCHANGE debounce отключаем, иначе второй узел может не получить наш ключ.
   uint32_t now = millis();
-  for (int i = 0; i < 4; i++) {
-    if (memcmp(s_throttle[i].peerId, peerId, protocol::NODE_ID_LEN) == 0 &&
-        now - s_throttle[i].lastSend < KEY_DEBOUNCE_MS) {
-      xSemaphoreGive(s_mutex);
-      RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=debounce peer=%02X%02X delta_ms=%lu reason=%s",
-          peerId[0], peerId[1], (unsigned long)(now - s_throttle[i].lastSend), safeReason(reason));
-      return;
+  if (!bypassDebounce) {
+    for (int i = 0; i < 4; i++) {
+      if (memcmp(s_throttle[i].peerId, peerId, protocol::NODE_ID_LEN) == 0 &&
+          now - s_throttle[i].lastSend < KEY_DEBOUNCE_MS) {
+        xSemaphoreGive(s_mutex);
+        RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=debounce peer=%02X%02X delta_ms=%lu reason=%s",
+            peerId[0], peerId[1], (unsigned long)(now - s_throttle[i].lastSend), safeReason(reason));
+        return;
+      }
     }
+  } else {
+    RIFTLINK_DIAG("KEY", "event=KEY_TX_FORCE_RESPONSE peer=%02X%02X reason=%s",
+        peerId[0], peerId[1], safeReason(reason));
   }
 
   if (forceSend && !hadKeyBefore) {

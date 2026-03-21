@@ -632,132 +632,45 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
   char msgStrBuf[256];
   uint8_t fwdBuf[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
 
-  // Self-reception: свой KEY_EXCHANGE (обрезанный) — отбросить без лога
-  if (buf[0] == protocol::SYNC_BYTE && buf[2] == protocol::OP_KEY_EXCHANGE && !(buf[1] & 0x01)) {
-    const uint8_t* fromPtr = (buf[1] & 0xF0) == 0x30 ? (buf + 5) : (buf + 3);
-    if (len >= 13 && memcmp(fromPtr, node::getId(), protocol::NODE_ID_LEN) == 0) {
-      return;  // наш исходящий KEY_EXCHANGE, принятый по эху/отражению
+  protocol::PacketHeader hdr;
+  const uint8_t* payload = nullptr;
+  size_t payloadLen = 0;
+  protocol::ParseResult parseRes;
+  if (!protocol::parsePacketEx(buf, len, &hdr, &payload, &payloadLen, &parseRes)) {
+    bool likelyCollision = (parseRes.status == protocol::ParseStatus::len_mismatch) ||
+                           (parseRes.status == protocol::ParseStatus::payload_range) ||
+                           (parseRes.status == protocol::ParseStatus::bad_header);
+    if (likelyCollision) {
+      radio::notifyCongestion();
+      region::switchChannelOnCongestion();
+      collision_slots::recordCollision();
     }
+    RIFTLINK_DIAG("PARSE", "event=RX_PARSE_FAIL status=%s len=%u off=%u op=0x%02X pktId=%u rssi=%d sf=%u",
+        protocol::parseStatusToString(parseRes.status), (unsigned)len, (unsigned)parseRes.startOffset,
+        (unsigned)parseRes.opcode, (unsigned)parseRes.pktId, rssi, (unsigned)sf);
+#if defined(DEBUG_PACKET_DUMP)
+    Serial.printf("[RiftLink] Parse FAIL status=%s len=%u rssi=%d hex=",
+        protocol::parseStatusToString(parseRes.status), (unsigned)len, rssi);
+    for (size_t i = 0; i < len && i < 32; i++) Serial.printf("%02X", buf[i]);
+    Serial.println();
+#endif
+    return;
   }
 
-  protocol::PacketHeader hdr;
-  const uint8_t* payload;
-  size_t payloadLen;
-  if (!protocol::parsePacket(buf, len, &hdr, &payload, &payloadLen)) {
-    // Fallback: коллизия/перегрузка — HELLO (13B) + мусор. Пробуем распарсить только первые 13 байт
-    if (len >= 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 &&
-        buf[2] == protocol::OP_HELLO && (buf[1] & 0x01)) {  // broadcast
-      if (protocol::parsePacket(buf, 13, &hdr, &payload, &payloadLen)) {
-        payloadLen = 0;
-        payload = nullptr;
-        // продолжаем обработку ниже
-      } else {
-#if defined(DEBUG_PACKET_DUMP)
-        Serial.printf("[RiftLink] Parse FAIL len=%u rssi=%d hex=", (unsigned)len, rssi);
-        for (size_t i = 0; i < len && i < 32; i++) Serial.printf("%02X", buf[i]);
-        Serial.println();
-#endif
-        return;
-      }
-    } else if (len == 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 &&
-               buf[2] == protocol::OP_KEY_EXCHANGE && !(buf[1] & 0x01)) {
-      // Обрезанный KEY_EXCHANGE (коллизия/half-duplex) — извлечь from, добавить в соседи
-      RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSE_FAIL cause=truncated_v2_len13 len=%u rssi=%d sf=%u",
-          (unsigned)len, rssi, (unsigned)sf);
-      RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE truncated len=13 (v2) — нет 32 B pubkey, onKeyExchange не вызывается\n");
-      radio::notifyCongestion();  // коллизия → BEB увеличит CW
-      uint8_t from[protocol::NODE_ID_LEN];
-      memcpy(from, buf + 3, protocol::NODE_ID_LEN);
-      if (!node::isBroadcast(from) && !node::isInvalidNodeId(from)) {
-        neighbors::onHello(from, rssi);
-      }
-      return;
-    } else if (len >= 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x30 &&
-               !(buf[1] & 0x01)) {
-      // v2.1 unicast: полный KEY по длине, но parsePacket не прошёл — не путать с обрезком (раньше уходили в NACK без лога)
-      if (buf[2] == protocol::OP_KEY_EXCHANGE &&
-          len >= protocol::keyExchangeTotalLen(true, false)) {
-        uint16_t pktId = (uint16_t)buf[3] | ((uint16_t)buf[4] << 8);
-        RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSE_FAIL cause=full_parse_failed len=%u pktId=%u rssi=%d sf=%u",
-            (unsigned)len, (unsigned)pktId, rssi, (unsigned)sf);
-        RIFTLINK_LOG_ERR(
-            "[RiftLink] KEY_EXCHANGE full len=%u pktId=%u parse FAILED — onKeyExchange не вызывается (битая рама/CRC?)\n",
-            (unsigned)len, (unsigned)pktId);
-        radio::notifyCongestion();
-        return;
-      }
-      // v2.1 с pktId — обрезанный пакет (13 B = sync+ver+opcode+pktId+from), отправить NACK для retransmit
-      radio::notifyCongestion();  // коллизия → BEB
-      uint16_t pktId = (uint16_t)buf[3] | ((uint16_t)buf[4] << 8);
-      if (buf[2] == protocol::OP_KEY_EXCHANGE &&
-          len < protocol::keyExchangeTotalLen(true, false)) {
-        RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSE_FAIL cause=truncated_v21 len=%u pktId=%u rssi=%d sf=%u",
-            (unsigned)len, (unsigned)pktId, rssi, (unsigned)sf);
-        RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE truncated len=%u pktId=%u — ждём NACK/retransmit; onKeyExchange не вызывается\n",
-            (unsigned)len, (unsigned)pktId);
-      }
-      uint8_t from[protocol::NODE_ID_LEN];
-      memcpy(from, buf + 5, protocol::NODE_ID_LEN);
-      if (!node::isBroadcast(from) && !node::isInvalidNodeId(from) &&
-          memcmp(from, node::getId(), protocol::NODE_ID_LEN) != 0) {
-        neighbors::onHello(from, rssi);
-        if (pktId != 0) {
-          uint8_t nackPayload[2] = {(uint8_t)(pktId & 0xFF), (uint8_t)(pktId >> 8)};
-          uint8_t nackPkt[protocol::PAYLOAD_OFFSET + 2];
-          size_t nackLen = protocol::buildPacket(nackPkt, sizeof(nackPkt),
-              node::getId(), from, 31, protocol::OP_NACK, nackPayload, 2);
-          if (nackLen > 0) {
-            bool nackOk = radio::send(nackPkt, nackLen, neighbors::rssiToSf(neighbors::getRssiFor(from)), true);
-            RIFTLINK_DIAG("KEY", "event=KEY_RX_NACK_SENT to=%02X%02X pktId=%u ok=%u",
-                from[0], from[1], (unsigned)pktId, (unsigned)nackOk);
-          }
-        }
-      }
-      return;
-    } else {
-      // len==13 и opcode MSG/TELEMETRY/GROUP_MSG/KEY_EXCHANGE — обрезанный пакет (коллизия/SF), не спамить
-      // broadcast (buf[1]&0x01) MSG/GROUP_MSG/TELEMETRY с len<45 — частично обрезан (min payload 32), не спамить
-      // opcode 0x0D (NACK) с len!=23 — скорее всего коррупция KEY_EXCHANGE, не спамить
-      // opcode 0x02 (ACK) с len!=25 (unicast) или len!=17 (broadcast) — коллизия/слияние пакетов
-      bool truncated = (len == 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 &&
-          (buf[2] == protocol::OP_MSG || buf[2] == protocol::OP_TELEMETRY || buf[2] == protocol::OP_GROUP_MSG ||
-           buf[2] == protocol::OP_KEY_EXCHANGE)) ||
-          (len < 45 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 && (buf[1] & 0x01) &&
-          (buf[2] == protocol::OP_MSG || buf[2] == protocol::OP_TELEMETRY || buf[2] == protocol::OP_GROUP_MSG)) ||
-          (buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 && buf[2] == protocol::OP_NACK && len != 23) ||
-          (buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 && buf[2] == protocol::OP_ACK &&
-          len != 25 && len != 17);  // ACK: unicast 25B, broadcast 17B
-      if (truncated) {
-        radio::notifyCongestion();  // коллизия/обрезанный пакет → BEB
-        region::switchChannelOnCongestion();  // Channel Hopping: EU 868.1→868.3→868.5
-        collision_slots::recordCollision();  // Predictive Slot Avoidance
-      }
-#if defined(DEBUG_PACKET_DUMP)
-      if (!truncated) {
-        Serial.printf("[RiftLink] Parse FAIL len=%u rssi=%d hex=", (unsigned)len, rssi);
-        for (size_t i = 0; i < len && i < 32; i++) Serial.printf("%02X", buf[i]);
-        Serial.println();
-      }
-#endif
-      if (len > 13 && buf[0] == protocol::SYNC_BYTE && buf[2] == protocol::OP_KEY_EXCHANGE) {
-        bool v21 = (buf[1] & 0xF0) == 0x30;
-        size_t need = protocol::keyExchangeTotalLen(v21, (buf[1] & 0x01) != 0);
-        if (len < need) {
-          RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSE_FAIL cause=incomplete len=%u need=%u rssi=%d sf=%u",
-              (unsigned)len, (unsigned)need, rssi, (unsigned)sf);
-          RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE incomplete len=%u (need %u) — parse/отбрасывание; onKeyExchange не вызывается\n",
-              (unsigned)len, (unsigned)need);
-        }
-      }
-      return;
-    }
+  size_t frameOffset = parseRes.startOffset;
+  const uint8_t* frameBuf = buf + frameOffset;
+  size_t frameLen = len - frameOffset;
+
+  if (hdr.opcode == protocol::OP_KEY_EXCHANGE &&
+      memcmp(hdr.from, node::getId(), protocol::NODE_ID_LEN) == 0) {
+    return;
   }
 
 #if defined(DEBUG_PACKET_DUMP)
   // Только успешный parsePacket: HELLO=13 B, KEY v2.1=55 B. Если в эфире только len=13 — полный KEY до парсера не дошёл (коллизия/очередь/не принят).
-  Serial.printf("[PKT] len=%u rssi=%d sf=%u hex=", (unsigned)len, rssi, sf);
-  for (size_t i = 0; i < len && i < 64; i++) Serial.printf("%02X", buf[i]);
-  if (len > 64) Serial.print("...");
+  Serial.printf("[PKT] len=%u rssi=%d sf=%u hex=", (unsigned)frameLen, rssi, sf);
+  for (size_t i = 0; i < frameLen && i < 64; i++) Serial.printf("%02X", frameBuf[i]);
+  if (frameLen > 64) Serial.print("...");
   Serial.println();
 #endif
 
@@ -768,7 +681,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
   if (hdr.opcode == protocol::OP_XOR_RELAY) {
     uint8_t decodedBuf[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
     size_t decodedLen = 0;
-    if (network_coding::onXorRelayReceived(buf, len, decodedBuf, &decodedLen) && decodedLen > 0) {
+    if (network_coding::onXorRelayReceived(frameBuf, frameLen, decodedBuf, &decodedLen) && decodedLen > 0) {
       if (packetQueue && decodedLen <= PACKET_BUF_SIZE) {
         PacketQueueItem item;
         memcpy(item.buf, decodedBuf, decodedLen);
@@ -822,8 +735,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       relaySosPerSourceRecord(hdr.from);
     } else relayRateRecord();
     if (hdr.opcode == protocol::OP_MSG && hdr.pktId != 0 && !node::isBroadcast(hdr.to)) {
-      pkt_cache::addOverheard(hdr.from, hdr.to, hdr.pktId, buf, len);
-      offline_queue::enqueueCourier(buf, len);  // SCF courier для разорванных сегментов
+      pkt_cache::addOverheard(hdr.from, hdr.to, hdr.pktId, frameBuf, frameLen);
+      offline_queue::enqueueCourier(frameBuf, frameLen);  // SCF courier для разорванных сегментов
     }
 
     uint8_t txSf = 0;
@@ -846,7 +759,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     }
 
     bool xorSent = false;
-    if (network_coding::addForXor(buf, len, hdr.from, hdr.to)) {
+    if (network_coding::addForXor(frameBuf, frameLen, hdr.from, hdr.to)) {
       uint8_t otherFrom[protocol::NODE_ID_LEN];
       uint32_t otherHash;
       network_coding::getLastPairOther(otherFrom, &otherHash);
@@ -861,7 +774,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     if (!xorSent) {
       uint8_t decodedBuf[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
       size_t decodedLen = 0;
-        if (network_coding::getDecodedFromPending(buf, len, hdr.from, hdr.to, hdr.pktId,
+        if (network_coding::getDecodedFromPending(frameBuf, frameLen, hdr.from, hdr.to, hdr.pktId,
                                                   decodedBuf, &decodedLen) && decodedLen > 0) {
         if (packetQueue && decodedLen <= PACKET_BUF_SIZE) {
           PacketQueueItem item;
@@ -878,16 +791,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           handlePacket(decodedBuf, decodedLen, rssi, sf);
         }
       }
-      memcpy(fwdBuf, buf, len);
-      size_t ttlOff;
-      if (buf[0] == protocol::SYNC_BYTE && ((buf[1] & 0xF0) == 0x20 || (buf[1] & 0xF0) == 0x30)) {
-        bool hasPktId = (buf[1] & 0xF0) == 0x30;
-        ttlOff = (buf[1] & 0x01) ? (hasPktId ? 13 : 11) : (hasPktId ? 21 : 19);
-      } else {
-        ttlOff = (buf[0] == protocol::SYNC_BYTE) ? (protocol::SYNC_LEN + 1 + protocol::NODE_ID_LEN * 2) : (1 + protocol::NODE_ID_LEN * 2);
-      }
-      if (ttlOff < len) fwdBuf[ttlOff]--;
-      queueDeferredRelay(fwdBuf, len, txSf, delayMs, hdr.from, relayPayloadHashVal);
+      memcpy(fwdBuf, frameBuf, frameLen);
+      size_t ttlOff = node::isBroadcast(hdr.to)
+          ? ((hdr.pktId != 0) ? 13 : 11)
+          : ((hdr.pktId != 0) ? 21 : 19);
+      if (ttlOff < frameLen) fwdBuf[ttlOff]--;
+      queueDeferredRelay(fwdBuf, frameLen, txSf, delayMs, hdr.from, relayPayloadHashVal);
       if ((esp_random() % 100) < 35) {  // Proof-of-Relay Lite sampling
         ble::notifyRelayProof(node::getId(), hdr.from, hdr.to, hdr.pktId, hdr.opcode);
       }

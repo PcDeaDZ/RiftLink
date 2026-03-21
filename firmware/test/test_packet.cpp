@@ -114,6 +114,85 @@ void test_corrupt_shifted_sync_sx1262() {
   }
 }
 
+void test_shifted_parse_all_core_opcodes_with_offset() {
+  struct Case {
+    uint8_t opcode;
+    const uint8_t* to;
+    uint8_t payload[40];
+    size_t payloadLen;
+    bool encrypted;
+    uint16_t pktId;
+  } cases[] = {
+    {protocol::OP_HELLO, protocol::BROADCAST_ID, {0}, 0, false, 0},
+    {protocol::OP_KEY_EXCHANGE, s_to, {0}, 32, false, 7},
+    {protocol::OP_NACK, s_to, {0x34, 0x12}, 2, false, 0},
+    {protocol::OP_ACK, s_to, {0x11, 0x22, 0x33, 0x44}, 4, false, 0},
+    {protocol::OP_MSG, s_to, {0}, 32, true, 0},
+    {protocol::OP_TELEMETRY, protocol::BROADCAST_ID, {0}, 32, true, 0},
+  };
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    if (cases[i].payloadLen == 32 && (cases[i].opcode == protocol::OP_KEY_EXCHANGE ||
+                                      cases[i].opcode == protocol::OP_MSG ||
+                                      cases[i].opcode == protocol::OP_TELEMETRY)) {
+      for (size_t k = 0; k < 32; k++) cases[i].payload[k] = (uint8_t)(k + i);
+    }
+    uint8_t pkt[256];
+    size_t pktLen = protocol::buildPacket(pkt, sizeof(pkt),
+        s_from, cases[i].to, 2, cases[i].opcode,
+        cases[i].payloadLen ? cases[i].payload : nullptr, cases[i].payloadLen,
+        cases[i].encrypted, false, false, 0, cases[i].pktId);
+    TEST_ASSERT_GREATER_THAN(0, pktLen);
+
+    for (size_t shift = 1; shift <= 4; shift++) {
+      uint8_t buf[300];
+      memset(buf, 0xAA, shift);
+      memcpy(buf + shift, pkt, pktLen);
+      protocol::PacketHeader hdr;
+      const uint8_t* pl = nullptr;
+      size_t plLen = 0;
+      protocol::ParseResult res;
+      bool ok = protocol::parsePacketEx(buf, shift + pktLen, &hdr, &pl, &plLen, &res);
+      TEST_ASSERT_TRUE(ok);
+      TEST_ASSERT_EQUAL_UINT32(shift, (uint32_t)res.startOffset);
+      TEST_ASSERT_EQUAL(cases[i].opcode, hdr.opcode);
+      TEST_ASSERT_EQUAL(cases[i].payloadLen, plLen);
+    }
+  }
+}
+
+void test_shifted_parse_status_payload_range_for_bad_ack_len() {
+  uint8_t pkt[64];
+  const uint8_t ackPl[4] = {0x01, 0x02, 0x03, 0x04};
+  size_t pktLen = protocol::buildPacket(pkt, sizeof(pkt),
+      s_from, s_to, 1, protocol::OP_ACK, ackPl, 4, false, false, false, 0, 0);
+  TEST_ASSERT_GREATER_THAN(0, pktLen);
+  uint8_t buf[80];
+  memset(buf, 0xCC, 2);
+  memcpy(buf + 2, pkt, pktLen - 1);  // намеренно обрезаем 1 байт
+
+  protocol::PacketHeader hdr;
+  protocol::ParseResult res;
+  bool ok = protocol::parsePacketEx(buf, 2 + pktLen - 1, &hdr, nullptr, nullptr, &res);
+  TEST_ASSERT_FALSE(ok);
+  TEST_ASSERT_EQUAL(protocol::ParseStatus::payload_range, res.status);
+  TEST_ASSERT_EQUAL(protocol::OP_ACK, res.opcode);
+  TEST_ASSERT_EQUAL_UINT32(2, (uint32_t)res.startOffset);
+}
+
+void test_parse_status_invalid_ids() {
+  uint8_t zero[8] = {0};
+  uint8_t pkt[64];
+  size_t len = protocol::buildPacket(pkt, sizeof(pkt),
+      zero, protocol::BROADCAST_ID, 0, protocol::OP_HELLO,
+      nullptr, 0, false, false, false, 0, 0);
+  TEST_ASSERT_GREATER_THAN(0, len);
+  protocol::PacketHeader hdr;
+  protocol::ParseResult res;
+  bool ok = protocol::parsePacketEx(pkt, len, &hdr, nullptr, nullptr, &res);
+  TEST_ASSERT_FALSE(ok);
+  TEST_ASSERT_EQUAL(protocol::ParseStatus::invalid_ids, res.status);
+}
+
 void test_corrupt_wrong_sync_byte() {
   uint8_t buf[64];
   size_t len = protocol::buildPacket(buf, sizeof(buf),
@@ -685,7 +764,7 @@ void test_scenario_payload_integrity() {
   TEST_ASSERT_EQUAL_UINT8_ARRAY(payload, pl, 50);
 }
 
-void test_scenario_node_id_all_zeros() {
+void test_scenario_node_id_all_zeros_rejected() {
   uint8_t zero[8] = {0};
   uint8_t buf[64];
   size_t len = protocol::buildPacket(buf, sizeof(buf),
@@ -693,8 +772,7 @@ void test_scenario_node_id_all_zeros() {
       nullptr, 0, false, false, false, 0, 0);
   protocol::PacketHeader hdr;
   bool ok = protocol::parsePacket(buf, len, &hdr, nullptr, nullptr);
-  TEST_ASSERT_TRUE(ok);
-  TEST_ASSERT_EQUAL_UINT8_ARRAY(zero, hdr.from, 8);
+  TEST_ASSERT_FALSE(ok);
 }
 
 void test_scenario_unicast_ack() {
@@ -801,6 +879,9 @@ int main(int argc, char** argv) {
   RUN_TEST(test_sync_byte_in_output);
   RUN_TEST(test_corrupt_garbage_before_packet);
   RUN_TEST(test_corrupt_shifted_sync_sx1262);
+  RUN_TEST(test_shifted_parse_all_core_opcodes_with_offset);
+  RUN_TEST(test_shifted_parse_status_payload_range_for_bad_ack_len);
+  RUN_TEST(test_parse_status_invalid_ids);
   RUN_TEST(test_corrupt_wrong_sync_byte);
   RUN_TEST(test_corrupt_wrong_version);
   RUN_TEST(test_corrupt_truncated_packet);
@@ -841,7 +922,7 @@ int main(int argc, char** argv) {
   RUN_TEST(test_scenario_voice_msg_roundtrip);
   RUN_TEST(test_scenario_xor_relay_meta);
   RUN_TEST(test_scenario_payload_integrity);
-  RUN_TEST(test_scenario_node_id_all_zeros);
+  RUN_TEST(test_scenario_node_id_all_zeros_rejected);
   RUN_TEST(test_scenario_unicast_ack);
   RUN_TEST(test_scenario_exact_buffer_size);
   RUN_TEST(test_scenario_flags_independent);
