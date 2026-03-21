@@ -340,7 +340,13 @@ class _ContactsScreenState extends State<ContactsScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.people_outline_rounded, size: 60, color: p.onSurfaceVariant.withOpacity(0.42)),
+            TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0.0, end: 1.0),
+              duration: const Duration(milliseconds: 600),
+              curve: Curves.easeOut,
+              builder: (_, opacity, child) => Opacity(opacity: opacity, child: child),
+              child: Icon(Icons.people_outline_rounded, size: 72, color: p.onSurfaceVariant.withOpacity(0.38)),
+            ),
             const SizedBox(height: AppSpacing.lg),
             Text(
               l.tr('contacts_empty'),
@@ -348,6 +354,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
               style: AppTypography.bodyBase().copyWith(
                 color: p.onSurface,
                 fontWeight: FontWeight.w600,
+                fontSize: 16,
               ),
             ),
             const SizedBox(height: AppSpacing.sm),
@@ -360,6 +367,21 @@ class _ContactsScreenState extends State<ContactsScreen> {
                 fontWeight: FontWeight.w400,
               ),
             ),
+            const SizedBox(height: AppSpacing.xl),
+            FilledButton.icon(
+              onPressed: () => _showAddDialog(),
+              icon: const Icon(Icons.person_add_alt_1_rounded, size: 18),
+              label: Text(
+                l.tr('add_contact'),
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              style: FilledButton.styleFrom(
+                backgroundColor: p.primary,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl, vertical: AppSpacing.md),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+              ),
+            ),
           ],
         ),
       ),
@@ -368,55 +390,84 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
   Widget _buildContactTile(Contact c) {
     final p = context.palette;
-    return AppSectionCard(
-      margin: const EdgeInsets.only(bottom: AppSpacing.sm),
-      padding: EdgeInsets.zero,
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
+    final l = context.l10n;
+    return Dismissible(
+      key: ValueKey('contact-${c.id}'),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
+        decoration: BoxDecoration(
+          color: p.error.withOpacity(0.12),
           borderRadius: BorderRadius.circular(AppRadius.card),
-          onTap: () => _showEditDialog(c),
-          onLongPress: () => _delete(c),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md + 2),
-            child: Row(
-              children: [
-                CircleAvatar(
-                  radius: 20,
-                  backgroundColor: p.primary.withOpacity(0.13),
-                  child: Text(
-                    (c.nickname.isNotEmpty ? c.nickname[0] : (c.id.isNotEmpty ? c.id[0] : '?')).toUpperCase(),
-                    style: TextStyle(color: p.primary, fontWeight: FontWeight.w700, fontSize: 18),
+          border: Border.all(color: p.error.withOpacity(0.45)),
+        ),
+        child: Icon(Icons.delete_outline_rounded, color: p.error),
+      ),
+      confirmDismiss: (_) => showRiftConfirmDialog(
+        context: context,
+        title: l.tr('delete_contact'),
+        message: l.tr('delete_contact_confirm', {
+          'name': c.nickname.isNotEmpty ? c.nickname : c.id,
+        }),
+        cancelText: l.tr('cancel'),
+        confirmText: l.tr('delete'),
+        danger: true,
+        icon: Icons.delete_outline_rounded,
+      ),
+      onDismissed: (_) async {
+        await ContactsService.remove(c.id);
+        _load();
+      },
+      child: AppSectionCard(
+        margin: const EdgeInsets.only(bottom: AppSpacing.sm),
+        padding: EdgeInsets.zero,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(AppRadius.card),
+            onTap: () => _showEditDialog(c),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md + 2),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 20,
+                    backgroundColor: p.primary.withOpacity(0.13),
+                    child: Text(
+                      (c.nickname.isNotEmpty ? c.nickname[0] : (c.id.isNotEmpty ? c.id[0] : '?')).toUpperCase(),
+                      style: TextStyle(color: p.primary, fontWeight: FontWeight.w700, fontSize: 18),
+                    ),
                   ),
-                ),
-                const SizedBox(width: AppSpacing.md + 2),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        c.nickname.isNotEmpty ? c.nickname : c.id,
-                        style: AppTypography.bodyBase().copyWith(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 16,
-                          color: p.onSurface,
+                  const SizedBox(width: AppSpacing.md + 2),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          c.nickname.isNotEmpty ? c.nickname : c.id,
+                          style: AppTypography.bodyBase().copyWith(
+                            fontWeight: FontWeight.w600,
+                            fontSize: 16,
+                            color: p.onSurface,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: AppSpacing.xs),
-                      Text(
-                        c.id,
-                        style: TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 12.5,
-                          letterSpacing: 0.2,
-                          color: p.onSurfaceVariant.withOpacity(0.95),
+                        const SizedBox(height: AppSpacing.xs),
+                        Text(
+                          c.id,
+                          style: TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 12.5,
+                            letterSpacing: 0.2,
+                            color: p.onSurfaceVariant.withOpacity(0.95),
+                          ),
                         ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
-                Icon(Icons.chevron_right_rounded, color: p.onSurfaceVariant.withOpacity(0.4)),
-              ],
+                  Icon(Icons.chevron_right_rounded, color: p.onSurfaceVariant.withOpacity(0.4)),
+                ],
+              ),
             ),
           ),
         ),

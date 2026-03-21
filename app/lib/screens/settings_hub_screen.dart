@@ -639,11 +639,11 @@ class _NetworkModemPageState extends State<_NetworkModemPage> {
   void dispose() { _sub?.cancel(); super.dispose(); }
 
   Future<bool> _waitModem({required int preset, int? sf, double? bw, int? cr}) async {
-    // Firmware scheduleInfoNotify fires after ~450ms; wait before first poll.
-    await Future<void>.delayed(const Duration(milliseconds: 500));
-    for (var i = 0; i < 6; i++) {
+    // Firmware scheduleInfoNotify fires after ~600ms; wait before first poll.
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+    for (var i = 0; i < 8; i++) {
       await widget.ble.getInfo(force: true);
-      await Future<void>.delayed(const Duration(milliseconds: 350));
+      await Future<void>.delayed(const Duration(milliseconds: 400));
       final li = widget.ble.lastInfo;
       if (li != null && li.modemPreset == preset) {
         if (preset != 4) return true;
@@ -1436,6 +1436,16 @@ class _FaqPage extends StatelessWidget {
       (l.tr('faq_q_sos'), l.tr('faq_a_sos')),
       (l.tr('faq_q_timecapsule'), l.tr('faq_a_timecapsule')),
       (l.tr('faq_q_ping'), l.tr('faq_a_ping')),
+      (l.tr('faq_q_ble_wifi'), l.tr('faq_a_ble_wifi')),
+      (l.tr('faq_q_e2e'), l.tr('faq_a_e2e')),
+      (l.tr('faq_q_powersave'), l.tr('faq_a_powersave')),
+      (l.tr('faq_q_gps'), l.tr('faq_a_gps')),
+      (l.tr('faq_q_groups'), l.tr('faq_a_groups')),
+      (l.tr('faq_q_offline'), l.tr('faq_a_offline')),
+      (l.tr('faq_q_nickname'), l.tr('faq_a_nickname')),
+      (l.tr('faq_q_lora_channel'), l.tr('faq_a_lora_channel')),
+      (l.tr('faq_q_voice'), l.tr('faq_a_voice')),
+      (l.tr('faq_q_selftest'), l.tr('faq_a_selftest')),
     ];
     return _SubpageScaffold(
       title: l.tr('faq_title'),
@@ -1473,8 +1483,6 @@ class _ModemSectionState extends State<_ModemSection> {
   static const _descRu = ['SF7·BW250·CR5\nГород, скорость, малая дальность', 'SF7·BW125·CR5\nБаланс скорости и дальности', 'SF10·BW125·CR5\nХорошая дальность', 'SF12·BW125·CR8\nМакс. дальность, медленно', 'Ручная настройка SF / BW / CR'];
   static const _descEn = ['SF7·BW250·CR5\nCity use, high speed, short range', 'SF7·BW125·CR5\nBalanced speed and range', 'SF10·BW125·CR5\nGood long-range profile', 'SF12·BW125·CR8\nMaximum range, slower throughput', 'Manual SF / BW / CR configuration'];
   static const _bwOpts = [62.5, 125.0, 250.0, 500.0];
-  static const _crOpts = [5, 6, 7, 8];
-  static const _crDesc = ['4/5', '4/6', '4/7', '4/8'];
 
   late int _sel, _cSf, _cCr;
   late double _cBw;
@@ -1522,13 +1530,23 @@ class _ModemSectionState extends State<_ModemSection> {
         const SizedBox(height: AppSpacing.sm + 2),
         Text(l.tr('modem_bw_label'), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
         const SizedBox(height: AppSpacing.xs),
-        _optionRow<double>(context, options: _bwOpts, selected: _cBw, label: (v) => v == 62.5 ? '62.5' : '${v.toInt()}', enabled: en, onSelect: (v) => setState(() => _cBw = v)),
+        _SegmentedPickBar(
+          labels: const ['62.5', '125', '250', '500'],
+          selectedIndex: _bwOpts.indexOf(_cBw) >= 0 ? _bwOpts.indexOf(_cBw) : null,
+          enabled: en,
+          onSelected: (i) => setState(() => _cBw = _bwOpts[i]),
+        ),
         const SizedBox(height: AppSpacing.xs),
         Text(l.tr('modem_bw_desc'), style: descStyle),
         const SizedBox(height: AppSpacing.sm + 2),
         Text(l.tr('modem_cr_label'), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
         const SizedBox(height: AppSpacing.xs),
-        _optionRow<int>(context, options: _crOpts, selected: _cCr, label: (v) => _crDesc[v - 5], enabled: en, onSelect: (v) => setState(() => _cCr = v)),
+        _SegmentedPickBar(
+          labels: const ['4/5', '4/6', '4/7', '4/8'],
+          selectedIndex: _cCr >= 5 && _cCr <= 8 ? _cCr - 5 : null,
+          enabled: en,
+          onSelected: (i) => setState(() => _cCr = i + 5),
+        ),
         const SizedBox(height: AppSpacing.xs),
         Text(l.tr('modem_cr_desc'), style: descStyle),
         const SizedBox(height: AppSpacing.md),
@@ -1552,22 +1570,5 @@ class _ModemSectionState extends State<_ModemSection> {
           border: Border.all(color: sel ? pal.primary : pal.divider, width: sel ? 1.6 : 1)),
         child: Text(label, textAlign: TextAlign.center,
           style: TextStyle(fontSize: 12.5, fontWeight: sel ? FontWeight.w700 : FontWeight.w500, color: sel ? pal.primary : pal.onSurfaceVariant.withOpacity(en ? 1.0 : 0.5)))));
-  }
-
-  Widget _optionRow<T>(BuildContext context, {required List<T> options, required T selected, required String Function(T) label, required bool enabled, required ValueChanged<T> onSelect}) {
-    final pal = context.palette;
-    return Row(children: [
-      for (var i = 0; i < options.length; i++) ...[
-        if (i > 0) const SizedBox(width: AppSpacing.sm - 2),
-        Expanded(child: GestureDetector(
-          onTap: enabled ? () { HapticFeedback.selectionClick(); onSelect(options[i]); } : null,
-          child: AnimatedContainer(duration: _kDur, padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm), alignment: Alignment.center,
-            decoration: BoxDecoration(borderRadius: BorderRadius.circular(AppRadius.md),
-              color: options[i] == selected ? pal.primary.withOpacity(0.15) : pal.surfaceVariant,
-              border: Border.all(color: options[i] == selected ? pal.primary : pal.divider, width: options[i] == selected ? 1.6 : 1)),
-            child: Text(label(options[i]), style: TextStyle(fontSize: 11.5, fontWeight: options[i] == selected ? FontWeight.w700 : FontWeight.w500,
-              color: options[i] == selected ? pal.primary : pal.onSurfaceVariant.withOpacity(enabled ? 1.0 : 0.5)))))),
-      ],
-    ]);
   }
 }

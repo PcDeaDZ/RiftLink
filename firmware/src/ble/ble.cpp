@@ -139,7 +139,7 @@ static uint8_t s_pendingMsgTtl = 0;
 static char s_pendingMsgLane[10] = "normal";
 static char s_pendingMsgType[10] = "text";
 static volatile bool s_pendingNickname = false;
-static char s_pendingNicknameBuf[17] = {0};
+static char s_pendingNicknameBuf[33] = {0};
 static volatile bool s_pendingGps = false;
 static bool s_pendingGpsHasEnabled = false;
 static bool s_pendingGpsEnabled = false;
@@ -725,9 +725,9 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
 
     if (strcmp(cmd, "nickname") == 0) {
       const char* nick = doc["nickname"];
-      if (nick && strnlen(nick, 18) <= 16) {
-        strncpy(s_pendingNicknameBuf, nick, 16);
-        s_pendingNicknameBuf[16] = '\0';
+      if (nick && strnlen(nick, 34) <= 32) {
+        strncpy(s_pendingNicknameBuf, nick, 32);
+        s_pendingNicknameBuf[32] = '\0';
         __sync_synchronize();
         s_pendingNickname = true;
         scheduleInfoNotify();
@@ -1263,7 +1263,7 @@ void notifyInfo() {
   char idHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(idHex + i*2, 3, "%02X", id[i]);
   doc["id"] = idHex;
-  char nick[17];
+  char nick[33];
   node::getNickname(nick, sizeof(nick));
   if (nick[0]) doc["nickname"] = nick;
   doc["region"] = region::getCode();

@@ -739,6 +739,12 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                           labelText: l10n.tr('wifi_ip'),
                           hintText: '192.168.4.1',
                           errorText: _wifiIpFieldError(context),
+                          suffixIcon: IconButton(
+                            onPressed: (_wifiConnecting || !_wifiIpValid) ? null : _connectWifi,
+                            icon: _wifiConnecting
+                                ? SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: context.palette.primary))
+                                : Icon(Icons.arrow_forward_rounded, color: (_wifiConnecting || !_wifiIpValid) ? context.palette.onSurfaceVariant.withOpacity(0.3) : context.palette.primary),
+                          ),
                         ),
                       ),
                     ),
@@ -936,48 +942,37 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                                 ),
                                 child: Icon(Icons.delete_outline_rounded, color: context.palette.error),
                               ),
+                              confirmDismiss: (_) async {
+                                final l = context.l10n;
+                                return await showRiftConfirmDialog(
+                                  context: context,
+                                  title: l.tr('forget_device'),
+                                  message: l.tr('forget_device_confirm', {'name': title}),
+                                  cancelText: l.tr('cancel'),
+                                  confirmText: l.tr('delete'),
+                                  danger: true,
+                                  icon: Icons.delete_outline_rounded,
+                                );
+                              },
                               onDismissed: (_) => _removeWifiIp(ip),
                               child: _DeviceCard(
                                 icon: Icons.wifi_rounded,
                                 title: title,
                                 subtitle: subtitle,
                                 showDelete: false,
-                                onTap: _wifiConnecting ? null : () => _useWifiIp(ip),
+                                onTap: _wifiConnecting ? null : () {
+                                  setState(() {
+                                    _wifiIpController.text = ip;
+                                    _wifiIpTouched = true;
+                                  });
+                                  _connectWifi();
+                                },
                               ),
                             ),
                           );
                         })),
                       ),
                     ],
-                    SizedBox(height: AppSpacing.md),
-                    Padding(
-                      padding: EdgeInsets.symmetric(horizontal: AppSpacing.xxl),
-                      child: AppPrimaryButton(
-                        onPressed: (_wifiConnecting || !_wifiIpValid) ? null : _connectWifi,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (_wifiConnecting)
-                              SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Theme.of(context).colorScheme.onPrimary,
-                                ),
-                              )
-                            else
-                              Icon(Icons.wifi_rounded, color: Theme.of(context).colorScheme.onPrimary),
-                            SizedBox(width: AppSpacing.sm),
-                            Text(
-                              _wifiConnecting ? l10n.tr('connecting') : l10n.tr('connect'),
-                              style: AppTypography.bodyBase().copyWith(color: Theme.of(context).colorScheme.onPrimary),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
                   ],
                   if (_transportTab == 0 && _recent.isNotEmpty) ...[
                     SizedBox(height: AppSpacing.xxl),
@@ -996,17 +991,46 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                           final label = d.displayName.isNotEmpty ? d.displayName : (d.nodeId.isNotEmpty ? d.nodeId : d.remoteId);
                           return Padding(
                             padding: EdgeInsets.only(bottom: i < _recent.length - 1 ? AppSpacing.sm : 0),
-                            child: _DeviceCard(
-                              icon: Icons.bluetooth,
-                              title: label,
-                              subtitle: d.displayName != d.nodeId ? d.nodeId : null,
-                              isLoading: isConnecting,
-                              showDelete: !_scanning,
-                              onDelete: () => _confirmForgetDevice(d),
-                              onTap: _scanning ? null : () {
-                                setState(() { _connectingToRemoteId = d.remoteId; _connectingToDeviceName = label; _scanning = true; _scanStoppedByUser = false; _results = []; _error = null; });
-                                WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && _connectingToRemoteId == d.remoteId) _connectToRecent(d, displayLabel: label); });
+                            child: Dismissible(
+                              key: ValueKey('ble-recent-${d.remoteId}'),
+                              direction: DismissDirection.endToStart,
+                              background: Container(
+                                alignment: Alignment.centerRight,
+                                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm + 2),
+                                decoration: BoxDecoration(
+                                  color: context.palette.error.withOpacity(0.12),
+                                  borderRadius: BorderRadius.circular(AppRadius.sm),
+                                  border: Border.all(color: context.palette.error.withOpacity(0.45)),
+                                ),
+                                child: Icon(Icons.delete_outline_rounded, color: context.palette.error),
+                              ),
+                              confirmDismiss: (_) async {
+                                final l10n = context.l10n;
+                                return await showRiftConfirmDialog(
+                                  context: context,
+                                  title: l10n.tr('forget_device'),
+                                  message: l10n.tr('forget_device_confirm', {'name': d.displayName}),
+                                  cancelText: l10n.tr('cancel'),
+                                  confirmText: l10n.tr('delete'),
+                                  danger: true,
+                                  icon: Icons.delete_outline_rounded,
+                                );
                               },
+                              onDismissed: (_) async {
+                                await RecentDevicesService.remove(d.remoteId);
+                                _loadRecent();
+                              },
+                              child: _DeviceCard(
+                                icon: Icons.bluetooth,
+                                title: label,
+                                subtitle: d.displayName != d.nodeId ? d.nodeId : null,
+                                isLoading: isConnecting,
+                                showDelete: false,
+                                onTap: _scanning ? null : () {
+                                  setState(() { _connectingToRemoteId = d.remoteId; _connectingToDeviceName = label; _scanning = true; _scanStoppedByUser = false; _results = []; _error = null; });
+                                  WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && _connectingToRemoteId == d.remoteId) _connectToRecent(d, displayLabel: label); });
+                                },
+                              ),
                             ),
                           );
                         }).toList(),

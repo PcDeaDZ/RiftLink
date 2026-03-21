@@ -379,18 +379,38 @@ class _GroupsScreenState extends State<GroupsScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(
-              Icons.groups_outlined,
-              size: 60,
-              color: p.onSurfaceVariant.withOpacity(0.42),
+            TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0.0, end: 1.0),
+              duration: const Duration(milliseconds: 600),
+              curve: Curves.easeOut,
+              builder: (_, opacity, child) => Opacity(opacity: opacity, child: child),
+              child: Icon(Icons.groups_outlined, size: 72, color: p.onSurfaceVariant.withOpacity(0.38)),
             ),
-            const SizedBox(height: AppSpacing.md),
+            const SizedBox(height: AppSpacing.lg),
             Text(
               l.tr('no_groups'),
               textAlign: TextAlign.center,
               style: AppTypography.bodyBase().copyWith(
-                fontSize: 15,
-                color: p.onSurfaceVariant.withOpacity(0.92),
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: p.onSurface,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.xl),
+            FilledButton.icon(
+              onPressed: widget.ble.isConnected ? _showAddSheet : null,
+              icon: const Icon(Icons.group_add_rounded, size: 18),
+              label: Text(
+                l.tr('add_group'),
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              style: FilledButton.styleFrom(
+                backgroundColor: p.primary,
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: p.primary.withOpacity(0.3),
+                disabledForegroundColor: Colors.white.withOpacity(0.5),
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl, vertical: AppSpacing.md),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
               ),
             ),
           ],
@@ -407,12 +427,13 @@ class _GroupsScreenState extends State<GroupsScreen> {
       direction: DismissDirection.endToStart,
       background: Container(
         alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: AppSpacing.lg),
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm + 2),
         decoration: BoxDecoration(
-          color: p.error.withOpacity(0.92),
-          borderRadius: BorderRadius.circular(AppRadius.card),
+          color: p.error.withOpacity(0.12),
+          borderRadius: BorderRadius.circular(AppRadius.sm),
+          border: Border.all(color: p.error.withOpacity(0.45)),
         ),
-        child: Icon(Icons.delete_outline_rounded, color: Colors.white.withOpacity(0.95), size: 26),
+        child: Icon(Icons.delete_outline_rounded, color: p.error),
       ),
       confirmDismiss: (direction) async {
         final ok = await showRiftConfirmDialog(
@@ -461,28 +482,60 @@ class _GroupsScreenState extends State<GroupsScreen> {
                     ),
                   ),
                   const SizedBox(width: AppSpacing.sm + 2),
-                  Expanded(
+                    Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          '${l.tr('group')} $gid',
-                          style: AppTypography.bodyBase().copyWith(
-                            fontWeight: FontWeight.w600,
-                            color: p.onSurface,
-                          ),
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                '${l.tr('group')} $gid',
+                                style: AppTypography.bodyBase().copyWith(
+                                  fontWeight: FontWeight.w600,
+                                  color: p.onSurface,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: AppSpacing.sm),
+                            AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 300),
+                              switchInCurve: Curves.easeOutBack,
+                              switchOutCurve: Curves.easeIn,
+                              transitionBuilder: (child, anim) => ScaleTransition(
+                                scale: anim,
+                                child: FadeTransition(opacity: anim, child: child),
+                              ),
+                              child: isPrivate
+                                  ? Icon(Icons.lock_rounded, key: const ValueKey('locked'), size: 16, color: p.primary)
+                                  : const SizedBox.shrink(key: ValueKey('unlocked')),
+                            ),
+                          ],
                         ),
                         const SizedBox(height: AppSpacing.xs),
-                        if (isPrivate)
-                          AppStateChip(
-                            label: '${l.tr('group_private')}  v$ver',
-                            kind: AppStateKind.info,
-                          )
-                        else
-                          AppStateChip(
-                            label: l.tr('group_public'),
-                            kind: AppStateKind.neutral,
-                          ),
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 280),
+                          switchInCurve: Curves.easeOut,
+                          switchOutCurve: Curves.easeIn,
+                          transitionBuilder: (child, anim) {
+                            final scale = Tween<double>(begin: 0.85, end: 1.0).animate(anim);
+                            return ScaleTransition(
+                              scale: scale,
+                              child: FadeTransition(opacity: anim, child: child),
+                            );
+                          },
+                          child: isPrivate
+                              ? AppStateChip(
+                                  key: ValueKey('priv-$gid-$ver'),
+                                  label: '${l.tr('group_private')}  v$ver',
+                                  kind: AppStateKind.info,
+                                )
+                              : AppStateChip(
+                                  key: ValueKey('pub-$gid'),
+                                  label: l.tr('group_public'),
+                                  kind: AppStateKind.neutral,
+                                ),
+                        ),
                       ],
                     ),
                   ),

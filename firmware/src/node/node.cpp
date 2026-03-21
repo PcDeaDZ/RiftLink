@@ -11,13 +11,13 @@
 #include <string.h>
 
 static uint8_t s_nodeId[protocol::NODE_ID_LEN];
-static char s_nickname[17] = {0};
+static char s_nickname[33] = {0};
 static bool s_inited = false;
 
 #define NVS_NAMESPACE "riftlink"
 #define NVS_KEY_NODEID "nodeid"
 #define NVS_KEY_NICKNAME "nick"
-#define NICKNAME_MAX 16
+#define NICKNAME_MAX 32
 
 namespace node {
 

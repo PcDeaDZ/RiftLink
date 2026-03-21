@@ -3,16 +3,12 @@ import 'package:flutter/material.dart';
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
+import '../theme/design_tokens.dart';
 import '../widgets/app_primitives.dart';
 import '../widgets/mesh_background.dart';
 import 'contacts_screen.dart';
 import 'groups_screen.dart';
 
-// Визуальные константы экрана (табы, чипы, отступы) — одна шкала радиусов и отступов.
-const double _kTabBarSlotHeight = 40;
-const double _kTabContainerRadius = 12;
-const double _kTabIndicatorRadius = 10;
-const EdgeInsets _kTabIndicatorPadding = EdgeInsets.symmetric(horizontal: 4, vertical: 4);
 const EdgeInsets _kChipRowPadding = EdgeInsets.fromLTRB(12, 10, 12, 4);
 const double _kChipSpacing = 8;
 const double _kChipIconSize = 14;
@@ -21,8 +17,8 @@ const EdgeInsets _kChipPadding = EdgeInsets.symmetric(horizontal: 10, vertical: 
 const double _kChipRadius = 12;
 const double _kTabViewTopInset = 6;
 
-/// Контакты и группы: табы в [AppBar.title] — без дубля «заголовок + те же вкладки».
-/// Стрелка «назад» слева, табы справа от неё — обычный паттерн Material.
+/// Контакты и группы: минимальный AppBar (стрелка назад),
+/// сегментированная панель — часть контента (body).
 class ContactsGroupsHubScreen extends StatelessWidget {
   final RiftLinkBle ble;
   final List<String> neighbors;
@@ -44,55 +40,25 @@ class ContactsGroupsHubScreen extends StatelessWidget {
       child: MeshBackgroundWrapper(
         child: Scaffold(
           backgroundColor: Colors.transparent,
-          appBar: riftAppBar(
-            context,
-            title: '',
-            showBack: true,
-            titleWidget: SizedBox(
-              height: _kTabBarSlotHeight,
-              child: Material(
-                color: p.surfaceVariant.withOpacity(0.92),
-                elevation: 0,
-                shadowColor: Colors.transparent,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(_kTabContainerRadius),
-                  side: BorderSide(color: p.divider),
-                ),
-                clipBehavior: Clip.antiAlias,
-                child: TabBar(
-                  indicatorSize: TabBarIndicatorSize.tab,
-                  dividerColor: Colors.transparent,
-                  indicatorPadding: _kTabIndicatorPadding,
-                  labelColor: p.primary,
-                  unselectedLabelColor: p.onSurfaceVariant,
-                  labelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
-                  unselectedLabelStyle: const TextStyle(fontWeight: FontWeight.w500, fontSize: 13),
-                  indicator: BoxDecoration(
-                    color: p.primary.withOpacity(0.18),
-                    borderRadius: BorderRadius.circular(_kTabIndicatorRadius),
-                  ),
-                  tabs: [
-                    Tab(
-                      icon: Icon(
-                        Icons.person_outline_rounded,
-                        size: 22,
-                        semanticLabel: l.tr('contacts'),
-                      ),
-                    ),
-                    Tab(
-                      icon: Icon(
-                        Icons.groups_outlined,
-                        size: 22,
-                        semanticLabel: l.tr('groups'),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
+          appBar: riftAppBar(context, title: '', showBack: true),
           body: Column(
             children: [
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: AppSpacing.xxl, vertical: AppSpacing.xs),
+                child: Builder(
+                  builder: (ctx) {
+                    final tab = DefaultTabController.of(ctx);
+                    return ListenableBuilder(
+                      listenable: tab,
+                      builder: (_, __) => RiftSegmentedBar(
+                        labels: [l.tr('contacts'), l.tr('groups')],
+                        selectedIndex: tab.index,
+                        onSelected: (i) => tab.animateTo(i),
+                      ),
+                    );
+                  },
+                ),
+              ),
               Padding(
                 padding: _kChipRowPadding,
                 child: Wrap(

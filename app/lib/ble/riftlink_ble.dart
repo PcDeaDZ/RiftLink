@@ -513,7 +513,7 @@ class RiftLinkBle {
 
   /// Установить никнейм (до 16 символов)
   Future<bool> setNickname(String nickname) async {
-    if (nickname.length > 16) return false;
+    if (utf8.encode(nickname).length > 32) return false;
     return _sendCmd({'cmd': 'nickname', 'nickname': nickname});
   }
 

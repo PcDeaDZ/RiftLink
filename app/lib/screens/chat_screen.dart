@@ -29,7 +29,6 @@ import '../mesh_constants.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/app_primitives.dart';
 import '../widgets/app_snackbar.dart';
-import '../widgets/app_popover_menu.dart';
 import '../widgets/rift_dialogs.dart';
 
 List<int> _filterUserGroups(List<int> raw) =>
@@ -1796,12 +1795,140 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   Future<void> _showAppMenu(BuildContext context, AppLocalizations l) async {
     FocusScope.of(context).unfocus();
-    final value = await Navigator.push<String>(
-      context,
-      AppPopoverMenuRoute<String>(
-        toolbarHeight: 44,
-        child: _AppMenuPopover(l: l),
-      ),
+    final value = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: false,
+      builder: (sheetContext) {
+        final pal = sheetContext.palette;
+        final tools = <(IconData, String, String)>[
+          (Icons.map, l.tr('map'), 'map'),
+          (Icons.location_on, l.tr('location'), 'send_location'),
+          (Icons.priority_high, l.tr('menu_send_critical'), 'send_critical'),
+          (Icons.emergency, l.tr('menu_send_sos'), 'send_sos'),
+          (Icons.hourglass_bottom, l.tr('menu_time_capsule'), 'time_capsule'),
+          (Icons.hub, l.tr('mesh_topology'), 'mesh'),
+          (Icons.radar, l.tr('ping'), 'ping'),
+          (Icons.health_and_safety, l.tr('selftest'), 'selftest'),
+        ];
+        return Material(
+          color: Colors.transparent,
+          child: SafeArea(
+            child: ClipRRect(
+              borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.card)),
+              child: Container(
+                color: pal.card,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(top: AppSpacing.sm, bottom: AppSpacing.xs),
+                      child: Center(
+                        child: Container(
+                          width: 40,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: pal.onSurfaceVariant.withOpacity(0.35),
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                      ),
+                    ),
+                    ListTile(
+                      leading: Icon(Icons.contact_mail_outlined, color: pal.onSurface),
+                      title: Text(
+                        l.tr('contacts_groups_title'),
+                        style: AppTypography.bodyBase().copyWith(color: pal.onSurface),
+                      ),
+                      onTap: () {
+                        HapticFeedback.selectionClick();
+                        Navigator.pop(sheetContext, 'contacts_hub');
+                      },
+                    ),
+                    ListTile(
+                      leading: Icon(Icons.settings, color: pal.onSurface),
+                      title: Text(
+                        l.tr('settings'),
+                        style: AppTypography.bodyBase().copyWith(color: pal.onSurface),
+                      ),
+                      onTap: () {
+                        HapticFeedback.selectionClick();
+                        Navigator.pop(sheetContext, 'settings');
+                      },
+                    ),
+                    Divider(height: 1, thickness: 1, color: pal.divider),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.sm),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          l.tr('menu_tools'),
+                          style: AppTypography.bodyBase().copyWith(
+                            fontWeight: FontWeight.w600,
+                            color: pal.onSurface,
+                          ),
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(AppSpacing.md, 0, AppSpacing.md, AppSpacing.lg),
+                      child: GridView.count(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        crossAxisCount: 4,
+                        crossAxisSpacing: AppSpacing.sm,
+                        mainAxisSpacing: AppSpacing.sm,
+                        childAspectRatio: 0.78,
+                        children: [
+                          for (final t in tools)
+                            InkWell(
+                              onTap: () {
+                                HapticFeedback.selectionClick();
+                                Navigator.pop(sheetContext, t.$3);
+                              },
+                              borderRadius: BorderRadius.circular(AppRadius.sm),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Container(
+                                      width: 48,
+                                      height: 48,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: pal.primary.withOpacity(0.14),
+                                      ),
+                                      child: Icon(t.$1, color: pal.onSurface, size: 24),
+                                    ),
+                                    const SizedBox(height: AppSpacing.xs),
+                                    Text(
+                                      t.$2,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      textAlign: TextAlign.center,
+                                      style: AppTypography.labelBase().copyWith(
+                                        fontSize: 11,
+                                        height: 1.2,
+                                        color: pal.onSurface,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
     if (value != null && mounted) _onMenuSelected(value);
   }
@@ -1879,7 +2006,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             onGpsChanged: (v) => setState(() => _gpsEnabled = v),
             meshAnimationEnabled: _meshAnimationEnabled,
             onMeshAnimationChanged: _onMeshAnimationChanged,
-          ))).then((_) => setState(() {}));
+          ))).then((_) {
+            if (mounted) setState(() {});
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) setState(() {});
+            });
+          });
         } else {
           _showSnack(context.l10n.tr('connect_first'));
         }
@@ -2673,215 +2805,6 @@ class _PingDialogContentState extends State<_PingDialogContent> {
                   ),
                 ],
               ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Popover меню в стиле Telegram — компактная карточка сверху справа.
-/// Второй уровень «Инструменты»: карта, геолокация в mesh, топология, ping, самотест.
-class _AppMenuPopover extends StatefulWidget {
-  final AppLocalizations l;
-
-  const _AppMenuPopover({required this.l});
-
-  @override
-  State<_AppMenuPopover> createState() => _AppMenuPopoverState();
-}
-
-class _AppMenuPopoverState extends State<_AppMenuPopover> {
-  bool _tools = false;
-
-  AppLocalizations get l => widget.l;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: AnimatedSize(
-        duration: const Duration(milliseconds: 220),
-        curve: Curves.easeInOutCubic,
-        alignment: Alignment.topRight,
-        child: Container(
-          constraints: const BoxConstraints(minWidth: 200, maxWidth: 280),
-          decoration: BoxDecoration(
-            color: context.palette.card,
-            borderRadius: BorderRadius.circular(AppRadius.md),
-            border: Border.all(color: context.palette.divider, width: 0.5),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withOpacity(0.3),
-                blurRadius: AppSpacing.lg,
-                offset: const Offset(0, AppSpacing.xs),
-              ),
-            ],
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(AppRadius.md),
-            child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 220),
-              switchInCurve: Curves.easeOut,
-              switchOutCurve: Curves.easeIn,
-              transitionBuilder: (child, anim) => FadeTransition(
-                opacity: anim,
-                child: SlideTransition(
-                  position: Tween<Offset>(begin: const Offset(0.06, 0), end: Offset.zero).animate(anim),
-                  child: child,
-                ),
-              ),
-              child: _tools
-                  ? _buildToolsPage(key: const ValueKey('tools'))
-                  : _buildMainPage(key: const ValueKey('main')),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildMainPage({required Key key}) {
-    return Column(
-      key: key,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        _popoverItem(context, Icons.contact_mail_outlined, l.tr('contacts_groups_title'), 'contacts_hub'),
-        _toolsEntry(),
-        _popoverItem(context, Icons.settings, l.tr('settings'), 'settings'),
-      ],
-    );
-  }
-
-  Widget _toolsEntry() {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: () => setState(() => _tools = true),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm + 2),
-          child: Row(
-            children: [
-              Icon(Icons.handyman_outlined, size: 22, color: context.palette.onSurface),
-              const SizedBox(width: AppSpacing.sm + 2),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(l.tr('menu_tools'), style: AppTypography.bodyBase().copyWith(color: context.palette.onSurface)),
-                    const SizedBox(height: AppSpacing.xs / 2),
-                    Text(
-                      l.tr('menu_tools_subtitle'),
-                      style: AppTypography.labelBase().copyWith(
-                        fontSize: 11,
-                        height: 1.2,
-                        color: context.palette.onSurfaceVariant.withOpacity(0.95),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Icon(Icons.chevron_right, size: 22, color: context.palette.onSurfaceVariant.withOpacity(0.9)),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildToolsPage({required Key key}) {
-    return Column(
-      key: key,
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Material(
-          color: Colors.transparent,
-          child: InkWell(
-            onTap: () => setState(() => _tools = false),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.sm + 2),
-              child: Row(
-                children: [
-                  Icon(Icons.arrow_back_ios_new, size: 16, color: context.palette.primary),
-                  const SizedBox(width: AppSpacing.sm),
-                  Text(
-                    l.tr('menu_tools'),
-                    style: AppTypography.bodyBase().copyWith(fontWeight: FontWeight.w600, color: context.palette.onSurface),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-        Divider(height: 1, color: context.palette.divider),
-        _toolsPopoverItem(context, Icons.map, l.tr('map'), l.tr('menu_tool_desc_map'), 'map'),
-        SizedBox(height: AppSpacing.xs),
-        _toolsPopoverItem(context, Icons.location_on, l.tr('location'), l.tr('menu_tool_desc_send_location'), 'send_location'),
-        SizedBox(height: AppSpacing.xs),
-        _toolsPopoverItem(context, Icons.priority_high, l.tr('menu_send_critical'), l.tr('menu_tool_desc_send_critical'), 'send_critical'),
-        SizedBox(height: AppSpacing.xs),
-        _toolsPopoverItem(context, Icons.emergency, l.tr('menu_send_sos'), l.tr('menu_tool_desc_send_sos'), 'send_sos'),
-        SizedBox(height: AppSpacing.xs),
-        _toolsPopoverItem(context, Icons.hourglass_bottom, l.tr('menu_time_capsule'), l.tr('menu_tool_desc_time_capsule'), 'time_capsule'),
-        SizedBox(height: AppSpacing.xs),
-        _toolsPopoverItem(context, Icons.hub, l.tr('mesh_topology'), l.tr('menu_tool_desc_mesh'), 'mesh'),
-        SizedBox(height: AppSpacing.xs),
-        _toolsPopoverItem(context, Icons.radar, l.tr('ping'), l.tr('menu_tool_desc_ping'), 'ping'),
-        SizedBox(height: AppSpacing.xs),
-        _toolsPopoverItem(context, Icons.health_and_safety, l.tr('selftest'), l.tr('menu_tool_desc_selftest'), 'selftest'),
-      ],
-    );
-  }
-
-  Widget _toolsPopoverItem(BuildContext context, IconData icon, String label, String subtitle, String value) {
-    final pal = context.palette;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: () => Navigator.pop(context, value),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm + 2),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Icon(icon, size: 22, color: pal.onSurface),
-              const SizedBox(width: AppSpacing.sm + 2),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(label, style: AppTypography.bodyBase().copyWith(color: pal.onSurface)),
-                    const SizedBox(height: AppSpacing.xs / 2),
-                    Text(
-                      subtitle,
-                      style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _popoverItem(BuildContext context, IconData icon, String label, String value) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: () => Navigator.pop(context, value),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm + 2),
-          child: Row(
-            children: [
-              Icon(icon, size: 22, color: context.palette.onSurface),
-              const SizedBox(width: AppSpacing.sm + 2),
-              Text(label, style: AppTypography.bodyBase().copyWith(color: context.palette.onSurface)),
             ],
           ),
         ),

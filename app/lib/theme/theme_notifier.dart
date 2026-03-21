@@ -48,8 +48,8 @@ void showThemeModeSheet(BuildContext context) {
               title: Text(title, style: TextStyle(color: p.onSurface)),
               trailing: themeModeNotifier.value == mode ? Icon(Icons.check, color: p.primary) : null,
               onTap: () {
-                Navigator.pop(ctx);
                 setThemeMode(mode);
+                Navigator.pop(ctx);
               },
             );
           }

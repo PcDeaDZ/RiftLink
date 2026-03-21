@@ -862,10 +862,10 @@ static void drawContentMain() {
   char buf[32];
 
   // Line 0: nick (or ID) + clock right
-  char nick[17];
+  char nick[33];
   node::getNickname(nick, sizeof(nick));
   if (nick[0]) {
-    drawTruncRaw(CONTENT_X, CONTENT_Y + 2, nick, MAX_LINE_CHARS);
+    drawTruncUtf8(CONTENT_X, CONTENT_Y + 2, nick, MAX_LINE_CHARS);
   } else {
     const uint8_t* id = node::getId();
     snprintf(buf, sizeof(buf), "%02X%02X%02X%02X", id[0], id[1], id[2], id[3]);
