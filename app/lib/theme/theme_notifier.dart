@@ -34,31 +34,42 @@ void showThemeModeSheet(BuildContext context) {
   final l = context.l10n;
   showModalBottomSheet<void>(
     context: context,
-    backgroundColor: context.palette.card,
+    backgroundColor: Colors.transparent,
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
     ),
     builder: (ctx) {
-      final p = ctx.palette;
-      Widget row(ThemeMode mode, String title) {
-        return ListTile(
-          title: Text(title, style: TextStyle(color: p.onSurface)),
-          trailing: themeModeNotifier.value == mode ? Icon(Icons.check, color: p.primary) : null,
-          onTap: () {
-            Navigator.pop(ctx);
-            setThemeMode(mode);
-          },
-        );
-      }
-      return SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            row(ThemeMode.system, l.tr('theme_system')),
-            row(ThemeMode.light, l.tr('theme_light')),
-            row(ThemeMode.dark, l.tr('theme_dark')),
-          ],
-        ),
+      return ListenableBuilder(
+        listenable: themeModeNotifier,
+        builder: (innerCtx, _) {
+          final p = innerCtx.palette;
+          Widget row(ThemeMode mode, String title) {
+            return ListTile(
+              title: Text(title, style: TextStyle(color: p.onSurface)),
+              trailing: themeModeNotifier.value == mode ? Icon(Icons.check, color: p.primary) : null,
+              onTap: () {
+                Navigator.pop(ctx);
+                setThemeMode(mode);
+              },
+            );
+          }
+          return Container(
+            decoration: BoxDecoration(
+              color: p.card,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+            ),
+            child: SafeArea(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  row(ThemeMode.system, l.tr('theme_system')),
+                  row(ThemeMode.light, l.tr('theme_light')),
+                  row(ThemeMode.dark, l.tr('theme_dark')),
+                ],
+              ),
+            ),
+          );
+        },
       );
     },
   );

@@ -32,47 +32,60 @@ class _RiftLinkAppState extends State<RiftLinkApp> {
   final RiftLinkBle _ble = RiftLinkBle();
 
   @override
+  void initState() {
+    super.initState();
+    themeModeNotifier.addListener(_onSettingsChanged);
+    localeNotifier.addListener(_onSettingsChanged);
+  }
+
+  void _onSettingsChanged() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    themeModeNotifier.removeListener(_onSettingsChanged);
+    localeNotifier.removeListener(_onSettingsChanged);
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return RiftLinkBleScope(
       ble: _ble,
-      child: ListenableBuilder(
-        listenable: Listenable.merge([localeNotifier, themeModeNotifier]),
-        builder: (_, __) {
-          final locale = localeNotifier.value;
-          return MaterialApp(
-            navigatorKey: navigatorKey,
-            title: 'RiftLink',
-            locale: locale,
-            supportedLocales: const [Locale('en'), Locale('ru')],
-            localizationsDelegates: const [
-              GlobalMaterialLocalizations.delegate,
-              GlobalWidgetsLocalizations.delegate,
-              GlobalCupertinoLocalizations.delegate,
-            ],
-            theme: AppTheme.light,
-            darkTheme: AppTheme.dark,
-            themeMode: themeModeNotifier.value,
-            builder: (context, child) {
-              final brightness = Theme.of(context).brightness;
-              final isDark = brightness == Brightness.dark;
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle(
-                  statusBarColor: Colors.transparent,
-                  statusBarIconBrightness: isDark ? Brightness.light : Brightness.dark,
-                  statusBarBrightness: isDark ? Brightness.dark : Brightness.light,
-                  systemNavigationBarColor: Theme.of(context).scaffoldBackgroundColor,
-                  systemNavigationBarIconBrightness: isDark ? Brightness.light : Brightness.dark,
-                  systemNavigationBarDividerColor: Theme.of(context).dividerColor,
-                ));
-              });
-              return Directionality(
-                textDirection: TextDirection.ltr,
-                child: child!,
-              );
-            },
-            home: const ScanScreen(),
+      child: MaterialApp(
+        navigatorKey: navigatorKey,
+        title: 'RiftLink',
+        locale: localeNotifier.value,
+        supportedLocales: const [Locale('en'), Locale('ru')],
+        localizationsDelegates: const [
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        theme: AppTheme.light,
+        darkTheme: AppTheme.dark,
+        themeMode: themeModeNotifier.value,
+        themeAnimationDuration: Duration.zero,
+        builder: (context, child) {
+          final brightness = Theme.of(context).brightness;
+          final isDark = brightness == Brightness.dark;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle(
+              statusBarColor: Colors.transparent,
+              statusBarIconBrightness: isDark ? Brightness.light : Brightness.dark,
+              statusBarBrightness: isDark ? Brightness.dark : Brightness.light,
+              systemNavigationBarColor: Theme.of(context).scaffoldBackgroundColor,
+              systemNavigationBarIconBrightness: isDark ? Brightness.light : Brightness.dark,
+              systemNavigationBarDividerColor: Theme.of(context).dividerColor,
+            ));
+          });
+          return Directionality(
+            textDirection: TextDirection.ltr,
+            child: child!,
           );
         },
+        home: const ScanScreen(),
       ),
     );
   }

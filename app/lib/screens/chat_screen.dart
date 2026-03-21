@@ -24,6 +24,7 @@ import '../locale_notifier.dart';
 
 import '../theme/app_theme.dart';
 import '../theme/design_tokens.dart';
+import '../theme/theme_notifier.dart';
 import '../mesh_constants.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/app_primitives.dart';
@@ -116,6 +117,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _loadContactNicknames();
     _loadMeshPrefs();
     localeNotifier.addListener(_onLocaleChanged);
+    themeModeNotifier.addListener(_onThemeChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _sendReadForUnread();
       _sendLangToFirmware();
@@ -150,6 +152,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     });
     // GPS sync от телефона: UTC + координаты для beacon-sync (устройство без GPS)
     _gpsSyncTimer = Timer.periodic(const Duration(seconds: 15), (_) => _sendGpsSyncFromPhone());
+  }
+
+  void _onThemeChanged() {
+    if (mounted) setState(() {});
   }
 
   void _onTextChanged() {
@@ -193,6 +199,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _connStateSub?.cancel();
     _controller.removeListener(_onTextChanged);
     localeNotifier.removeListener(_onLocaleChanged);
+    themeModeNotifier.removeListener(_onThemeChanged);
     _ttlTimer?.cancel();
     _voiceRxCleanupTimer?.cancel();
     _neighborsPollTimer?.cancel();
