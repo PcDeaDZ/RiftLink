@@ -372,25 +372,6 @@ class _GroupsScreenState extends State<GroupsScreen> {
     );
   }
 
-  Future<void> _removeGroup(int gid) async {
-    final l = context.l10n;
-    final ok = await showRiftConfirmDialog(
-      context: context,
-      title: l.tr('delete'),
-      message: '${l.tr('group')} $gid',
-      cancelText: l.tr('cancel'),
-      confirmText: l.tr('delete'),
-      danger: true,
-    );
-    if (ok != true) return;
-    await widget.ble.removeGroup(gid);
-    if (mounted) {
-      setState(() {
-        _applyGroups(_groups.where((g) => g != gid));
-      });
-    }
-  }
-
   Widget _buildEmptyState(AppLocalizations l, AppPalette p) {
     return Center(
       child: Padding(
@@ -400,8 +381,8 @@ class _GroupsScreenState extends State<GroupsScreen> {
           children: [
             Icon(
               Icons.groups_outlined,
-              size: 56,
-              color: p.onSurfaceVariant.withOpacity(0.38),
+              size: 60,
+              color: p.onSurfaceVariant.withOpacity(0.42),
             ),
             const SizedBox(height: AppSpacing.md),
             Text(
@@ -421,76 +402,114 @@ class _GroupsScreenState extends State<GroupsScreen> {
   Widget _buildGroupCard(int gid, AppLocalizations l, AppPalette p) {
     final isPrivate = _groupPrivate[gid] == true;
     final ver = _groupKeyVersion[gid] ?? 0;
-    return AppSectionCard(
-      margin: const EdgeInsets.only(bottom: AppSpacing.sm),
-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.xs + 2),
-      child: Row(
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(left: AppSpacing.xs),
-            child: CircleAvatar(
-              radius: 18,
-              backgroundColor: p.primary.withOpacity(0.12),
-              child: Text(
-                '$gid',
-                style: TextStyle(color: p.primary, fontWeight: FontWeight.w700, fontSize: 10),
+    return Dismissible(
+      key: ValueKey<int>(gid),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: AppSpacing.lg),
+        decoration: BoxDecoration(
+          color: p.error.withOpacity(0.92),
+          borderRadius: BorderRadius.circular(AppRadius.card),
+        ),
+        child: Icon(Icons.delete_outline_rounded, color: Colors.white.withOpacity(0.95), size: 26),
+      ),
+      confirmDismiss: (direction) async {
+        final ok = await showRiftConfirmDialog(
+          context: context,
+          title: l.tr('delete'),
+          message: '${l.tr('group')} $gid',
+          cancelText: l.tr('cancel'),
+          confirmText: l.tr('delete'),
+          danger: true,
+        );
+        if (ok != true) return false;
+        final removed = await widget.ble.removeGroup(gid);
+        if (!mounted) return false;
+        if (!removed) {
+          _snack(l.tr('error'), backgroundColor: context.palette.error);
+          return false;
+        }
+        return true;
+      },
+      onDismissed: (_) {
+        setState(() {
+          _applyGroups(_groups.where((g) => g != gid));
+        });
+      },
+      child: AppSectionCard(
+        margin: const EdgeInsets.only(bottom: AppSpacing.sm),
+        padding: EdgeInsets.zero,
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(AppRadius.card),
+            onTap: () => HapticFeedback.lightImpact(),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.xs + 2),
+              child: Row(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(left: AppSpacing.xs),
+                    child: CircleAvatar(
+                      radius: 20,
+                      backgroundColor: p.primary.withOpacity(0.13),
+                      child: Text(
+                        '$gid',
+                        style: TextStyle(color: p.primary, fontWeight: FontWeight.w700, fontSize: 10),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: AppSpacing.sm + 2),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${l.tr('group')} $gid',
+                          style: AppTypography.bodyBase().copyWith(
+                            fontWeight: FontWeight.w600,
+                            color: p.onSurface,
+                          ),
+                        ),
+                        const SizedBox(height: AppSpacing.xs),
+                        if (isPrivate)
+                          AppStateChip(
+                            label: '${l.tr('group_private')}  v$ver',
+                            kind: AppStateKind.info,
+                          )
+                        else
+                          AppStateChip(
+                            label: l.tr('group_public'),
+                            kind: AppStateKind.neutral,
+                          ),
+                      ],
+                    ),
+                  ),
+                  PopupMenuButton<String>(
+                    tooltip: l.tr('settings'),
+                    position: PopupMenuPosition.under,
+                    icon: Icon(Icons.more_vert_rounded, color: p.onSurfaceVariant),
+                    onSelected: (v) async {
+                      if (v == 'private') await _setGroupPrivate(gid, true);
+                      if (v == 'public') await _setGroupPrivate(gid, false);
+                      if (v == 'rotate') await _rotatePrivateKey(gid);
+                      if (v == 'invite') await _copyInvite(gid);
+                    },
+                    itemBuilder: (ctx) => [
+                      if (isPrivate)
+                        PopupMenuItem(value: 'invite', child: Text(l.tr('group_copy_invite')))
+                      else
+                        PopupMenuItem(value: 'private', child: Text(l.tr('group_make_private'))),
+                      if (isPrivate) PopupMenuItem(value: 'rotate', child: Text(l.tr('group_rotate_key'))),
+                      if (isPrivate) PopupMenuItem(value: 'public', child: Text(l.tr('group_make_public'))),
+                    ],
+                  ),
+                ],
               ),
             ),
           ),
-          const SizedBox(width: AppSpacing.sm + 2),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '${l.tr('group')} $gid',
-                  style: AppTypography.bodyBase().copyWith(
-                    fontWeight: FontWeight.w600,
-                    color: p.onSurface,
-                  ),
-                ),
-                const SizedBox(height: AppSpacing.xs),
-                if (isPrivate)
-                  AppStateChip(
-                    label: '${l.tr('group_private')}  v$ver',
-                    kind: AppStateKind.info,
-                  )
-                else
-                  AppStateChip(
-                    label: l.tr('group_public'),
-                    kind: AppStateKind.neutral,
-                  ),
-              ],
-            ),
-          ),
-          PopupMenuButton<String>(
-            tooltip: l.tr('settings'),
-            position: PopupMenuPosition.under,
-            icon: Icon(Icons.more_vert_rounded, color: p.onSurfaceVariant),
-            onSelected: (v) async {
-              if (v == 'private') await _setGroupPrivate(gid, true);
-              if (v == 'public') await _setGroupPrivate(gid, false);
-              if (v == 'rotate') await _rotatePrivateKey(gid);
-              if (v == 'invite') await _copyInvite(gid);
-            },
-            itemBuilder: (ctx) => [
-              if (isPrivate)
-                PopupMenuItem(value: 'invite', child: Text(l.tr('group_copy_invite')))
-              else
-                PopupMenuItem(value: 'private', child: Text(l.tr('group_make_private'))),
-              if (isPrivate) PopupMenuItem(value: 'rotate', child: Text(l.tr('group_rotate_key'))),
-              if (isPrivate) PopupMenuItem(value: 'public', child: Text(l.tr('group_make_public'))),
-            ],
-          ),
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            padding: const EdgeInsets.all(AppSpacing.sm),
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-            icon: Icon(Icons.delete_outline_rounded, size: 22, color: p.error.withOpacity(0.88)),
-            tooltip: l.tr('delete'),
-            onPressed: () => _removeGroup(gid),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -598,21 +617,10 @@ class _GroupsScreenState extends State<GroupsScreen> {
 
     return Scaffold(
       backgroundColor: p.surface,
-      appBar: AppBar(
-        elevation: 0,
-        scrolledUnderElevation: 0,
-        backgroundColor: p.surface,
-        surfaceTintColor: Colors.transparent,
-        foregroundColor: p.onSurface,
-        title: Text(
-          l.tr('groups'),
-          style: AppTypography.screenTitleBase().copyWith(color: p.onSurface),
-        ),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_rounded),
-          tooltip: MaterialLocalizations.of(context).backButtonTooltip,
-          onPressed: () => Navigator.pop(context),
-        ),
+      appBar: riftAppBar(
+        context,
+        title: l.tr('groups'),
+        showBack: true,
         actions: [
           IconButton(
             onPressed: _loading ? null : _refresh,

@@ -167,14 +167,10 @@ class _MeshScreenState extends State<MeshScreen> {
       length: 2,
       child: Scaffold(
         backgroundColor: context.palette.surface,
-        appBar: AppBar(
-          backgroundColor: context.palette.surfaceVariant,
-          foregroundColor: context.palette.onSurface,
-          title: Text(l.tr('mesh_topology')),
-          leading: IconButton(
-            icon: const Icon(Icons.arrow_back),
-            onPressed: () => Navigator.pop(context),
-          ),
+        appBar: riftAppBar(
+          context,
+          title: l.tr('mesh_topology'),
+          showBack: true,
           actions: [
             IconButton(
               icon: const Icon(Icons.refresh),

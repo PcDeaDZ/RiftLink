@@ -220,6 +220,7 @@ class RiftLinkBle {
     _lastInfoRequestAt = null;
     await _disconnectWifi();
     _isWifiMode = false;
+    _wifiIp = null;
     await _stopRxDispatcher();
     if (_device != null) {
       await _device!.disconnect();
@@ -608,6 +609,10 @@ class RiftLinkBle {
   /// Текущий радио-режим: true = WiFi, false = BLE
   bool get isWifiMode => _isWifiMode;
 
+  String? _wifiIp;
+  /// IP address used for the current WiFi connection (null if BLE).
+  String? get wifiIp => _wifiIp;
+
   /// Переключить в WiFi STA-режим (подключение к сети)
   Future<bool> switchToWifiSta({required String ssid, required String pass}) =>
       _sendCmd({'cmd': 'radioMode', 'mode': 'wifi', 'variant': 'sta', 'ssid': ssid, 'pass': pass});
@@ -633,6 +638,7 @@ class RiftLinkBle {
       return false;
     }
     _isWifiMode = true;
+    _wifiIp = ip;
     _wifiRxSub = _wifiTransport!.rawJsonStream.listen((raw) {
       try {
         final decoded = jsonDecode(raw);

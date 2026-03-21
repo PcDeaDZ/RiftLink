@@ -3,12 +3,12 @@ import 'package:flutter/material.dart';
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
+import '../widgets/app_primitives.dart';
 import '../widgets/mesh_background.dart';
 import 'contacts_screen.dart';
 import 'groups_screen.dart';
 
 // Визуальные константы экрана (табы, чипы, отступы) — одна шкала радиусов и отступов.
-const double _kAppBarToolbarHeight = 48;
 const double _kTabBarSlotHeight = 40;
 const double _kTabContainerRadius = 12;
 const double _kTabIndicatorRadius = 10;
@@ -44,23 +44,11 @@ class ContactsGroupsHubScreen extends StatelessWidget {
       child: MeshBackgroundWrapper(
         child: Scaffold(
           backgroundColor: Colors.transparent,
-          appBar: AppBar(
-            toolbarHeight: _kAppBarToolbarHeight,
-            elevation: 0,
-            scrolledUnderElevation: 0,
-            backgroundColor: p.surface.withOpacity(0.94),
-            surfaceTintColor: Colors.transparent,
-            foregroundColor: p.onSurface,
-            iconTheme: IconThemeData(color: p.onSurface, size: 22),
-            leading: IconButton(
-              style: IconButton.styleFrom(foregroundColor: p.onSurface),
-              icon: const Icon(Icons.arrow_back_rounded, size: 22),
-              tooltip: MaterialLocalizations.of(context).backButtonTooltip,
-              onPressed: () => Navigator.pop(context),
-            ),
-            titleSpacing: 8,
-            centerTitle: false,
-            title: SizedBox(
+          appBar: riftAppBar(
+            context,
+            title: '',
+            showBack: true,
+            titleWidget: SizedBox(
               height: _kTabBarSlotHeight,
               child: Material(
                 color: p.surfaceVariant.withOpacity(0.92),

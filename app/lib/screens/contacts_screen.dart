@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../app_navigator.dart';
 import '../contacts/contacts_service.dart';
@@ -85,74 +86,137 @@ class _ContactsScreenState extends State<ContactsScreen> {
     final idC = TextEditingController(text: raw.length > 8 ? raw.substring(0, 8) : raw);
     final nickC = TextEditingController(text: existing?.nickname ?? '');
     final l = context.l10n;
-    final p = context.palette;
-    showAppDialog(
+    FocusScope.of(context).unfocus();
+    HapticFeedback.mediumImpact();
+    showAppModalBottomSheet<void>(
       context: context,
-      builder: (ctx) => RiftDialogFrame(
-        maxWidth: 360,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              prefilledId != null ? l.tr('edit_contact') : l.tr('add_contact'),
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    color: p.onSurface,
-                    height: 1.25,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final p = context.palette;
+        final bottomInset = MediaQuery.of(ctx).viewInsets.bottom;
+        return Padding(
+          padding: EdgeInsets.only(bottom: bottomInset),
+          child: Container(
+            decoration: BoxDecoration(
+              color: p.card,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+            ),
+            child: SafeArea(
+              top: false,
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    AppSpacing.lg,
+                    AppSpacing.md,
+                    AppSpacing.lg,
+                    AppSpacing.xl,
                   ),
-            ),
-            const SizedBox(height: AppSpacing.md + 2),
-            TextField(
-              controller: idC,
-              style: TextStyle(color: p.onSurface, fontSize: AppTypography.bodySize),
-              decoration: InputDecoration(labelText: l.tr('node_id_hex'), hintText: 'A1B2C3D4'),
-              maxLength: 8,
-              enabled: prefilledId == null,
-            ),
-            const SizedBox(height: AppSpacing.sm + 2),
-            TextField(
-              controller: nickC,
-              style: TextStyle(color: p.onSurface, fontSize: AppTypography.bodySize),
-              decoration: InputDecoration(
-                labelText: l.tr('contact_nickname'),
-                hintText: l.tr('contact_name_hint'),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Center(
+                        child: Container(
+                          width: 36,
+                          height: 3,
+                          decoration: BoxDecoration(
+                            color: p.onSurfaceVariant.withOpacity(0.3),
+                            borderRadius: BorderRadius.circular(AppRadius.sm),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.md),
+                      Row(
+                        children: [
+                          Icon(Icons.person_add_alt_1_rounded, color: p.primary, size: 22),
+                          const SizedBox(width: AppSpacing.sm + 2),
+                          Expanded(
+                            child: Text(
+                              prefilledId != null ? l.tr('edit_contact') : l.tr('add_contact'),
+                              style: AppTypography.screenTitleBase().copyWith(
+                                fontSize: 17,
+                                color: p.onSurface,
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            icon: Icon(Icons.close_rounded, color: p.onSurfaceVariant.withOpacity(0.85)),
+                            onPressed: () => Navigator.pop(ctx),
+                            visualDensity: VisualDensity.compact,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: AppSpacing.md),
+                      TextField(
+                        controller: idC,
+                        autofocus: prefilledId == null,
+                        style: TextStyle(color: p.onSurface, fontSize: 16),
+                        maxLength: 8,
+                        enabled: prefilledId == null,
+                        decoration: InputDecoration(
+                          labelText: l.tr('node_id_hex'),
+                          hintText: 'A1B2C3D4',
+                          filled: true,
+                          fillColor: p.surfaceVariant.withOpacity(0.55),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(AppRadius.md),
+                            borderSide: BorderSide.none,
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: AppSpacing.md + 2,
+                            vertical: AppSpacing.md,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.md),
+                      TextField(
+                        controller: nickC,
+                        autofocus: prefilledId != null,
+                        style: TextStyle(color: p.onSurface, fontSize: 16),
+                        maxLength: 16,
+                        decoration: InputDecoration(
+                          labelText: l.tr('contact_nickname'),
+                          hintText: l.tr('contact_name_hint'),
+                          filled: true,
+                          fillColor: p.surfaceVariant.withOpacity(0.55),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(AppRadius.md),
+                            borderSide: BorderSide.none,
+                          ),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: AppSpacing.md + 2,
+                            vertical: AppSpacing.md,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: AppSpacing.md + 2),
+                      AppPrimaryButton(
+                        onPressed: () async {
+                          final id = _normalizeId(idC.text.trim());
+                          if (id.length != 8) {
+                            showAppSnackBar(context, l.tr('invalid_hex'), kind: AppSnackKind.error);
+                            return;
+                          }
+                          Navigator.pop(ctx);
+                          await ContactsService.add(Contact(id: id, nickname: nickC.text.trim()));
+                          await _load();
+                        },
+                        child: Text(
+                          l.tr('save'),
+                          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
-              maxLength: 16,
             ),
-            const SizedBox(height: AppSpacing.sm),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                TextButton(
-                  style: TextButton.styleFrom(
-                    foregroundColor: p.onSurfaceVariant,
-                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
-                    minimumSize: Size.zero,
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  onPressed: () => Navigator.pop(ctx),
-                  child: Text(l.tr('cancel')),
-                ),
-                const SizedBox(width: AppSpacing.xs),
-                FilledButton(
-                  onPressed: () async {
-                    final id = _normalizeId(idC.text.trim());
-                    if (id.length != 8) {
-                      showAppSnackBar(context, l.tr('invalid_hex'), kind: AppSnackKind.error);
-                      return;
-                    }
-                    Navigator.pop(ctx);
-                    await ContactsService.add(Contact(id: id, nickname: nickC.text.trim()));
-                    await _load();
-                  },
-                  child: Text(l.tr('save')),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 
@@ -276,7 +340,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.people_outline_rounded, size: 64, color: p.onSurfaceVariant.withOpacity(0.45)),
+            Icon(Icons.people_outline_rounded, size: 60, color: p.onSurfaceVariant.withOpacity(0.42)),
             const SizedBox(height: AppSpacing.lg),
             Text(
               l.tr('contacts_empty'),
@@ -305,7 +369,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
   Widget _buildContactTile(Contact c) {
     final p = context.palette;
     return AppSectionCard(
-      margin: const EdgeInsets.only(bottom: AppSpacing.sm + 2),
+      margin: const EdgeInsets.only(bottom: AppSpacing.sm),
       padding: EdgeInsets.zero,
       child: Material(
         color: Colors.transparent,
@@ -318,8 +382,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
             child: Row(
               children: [
                 CircleAvatar(
-                  radius: 22,
-                  backgroundColor: p.primary.withOpacity(0.14),
+                  radius: 20,
+                  backgroundColor: p.primary.withOpacity(0.13),
                   child: Text(
                     (c.nickname.isNotEmpty ? c.nickname[0] : (c.id.isNotEmpty ? c.id[0] : '?')).toUpperCase(),
                     style: TextStyle(color: p.primary, fontWeight: FontWeight.w700, fontSize: 18),
@@ -430,12 +494,10 @@ class _ContactsScreenState extends State<ContactsScreen> {
 
     return Scaffold(
       backgroundColor: p.surface,
-      appBar: AppBar(
-        title: Text(l.tr('contacts')),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_rounded),
-          onPressed: () => Navigator.pop(context),
-        ),
+      appBar: riftAppBar(
+        context,
+        title: l.tr('contacts'),
+        showBack: true,
       ),
       body: body,
       floatingActionButton: fab,

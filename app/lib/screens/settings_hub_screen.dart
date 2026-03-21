@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
+import '../locale_notifier.dart';
 import '../prefs/mesh_prefs.dart';
 import '../theme/app_theme.dart';
 import '../theme/design_tokens.dart';
@@ -249,10 +250,7 @@ class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
 
     return Scaffold(
       backgroundColor: pal.surface,
-      appBar: AppBar(
-        title: Text(l.tr('settings')),
-        leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context)),
-      ),
+      appBar: riftAppBar(context, showBack: true, title: l.tr('settings')),
       body: MeshBackgroundWrapper(
         child: SafeArea(
           child: ListView(
@@ -292,6 +290,14 @@ class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
                 title: l.tr('settings_diagnostics_title'),
                 subtitle: diagSub.isNotEmpty ? diagSub : l.tr('settings_diagnostics_hint'),
                 onTap: () => _push(_DiagnosticsPage(ble: widget.ble)))),
+              const SizedBox(height: AppSpacing.md),
+              _stagger(6, _HubCard(
+                icon: Icons.help_outline_rounded,
+                iconColor: Colors.teal,
+                title: l.tr('faq_title'),
+                subtitle: l.tr('faq_subtitle'),
+                onTap: () => _push(const _FaqPage()),
+              )),
             ],
           ),
         ),
@@ -416,10 +422,7 @@ class _SubpageScaffold extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: context.palette.surface,
-      appBar: AppBar(
-        title: Text(title),
-        leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context)),
-      ),
+      appBar: riftAppBar(context, showBack: true, title: title),
       body: MeshBackgroundWrapper(
         child: SafeArea(
           child: ListView(
@@ -636,9 +639,11 @@ class _NetworkModemPageState extends State<_NetworkModemPage> {
   void dispose() { _sub?.cancel(); super.dispose(); }
 
   Future<bool> _waitModem({required int preset, int? sf, double? bw, int? cr}) async {
-    for (var i = 0; i < 5; i++) {
+    // Firmware scheduleInfoNotify fires after ~450ms; wait before first poll.
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    for (var i = 0; i < 6; i++) {
       await widget.ble.getInfo(force: true);
-      await Future<void>.delayed(const Duration(milliseconds: 280));
+      await Future<void>.delayed(const Duration(milliseconds: 350));
       final li = widget.ble.lastInfo;
       if (li != null && li.modemPreset == preset) {
         if (preset != 4) return true;
@@ -735,9 +740,9 @@ class _NetworkModemPageState extends State<_NetworkModemPage> {
                 if (await widget.ble.setEspNowChannel(v)) { setState(() => _espCh = v); widget.ble.getInfo(); }
               } : null),
             const SizedBox(height: AppSpacing.sm),
-            SwitchListTile(contentPadding: EdgeInsets.zero,
+            RiftSwitchTile(
               title: Text(l.tr('espnow_adaptive'), style: TextStyle(color: pal.onSurface)),
-              value: _espAdapt, activeThumbColor: pal.primary, activeTrackColor: pal.primary.withOpacity(0.45),
+              value: _espAdapt,
               onChanged: conn ? (v) async {
                 if (await widget.ble.setEspNowAdaptive(v)) { setState(() => _espAdapt = v); widget.ble.getInfo(); }
               } : null),
@@ -911,7 +916,7 @@ class _ConnectionPageState extends State<_ConnectionPage> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (!usingWifi) ...[
-            FilledButton.icon(onPressed: conn ? () => Navigator.push(context, MaterialPageRoute(builder: (_) => OtaScreen(ble: widget.ble))) : null,
+            FilledButton.icon(onPressed: conn ? () => showOtaDialog(context, widget.ble) : null,
               icon: const Icon(Icons.bluetooth_searching_rounded), label: Text(l.tr('firmware_update_ble'))),
             const SizedBox(height: AppSpacing.sm + 2),
             Text(l.tr('firmware_update_where_hint'), style: TextStyle(fontSize: 12, color: pal.onSurfaceVariant)),
@@ -1177,21 +1182,37 @@ class _EnergyThemePageState extends State<_EnergyThemePage> {
             trailing: Icon(Icons.chevron_right, color: pal.onSurfaceVariant),
             onTap: () { HapticFeedback.selectionClick(); showThemeModeSheet(context); }),
           const SizedBox(height: AppSpacing.xs),
-          SwitchListTile(contentPadding: EdgeInsets.zero,
+          RiftSwitchTile(
             title: Text(l.tr('mesh_animation'), style: TextStyle(color: pal.onSurface, fontWeight: FontWeight.w500)),
             subtitle: Text(l.tr('mesh_animation_hint'), style: TextStyle(color: pal.onSurfaceVariant, fontSize: 12, height: 1.35)),
-            secondary: Icon(Icons.animation_rounded, color: pal.primary),
-            value: _meshAnim, activeThumbColor: pal.primary, activeTrackColor: pal.primary.withOpacity(0.45),
+            leading: Icon(Icons.animation_rounded, color: pal.primary),
+            value: _meshAnim,
             onChanged: (v) { HapticFeedback.selectionClick(); widget.onMeshAnimationChanged(v); setState(() => _meshAnim = v); }),
+          const SizedBox(height: AppSpacing.lg),
+          _SectionAccentHeader(text: l.tr('lang'), trailingIcon: Icons.language),
+          const SizedBox(height: AppSpacing.sm + 2),
+          _SegmentedPickBar(
+            leadingIcon: Icons.language,
+            labels: const ['Русский', 'English'],
+            selectedIndex: AppLocalizations.currentLocale.languageCode == 'ru' ? 0 : 1,
+            onSelected: (i) async {
+              final target = i == 0 ? 'ru' : 'en';
+              if (AppLocalizations.currentLocale.languageCode != target) {
+                await AppLocalizations.switchLocale(() {
+                  localeNotifier.value = AppLocalizations.currentLocale;
+                });
+                if (mounted) setState(() {});
+              }
+            },
+          ),
         ],
       )),
 
       if (_gpsPresent)
-        _PageCard(title: l.tr('gps_section'), child: SwitchListTile(
-          contentPadding: EdgeInsets.zero,
+        _PageCard(title: l.tr('gps_section'), child: RiftSwitchTile(
           title: Text(l.tr('gps_enable'), style: TextStyle(color: pal.onSurface)),
           subtitle: Text(_gpsFix ? l.tr('gps_fix_yes') : l.tr('gps_fix_no'), style: TextStyle(color: pal.onSurfaceVariant, fontSize: 13)),
-          value: _gpsOn, activeThumbColor: pal.primary, activeTrackColor: pal.primary.withOpacity(0.45),
+          value: _gpsOn,
           onChanged: conn ? (v) async {
             if (await widget.ble.setGps(v)) { widget.onGpsChanged(v); setState(() => _gpsOn = v); }
           } : null)),
@@ -1213,6 +1234,9 @@ class _DiagnosticsPage extends StatefulWidget {
 class _DiagnosticsPageState extends State<_DiagnosticsPage> {
   int? _offPend, _offCourier, _offDirect, _batMv, _batPct;
   bool _charging = false;
+  bool _selftestRunning = false;
+  bool? _radioOk, _displayOk, _antennaOk;
+  int? _heapFree;
   String? _version;
   late final TextEditingController _avgCtrl, _hardCtrl, _minCtrl;
   bool _saving = false;
@@ -1237,6 +1261,17 @@ class _DiagnosticsPageState extends State<_DiagnosticsPage> {
           if (evt.hasOfflineDirectPendingField) _offDirect = evt.offlineDirectPending;
           if (evt.batteryMv != null && evt.batteryMv! > 0) _batMv = evt.batteryMv;
           _batPct = evt.batteryPercent; _charging = evt.charging; _version = evt.version;
+        });
+      } else if (evt is RiftLinkSelftestEvent) {
+        setState(() {
+          _selftestRunning = false;
+          _radioOk = evt.radioOk;
+          _displayOk = evt.displayOk;
+          _antennaOk = evt.antennaOk;
+          _heapFree = evt.heapFree;
+          if (evt.batteryMv > 0) _batMv = evt.batteryMv;
+          _batPct = evt.batteryPercent;
+          _charging = evt.charging;
         });
       }
     });
@@ -1272,6 +1307,15 @@ class _DiagnosticsPageState extends State<_DiagnosticsPage> {
     setState(() { _saving = false; _voiceSt = l.tr('saved'); _voiceErr = false; });
   }
 
+  Widget _selftestRow(String label, bool ok) {
+    final pal = context.palette;
+    return ListTile(
+      contentPadding: EdgeInsets.zero, dense: true,
+      leading: Icon(ok ? Icons.check_circle_outline : Icons.error_outline, color: ok ? pal.success : pal.error, size: 20),
+      title: Text(label, style: TextStyle(color: pal.onSurface, fontSize: 13)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final l = context.l10n;
@@ -1302,6 +1346,32 @@ class _DiagnosticsPageState extends State<_DiagnosticsPage> {
           if (_offDirect != null && _offDirect! > 0)
             ListTile(contentPadding: EdgeInsets.zero, leading: Icon(Icons.mark_email_unread_outlined, color: pal.onSurfaceVariant),
               title: Text(l.tr('offline_direct_status_count', {'n': '$_offDirect'}), style: TextStyle(color: pal.onSurface))),
+        ],
+      )),
+
+      _PageCard(title: l.tr('selftest'), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          FilledButton.tonalIcon(
+            onPressed: _selftestRunning ? null : () {
+              setState(() => _selftestRunning = true);
+              widget.ble.selftest();
+            },
+            icon: _selftestRunning
+              ? SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: pal.primary))
+              : const Icon(Icons.health_and_safety_outlined, size: 18),
+            label: Text(l.tr('selftest_run')),
+          ),
+          if (_radioOk != null) ...[
+            const SizedBox(height: AppSpacing.sm),
+            _selftestRow(l.tr('selftest_radio'), _radioOk!),
+            _selftestRow(l.tr('selftest_antenna'), _antennaOk ?? true),
+            _selftestRow(l.tr('selftest_display'), _displayOk!),
+            if (_heapFree != null)
+              ListTile(contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.memory, color: pal.onSurfaceVariant),
+                title: Text('Heap free: ${(_heapFree! / 1024).toStringAsFixed(1)} KB', style: TextStyle(color: pal.onSurface))),
+          ],
         ],
       )),
 
@@ -1350,136 +1420,43 @@ class _DiagnosticsPageState extends State<_DiagnosticsPage> {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  Shared widgets — скопированы из settings_screen.dart для автономности
-// ═══════════════════════════════════════════════════════════════════════════
-
-class _SegmentedPickBar extends StatelessWidget {
-  final List<String> labels;
-  final int? selectedIndex;
-  final ValueChanged<int> onSelected;
-  final bool enabled;
-  final IconData? leadingIcon;
-
-  const _SegmentedPickBar({required this.labels, required this.selectedIndex, required this.onSelected, this.enabled = true, this.leadingIcon});
-
-  static const _anim = Duration(milliseconds: 320);
-  static const _curve = Curves.easeOutCubic;
+class _FaqPage extends StatelessWidget {
+  const _FaqPage();
 
   @override
   Widget build(BuildContext context) {
-    final inactive = context.palette.onSurfaceVariant.withOpacity(enabled ? 1.0 : 0.45);
-    final n = labels.length;
-    return Material(
-      color: Colors.transparent,
-      child: Container(
-        decoration: BoxDecoration(
-          color: context.palette.surfaceVariant,
-          borderRadius: BorderRadius.circular(AppRadius.lg),
-          border: Border.all(color: context.palette.divider)),
-        padding: const EdgeInsets.all(AppSpacing.xs),
-        child: Row(children: [
-          if (leadingIcon != null) ...[
-            Padding(padding: const EdgeInsets.only(left: AppSpacing.sm, right: AppSpacing.xs),
-              child: AnimatedSwitcher(duration: _kDur, switchInCurve: Curves.easeOut, switchOutCurve: Curves.easeIn,
-                transitionBuilder: (child, anim) => ScaleTransition(scale: anim, child: FadeTransition(opacity: anim, child: child)),
-                child: Icon(leadingIcon, key: ValueKey(leadingIcon), size: 20, color: context.palette.primary.withOpacity(enabled ? 1 : 0.4)))),
-          ],
-          Expanded(child: n == 0 ? const SizedBox.shrink() : LayoutBuilder(builder: (context, constraints) {
-            final segW = constraints.maxWidth / n;
-            final idx = selectedIndex;
-            final show = idx != null && idx >= 0 && idx < n;
-            final left = show ? segW * idx : 0.0;
-            return ClipRRect(
-              borderRadius: BorderRadius.circular(AppRadius.md),
-              child: Stack(clipBehavior: Clip.none, children: [
-                AnimatedPositioned(duration: _anim, curve: _curve, left: left, width: show ? segW : 0, top: 0, bottom: 0,
-                  child: AnimatedOpacity(duration: const Duration(milliseconds: 200), opacity: show ? 1 : 0,
-                    child: DecoratedBox(decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(AppRadius.md),
-                      color: context.palette.primary.withOpacity(enabled ? 0.22 : 0.12),
-                      border: Border.all(color: context.palette.primary.withOpacity(enabled ? 1 : 0.45), width: 1.5),
-                      boxShadow: [BoxShadow(color: context.palette.primary.withOpacity(0.2), blurRadius: 12, offset: const Offset(0, 2))])))),
-                Row(children: List.generate(n, (i) {
-                  final sel = idx == i;
-                  return Expanded(child: Material(color: Colors.transparent, child: InkWell(
-                    borderRadius: BorderRadius.circular(AppRadius.md),
-                    onTap: enabled ? () { HapticFeedback.selectionClick(); onSelected(i); } : null,
-                    child: Padding(padding: const EdgeInsets.symmetric(vertical: AppSpacing.md, horizontal: 2),
-                      child: Center(child: AnimatedDefaultTextStyle(duration: _anim, curve: _curve,
-                        style: TextStyle(fontSize: 13, letterSpacing: 0.3, fontWeight: sel ? FontWeight.w800 : FontWeight.w500, color: sel ? context.palette.primary : inactive),
-                        child: FittedBox(fit: BoxFit.scaleDown, child: Text(labels[i], maxLines: 1))))))));
-                })),
-              ]));
-          })),
-        ]),
-      ),
+    final l = context.l10n;
+    final pal = context.palette;
+    final items = <(String, String)>[
+      (l.tr('faq_q_mesh'), l.tr('faq_a_mesh')),
+      (l.tr('faq_q_sf'), l.tr('faq_a_sf')),
+      (l.tr('faq_q_invite'), l.tr('faq_a_invite')),
+      (l.tr('faq_q_ota'), l.tr('faq_a_ota')),
+      (l.tr('faq_q_critical'), l.tr('faq_a_critical')),
+      (l.tr('faq_q_sos'), l.tr('faq_a_sos')),
+      (l.tr('faq_q_timecapsule'), l.tr('faq_a_timecapsule')),
+      (l.tr('faq_q_ping'), l.tr('faq_a_ping')),
+    ];
+    return _SubpageScaffold(
+      title: l.tr('faq_title'),
+      children: items.map((qa) => _PageCard(
+        child: ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          childrenPadding: const EdgeInsets.only(bottom: AppSpacing.sm),
+          title: Text(qa.$1, style: TextStyle(color: pal.onSurface, fontWeight: FontWeight.w600, fontSize: 14)),
+          children: [Text(qa.$2, style: TextStyle(color: pal.onSurfaceVariant, fontSize: 13, height: 1.4))],
+        ),
+      )).toList(),
     );
   }
 }
 
-class _SfPickGrid extends StatelessWidget {
-  final int? selectedSf;
-  final ValueChanged<int> onSelectSf;
-  final bool enabled;
-  const _SfPickGrid({required this.selectedSf, required this.onSelectSf, this.enabled = true});
+// ═══════════════════════════════════════════════════════════════════════════
+//  Shared widgets — скопированы из settings_screen.dart для автономности
+// ═══════════════════════════════════════════════════════════════════════════
 
-  static const _sfs = [7, 8, 9, 10, 11, 12];
-
-  @override
-  Widget build(BuildContext context) {
-    final inactive = context.palette.onSurfaceVariant.withOpacity(enabled ? 1.0 : 0.45);
-    return LayoutBuilder(builder: (context, c) {
-      final w = c.maxWidth;
-      final gap = AppSpacing.sm;
-      final n = _sfs.length;
-      final cell = (w - gap * (n - 1)) / n;
-      final minCell = 44.0;
-      if (cell < minCell) {
-        return SizedBox(height: 52, child: ListView.separated(
-          scrollDirection: Axis.horizontal, physics: const BouncingScrollPhysics(), itemCount: n,
-          separatorBuilder: (_, __) => SizedBox(width: gap),
-          itemBuilder: (_, i) => _SfCell(sf: _sfs[i], selected: selectedSf == _sfs[i], enabled: enabled, inactiveColor: inactive, minWidth: minCell, onTap: enabled ? () => onSelectSf(_sfs[i]) : null)));
-      }
-      return Row(children: [
-        for (var i = 0; i < n; i++) ...[
-          if (i > 0) SizedBox(width: gap),
-          Expanded(child: _SfCell(sf: _sfs[i], selected: selectedSf == _sfs[i], enabled: enabled, inactiveColor: inactive, minWidth: 0, onTap: enabled ? () => onSelectSf(_sfs[i]) : null)),
-        ],
-      ]);
-    });
-  }
-}
-
-class _SfCell extends StatelessWidget {
-  final int sf;
-  final bool selected, enabled;
-  final Color inactiveColor;
-  final double minWidth;
-  final VoidCallback? onTap;
-  const _SfCell({required this.sf, required this.selected, required this.enabled, required this.inactiveColor, required this.minWidth, this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedScale(scale: selected ? 1.06 : 1.0, duration: _kDur, curve: _kIn, alignment: Alignment.center,
-      child: Material(color: Colors.transparent, borderRadius: BorderRadius.circular(AppRadius.md),
-        child: InkWell(borderRadius: BorderRadius.circular(AppRadius.md),
-          onTap: onTap == null ? null : () { HapticFeedback.selectionClick(); onTap!(); },
-          child: AnimatedContainer(duration: _kDur, curve: _kIn,
-            constraints: BoxConstraints(minWidth: minWidth, minHeight: 48),
-            padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm, horizontal: AppSpacing.xs),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(AppRadius.md),
-              color: context.palette.surfaceVariant,
-              border: Border.all(color: selected ? context.palette.primary : context.palette.divider, width: selected ? 2 : 1),
-              boxShadow: selected && enabled ? [BoxShadow(color: context.palette.primary.withOpacity(0.28), blurRadius: 14, offset: const Offset(0, 3))] : null),
-            child: Column(mainAxisAlignment: MainAxisAlignment.center, mainAxisSize: MainAxisSize.min, children: [
-              AnimatedDefaultTextStyle(duration: _kDur, style: TextStyle(fontSize: 10, height: 1, fontWeight: FontWeight.w500, color: inactiveColor, letterSpacing: 0.5), child: const Text('SF')),
-              const SizedBox(height: 2),
-              AnimatedDefaultTextStyle(duration: _kDur, style: TextStyle(fontSize: 16, height: 1, fontWeight: selected ? FontWeight.w800 : FontWeight.w600, color: selected ? context.palette.primary : inactiveColor, fontFeatures: const [FontFeature.tabularFigures()]), child: Text('$sf')),
-            ])))));
-  }
-}
+// _SegmentedPickBar is now RiftSegmentedBar from app_primitives.dart
+typedef _SegmentedPickBar = RiftSegmentedBar;
 
 class _ModemSection extends StatefulWidget {
   final int? modemPreset, sf, cr;
@@ -1519,10 +1496,12 @@ class _ModemSectionState extends State<_ModemSection> {
   @override
   Widget build(BuildContext context) {
     final pal = context.palette;
+    final l = context.l10n;
     final en = widget.enabled;
     final isCustom = _sel == 4;
     final isRu = AppLocalizations.currentLocale.languageCode == 'ru';
     final desc = isRu ? _descRu : _descEn;
+    final descStyle = AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant, fontStyle: FontStyle.italic);
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       Wrap(spacing: AppSpacing.sm - 2, runSpacing: AppSpacing.sm - 2, children: [for (var i = 0; i < 5; i++) _chip(context, i, en)]),
       const SizedBox(height: AppSpacing.sm),
@@ -1530,20 +1509,31 @@ class _ModemSectionState extends State<_ModemSection> {
         child: Text(desc[_sel], style: TextStyle(fontSize: 12, height: 1.4, color: pal.onSurfaceVariant.withOpacity(0.85))))),
       if (isCustom) ...[
         const SizedBox(height: AppSpacing.sm + 2),
-        Text('SF', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+        Text(l.tr('modem_sf_label'), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
         const SizedBox(height: AppSpacing.xs),
-        _SfPickGrid(selectedSf: _cSf, enabled: en, onSelectSf: (sf) => setState(() => _cSf = sf)),
+        _SegmentedPickBar(
+          labels: const ['7', '8', '9', '10', '11', '12'],
+          selectedIndex: _cSf >= 7 && _cSf <= 12 ? _cSf - 7 : null,
+          enabled: en,
+          onSelected: (i) => setState(() => _cSf = i + 7),
+        ),
+        const SizedBox(height: AppSpacing.xs),
+        Text(l.tr('modem_sf_desc'), style: descStyle),
         const SizedBox(height: AppSpacing.sm + 2),
-        Text('BW (kHz)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+        Text(l.tr('modem_bw_label'), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
         const SizedBox(height: AppSpacing.xs),
         _optionRow<double>(context, options: _bwOpts, selected: _cBw, label: (v) => v == 62.5 ? '62.5' : '${v.toInt()}', enabled: en, onSelect: (v) => setState(() => _cBw = v)),
+        const SizedBox(height: AppSpacing.xs),
+        Text(l.tr('modem_bw_desc'), style: descStyle),
         const SizedBox(height: AppSpacing.sm + 2),
-        Text('CR', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+        Text(l.tr('modem_cr_label'), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
         const SizedBox(height: AppSpacing.xs),
         _optionRow<int>(context, options: _crOpts, selected: _cCr, label: (v) => _crDesc[v - 5], enabled: en, onSelect: (v) => setState(() => _cCr = v)),
+        const SizedBox(height: AppSpacing.xs),
+        Text(l.tr('modem_cr_desc'), style: descStyle),
         const SizedBox(height: AppSpacing.md),
         FilledButton.tonalIcon(onPressed: en ? () => widget.onCustom(_cSf, _cBw, _cCr) : null,
-          icon: const Icon(Icons.tune_rounded, size: 18), label: Text(context.l10n.tr('modem_apply_custom'))),
+          icon: const Icon(Icons.tune_rounded, size: 18), label: Text(l.tr('modem_apply_custom'))),
       ],
     ]);
   }

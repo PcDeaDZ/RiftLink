@@ -5,12 +5,33 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:crypto/crypto.dart' as crypto_lib;
 
+import '../app_navigator.dart';
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
 import '../widgets/mesh_background.dart';
+import '../widgets/rift_dialogs.dart';
 
 enum _OtaState { idle, picking, starting, uploading, verifying, done, error }
+
+const double _kOtaScreenOuterPadding = 24;
+
+/// Показывает OTA в модальном диалоге (корневая оболочка — [RiftDialogFrame]).
+Future<void> showOtaDialog(BuildContext context, RiftLinkBle ble) {
+  return showAppDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) {
+      return RiftDialogFrame(
+        maxWidth: 400,
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+        child: SingleChildScrollView(
+          child: _OtaFlow(ble: ble, embeddedInDialog: true),
+        ),
+      );
+    },
+  );
+}
 
 class OtaScreen extends StatefulWidget {
   final RiftLinkBle ble;
@@ -21,6 +42,44 @@ class OtaScreen extends StatefulWidget {
 }
 
 class _OtaScreenState extends State<OtaScreen> {
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final l = context.l10n;
+    return Scaffold(
+      backgroundColor: palette.surface,
+      appBar: AppBar(
+        title: Text(l.tr('firmware_update_title')),
+        backgroundColor: palette.surface,
+        foregroundColor: palette.onSurface,
+        elevation: 0,
+      ),
+      body: MeshBackgroundWrapper(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(_kOtaScreenOuterPadding),
+            child: _OtaFlow(ble: widget.ble),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _OtaFlow extends StatefulWidget {
+  final RiftLinkBle ble;
+  final bool embeddedInDialog;
+
+  const _OtaFlow({
+    required this.ble,
+    this.embeddedInDialog = false,
+  });
+
+  @override
+  State<_OtaFlow> createState() => _OtaFlowState();
+}
+
+class _OtaFlowState extends State<_OtaFlow> {
   static const double _kRadius = 12;
   static const double _kIconSize = 64;
   static const double _kRingSize = 120;
@@ -41,6 +100,11 @@ class _OtaScreenState extends State<OtaScreen> {
   String? _errorMsg;
   StreamSubscription? _evtSub;
   Timer? _startTimeout;
+
+  bool get _canDismiss =>
+      _state == _OtaState.idle ||
+      _state == _OtaState.done ||
+      _state == _OtaState.error;
 
   @override
   void initState() {
@@ -248,21 +312,24 @@ class _OtaScreenState extends State<OtaScreen> {
   Widget build(BuildContext context) {
     final palette = context.palette;
     final l = context.l10n;
-    return Scaffold(
-      backgroundColor: palette.surface,
-      appBar: AppBar(
-        title: Text(l.tr('firmware_update_title')),
-        backgroundColor: palette.surface,
-        foregroundColor: palette.onSurface,
-        elevation: 0,
-      ),
-      body: MeshBackgroundWrapper(
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(_kGapLg),
-            child: _buildBody(context, palette, l),
-          ),
-        ),
+    final body = _buildBody(context, palette, l);
+    return PopScope(
+      canPop: _canDismiss,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (widget.embeddedInDialog && _state == _OtaState.idle)
+            Align(
+              alignment: Alignment.centerRight,
+              child: IconButton(
+                icon: Icon(Icons.close, color: palette.onSurfaceVariant),
+                tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ),
+          body,
+        ],
       ),
     );
   }

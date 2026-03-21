@@ -8,6 +8,7 @@ import 'package:latlong2/latlong.dart';
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
+import '../widgets/app_primitives.dart';
 
 class MapScreen extends StatefulWidget {
   final RiftLinkBle ble;
@@ -56,11 +57,10 @@ class _MapScreenState extends State<MapScreen> {
 
     return Scaffold(
       backgroundColor: p.surface,
-      appBar: AppBar(
-        backgroundColor: p.surfaceVariant,
-        foregroundColor: p.onSurface,
-        title: Text(context.l10n.tr('map')),
-        leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context)),
+      appBar: riftAppBar(
+        context,
+        title: context.l10n.tr('map'),
+        showBack: true,
         actions: [
           IconButton(
             icon: const Icon(Icons.radar),

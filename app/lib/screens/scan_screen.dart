@@ -20,7 +20,6 @@ import '../theme/theme_notifier.dart';
 import '../recent_devices/recent_devices_service.dart';
 import '../wifi/mdns_discovery.dart';
 import '../widgets/rift_dialogs.dart';
-import '../widgets/app_popover_menu.dart';
 import 'chat_screen.dart';
 import 'debug_screen.dart';
 
@@ -92,6 +91,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
   int? _wifiActionFlash; // 0 = last IP, 1 = mDNS
   Timer? _wifiActionFlashTimer;
   bool _wifiIpTouched = false;
+  Map<String, WifiDeviceMeta> _wifiMeta = {};
 
   @override
   void initState() {
@@ -179,8 +179,9 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
 
   Future<void> _loadRecentWifiIps() async {
     final list = await RecentDevicesService.loadRecentWifiIps();
+    final meta = await RecentDevicesService.loadAllWifiMeta();
     if (!mounted) return;
-    setState(() => _recentWifiIps = list);
+    setState(() { _recentWifiIps = list; _wifiMeta = meta; });
     if (list.isNotEmpty && (_wifiIpController.text.trim().isEmpty || _wifiIpController.text.trim() == '192.168.4.1')) {
       _wifiIpController.text = list.first;
       _wifiIpController.selection = TextSelection.collapsed(offset: _wifiIpController.text.length);
@@ -455,37 +456,70 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
     );
   }
 
-  void _showLangPicker() async {
-    await AppLocalizations.switchLocale(() { localeNotifier.value = AppLocalizations.currentLocale; });
-    if (mounted) {
-      final l10n = context.l10n;
-      final langName = AppLocalizations.currentLocale.languageCode == 'ru' ? l10n.tr('lang_ru') : l10n.tr('lang_en');
-      showAppSnackBar(context, '${l10n.tr('lang')}: $langName');
-    }
-  }
-
-  void _showThemePicker() => showThemeModeSheet(context);
-
-  Future<void> _showScanMenu(AppLocalizations l10n) async {
-    FocusScope.of(context).unfocus();
-    final v = await Navigator.push<String>(
-      context,
-      AppPopoverMenuRoute<String>(
-        child: _ScanMenuPopover(l10n: l10n),
-      ),
+  void _showQuickSettings() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) {
+        return ListenableBuilder(
+          listenable: Listenable.merge([themeModeNotifier, localeNotifier]),
+          builder: (ctx, _) {
+            final p = ctx.palette;
+            final l10n = ctx.l10n;
+            final themeIdx = switch (themeModeNotifier.value) { ThemeMode.system => 0, ThemeMode.light => 1, ThemeMode.dark => 2 };
+            final curLang = AppLocalizations.currentLocale.languageCode == 'ru' ? 0 : 1;
+            return Container(
+              decoration: BoxDecoration(
+                color: p.card,
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+              ),
+              child: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.sm),
+                  child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                    Center(child: Container(width: 36, height: 3, decoration: BoxDecoration(color: p.onSurfaceVariant.withOpacity(0.3), borderRadius: BorderRadius.circular(2)))),
+                    const SizedBox(height: AppSpacing.lg),
+                    Text(l10n.tr('theme'), style: AppTypography.labelBase().copyWith(color: p.onSurfaceVariant, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: AppSpacing.sm),
+                    RiftSegmentedBar(
+                      labels: [l10n.tr('theme_system'), l10n.tr('theme_light'), l10n.tr('theme_dark')],
+                      selectedIndex: themeIdx,
+                      onSelected: (i) {
+                        final mode = switch (i) { 0 => ThemeMode.system, 1 => ThemeMode.light, _ => ThemeMode.dark };
+                        setThemeMode(mode);
+                      },
+                    ),
+                    const SizedBox(height: AppSpacing.lg),
+                    Text(l10n.tr('lang'), style: AppTypography.labelBase().copyWith(color: p.onSurfaceVariant, fontWeight: FontWeight.w600)),
+                    const SizedBox(height: AppSpacing.sm),
+                    RiftSegmentedBar(
+                      labels: const ['Русский', 'English'],
+                      selectedIndex: curLang,
+                      onSelected: (i) {
+                        final target = i == 0 ? 'ru' : 'en';
+                        if (AppLocalizations.currentLocale.languageCode != target) {
+                          AppLocalizations.switchLocale(() { localeNotifier.value = AppLocalizations.currentLocale; });
+                        }
+                      },
+                    ),
+                    const SizedBox(height: AppSpacing.sm),
+                    Divider(color: p.divider),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.info_outline_rounded, color: p.onSurfaceVariant),
+                      title: Text(l10n.tr('about'), style: TextStyle(color: p.onSurface)),
+                      trailing: Icon(Icons.chevron_right, color: p.onSurfaceVariant),
+                      onTap: () { Navigator.pop(ctx); _showAbout(); },
+                    ),
+                  ]),
+                ),
+              ),
+            );
+          },
+        );
+      },
     );
-    if (!mounted || v == null) return;
-    switch (v) {
-      case 'theme':
-        _showThemePicker();
-        break;
-      case 'lang':
-        _showLangPicker();
-        break;
-      case 'about':
-        _showAbout();
-        break;
-    }
   }
 
   @override
@@ -493,8 +527,10 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
     final l10n = context.l10n;
     return Scaffold(
       backgroundColor: context.palette.surface,
-      appBar: AppBar(
-        title: GestureDetector(
+      appBar: riftAppBar(
+        context,
+        title: '',
+        titleWidget: GestureDetector(
           onTap: () {
             _titleTapCount++;
             if (_titleTapCount >= 5) {
@@ -506,9 +542,9 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.more_vert),
-            tooltip: l10n.tr('menu_tools'),
-            onPressed: () => _showScanMenu(l10n),
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: l10n.tr('settings'),
+            onPressed: _showQuickSettings,
           ),
         ],
       ),
@@ -547,74 +583,26 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                     _transportTab == 0 ? l10n.tr('find_device') : l10n.tr('wifi_connect_title'),
                   ),
                   SizedBox(height: AppSpacing.md),
-                  AppSectionCard(
-                    margin: EdgeInsets.symmetric(horizontal: AppSpacing.xxl),
-                    padding: EdgeInsets.all(AppSpacing.xs),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(AppRadius.sm),
-                            onTap: () => setState(() => _transportTab = 0),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm + 2),
-                              decoration: BoxDecoration(
-                                color: _transportTab == 0 ? context.palette.primary.withOpacity(0.2) : Colors.transparent,
-                                borderRadius: BorderRadius.circular(AppRadius.sm),
-                                border: _transportTab == 0 ? Border.all(color: context.palette.primary.withOpacity(0.55)) : null,
-                              ),
-                              child: Text(
-                                l10n.tr('transport_ble'),
-                                textAlign: TextAlign.center,
-                                style: AppTypography.chipBase().copyWith(
-                                  color: _transportTab == 0 ? context.palette.primary : context.palette.onSurfaceVariant,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        SizedBox(width: AppSpacing.sm - 2),
-                        Expanded(
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(AppRadius.sm),
-                            onTap: () {
-                              if (!_wifiNetworkAvailable) {
-                                _snack(l10n.tr('wifi_tab_locked'));
-                                return;
-                              }
-                              if (_scanning) {
-                                _scanStoppedByUser = true;
-                                _scanCompleter?.complete();
-                              }
-                              setState(() => _transportTab = 1);
-                              if (_recentWifiIps.isNotEmpty && (_wifiIpController.text.trim().isEmpty || _wifiIpController.text.trim() == '192.168.4.1')) {
-                                _useLastWifiIp();
-                              }
-                            },
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm + 2),
-                              decoration: BoxDecoration(
-                                color: _transportTab == 1
-                                    ? context.palette.primary.withOpacity(0.2)
-                                    : (_wifiNetworkAvailable ? Colors.transparent : context.palette.onSurfaceVariant.withOpacity(0.08)),
-                                borderRadius: BorderRadius.circular(AppRadius.sm),
-                                border: _transportTab == 1 ? Border.all(color: context.palette.primary.withOpacity(0.55)) : null,
-                              ),
-                              child: Text(
-                                l10n.tr('transport_wifi'),
-                                textAlign: TextAlign.center,
-                                style: AppTypography.chipBase().copyWith(
-                                  color: _transportTab == 1
-                                      ? context.palette.primary
-                                      : (_wifiNetworkAvailable
-                                          ? context.palette.onSurfaceVariant
-                                          : context.palette.onSurfaceVariant.withOpacity(0.45)),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
+                  Padding(
+                    padding: EdgeInsets.symmetric(horizontal: AppSpacing.xxl),
+                    child: RiftSegmentedBar(
+                      labels: [l10n.tr('transport_ble'), l10n.tr('transport_wifi')],
+                      selectedIndex: _transportTab,
+                      enabled: _transportTab == 1 || _wifiNetworkAvailable,
+                      onSelected: (i) {
+                        if (i == 1 && !_wifiNetworkAvailable) {
+                          _snack(l10n.tr('wifi_tab_locked'));
+                          return;
+                        }
+                        if (i == 1 && _scanning) {
+                          _scanStoppedByUser = true;
+                          _scanCompleter?.complete();
+                        }
+                        setState(() => _transportTab = i);
+                        if (i == 1 && _recentWifiIps.isNotEmpty && (_wifiIpController.text.trim().isEmpty || _wifiIpController.text.trim() == '192.168.4.1')) {
+                          _useLastWifiIp();
+                        }
+                      },
                     ),
                   ),
                   SizedBox(height: AppSpacing.md),
@@ -899,43 +887,19 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                       SizedBox(height: AppSpacing.sm - 2),
                       Padding(
                         padding: EdgeInsets.symmetric(horizontal: AppSpacing.xxl),
-                        child: ListView.separated(
-                          shrinkWrap: true,
-                          physics: const NeverScrollableScrollPhysics(),
-                          itemCount: _mdnsNodes.length,
-                          separatorBuilder: (_, __) => SizedBox(height: AppSpacing.sm),
-                          itemBuilder: (_, i) {
-                            final node = _mdnsNodes[i];
-                            return Material(
-                              color: Colors.transparent,
-                              child: InkWell(
-                                borderRadius: BorderRadius.circular(AppRadius.card),
-                                onTap: _wifiConnecting ? null : () => _useWifiIp(node.ip),
-                                child: AppSectionCard(
-                                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
-                                  margin: EdgeInsets.zero,
-                                  child: ListTile(
-                                    dense: true,
-                                    contentPadding: EdgeInsets.zero,
-                                    leading: Icon(Icons.router_rounded, color: context.palette.primary, size: 18),
-                                    title: Text(
-                                      node.ip,
-                                      style: AppTypography.labelBase().copyWith(
-                                        color: context.palette.onSurface,
-                                        fontFamily: 'monospace',
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                    subtitle: Text(
-                                      '${node.host}:${node.port}',
-                                      style: _microCaptionStyle(context).copyWith(fontSize: 11),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            );
-                          },
-                        ),
+                        child: Column(children: List.generate(_mdnsNodes.length, (i) {
+                          final node = _mdnsNodes[i];
+                          return Padding(
+                            padding: EdgeInsets.only(bottom: i < _mdnsNodes.length - 1 ? AppSpacing.sm : 0),
+                            child: _DeviceCard(
+                              icon: Icons.router_rounded,
+                              title: node.ip,
+                              subtitle: '${node.host}:${node.port}',
+                              showDelete: false,
+                              onTap: _wifiConnecting ? null : () => _useWifiIp(node.ip),
+                            ),
+                          );
+                        })),
                       ),
                     ],
                     if (_recentWifiIps.isNotEmpty) ...[
@@ -952,19 +916,19 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                       SizedBox(height: AppSpacing.sm - 2),
                       Padding(
                         padding: EdgeInsets.symmetric(horizontal: AppSpacing.xxl),
-                        child: ListView.separated(
-                          shrinkWrap: true,
-                          physics: const NeverScrollableScrollPhysics(),
-                          itemCount: _recentWifiIps.length,
-                          separatorBuilder: (_, __) => SizedBox(height: AppSpacing.sm),
-                          itemBuilder: (_, i) {
-                            final ip = _recentWifiIps[i];
-                            return Dismissible(
+                        child: Column(children: List.generate(_recentWifiIps.length, (i) {
+                          final ip = _recentWifiIps[i];
+                          final meta = _wifiMeta[ip];
+                          final title = meta != null && meta.displayName.isNotEmpty ? meta.displayName : ip;
+                          final subtitle = meta != null && meta.displayName.isNotEmpty ? ip : null;
+                          return Padding(
+                            padding: EdgeInsets.only(bottom: i < _recentWifiIps.length - 1 ? AppSpacing.sm : 0),
+                            child: Dismissible(
                               key: ValueKey('wifi-ip-$ip'),
                               direction: DismissDirection.endToStart,
                               background: Container(
                                 alignment: Alignment.centerRight,
-                                padding: EdgeInsets.symmetric(horizontal: AppSpacing.sm + 2),
+                                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm + 2),
                                 decoration: BoxDecoration(
                                   color: context.palette.error.withOpacity(0.12),
                                   borderRadius: BorderRadius.circular(AppRadius.sm),
@@ -972,37 +936,17 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                                 ),
                                 child: Icon(Icons.delete_outline_rounded, color: context.palette.error),
                               ),
-                              onDismissed: (_) {
-                                _removeWifiIp(ip);
-                              },
-                              child: Material(
-                                color: Colors.transparent,
-                                child: InkWell(
-                                  borderRadius: BorderRadius.circular(AppRadius.card),
-                                  onTap: _wifiConnecting ? null : () => _useWifiIp(ip),
-                                  child: AppSectionCard(
-                                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
-                                    margin: EdgeInsets.zero,
-                                    child: ListTile(
-                                      dense: true,
-                                      contentPadding: EdgeInsets.zero,
-                                      leading: Icon(Icons.wifi_rounded, color: context.palette.primary, size: 18),
-                                      title: Text(
-                                        ip,
-                                        style: AppTypography.labelBase().copyWith(
-                                          color: context.palette.onSurface,
-                                          fontFamily: 'monospace',
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                      trailing: Icon(Icons.swipe_left_rounded, color: context.palette.onSurfaceVariant, size: 18),
-                                    ),
-                                  ),
-                                ),
+                              onDismissed: (_) => _removeWifiIp(ip),
+                              child: _DeviceCard(
+                                icon: Icons.wifi_rounded,
+                                title: title,
+                                subtitle: subtitle,
+                                showDelete: false,
+                                onTap: _wifiConnecting ? null : () => _useWifiIp(ip),
                               ),
-                            );
-                          },
-                        ),
+                            ),
+                          );
+                        })),
                       ),
                     ],
                     SizedBox(height: AppSpacing.md),
@@ -1049,86 +993,20 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                           final i = e.key;
                           final d = e.value;
                           final isConnecting = _connectingToRemoteId == d.remoteId;
+                          final label = d.displayName.isNotEmpty ? d.displayName : (d.nodeId.isNotEmpty ? d.nodeId : d.remoteId);
                           return Padding(
-                            padding: EdgeInsets.only(bottom: i < _recent.length - 1 ? AppSpacing.md : 0),
-                            child: Material(
-                              color: Colors.transparent,
-                              child: InkWell(
-                                onTap: _scanning ? null : () {
-                                  final label = d.displayName.isNotEmpty ? d.displayName : (d.nodeId.isNotEmpty ? d.nodeId : d.remoteId);
-                                  setState(() {
-                                    _connectingToRemoteId = d.remoteId;
-                                    _connectingToDeviceName = label;
-                                    _scanning = true;
-                                    _scanStoppedByUser = false;
-                                    _results = [];
-                                    _error = null;
-                                  });
-                                  WidgetsBinding.instance.addPostFrameCallback((_) {
-                                    if (mounted && _connectingToRemoteId == d.remoteId) {
-                                      _connectToRecent(d, displayLabel: label);
-                                    }
-                                  });
-                                },
-                                borderRadius: BorderRadius.circular(AppRadius.card),
-                                child: AppSectionCard(
-                                  padding: EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm + 2),
-                                  margin: EdgeInsets.zero,
-                                  child: Row(
-                                    children: [
-                                      Container(
-                                        width: 52,
-                                        height: 52,
-                                        decoration: BoxDecoration(
-                                          color: context.palette.primary.withOpacity(0.2),
-                                          borderRadius: BorderRadius.circular(26),
-                                        ),
-                                        child: isConnecting
-                                            ? Padding(
-                                                padding: EdgeInsets.all(AppSpacing.sm + 2),
-                                                child: CircularProgressIndicator(strokeWidth: 2, color: context.palette.primary),
-                                              )
-                                            : Icon(Icons.bluetooth, color: context.palette.primary, size: 28),
-                                      ),
-                                      SizedBox(width: AppSpacing.sm + 2),
-                                      Expanded(
-                                        child: Column(
-                                          mainAxisAlignment: MainAxisAlignment.center,
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: d.displayName != d.nodeId
-                                              ? [
-                                                  Text(
-                                                    d.displayName,
-                                                    style: _sectionHeaderStyle(context),
-                                                    overflow: TextOverflow.ellipsis,
-                                                  ),
-                                                  SizedBox(height: AppSpacing.xs / 2),
-                                                  Text(
-                                                    d.nodeId,
-                                                    style: _captionStyle(context).copyWith(fontFamily: 'monospace', fontWeight: FontWeight.w500),
-                                                    overflow: TextOverflow.ellipsis,
-                                                  ),
-                                                ]
-                                              : [
-                                                  Text(
-                                                    d.nodeId,
-                                                    style: _sectionHeaderStyle(context).copyWith(fontFamily: 'monospace'),
-                                                    overflow: TextOverflow.ellipsis,
-                                                  ),
-                                                ],
-                                        ),
-                                      ),
-                                      if (!_scanning)
-                                        IconButton(
-                                          icon: Icon(Icons.close, size: 22, color: context.palette.onSurfaceVariant),
-                                          onPressed: () => _confirmForgetDevice(d),
-                                          tooltip: l10n.tr('forget_device'),
-                                          style: IconButton.styleFrom(padding: EdgeInsets.all(AppSpacing.sm - 2), minimumSize: const Size(40, 40)),
-                                        ),
-                                    ],
-                                  ),
-                                ),
-                              ),
+                            padding: EdgeInsets.only(bottom: i < _recent.length - 1 ? AppSpacing.sm : 0),
+                            child: _DeviceCard(
+                              icon: Icons.bluetooth,
+                              title: label,
+                              subtitle: d.displayName != d.nodeId ? d.nodeId : null,
+                              isLoading: isConnecting,
+                              showDelete: !_scanning,
+                              onDelete: () => _confirmForgetDevice(d),
+                              onTap: _scanning ? null : () {
+                                setState(() { _connectingToRemoteId = d.remoteId; _connectingToDeviceName = label; _scanning = true; _scanStoppedByUser = false; _results = []; _error = null; });
+                                WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && _connectingToRemoteId == d.remoteId) _connectToRecent(d, displayLabel: label); });
+                              },
                             ),
                           );
                         }).toList(),
@@ -1162,41 +1040,24 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                         ),
                         SizedBox(height: AppSpacing.xs),
                         Divider(height: 1, color: context.palette.divider),
-                        ListView.separated(
-                          shrinkWrap: true,
-                          physics: const NeverScrollableScrollPhysics(),
-                          itemCount: filtered.length,
-                          separatorBuilder: (_, __) => Divider(height: 1, indent: 72, color: context.palette.divider),
-                          itemBuilder: (_, i) {
+                        Padding(
+                          padding: EdgeInsets.symmetric(horizontal: AppSpacing.sm),
+                          child: Column(children: List.generate(filtered.length, (i) {
                             final r = filtered[i];
                             final name = r.device.advName.isNotEmpty ? r.device.advName
                                 : r.device.platformName.isNotEmpty ? r.device.platformName
                                 : r.device.remoteId.toString();
-                            return ListTile(
-                              leading: Container(
-                                width: 40,
-                                height: 40,
-                                decoration: BoxDecoration(
-                                  color: context.palette.primary.withOpacity(0.2),
-                                  borderRadius: BorderRadius.circular(20),
-                                ),
-                                child: Icon(Icons.bluetooth, color: context.palette.primary, size: 22),
+                            return Padding(
+                              padding: EdgeInsets.only(bottom: i < filtered.length - 1 ? AppSpacing.sm : 0),
+                              child: _DeviceCard(
+                                icon: Icons.bluetooth,
+                                title: name,
+                                subtitle: r.device.remoteId.toString(),
+                                showDelete: false,
+                                onTap: () => _connect(r.device, displayName: name),
                               ),
-                              title: Text(
-                                name,
-                                style: AppTypography.labelBase().copyWith(
-                                  color: context.palette.onSurface,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                              subtitle: Text(
-                                r.device.remoteId.toString(),
-                                style: _microCaptionStyle(context).copyWith(fontFamily: 'monospace'),
-                              ),
-                              trailing: Icon(Icons.chevron_right, color: context.palette.onSurfaceVariant),
-                              onTap: () => _connect(r.device, displayName: name),
                             );
-                          },
+                          })),
                         ),
                       ],
                     );
@@ -1214,65 +1075,65 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
   }
 }
 
-/// Меню «три точки» в том же стиле, что и в [ChatScreen].
-class _ScanMenuPopover extends StatelessWidget {
-  final AppLocalizations l10n;
 
-  const _ScanMenuPopover({required this.l10n});
+class _DeviceCard extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+  final VoidCallback? onTap;
+  final VoidCallback? onDelete;
+  final bool isLoading;
+  final bool showDelete;
+
+  const _DeviceCard({
+    required this.icon,
+    required this.title,
+    this.subtitle,
+    this.onTap,
+    this.onDelete,
+    this.isLoading = false,
+    this.showDelete = true,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final p = context.palette;
-    final shadow = Theme.of(context).brightness == Brightness.dark ? 0.42 : 0.14;
-    return Material(
-      color: Colors.transparent,
-      child: Container(
-        constraints: const BoxConstraints(minWidth: 200, maxWidth: 280),
-        decoration: BoxDecoration(
-          color: p.card,
-          borderRadius: BorderRadius.circular(AppRadius.card),
-          border: Border.all(color: p.divider, width: 0.5),
-          boxShadow: [
-            BoxShadow(
-              color: p.onSurface.withOpacity(shadow),
-              blurRadius: 16,
-              offset: const Offset(0, 4),
-            ),
-          ],
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(AppRadius.card),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _item(context, Icons.dark_mode_outlined, l10n.tr('theme'), 'theme'),
-              _item(context, Icons.language, l10n.tr('lang'), 'lang'),
-              _item(context, Icons.info_outline_rounded, l10n.tr('about'), 'about'),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _item(BuildContext context, IconData icon, String label, String id) {
-    final p = context.palette;
+    final pal = context.palette;
     return Material(
       color: Colors.transparent,
       child: InkWell(
-        onTap: () => Navigator.pop(context, id),
-        child: Padding(
-          padding: EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.buttonPrimaryV),
-          child: Row(
-            children: [
-              Icon(icon, size: 22, color: p.onSurface),
-              SizedBox(width: AppSpacing.sm + 2),
-              Text(
-                label,
-                style: AppTypography.bodyBase().copyWith(color: p.onSurface),
-              ),
-            ],
-          ),
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        child: AppSectionCard(
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm + 2),
+          margin: EdgeInsets.zero,
+          child: Row(children: [
+            Container(
+              width: 44, height: 44,
+              decoration: BoxDecoration(color: pal.primary.withOpacity(0.15), borderRadius: BorderRadius.circular(22)),
+              child: isLoading
+                  ? Padding(padding: const EdgeInsets.all(10), child: CircularProgressIndicator(strokeWidth: 2, color: pal.primary))
+                  : Icon(icon, color: pal.primary, size: 22),
+            ),
+            const SizedBox(width: AppSpacing.sm + 2),
+            Expanded(child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(title, style: AppTypography.labelBase().copyWith(color: pal.onSurface, fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis),
+                if (subtitle != null && subtitle!.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(subtitle!, style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant, fontFamily: 'monospace'), overflow: TextOverflow.ellipsis),
+                ],
+              ],
+            )),
+            if (showDelete && onDelete != null)
+              IconButton(
+                icon: Icon(Icons.close, size: 20, color: pal.onSurfaceVariant),
+                onPressed: onDelete,
+                style: IconButton.styleFrom(padding: const EdgeInsets.all(6), minimumSize: const Size(36, 36)),
+              )
+            else
+              Icon(Icons.chevron_right, color: pal.onSurfaceVariant, size: 22),
+          ]),
         ),
       ),
     );

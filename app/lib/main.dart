@@ -55,14 +55,16 @@ class _RiftLinkAppState extends State<RiftLinkApp> {
             builder: (context, child) {
               final brightness = Theme.of(context).brightness;
               final isDark = brightness == Brightness.dark;
-              SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle(
-                statusBarColor: Colors.transparent,
-                statusBarIconBrightness: isDark ? Brightness.light : Brightness.dark,
-                statusBarBrightness: isDark ? Brightness.dark : Brightness.light,
-                systemNavigationBarColor: Theme.of(context).scaffoldBackgroundColor,
-                systemNavigationBarIconBrightness: isDark ? Brightness.light : Brightness.dark,
-                systemNavigationBarDividerColor: Theme.of(context).dividerColor,
-              ));
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle(
+                  statusBarColor: Colors.transparent,
+                  statusBarIconBrightness: isDark ? Brightness.light : Brightness.dark,
+                  statusBarBrightness: isDark ? Brightness.dark : Brightness.light,
+                  systemNavigationBarColor: Theme.of(context).scaffoldBackgroundColor,
+                  systemNavigationBarIconBrightness: isDark ? Brightness.light : Brightness.dark,
+                  systemNavigationBarDividerColor: Theme.of(context).dividerColor,
+                ));
+              });
               return Directionality(
                 textDirection: TextDirection.ltr,
                 child: child!,

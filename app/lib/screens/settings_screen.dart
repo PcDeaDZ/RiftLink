@@ -1493,12 +1493,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                     if (!usingWifiTransport) ...[
                       FilledButton.icon(
                         onPressed: connected
-                            ? () {
-                                Navigator.push(
-                                  context,
-                                  MaterialPageRoute(builder: (_) => OtaScreen(ble: widget.ble)),
-                                );
-                              }
+                            ? () => showOtaDialog(context, widget.ble)
                             : null,
                         icon: const Icon(Icons.bluetooth_searching_rounded),
                         label: Text(l.tr('firmware_update_ble')),

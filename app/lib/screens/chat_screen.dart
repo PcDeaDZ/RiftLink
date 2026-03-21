@@ -26,6 +26,7 @@ import '../theme/app_theme.dart';
 import '../theme/design_tokens.dart';
 import '../mesh_constants.dart';
 import '../widgets/mesh_background.dart';
+import '../widgets/app_primitives.dart';
 import '../widgets/app_snackbar.dart';
 import '../widgets/app_popover_menu.dart';
 import '../widgets/rift_dialogs.dart';
@@ -995,6 +996,16 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         nickname: evt.nickname?.isNotEmpty == true ? evt.nickname : null,
       );
     }
+    if (widget.ble.isWifiMode && resolvedId.isNotEmpty) {
+      final wifiIp = widget.ble.wifiIp;
+      if (wifiIp != null && wifiIp.isNotEmpty) {
+        RecentDevicesService.associateWifiNode(
+          ip: wifiIp,
+          nodeId: resolvedId,
+          nickname: evt.nickname?.isNotEmpty == true ? evt.nickname : null,
+        );
+      }
+    }
   }
 
   // ── BLE Events ──
@@ -1876,9 +1887,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       resizeToAvoidBottomInset: true,
       backgroundColor: context.palette.surface,
       extendBody: true,
-      appBar: AppBar(
-        toolbarHeight: 44,
-        title: Builder(
+      appBar: riftAppBar(context, title: '',
+        titleWidget: Builder(
           builder: (context) {
             final name = (_nickname ?? _nodeId).trim();
             final label = widget.ble.isConnected
@@ -1938,9 +1948,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             );
           },
         ),
-        backgroundColor: context.palette.surfaceVariant,
-        foregroundColor: context.palette.onSurface,
-        elevation: 0,
         actions: [
           IconButton(
             icon: const Icon(Icons.more_vert),
@@ -2803,15 +2810,56 @@ class _AppMenuPopoverState extends State<_AppMenuPopover> {
           ),
         ),
         Divider(height: 1, color: context.palette.divider),
-        _popoverItem(context, Icons.map, l.tr('map'), 'map'),
-        _popoverItem(context, Icons.location_on, l.tr('location'), 'send_location'),
-        _popoverItem(context, Icons.priority_high, l.tr('menu_send_critical'), 'send_critical'),
-        _popoverItem(context, Icons.emergency, l.tr('menu_send_sos'), 'send_sos'),
-        _popoverItem(context, Icons.hourglass_bottom, l.tr('menu_time_capsule'), 'time_capsule'),
-        _popoverItem(context, Icons.hub, l.tr('mesh_topology'), 'mesh'),
-        _popoverItem(context, Icons.radar, l.tr('ping'), 'ping'),
-        _popoverItem(context, Icons.health_and_safety, l.tr('selftest'), 'selftest'),
+        _toolsPopoverItem(context, Icons.map, l.tr('map'), l.tr('menu_tool_desc_map'), 'map'),
+        SizedBox(height: AppSpacing.xs),
+        _toolsPopoverItem(context, Icons.location_on, l.tr('location'), l.tr('menu_tool_desc_send_location'), 'send_location'),
+        SizedBox(height: AppSpacing.xs),
+        _toolsPopoverItem(context, Icons.priority_high, l.tr('menu_send_critical'), l.tr('menu_tool_desc_send_critical'), 'send_critical'),
+        SizedBox(height: AppSpacing.xs),
+        _toolsPopoverItem(context, Icons.emergency, l.tr('menu_send_sos'), l.tr('menu_tool_desc_send_sos'), 'send_sos'),
+        SizedBox(height: AppSpacing.xs),
+        _toolsPopoverItem(context, Icons.hourglass_bottom, l.tr('menu_time_capsule'), l.tr('menu_tool_desc_time_capsule'), 'time_capsule'),
+        SizedBox(height: AppSpacing.xs),
+        _toolsPopoverItem(context, Icons.hub, l.tr('mesh_topology'), l.tr('menu_tool_desc_mesh'), 'mesh'),
+        SizedBox(height: AppSpacing.xs),
+        _toolsPopoverItem(context, Icons.radar, l.tr('ping'), l.tr('menu_tool_desc_ping'), 'ping'),
+        SizedBox(height: AppSpacing.xs),
+        _toolsPopoverItem(context, Icons.health_and_safety, l.tr('selftest'), l.tr('menu_tool_desc_selftest'), 'selftest'),
       ],
+    );
+  }
+
+  Widget _toolsPopoverItem(BuildContext context, IconData icon, String label, String subtitle, String value) {
+    final pal = context.palette;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => Navigator.pop(context, value),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm + 2),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(icon, size: 22, color: pal.onSurface),
+              const SizedBox(width: AppSpacing.sm + 2),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(label, style: AppTypography.bodyBase().copyWith(color: pal.onSurface)),
+                    const SizedBox(height: AppSpacing.xs / 2),
+                    Text(
+                      subtitle,
+                      style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 

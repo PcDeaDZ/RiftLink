@@ -104,6 +104,8 @@ class RecentDevicesService {
     await prefs.setString(_key, jsonEncode(list.map((d) => d.toJson()).toList()));
   }
 
+  // --- WiFi recent IPs (legacy simple list, still readable) ---
+
   static Future<List<String>> loadRecentWifiIps() async {
     final prefs = await SharedPreferences.getInstance();
     final list = prefs.getStringList(_wifiIpKey) ?? const <String>[];
@@ -140,4 +142,67 @@ class RecentDevicesService {
         .toList();
     await prefs.setStringList(_wifiIpKey, list);
   }
+
+  // --- WiFi device metadata (node ID / nickname per IP, deduplication) ---
+  static const _wifiMetaKey = 'riftlink_wifi_meta';
+
+  static Future<Map<String, WifiDeviceMeta>> _loadWifiMeta() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_wifiMetaKey);
+    if (raw == null || raw.isEmpty) return {};
+    try {
+      final map = jsonDecode(raw) as Map<String, dynamic>? ?? {};
+      return map.map((k, v) => MapEntry(k, WifiDeviceMeta.fromJson(v as Map<String, dynamic>)));
+    } catch (_) {
+      return {};
+    }
+  }
+
+  static Future<void> _saveWifiMeta(Map<String, WifiDeviceMeta> meta) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_wifiMetaKey, jsonEncode(meta.map((k, v) => MapEntry(k, v.toJson()))));
+  }
+
+  /// Associate nodeId/nickname with an IP. If the same nodeId already exists
+  /// on a different IP, the old entry is removed (dedup).
+  static Future<void> associateWifiNode({
+    required String ip,
+    required String nodeId,
+    String? nickname,
+  }) async {
+    final meta = await _loadWifiMeta();
+    final dupeKey = meta.entries
+        .where((e) => e.key != ip && (e.value.nodeId == nodeId || (nickname != null && nickname.isNotEmpty && e.value.nickname == nickname)))
+        .map((e) => e.key)
+        .toList();
+    for (final k in dupeKey) {
+      meta.remove(k);
+      await removeRecentWifiIp(k);
+    }
+    meta[ip] = WifiDeviceMeta(nodeId: nodeId, nickname: nickname);
+    await _saveWifiMeta(meta);
+  }
+
+  /// Get metadata (nodeId/nickname) for a WiFi IP if available.
+  static Future<WifiDeviceMeta?> getWifiMeta(String ip) async {
+    final meta = await _loadWifiMeta();
+    return meta[ip];
+  }
+
+  /// Get all WiFi metadata.
+  static Future<Map<String, WifiDeviceMeta>> loadAllWifiMeta() async => _loadWifiMeta();
+}
+
+class WifiDeviceMeta {
+  final String nodeId;
+  final String? nickname;
+  const WifiDeviceMeta({required this.nodeId, this.nickname});
+
+  String get displayName => (nickname != null && nickname!.isNotEmpty) ? nickname! : nodeId;
+
+  Map<String, dynamic> toJson() => {'nodeId': nodeId, 'nickname': nickname};
+  factory WifiDeviceMeta.fromJson(Map<String, dynamic> json) => WifiDeviceMeta(
+    nodeId: json['nodeId'] as String? ?? '',
+    nickname: json['nickname'] as String?,
+  );
 }

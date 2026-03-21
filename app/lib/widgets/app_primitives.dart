@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../theme/app_theme.dart';
 import '../theme/design_tokens.dart';
@@ -162,6 +163,211 @@ class AppScreenTitle extends StatelessWidget {
       style: AppTypography.screenTitleBase().copyWith(
         color: context.palette.onSurface,
       ),
+    );
+  }
+}
+
+/// Animated segmented bar used for region/channel/mode pickers.
+class RiftSegmentedBar extends StatelessWidget {
+  final List<String> labels;
+  final int? selectedIndex;
+  final ValueChanged<int> onSelected;
+  final bool enabled;
+  final IconData? leadingIcon;
+
+  const RiftSegmentedBar({
+    super.key,
+    required this.labels,
+    required this.selectedIndex,
+    required this.onSelected,
+    this.enabled = true,
+    this.leadingIcon,
+  });
+
+  static const _slide = Duration(milliseconds: 320);
+  static const _text = Duration(milliseconds: 220);
+  static const _curve = Curves.easeOutCubic;
+
+  @override
+  Widget build(BuildContext context) {
+    final pal = context.palette;
+    final inactive = pal.onSurfaceVariant.withOpacity(enabled ? 1.0 : 0.45);
+    final n = labels.length;
+    return Material(
+      color: Colors.transparent,
+      child: Container(
+        decoration: BoxDecoration(
+          color: pal.surfaceVariant,
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          border: Border.all(color: pal.divider),
+        ),
+        padding: const EdgeInsets.all(AppSpacing.xs),
+        child: Row(children: [
+          if (leadingIcon != null) ...[
+            Padding(
+              padding: const EdgeInsets.only(left: AppSpacing.sm, right: AppSpacing.xs),
+              child: AnimatedSwitcher(
+                duration: _text,
+                switchInCurve: Curves.easeOut,
+                switchOutCurve: Curves.easeIn,
+                transitionBuilder: (child, anim) => ScaleTransition(scale: anim, child: FadeTransition(opacity: anim, child: child)),
+                child: Icon(leadingIcon, key: ValueKey(leadingIcon), size: 20, color: pal.primary.withOpacity(enabled ? 1 : 0.4)),
+              ),
+            ),
+          ],
+          Expanded(
+            child: n == 0
+                ? const SizedBox.shrink()
+                : LayoutBuilder(builder: (context, constraints) {
+                    final segW = constraints.maxWidth / n;
+                    final idx = selectedIndex;
+                    final show = idx != null && idx >= 0 && idx < n;
+                    final left = show ? segW * idx : 0.0;
+                    return ClipRRect(
+                      borderRadius: BorderRadius.circular(AppRadius.md),
+                      child: Stack(clipBehavior: Clip.none, children: [
+                        AnimatedPositioned(
+                          duration: _slide, curve: _curve, left: left, width: show ? segW : 0, top: 0, bottom: 0,
+                          child: AnimatedOpacity(
+                            duration: const Duration(milliseconds: 200), opacity: show ? 1 : 0,
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(AppRadius.md),
+                                color: pal.primary.withOpacity(enabled ? 0.22 : 0.12),
+                                border: Border.all(color: pal.primary.withOpacity(enabled ? 1 : 0.45), width: 1.5),
+                                boxShadow: [BoxShadow(color: pal.primary.withOpacity(0.2), blurRadius: 12, offset: const Offset(0, 2))],
+                              ),
+                            ),
+                          ),
+                        ),
+                        Row(children: List.generate(n, (i) {
+                          final sel = idx == i;
+                          return Expanded(
+                            child: Material(
+                              color: Colors.transparent,
+                              child: InkWell(
+                                borderRadius: BorderRadius.circular(AppRadius.md),
+                                onTap: enabled ? () { HapticFeedback.selectionClick(); onSelected(i); } : null,
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: AppSpacing.md, horizontal: 2),
+                                  child: Center(
+                                    child: AnimatedDefaultTextStyle(
+                                      duration: _slide, curve: _curve,
+                                      style: TextStyle(
+                                        fontSize: 13, letterSpacing: 0.3,
+                                        fontWeight: sel ? FontWeight.w800 : FontWeight.w500,
+                                        color: sel ? pal.primary : inactive,
+                                      ),
+                                      child: FittedBox(fit: BoxFit.scaleDown, child: Text(labels[i], maxLines: 1)),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          );
+                        })),
+                      ]),
+                    );
+                  }),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+/// Unified AppBar factory for all screens.
+AppBar riftAppBar(
+  BuildContext context, {
+  required String title,
+  bool showBack = false,
+  List<Widget>? actions,
+  Widget? titleWidget,
+  PreferredSizeWidget? bottom,
+}) {
+  final pal = context.palette;
+  return AppBar(
+    toolbarHeight: 48,
+    backgroundColor: pal.surface,
+    foregroundColor: pal.onSurface,
+    elevation: 0,
+    scrolledUnderElevation: 0,
+    surfaceTintColor: Colors.transparent,
+    leading: showBack ? IconButton(icon: const Icon(Icons.arrow_back_rounded), onPressed: () => Navigator.pop(context)) : null,
+    automaticallyImplyLeading: false,
+    title: titleWidget ?? Text(title, style: AppTypography.screenTitleBase().copyWith(fontSize: 18, color: pal.onSurface)),
+    centerTitle: false,
+    titleSpacing: showBack ? 0 : AppSpacing.lg,
+    actions: actions,
+    bottom: bottom,
+  );
+}
+
+/// Animated toggle switch with haptic feedback, consistent style across the app.
+class RiftSwitch extends StatelessWidget {
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+
+  const RiftSwitch({super.key, required this.value, this.onChanged});
+
+  static const _dur = Duration(milliseconds: 220);
+
+  @override
+  Widget build(BuildContext context) {
+    final pal = context.palette;
+    final active = onChanged != null;
+    return GestureDetector(
+      onTap: active ? () { HapticFeedback.selectionClick(); onChanged!(!value); } : null,
+      child: AnimatedContainer(
+        duration: _dur, curve: Curves.easeOutCubic,
+        width: 48, height: 28,
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          color: value
+              ? pal.primary.withOpacity(active ? 1 : 0.5)
+              : pal.surfaceVariant.withOpacity(active ? 1 : 0.5),
+          border: Border.all(
+            color: value ? pal.primary.withOpacity(0.6) : pal.divider,
+            width: 1,
+          ),
+        ),
+        child: AnimatedAlign(
+          duration: _dur, curve: Curves.easeOutCubic,
+          alignment: value ? Alignment.centerRight : Alignment.centerLeft,
+          child: Container(
+            width: 22, height: 22,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: value ? Colors.white : pal.onSurfaceVariant.withOpacity(0.7),
+              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 4, offset: const Offset(0, 1))],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ListTile with a RiftSwitch trailing widget.
+class RiftSwitchTile extends StatelessWidget {
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+  final Widget? title;
+  final Widget? subtitle;
+  final Widget? leading;
+
+  const RiftSwitchTile({super.key, required this.value, this.onChanged, this.title, this.subtitle, this.leading});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: leading,
+      title: title,
+      subtitle: subtitle,
+      trailing: RiftSwitch(value: value, onChanged: onChanged),
+      onTap: onChanged != null ? () { HapticFeedback.selectionClick(); onChanged!(!value); } : null,
     );
   }
 }
