@@ -494,7 +494,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                     Text(l10n.tr('lang'), style: AppTypography.labelBase().copyWith(color: p.onSurfaceVariant, fontWeight: FontWeight.w600)),
                     const SizedBox(height: AppSpacing.sm),
                     RiftSegmentedBar(
-                      labels: const ['Русский', 'English'],
+                      labels: [l10n.tr('lang_ru'), l10n.tr('lang_en')],
                       selectedIndex: curLang,
                       onSelected: (i) {
                         final target = i == 0 ? 'ru' : 'en';

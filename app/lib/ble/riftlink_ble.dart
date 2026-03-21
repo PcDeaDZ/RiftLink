@@ -51,6 +51,8 @@ class RiftLinkBle {
   /// Склейка фрагментов notify (длинный `info` / MTU): каждый chunk может быть не целым JSON.
   final List<int> _rxAccum = [];
   int _lastRxIncompleteLogLen = 0;
+  Timer? _rxAccumTimeout;
+  Completer<void>? _txLock;
   DateTime? _lastInfoRequestAt;
   Timer? _queuedInfoTimer;
   bool _hasQueuedInfoRequest = false;
@@ -120,17 +122,27 @@ class RiftLinkBle {
   }
 
   Future<bool> _sendCmd(Map<String, dynamic> payload) async {
-    // WiFi mode: route through WebSocket
+    // WiFi mode: route through WebSocket (no MTU limit)
     if (_isWifiMode && _wifiTransport != null && _wifiTransport!.isConnected) {
       return _wifiTransport!.sendJson(jsonEncode(payload));
     }
     if (_txChar == null || !isConnected) return false;
+
+    while (_txLock != null) {
+      await _txLock!.future;
+    }
+    _txLock = Completer<void>();
     try {
       final json = jsonEncode(payload);
       await _txChar!.write(utf8.encode(json), withoutResponse: true);
       return true;
-    } catch (_) {
+    } catch (e) {
+      debugPrint('RiftLinkBle: _sendCmd error: $e');
       return false;
+    } finally {
+      final c = _txLock;
+      _txLock = null;
+      c?.complete();
     }
   }
 
@@ -288,9 +300,19 @@ class RiftLinkBle {
     _rxAccum.addAll(chunk);
     const maxAccum = 16384;
     if (_rxAccum.length > maxAccum) {
+      debugPrint('RiftLinkBle: RX buffer overflow (${_rxAccum.length} bytes), clearing');
       _rxAccum.clear();
+      _rxAccumTimeout?.cancel();
       return;
     }
+    _rxAccumTimeout?.cancel();
+    _rxAccumTimeout = Timer(const Duration(seconds: 5), () {
+      if (_rxAccum.isNotEmpty) {
+        debugPrint('RiftLinkBle: RX timeout, discarding ${_rxAccum.length} incomplete bytes');
+        _rxAccum.clear();
+        _lastRxIncompleteLogLen = 0;
+      }
+    });
     _drainRxAccum();
   }
 
@@ -367,7 +389,9 @@ class RiftLinkBle {
             _emitParsedJson(m);
           }
         }
-      } catch (_) {}
+      } catch (e) {
+        if (kDebugMode) debugPrint('RiftLinkBle: NDJSON parse error: $e');
+      }
     }
     return tail;
   }
@@ -427,8 +451,9 @@ class RiftLinkBle {
         if (kDebugMode) {
           debugPrint('RiftLinkBle: RX json root is ${decoded.runtimeType}, trying brace extract');
         }
-      } catch (_) {
-        // Неполный JSON или несколько объектов подряд — разбираем ниже (extractor / _tryEmitFromConcatenated).
+      } catch (e) {
+        // Неполный JSON или несколько объектов подряд — разбираем ниже
+        if (kDebugMode && s.length < 256) debugPrint('RiftLinkBle: single-object parse: $e');
       }
 
       final objs = _extractTopLevelJsonObjects(s);
@@ -469,7 +494,9 @@ class RiftLinkBle {
           final decoded = jsonDecode(raw);
           if (decoded is! Map) continue;
           _emitParsedJson(Map<String, dynamic>.from(decoded as Map));
-        } catch (_) {}
+        } catch (e) {
+          if (kDebugMode) debugPrint('RiftLinkBle: extracted object parse error: $e');
+        }
       }
       final tailBytes = utf8.encode(objs.tail);
       _rxAccum
@@ -645,7 +672,9 @@ class RiftLinkBle {
         if (decoded is Map) {
           _emitParsedJson(Map<String, dynamic>.from(decoded as Map));
         }
-      } catch (_) {}
+      } catch (e) {
+        if (kDebugMode) debugPrint('RiftLinkBle: WiFi JSON parse error: $e');
+      }
     });
     // Wi-Fi transport does not push initial state automatically like BLE connect flow.
     // Request baseline payload right after WS attach.

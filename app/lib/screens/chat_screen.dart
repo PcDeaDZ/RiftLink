@@ -2801,7 +2801,7 @@ class _PingDialogContentState extends State<_PingDialogContent> {
                       foregroundColor: Theme.of(context).colorScheme.onPrimary,
                     ),
                     onPressed: _doPing,
-                    child: const Text('Ping'),
+                    child: Text(context.l10n.tr('ping')),
                   ),
                 ],
               ),

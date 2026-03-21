@@ -1193,7 +1193,7 @@ class _EnergyThemePageState extends State<_EnergyThemePage> {
           const SizedBox(height: AppSpacing.sm + 2),
           _SegmentedPickBar(
             leadingIcon: Icons.language,
-            labels: const ['Русский', 'English'],
+            labels: [l.tr('lang_ru'), l.tr('lang_en')],
             selectedIndex: AppLocalizations.currentLocale.languageCode == 'ru' ? 0 : 1,
             onSelected: (i) async {
               final target = i == 0 ? 'ru' : 'en';
@@ -1370,7 +1370,7 @@ class _DiagnosticsPageState extends State<_DiagnosticsPage> {
             if (_heapFree != null)
               ListTile(contentPadding: EdgeInsets.zero,
                 leading: Icon(Icons.memory, color: pal.onSurfaceVariant),
-                title: Text('Heap free: ${(_heapFree! / 1024).toStringAsFixed(1)} KB', style: TextStyle(color: pal.onSurface))),
+                title: Text(l.tr('selftest_heap', {'kb': (_heapFree! / 1024).toStringAsFixed(1)}), style: TextStyle(color: pal.onSurface))),
           ],
         ],
       )),

@@ -428,12 +428,19 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     return;
   }
 
-  if (len > BLE_ATT_MAX_JSON_BYTES) return;
+  if (len > BLE_ATT_MAX_JSON_BYTES) {
+    ble::notifyError("payload_too_long", "JSON exceeds 512 bytes");
+    return;
+  }
 
   JsonDocument doc(&s_bleJsonAllocator);
   const std::string_view jsonSv(reinterpret_cast<const char*>(val), len);
   DeserializationError err = deserializeJson(doc, jsonSv);
   if (err) return;
+  if (doc.overflowed()) {
+    ble::notifyError("json_overflow", "ArduinoJson document overflow");
+    return;
+  }
 
     const char* cmd = doc["cmd"];
     if (!cmd) return;

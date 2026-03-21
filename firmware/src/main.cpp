@@ -1841,11 +1841,14 @@ void loop() {
     uint16_t mv = telemetry::readBatteryMv();
     if (mv > 0 && mv < LOW_BAT_MV && !telemetry::isCharging()) {
       s_lowBatCount++;
+      Serial.printf("[bat] LOW %umV  count=%u/%u\n", mv, s_lowBatCount, LOW_BAT_SHUTOFF_CNT);
       if (s_lowBatCount >= LOW_BAT_SHUTOFF_CNT) {
+        Serial.printf("[bat] SHUTDOWN — battery critically low\n");
         displayShowWarning(locale::getForDisplay("low_battery"), locale::getForDisplay("shutting_down"), 3000);
         powersave::deepSleep();
       }
     } else {
+      if (s_lowBatCount > 0) Serial.printf("[bat] OK %umV  reset count\n", mv);
       s_lowBatCount = 0;
     }
   }

@@ -1,6 +1,7 @@
 /**
  * RiftLink — телеметрия
- * Heltec V3 (OLED): GPIO7 = ADC1_CH6 для батареи (divider ~4.01)
+ * Heltec V3/V4 (OLED): GPIO1 = ADC1_CH0 для батареи, GPIO37 = ADC_CTRL (HIGH = вкл. делитель)
+ *   Делитель 390k+100k → коэффициент 4.9.  Meshtastic variant.h: BATTERY_PIN=1, ADC_CTRL=37
  * Heltec V3 Paper: GPIO7 = E-Ink BUSY. Батарея на GPIO19/20 (ADC2, divider ~50%).
  */
 
@@ -13,8 +14,9 @@
 #include <Arduino.h>
 #include <string.h>
 
-#define BAT_ADC_PIN     7   // GPIO7 (Heltec V3 OLED)
-#define BAT_DIVIDER     4.01f
+#define BAT_ADC_PIN      1      // GPIO1 (ADC1_CH0) — Heltec V3/V4 OLED
+#define BAT_ADC_CTRL     37     // GPIO37: HIGH = включить делитель батареи
+#define BAT_DIVIDER      4.9f   // резисторный делитель 390k / 100k
 
 #if defined(USE_EINK)
 #define PAPER_ADC_CTRL  19  // GPIO19: LOW = включить делитель батареи
@@ -28,7 +30,11 @@ namespace telemetry {
 void init() {
 #if defined(USE_EINK)
   pinMode(PAPER_ADC_CTRL, OUTPUT);
-  digitalWrite(PAPER_ADC_CTRL, LOW);  // включить цепь измерения батареи
+  digitalWrite(PAPER_ADC_CTRL, LOW);
+#else
+  pinMode(BAT_ADC_CTRL, OUTPUT);
+  digitalWrite(BAT_ADC_CTRL, HIGH);   // включить делитель батареи (active HIGH)
+  analogSetPinAttenuation(BAT_ADC_PIN, ADC_11db);
 #endif
   s_inited = true;
 }
@@ -52,17 +58,20 @@ uint16_t readBatteryMv() {
   uint32_t avg = sum / n;
   return (uint16_t)(avg * 2);  // делитель ~50%
 #else
+  digitalWrite(BAT_ADC_CTRL, HIGH);
+  delay(10);  // стабилизация делителя
+
   uint32_t sum = 0;
-  for (int i = 0; i < 4; i++) {
-    sum += analogRead(BAT_ADC_PIN);
+  for (int i = 0; i < 8; i++) {
+    sum += analogReadMilliVolts(BAT_ADC_PIN);
     delay(2);
   }
-  int raw = sum / 4;
-  if (raw < 10) return 0;  // Нет батареи или не подключено
+  uint32_t avgMv = sum / 8;
+  if (avgMv < 50) return 0;  // нет батареи
 
-  // 12-bit ADC, 3.3V ref, divider 4.01
-  float v = (float)raw / 4096.0f * 3.3f * BAT_DIVIDER;
-  return (uint16_t)(v * 1000.0f);
+  uint16_t batMv = (uint16_t)(avgMv * BAT_DIVIDER);
+  Serial.printf("[bat] GPIO%d raw_avg=%lumV bat=%umV\n", BAT_ADC_PIN, avgMv, batMv);
+  return batMv;
 #endif
 }
 

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../app_navigator.dart';
 import '../l10n/app_localizations.dart';
 import 'app_theme.dart';
 
@@ -32,7 +33,7 @@ Future<void> setThemeMode(ThemeMode mode) async {
 /// Выбор дневной / ночной темы (общий лист для экрана сканирования и настроек).
 void showThemeModeSheet(BuildContext context) {
   final l = context.l10n;
-  showModalBottomSheet<void>(
+  showAppModalBottomSheet<void>(
     context: context,
     backgroundColor: Colors.transparent,
     shape: const RoundedRectangleBorder(
