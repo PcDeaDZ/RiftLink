@@ -27,7 +27,8 @@ struct FusionEntry {
   bool inUse;
 };
 
-static FusionEntry s_fusion[2];  // 2 получателя макс
+#define FUSION_SLOTS 1
+static FusionEntry s_fusion[FUSION_SLOTS];
 static bool s_inited = false;
 static void (*s_onBatchSent)(const uint8_t* to, const uint32_t* msgIds, int count) = nullptr;
 static bool (*s_onSingleFlush)(const uint8_t* to, uint32_t msgId, const uint8_t* pkt, size_t pktLen, uint8_t txSf) = nullptr;
@@ -46,7 +47,7 @@ bool offer(const uint8_t* to, const uint8_t* plainBuf, size_t plainLen,
 
   uint32_t now = millis();
   int slot = -1;
-  for (int i = 0; i < 2; i++) {
+  for (int i = 0; i < FUSION_SLOTS; i++) {
     if (!s_fusion[i].inUse) {
       slot = i;
       break;
@@ -142,7 +143,7 @@ void setOnSingleFlush(bool (*cb)(const uint8_t* to, uint32_t msgId, const uint8_
 void flush() {
   if (!s_inited) return;
   uint32_t now = millis();
-  for (int i = 0; i < 2; i++) {
+  for (int i = 0; i < FUSION_SLOTS; i++) {
     if (!s_fusion[i].inUse) continue;
     FusionEntry* e = &s_fusion[i];
     if (e->count >= 2 || (now - e->firstAddTime) >= BATCH_WINDOW_MS) {

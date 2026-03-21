@@ -11,12 +11,8 @@
 
 namespace voice_frag {
 
-#if defined(USE_EINK)
-constexpr size_t MAX_VOICE_PLAIN = 10240;   // Paper: ~10 KB (~10 сек), экономия heap
-#else
-constexpr size_t MAX_VOICE_PLAIN = 30720;   // ~30 KB (30 сек Opus 8 kbps)
-#endif
-constexpr size_t MAX_FRAGMENTS = 160;       // 30KB / 194
+constexpr size_t MAX_VOICE_PLAIN = 15360;   // ~15 KB (~15 сек Opus/AAC ~1 KB/s)
+constexpr size_t MAX_FRAGMENTS = 85;        // ceil(16412 / 194)
 constexpr uint8_t VOICE_PROFILE_FAST = 1;
 constexpr uint8_t VOICE_PROFILE_BALANCED = 2;
 constexpr uint8_t VOICE_PROFILE_RESILIENT = 3;

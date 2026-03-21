@@ -13,11 +13,7 @@
 
 #define FRAG_HEADER_LEN 6
 #define FRAG_DATA_MAX (protocol::MAX_PAYLOAD - FRAG_HEADER_LEN)
-#if defined(USE_EINK)
-#define VOICE_REASSEMBLE_MAX 1   // Paper: 1 слот ~11 KB (экономия heap)
-#else
 #define VOICE_REASSEMBLE_MAX 2
-#endif
 #define VOICE_TIMEOUT_MS 60000
 
 struct VoiceMeshTxProfile {
@@ -183,9 +179,8 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
   if (slot->partsReceived < slot->partsTotal) return false;
 
   size_t encLen = (slot->partsTotal - 1) * FRAG_DATA_MAX + chunkLen;
-  uint8_t decBuf[MAX_VOICE_PLAIN + 1024];
   size_t decLen = 0;
-  if (!crypto::decryptFrom(slot->from, slot->storage, encLen, decBuf, &decLen)) {
+  if (!crypto::decryptFrom(slot->from, slot->storage, encLen, out, &decLen)) {
     slot->inUse = false;
     return false;
   }
@@ -194,7 +189,6 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
     slot->inUse = false;
     return false;
   }
-  memcpy(out, decBuf, decLen);
   *outLen = decLen;
   slot->inUse = false;
   Serial.printf("[RiftLink] VOICE_MSG received %u bytes from %02X%02X\n",

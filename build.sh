@@ -254,6 +254,7 @@ do_update() {
     fi
     (cd "$SCRIPT_DIR" && git fetch origin && git reset --hard "origin/$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)" && git clean -fd)
     local ret=$?
+    chmod +x "$SCRIPT_DIR/build.sh" "$SCRIPT_DIR/update.sh" "$SCRIPT_DIR/install.sh" 2>/dev/null || true
     if [[ $ret -eq 0 ]]; then
         echo ""
         echo -e "\033[32mГотово! Репозиторий обновлён.\033[0m"

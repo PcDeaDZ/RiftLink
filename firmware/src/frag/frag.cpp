@@ -12,7 +12,7 @@
 #include <esp_random.h>
 #include <string.h>
 
-#define FRAG_REASSEMBLE_MAX  4       // макс. собираемых сообщений одновременно
+#define FRAG_REASSEMBLE_MAX  2       // макс. собираемых сообщений одновременно
 #define FRAG_TIMEOUT_MS      60000  // таймаут неполного сообщения
 /** Раньше malloc(4096) на слот — теперь фиксированный пул в BSS. */
 #define FRAG_SLOT_BUF 4096
@@ -148,7 +148,7 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
   if (slot->partsReceived < slot->partsTotal) return false;
 
   size_t encLen = (slot->partsTotal - 1) * FRAG_DATA_MAX + chunkLen;
-  uint8_t decBuf[MAX_MSG_PLAIN + 512];
+  static uint8_t decBuf[MAX_MSG_PLAIN + 512];
   size_t decLen = 0;
   if (!crypto::decryptFrom(slot->from, slot->storage, encLen, decBuf, &decLen)) {
     slot->inUse = false;
@@ -157,7 +157,7 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
 
   uint8_t* plain = decBuf;
   size_t plainLen = decLen;
-  uint8_t decompBuf[MAX_MSG_PLAIN];
+  static uint8_t decompBuf[MAX_MSG_PLAIN];
   if (slot->compressed) {
     size_t d = compress::decompress(decBuf, decLen, decompBuf, sizeof(decompBuf));
     if (d > 0) {

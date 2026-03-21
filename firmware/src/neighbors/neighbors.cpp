@@ -4,6 +4,7 @@
 
 #include "neighbors.h"
 #include "node/node.h"
+#include "log.h"
 #include <Arduino.h>
 #include <string.h>
 #include <freertos/FreeRTOS.h>
@@ -16,10 +17,12 @@ static SemaphoreHandle_t s_mutex = nullptr;
 struct Entry {
   uint8_t id[protocol::NODE_ID_LEN];
   uint32_t lastSeenMs;
+  uint32_t lastDiagMs;
   int8_t lastRssi;  // dBm, 0 = unknown
   uint16_t batteryMv;
   uint16_t ackSent;
   uint16_t ackReceived;
+  bool online;
   bool used;
 };
 
@@ -88,7 +91,22 @@ bool onHello(const uint8_t* nodeId, int rssi) {
   memcpy(s_entries[idx].id, nodeId, protocol::NODE_ID_LEN);
   s_entries[idx].lastSeenMs = millis();
   s_entries[idx].lastRssi = (rssi >= -128 && rssi <= 0) ? (int8_t)rssi : 0;
+  bool wasOnline = s_entries[idx].online;
+  s_entries[idx].online = true;
   s_entries[idx].used = true;
+  if (wasNew) {
+    RIFTLINK_DIAG("NEIGH", "event=NEIGHBOR_ONLINE peer=%02X%02X rssi=%d",
+        nodeId[0], nodeId[1], rssi);
+    s_entries[idx].lastDiagMs = s_entries[idx].lastSeenMs;
+  } else if (!wasOnline) {
+    RIFTLINK_DIAG("NEIGH", "event=NEIGHBOR_BACK_ONLINE peer=%02X%02X rssi=%d",
+        nodeId[0], nodeId[1], rssi);
+    s_entries[idx].lastDiagMs = s_entries[idx].lastSeenMs;
+  } else if ((s_entries[idx].lastSeenMs - s_entries[idx].lastDiagMs) >= 15000) {
+    RIFTLINK_DIAG("NEIGH", "event=NEIGHBOR_REFRESH peer=%02X%02X rssi=%d age_ms=0",
+        nodeId[0], nodeId[1], rssi);
+    s_entries[idx].lastDiagMs = s_entries[idx].lastSeenMs;
+  }
   xSemaphoreGive(s_mutex);
   return wasNew;
 }
@@ -250,8 +268,15 @@ int getCount() {
   uint32_t now = millis();
   int n = 0;
   for (int i = 0; i < NEIGHBORS_MAX; i++) {
-    if (s_entries[i].used && (now - s_entries[i].lastSeenMs) < NEIGHBOR_TIMEOUT_MS) {
+    if (!s_entries[i].used) continue;
+    uint32_t age = now - s_entries[i].lastSeenMs;
+    if (age < NEIGHBOR_TIMEOUT_MS) {
       n++;
+      s_entries[i].online = true;
+    } else if (s_entries[i].online) {
+      s_entries[i].online = false;
+      RIFTLINK_DIAG("NEIGH", "event=NEIGHBOR_OFFLINE peer=%02X%02X age_ms=%lu timeout_ms=%lu",
+          s_entries[i].id[0], s_entries[i].id[1], (unsigned long)age, (unsigned long)NEIGHBOR_TIMEOUT_MS);
     }
   }
   xSemaphoreGive(s_mutex);

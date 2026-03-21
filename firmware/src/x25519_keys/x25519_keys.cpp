@@ -6,6 +6,7 @@
 #include "pkt_cache/pkt_cache.h"
 #include "node/node.h"
 #include "radio/radio.h"
+#include "async_tasks.h"
 #include "log.h"
 #include <sodium.h>
 #include <nvs_flash.h>
@@ -37,11 +38,14 @@ static bool s_inited = false;
 static SemaphoreHandle_t s_mutex = nullptr;
 
 // Троттлинг: не спамить KEY_EXCHANGE — иначе забивают канал, MSG не проходят
-#define KEY_EXCHANGE_THROTTLE_MS 60000   // мин. интервал инициатору (было 18с — flood)
+#define KEY_EXCHANGE_THROTTLE_MS 8000    // первичный обмен без ключа: быстрее retry, чтобы не застрять в deadlock
 #define KEY_RESPONSE_THROTTLE_MS 60000  // ответ когда ключ уже был — макс. раз в 60с (пир может повторить)
 #define KEY_DEBOUNCE_MS 1500             // мин. пауза между отправками одному пиру (HELLO+KEY_EXCHANGE подряд → 1 пакет)
+#define KEY_INITIAL_JITTER_MIN_MS 25
+#define KEY_INITIAL_JITTER_SPAN_MS 180
 struct ThrottleEntry { uint8_t peerId[protocol::NODE_ID_LEN]; uint32_t lastSend; };
 static ThrottleEntry s_throttle[4];
+static uint32_t s_lastKeyTxReadyMs = 0;
 
 /** Слот троттла по хэшу peerId — не round-robin: иначе 4 чужие TX затирают lastSend и дебаунс HELLO+KEY ломается */
 static int throttleSlotForPeer(const uint8_t* peerId) {
@@ -51,6 +55,21 @@ static int throttleSlotForPeer(const uint8_t* peerId) {
     h *= 16777619u;
   }
   return (int)(h % 4);
+}
+
+static const char* safeReason(const char* reason) {
+  return (reason && reason[0]) ? reason : "-";
+}
+
+static uint32_t computeInitialJitterMs(const uint8_t* peerId) {
+  if (!peerId) return 0;
+  const uint8_t* self = node::getId();
+  uint32_t h = 2166136261u;
+  for (int i = 0; i < protocol::NODE_ID_LEN; i++) {
+    h ^= (uint32_t)(peerId[i] ^ self[i]);
+    h *= 16777619u;
+  }
+  return KEY_INITIAL_JITTER_MIN_MS + (h % KEY_INITIAL_JITTER_SPAN_MS);
 }
 
 namespace x25519_keys {
@@ -120,21 +139,26 @@ static int findFreeSlot() {
 
 void onKeyExchange(const uint8_t* peerId, const uint8_t* theirPubKey) {
   if (!s_inited) {
+    RIFTLINK_DIAG("KEY", "event=KEY_STORE_FAIL cause=not_inited");
     RIFTLINK_LOG_ERR("[RiftLink] X25519 onKeyExchange skip: keys not inited\n");
     return;
   }
   if (!peerId || !theirPubKey) {
+    RIFTLINK_DIAG("KEY", "event=KEY_STORE_FAIL cause=null_input");
     RIFTLINK_LOG_ERR("[RiftLink] X25519 onKeyExchange skip: null peer/payload\n");
     return;
   }
   if (node::isForMe(peerId)) {
+    RIFTLINK_DIAG("KEY", "event=KEY_STORE_SKIP cause=self_echo");
     return;  // эхо своего KEY — без шума
   }
   if (node::isInvalidNodeId(peerId)) {
+    RIFTLINK_DIAG("KEY", "event=KEY_STORE_FAIL cause=invalid_node peer=%02X%02X", peerId[0], peerId[1]);
     RIFTLINK_LOG_ERR("[RiftLink] X25519 onKeyExchange skip: invalid node id\n");
     return;
   }
   if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
+    RIFTLINK_DIAG("KEY", "event=KEY_STORE_FAIL cause=mutex_timeout peer=%02X%02X", peerId[0], peerId[1]);
     RIFTLINK_LOG_ERR("[RiftLink] X25519 onKeyExchange: mutex timeout peer=%02X%02X\n",
         peerId[0], peerId[1]);
     return;
@@ -145,6 +169,8 @@ void onKeyExchange(const uint8_t* peerId, const uint8_t* theirPubKey) {
 
   if (crypto_box_beforenm(s_peers[idx].sharedKey, theirPubKey, s_secKey) != 0) {
     xSemaphoreGive(s_mutex);
+    RIFTLINK_DIAG("KEY", "event=KEY_STORE_FAIL cause=beforenm_failed peer=%02X%02X pub0=%02X pub1=%02X",
+        peerId[0], peerId[1], theirPubKey[0], theirPubKey[1]);
     // Частая причина «нет строки X25519 key»: мусор в 32 B после обрезанного KEY в эфире (см. NACK/retransmit)
     RIFTLINK_LOG_ERR("[RiftLink] X25519 crypto_box_beforenm FAILED peer=%02X%02X pub32=%02X%02X...\n",
         peerId[0], peerId[1], theirPubKey[0], theirPubKey[1]);
@@ -156,6 +182,8 @@ void onKeyExchange(const uint8_t* peerId, const uint8_t* theirPubKey) {
   s_peers[idx].timestamp = millis();
   s_peers[idx].used = true;
   xSemaphoreGive(s_mutex);
+  RIFTLINK_DIAG("KEY", "event=KEY_STORE_OK peer=%02X%02X slot=%d peers_max=%d",
+      peerId[0], peerId[1], idx, X25519_MAX_PEERS);
   RIFTLINK_LOG_EVENT("[RiftLink] X25519 key with %02X%02X\n", peerId[0], peerId[1]);
 }
 
@@ -191,12 +219,40 @@ bool getKeyFor(const uint8_t* peerId, uint8_t* keyOut) {
 }
 
 void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, const char* reason) {
-  if (!s_inited || !peerId || node::isForMe(peerId) || node::isBroadcast(peerId) || node::isInvalidNodeId(peerId)) return;
-  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
+  if (!s_inited) {
+    RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=not_inited");
+    return;
+  }
+  if (!peerId) {
+    RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=null_peer reason=%s", safeReason(reason));
+    return;
+  }
+  if (node::isForMe(peerId)) {
+    RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=self_peer reason=%s", safeReason(reason));
+    return;
+  }
+  if (node::isBroadcast(peerId)) {
+    RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=broadcast_peer reason=%s", safeReason(reason));
+    return;
+  }
+  if (node::isInvalidNodeId(peerId)) {
+    RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=invalid_peer peer=%02X%02X reason=%s",
+        peerId[0], peerId[1], safeReason(reason));
+    return;
+  }
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) {
+    RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=mutex_timeout peer=%02X%02X reason=%s",
+        peerId[0], peerId[1], safeReason(reason));
+    return;
+  }
+  RIFTLINK_DIAG("KEY", "event=KEY_TX_ATTEMPT peer=%02X%02X reason=%s force=%u had=%u",
+      peerId[0], peerId[1], safeReason(reason), (unsigned)forceSend, (unsigned)hadKeyBefore);
 
   // Ключ уже есть и это не ответ на их KEY_EXCHANGE — не захламлять радио
   if (findPeer(peerId) >= 0 && !forceSend) {
     xSemaphoreGive(s_mutex);
+    RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=already_has_key peer=%02X%02X reason=%s",
+        peerId[0], peerId[1], safeReason(reason));
     return;
   }
 
@@ -206,6 +262,8 @@ void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, c
     if (memcmp(s_throttle[i].peerId, peerId, protocol::NODE_ID_LEN) == 0 &&
         now - s_throttle[i].lastSend < KEY_DEBOUNCE_MS) {
       xSemaphoreGive(s_mutex);
+      RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=debounce peer=%02X%02X delta_ms=%lu reason=%s",
+          peerId[0], peerId[1], (unsigned long)(now - s_throttle[i].lastSend), safeReason(reason));
       return;
     }
   }
@@ -218,6 +276,9 @@ void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, c
       if (memcmp(s_throttle[i].peerId, peerId, protocol::NODE_ID_LEN) == 0) {
         if (now - s_throttle[i].lastSend < throttleMs) {
           xSemaphoreGive(s_mutex);
+          RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=throttle peer=%02X%02X delta_ms=%lu throttle_ms=%lu reason=%s",
+              peerId[0], peerId[1], (unsigned long)(now - s_throttle[i].lastSend),
+              (unsigned long)throttleMs, safeReason(reason));
           return;  // троттл — ключ уже был, не дрочить
         }
         break;
@@ -246,13 +307,36 @@ void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, c
   // Всегда текущий mesh SF (txSf=0) — без отдельного SF12 для KEY при фиксированном SF в настройках.
   if (len > 0) {
     pkt_cache::add(peerId, pktId, pkt, len);
-    char reason[40];
-    // priority: не теряться за ACK/очередью — иначе «Sending KEY_EXCHANGE» без фактического TX и залипания.
-    if (!radio::send(pkt, len, 0, true, reason, sizeof(reason))) {
-      RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE tx NOT queued (%s) to %02X%02X pktId=%u\n",
-          reason[0] ? reason : "?", peerId[0], peerId[1], (unsigned)pktId);
+    // Для первичного handshake (до готового ключа) разводим симметричные TX по времени:
+    // оба узла одновременно шлют KEY после HELLO и часто коллизят.
+    if (!forceSend && !hadKeyBefore) {
+      uint32_t jitterMs = computeInitialJitterMs(peerId);
+      queueDeferredSend(pkt, len, 0, jitterMs);
+      s_lastKeyTxReadyMs = millis();
+      RIFTLINK_DIAG("KEY", "event=KEY_TX_DEFER peer=%02X%02X pktId=%u len=%u delay_ms=%lu reason=%s",
+          peerId[0], peerId[1], (unsigned)pktId, (unsigned)len, (unsigned long)jitterMs, safeReason(reason));
+    } else {
+      char reasonBuf[40];
+      RIFTLINK_DIAG("KEY", "event=KEY_TX_READY peer=%02X%02X pktId=%u len=%u txSf=mesh priority=1",
+          peerId[0], peerId[1], (unsigned)pktId, (unsigned)len);
+      // priority: не теряться за ACK/очередью — иначе «Sending KEY_EXCHANGE» без фактического TX и залипания.
+      if (!radio::send(pkt, len, 0, true, reasonBuf, sizeof(reasonBuf))) {
+        RIFTLINK_DIAG("KEY", "event=KEY_TX_NOT_QUEUED peer=%02X%02X pktId=%u cause=%s",
+            peerId[0], peerId[1], (unsigned)pktId, reasonBuf[0] ? reasonBuf : "?");
+        RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE tx NOT queued (%s) to %02X%02X pktId=%u\n",
+            reasonBuf[0] ? reasonBuf : "?", peerId[0], peerId[1], (unsigned)pktId);
+      } else {
+        s_lastKeyTxReadyMs = millis();
+      }
     }
+  } else {
+    RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=build_packet_failed peer=%02X%02X reason=%s",
+        peerId[0], peerId[1], safeReason(reason));
   }
+}
+
+uint32_t getLastKeyTxReadyMs() {
+  return s_lastKeyTxReadyMs;
 }
 
 }  // namespace x25519_keys

@@ -30,7 +30,10 @@ bool hasKeyFor(const uint8_t* peerId);
 /** Получить ключ для peer (32 байта). Возвращает false если нет */
 bool getKeyFor(const uint8_t* peerId, uint8_t* keyOut);
 
-/** Отправить наш публичный ключ peer (TX всегда на текущем mesh SF из NVS). forceSend → ответ на KEY_EXCHANGE. hadKeyBefore → уже был ключ, не спамить ответ (троттл 60с). reason — метка в логе (hello, key_rx, retry, ble, …). */
+/** Отправить наш публичный ключ peer (TX всегда на текущем mesh SF из NVS). forceSend → ответ на KEY_EXCHANGE. hadKeyBefore → уже был ключ, не спамить ответ (длинный троттл). reason — метка в логе (hello, key_rx, retry, ble, …). */
 void sendKeyExchange(const uint8_t* peerId, bool forceSend = false, bool hadKeyBefore = false, const char* reason = nullptr);
+
+/** Последний момент, когда KEY_EXCHANGE был реально поставлен в TX (millis). */
+uint32_t getLastKeyTxReadyMs();
 
 }  // namespace x25519_keys

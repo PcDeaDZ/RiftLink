@@ -86,6 +86,7 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #define HELLO_MIN_AIR_GAP_MS 1800
 /** После drop (очередь/CAD) не долбить sendHello каждые ~10 ms */
 #define HELLO_DROP_RETRY_MS 350
+#define HELLO_QUIET_AFTER_KEY_MS 2500  // после KEY дать эфиру окно под ответный KEY
 static uint32_t s_lastHelloAirMs = 0;
 static uint32_t s_nextHelloAfterDropMs = 0;
 /** HELLO «сразу при первом соседе» — только из loop(), не из packetTask (TX только через очередь). */
@@ -116,6 +117,7 @@ static const uint8_t SF_DEFAULT = 7;
 static uint32_t s_loopCooldownUntil = 0;  // вместо delay(10) — throttle OTA и конец loop
 static uint8_t s_bootPhase = 0;           // 0=ожидание 4с, 1=готов
 static uint32_t s_bootPhaseStart = 0;
+static uint32_t s_lastDiagSnapshotMs = 0;
 static uint32_t s_lastBatCheckMs = 0;
 static uint8_t s_lowBatCount = 0;
 #define LOW_BAT_MV          3000
@@ -469,6 +471,13 @@ static bool helloTxReasonIsCadDefer(const char* sepReason) {
 /** @return true если пакет ушёл в radio (или в очередь TX), false если слишком рано после предыдущего HELLO */
 static bool sendHello() {
   uint32_t now = millis();
+  uint32_t lastKeyTxMs = x25519_keys::getLastKeyTxReadyMs();
+  if (lastKeyTxMs != 0 && (now - lastKeyTxMs) < HELLO_QUIET_AFTER_KEY_MS) {
+    s_nextHelloDueMs = lastKeyTxMs + HELLO_QUIET_AFTER_KEY_MS;
+    RIFTLINK_DIAG("HELLO", "event=HELLO_HOLD cause=recent_key quiet_ms=%lu",
+        (unsigned long)(s_nextHelloDueMs - now));
+    return false;
+  }
   // Дедлайн уже наступил, но ждём retry после drop — сдвинуть due, иначе loop долбит sendHello каждый тик без лога.
   if (now < s_nextHelloAfterDropMs) {
     s_nextHelloDueMs = s_nextHelloAfterDropMs;
@@ -515,9 +524,15 @@ static bool sendHello() {
   }
   if (helloSent) {
     const char* tag = viaCadDefer ? " (deferred/CAD)" : "";
+    RIFTLINK_DIAG("HELLO", "event=HELLO_TX ok=1 via=%s sf=%u neighbors=%d reason=%s heap=%u",
+        viaCadDefer ? "cad_defer" : "direct", (unsigned)getDiscoverySf(), n,
+        helloWhy[0] ? helloWhy : "-", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     Serial.printf("[RiftLink] HELLO sent%s n=%d heap=%u\n", tag,
         n, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   } else {
+    RIFTLINK_DIAG("HELLO", "event=HELLO_TX ok=0 sf=%u neighbors=%d cause=%s heap=%u",
+        (unsigned)getDiscoverySf(), n, helloWhy[0] ? helloWhy : "unknown",
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     Serial.printf("[RiftLink] HELLO drop why=%s n=%d heap=%u\n",
         helloWhy[0] ? helloWhy : "unknown",
         n, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -629,6 +644,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     } else if (len == 13 && buf[0] == protocol::SYNC_BYTE && (buf[1] & 0xF0) == 0x20 &&
                buf[2] == protocol::OP_KEY_EXCHANGE && !(buf[1] & 0x01)) {
       // Обрезанный KEY_EXCHANGE (коллизия/half-duplex) — извлечь from, добавить в соседи
+      RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSE_FAIL cause=truncated_v2_len13 len=%u rssi=%d sf=%u",
+          (unsigned)len, rssi, (unsigned)sf);
       RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE truncated len=13 (v2) — нет 32 B pubkey, onKeyExchange не вызывается\n");
       radio::notifyCongestion();  // коллизия → BEB увеличит CW
       uint8_t from[protocol::NODE_ID_LEN];
@@ -643,6 +660,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       if (buf[2] == protocol::OP_KEY_EXCHANGE &&
           len >= protocol::keyExchangeTotalLen(true, false)) {
         uint16_t pktId = (uint16_t)buf[3] | ((uint16_t)buf[4] << 8);
+        RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSE_FAIL cause=full_parse_failed len=%u pktId=%u rssi=%d sf=%u",
+            (unsigned)len, (unsigned)pktId, rssi, (unsigned)sf);
         RIFTLINK_LOG_ERR(
             "[RiftLink] KEY_EXCHANGE full len=%u pktId=%u parse FAILED — onKeyExchange не вызывается (битая рама/CRC?)\n",
             (unsigned)len, (unsigned)pktId);
@@ -654,6 +673,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       uint16_t pktId = (uint16_t)buf[3] | ((uint16_t)buf[4] << 8);
       if (buf[2] == protocol::OP_KEY_EXCHANGE &&
           len < protocol::keyExchangeTotalLen(true, false)) {
+        RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSE_FAIL cause=truncated_v21 len=%u pktId=%u rssi=%d sf=%u",
+            (unsigned)len, (unsigned)pktId, rssi, (unsigned)sf);
         RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE truncated len=%u pktId=%u — ждём NACK/retransmit; onKeyExchange не вызывается\n",
             (unsigned)len, (unsigned)pktId);
       }
@@ -667,7 +688,11 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           uint8_t nackPkt[protocol::PAYLOAD_OFFSET + 2];
           size_t nackLen = protocol::buildPacket(nackPkt, sizeof(nackPkt),
               node::getId(), from, 31, protocol::OP_NACK, nackPayload, 2);
-          if (nackLen > 0) radio::send(nackPkt, nackLen, neighbors::rssiToSf(neighbors::getRssiFor(from)), true);
+          if (nackLen > 0) {
+            bool nackOk = radio::send(nackPkt, nackLen, neighbors::rssiToSf(neighbors::getRssiFor(from)), true);
+            RIFTLINK_DIAG("KEY", "event=KEY_RX_NACK_SENT to=%02X%02X pktId=%u ok=%u",
+                from[0], from[1], (unsigned)pktId, (unsigned)nackOk);
+          }
         }
       }
       return;
@@ -700,6 +725,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         bool v21 = (buf[1] & 0xF0) == 0x30;
         size_t need = protocol::keyExchangeTotalLen(v21, (buf[1] & 0x01) != 0);
         if (len < need) {
+          RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSE_FAIL cause=incomplete len=%u need=%u rssi=%d sf=%u",
+              (unsigned)len, (unsigned)need, rssi, (unsigned)sf);
           RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE incomplete len=%u (need %u) — parse/отбрасывание; onKeyExchange не вызывается\n",
               (unsigned)len, (unsigned)need);
         }
@@ -857,17 +884,23 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     } else if (hdr.opcode == protocol::OP_ROUTE_REPLY) {
       routing::onRouteReply(hdr.from, hdr.to, payload, payloadLen);
     } else if (hdr.opcode == protocol::OP_KEY_EXCHANGE && payloadLen >= 32) {
+      RIFTLINK_DIAG("KEY", "event=KEY_RX_RAW from=%02X%02X len=%u rssi=%d sf=%u pktId=%u",
+          hdr.from[0], hdr.from[1], (unsigned)payloadLen, rssi, (unsigned)sf, (unsigned)hdr.pktId);
       if (neighbors::onHello(hdr.from, rssi)) {
         queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info
         RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
       }
       if (x25519_keys::isPeerPubKeyMismatch(hdr.from, payload)) {
+        RIFTLINK_DIAG("KEY", "event=KEY_STORE_FAIL cause=pubkey_mismatch peer=%02X%02X pktId=%u",
+            hdr.from[0], hdr.from[1], (unsigned)hdr.pktId);
         RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE mismatch for %02X%02X — possible key substitution\n",
             hdr.from[0], hdr.from[1]);
         ble::notifyError("invite_peer_key_mismatch", "Peer public key mismatch");
         return;
       }
       bool hadKey = x25519_keys::hasKeyFor(hdr.from);
+      RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSED_OK from=%02X%02X payload=%u pktId=%u hadKey=%u",
+          hdr.from[0], hdr.from[1], (unsigned)payloadLen, (unsigned)hdr.pktId, (unsigned)hadKey);
       RIFTLINK_LOG_EVENT("[RiftLink] KEY_EXCHANGE rx parsed payload=%u from %02X%02X (→ onKeyExchange)\n",
           (unsigned)payloadLen, hdr.from[0], hdr.from[1]);
       x25519_keys::onKeyExchange(hdr.from, payload);
@@ -879,6 +912,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           x25519_keys::sendKeyExchange(hdr.from, true, true, "key_rx");
         }
       }
+    } else if (hdr.opcode == protocol::OP_KEY_EXCHANGE) {
+      RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSE_FAIL cause=payload_lt_32 from=%02X%02X payload=%u pktId=%u",
+          hdr.from[0], hdr.from[1], (unsigned)payloadLen, (unsigned)hdr.pktId);
     } else if (hdr.opcode == protocol::OP_HELLO) {
       beacon_sync::onBeaconReceived(hdr.from);
       offline_queue::onNodeOnline(hdr.from);
@@ -898,6 +934,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 
   switch (hdr.opcode) {
     case protocol::OP_KEY_EXCHANGE:
+      RIFTLINK_DIAG("KEY", "event=KEY_RX_RAW from=%02X%02X len=%u rssi=%d sf=%u pktId=%u",
+          hdr.from[0], hdr.from[1], (unsigned)payloadLen, rssi, (unsigned)sf, (unsigned)hdr.pktId);
       if (payloadLen >= 32) {
         if (neighbors::onHello(hdr.from, rssi)) {
           ble::requestNeighborsNotify();
@@ -905,12 +943,16 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
         }
         if (x25519_keys::isPeerPubKeyMismatch(hdr.from, payload)) {
+          RIFTLINK_DIAG("KEY", "event=KEY_STORE_FAIL cause=pubkey_mismatch peer=%02X%02X pktId=%u",
+              hdr.from[0], hdr.from[1], (unsigned)hdr.pktId);
           RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE mismatch for %02X%02X — possible key substitution\n",
               hdr.from[0], hdr.from[1]);
           ble::notifyError("invite_peer_key_mismatch", "Peer public key mismatch");
           break;
         }
         bool hadKey = x25519_keys::hasKeyFor(hdr.from);
+        RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSED_OK from=%02X%02X payload=%u pktId=%u hadKey=%u",
+            hdr.from[0], hdr.from[1], (unsigned)payloadLen, (unsigned)hdr.pktId, (unsigned)hadKey);
         RIFTLINK_LOG_EVENT("[RiftLink] KEY_EXCHANGE rx parsed payload=%u from %02X%02X (→ onKeyExchange)\n",
             (unsigned)payloadLen, hdr.from[0], hdr.from[1]);
         x25519_keys::onKeyExchange(hdr.from, payload);
@@ -923,6 +965,10 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           }
         }
       }
+      else {
+        RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSE_FAIL cause=payload_lt_32 from=%02X%02X payload=%u pktId=%u",
+            hdr.from[0], hdr.from[1], (unsigned)payloadLen, (unsigned)hdr.pktId);
+      }
       break;
 
     case protocol::OP_SF_BEACON:
@@ -930,6 +976,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       break;
 
     case protocol::OP_HELLO:
+      RIFTLINK_DIAG("HELLO", "event=HELLO_RX from=%02X%02X rssi=%d sf=%u heap=%u",
+          hdr.from[0], hdr.from[1], rssi, (unsigned)sf, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       Serial.printf("[RiftLink] HELLO rx from %02X%02X rssi=%d heap=%u\n",
           hdr.from[0], hdr.from[1], rssi, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       clock_drift::onHelloReceived(hdr.from);
@@ -1367,7 +1415,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       break;
 
     case protocol::OP_VOICE_MSG:
-      if (payloadLen >= 6 && node::isForMe(hdr.to)) {
+      if (payloadLen >= 6 && node::isForMe(hdr.to) && ble::isConnected()) {
         size_t outLen = 0;
         if (voice_frag::onFragment(hdr.from, hdr.to, payload, payloadLen,
                                   s_voiceOutBuf, sizeof(s_voiceOutBuf), &outLen)) {
@@ -1570,7 +1618,9 @@ void loop() {
   }
   if (nNeigh != s_helloPlannerLastN) {
     s_helloPlannerLastN = nNeigh;
-    s_nextHelloDueMs = millis();
+    if (s_nextHelloDueMs == 0) {
+      s_nextHelloDueMs = millis();
+    }
   }
 
   // Отложенный discovery HELLO (см. OP_HELLO в handlePacket) — постановка в radioSchedulerTask.
@@ -1813,14 +1863,25 @@ void loop() {
   #define KEY_RETRY_JITTER_MS 15000
   #define KEY_RETRY_EXTRA_JITTER_MS 3000
   static uint32_t s_keyRetryCooldownUntil = 0;  // без блокировки loop
+  if (millis() - s_lastDiagSnapshotMs >= 60000) {
+    s_lastDiagSnapshotMs = millis();
+    RIFTLINK_DIAG("STATE", "event=MODEM_SNAPSHOT region=%s freq_mhz=%.1f sf=%u bw=%.1f cr=%u neighbors=%d ps_enabled=%u ps_can=%u",
+        region::getCode(), region::getFreq(), (unsigned)radio::getSpreadingFactor(),
+        radio::getBandwidth(), (unsigned)radio::getCodingRate(), neighbors::getCount(),
+        (unsigned)powersave::isEnabled(), (unsigned)powersave::canSleep());
+  }
   if (millis() >= s_lastKeyRetry && millis() >= s_keyRetryCooldownUntil) {
     uint32_t phase = (node::getId()[0] % 16) * 500;  // 0–8 с смещение по ID
     uint32_t extraJitter = esp_random() % KEY_RETRY_EXTRA_JITTER_MS;
     s_lastKeyRetry = millis() + KEY_RETRY_BASE_MS + (esp_random() % KEY_RETRY_JITTER_MS) + phase + extraJitter;
     int n = neighbors::getCount();
+    RIFTLINK_DIAG("KEY", "event=KEY_RETRY_TICK neighbors=%d next_retry_in_ms=%lu cooldown_until=%lu",
+        n, (unsigned long)(s_lastKeyRetry - millis()), (unsigned long)s_keyRetryCooldownUntil);
     for (int i = 0; i < n; i++) {
       uint8_t peerId[protocol::NODE_ID_LEN];
       if (neighbors::getId(i, peerId) && !x25519_keys::hasKeyFor(peerId)) {
+        RIFTLINK_DIAG("KEY", "event=KEY_RETRY_TARGET peer=%02X%02X idx=%d",
+            peerId[0], peerId[1], i);
         x25519_keys::sendKeyExchange(peerId, false, false, "retry");
         s_keyRetryCooldownUntil = millis() + 800 + (esp_random() % 400);  // 0.8–1.2 с, без delay()
         break;

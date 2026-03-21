@@ -51,7 +51,6 @@ static StoredMsg s_msgs[OFFLINE_MAX_MSGS];
 static bool s_inited = false;
 static volatile bool s_dirty = false;  // отложенное сохранение в NVS — не блокировать handlePacket
 static SemaphoreHandle_t s_mutex = nullptr;
-static StoredMsgNvs s_nvsBuf[OFFLINE_MAX_MSGS];  // статика — saveToNvs/loadFromNvs вызываются из handlePacket (stack overflow)
 static uint32_t s_seqCounter = 0;
 
 #define NVS_SAVE_INTERVAL_MS 2000
@@ -59,50 +58,45 @@ static uint32_t s_seqCounter = 0;
 #define OFFLINE_EXPIRY_NORMAL_MS (6UL * 60UL * 60UL * 1000UL)
 #define OFFLINE_EXPIRY_COURIER_MS (24UL * 60UL * 60UL * 1000UL)
 
-/** Копирование под mutex (быстро). Вызывать с захваченным mutex. */
-static void copyToNvsBuffer() {
-  for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
-    s_nvsBuf[i].inUse = s_msgs[i].inUse ? 1 : 0;
-    memcpy(s_nvsBuf[i].to, s_msgs[i].to, protocol::NODE_ID_LEN);
-    s_nvsBuf[i].payloadLen = (uint16_t)s_msgs[i].payloadLen;
-    s_nvsBuf[i].opcode = s_msgs[i].opcode;
-    s_nvsBuf[i].flags = s_msgs[i].flags;
-    memcpy(s_nvsBuf[i].payload, s_msgs[i].payload, OFFLINE_MAX_LEN);
-  }
-}
-
-/** Запись в NVS (без mutex — пишем s_nvsBuf). */
-static void writeNvsBuffer() {
-  nvs_handle_t h;
-  esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
-  if (err != ESP_OK) {
-    Serial.printf("[RiftLink] NVS save failed: %s (0x%x)\n", esp_err_to_name(err), err);
-    return;
-  }
-  err = nvs_set_blob(h, NVS_KEY_OFFLINE, s_nvsBuf, sizeof(s_nvsBuf));
-  if (err != ESP_OK) {
-    Serial.printf("[RiftLink] NVS set_blob failed: %s\n", esp_err_to_name(err));
-  } else if (nvs_commit(h) != ESP_OK) {
-    Serial.println("[RiftLink] NVS commit failed");
-  }
-  nvs_close(h);
-}
-
+/** Snapshot s_msgs → локальный nvsBuf под mutex, затем запись в NVS без mutex.
+ *  nvsBuf живёт на стеке nvsTask (NVS_TASK_STACK учитывает его размер). */
 static void nvsTask(void* arg) {
-  vTaskDelay(pdMS_TO_TICKS(2000));  // дать init завершиться
+  vTaskDelay(pdMS_TO_TICKS(2000));
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(NVS_SAVE_INTERVAL_MS));
     if (!s_dirty || !s_mutex) continue;
     bool doWrite = false;
+    StoredMsgNvs nvsBuf[OFFLINE_MAX_MSGS];
     if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
       if (s_dirty) {
-        copyToNvsBuffer();
+        for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
+          nvsBuf[i].inUse = s_msgs[i].inUse ? 1 : 0;
+          memcpy(nvsBuf[i].to, s_msgs[i].to, protocol::NODE_ID_LEN);
+          nvsBuf[i].payloadLen = (uint16_t)s_msgs[i].payloadLen;
+          nvsBuf[i].opcode = s_msgs[i].opcode;
+          nvsBuf[i].flags = s_msgs[i].flags;
+          memcpy(nvsBuf[i].payload, s_msgs[i].payload, OFFLINE_MAX_LEN);
+        }
         s_dirty = false;
         doWrite = true;
       }
       xSemaphoreGive(s_mutex);
     }
-    if (doWrite) writeNvsBuffer();
+    if (doWrite) {
+      nvs_handle_t h;
+      esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+      if (err != ESP_OK) {
+        Serial.printf("[RiftLink] NVS save failed: %s (0x%x)\n", esp_err_to_name(err), err);
+        continue;
+      }
+      err = nvs_set_blob(h, NVS_KEY_OFFLINE, nvsBuf, sizeof(nvsBuf));
+      if (err != ESP_OK) {
+        Serial.printf("[RiftLink] NVS set_blob failed: %s\n", esp_err_to_name(err));
+      } else if (nvs_commit(h) != ESP_OK) {
+        Serial.println("[RiftLink] NVS commit failed");
+      }
+      nvs_close(h);
+    }
   }
 }
 
@@ -114,19 +108,20 @@ static void loadFromNvs() {
       Serial.printf("[RiftLink] NVS load failed: %s (0x%x)\n", esp_err_to_name(err), err);
     return;
   }
-  size_t len = sizeof(s_nvsBuf);
-  if (nvs_get_blob(h, NVS_KEY_OFFLINE, s_nvsBuf, &len) != ESP_OK) {
+  StoredMsgNvs nvsBuf[OFFLINE_MAX_MSGS];
+  size_t len = sizeof(nvsBuf);
+  if (nvs_get_blob(h, NVS_KEY_OFFLINE, nvsBuf, &len) != ESP_OK) {
     nvs_close(h);
     return;
   }
   nvs_close(h);
   for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
-    s_msgs[i].inUse = (s_nvsBuf[i].inUse != 0);
-    memcpy(s_msgs[i].to, s_nvsBuf[i].to, protocol::NODE_ID_LEN);
-    s_msgs[i].payloadLen = s_nvsBuf[i].payloadLen;
-    s_msgs[i].opcode = s_nvsBuf[i].opcode;
-    s_msgs[i].flags = s_nvsBuf[i].flags;
-    memcpy(s_msgs[i].payload, s_nvsBuf[i].payload, OFFLINE_MAX_LEN);
+    s_msgs[i].inUse = (nvsBuf[i].inUse != 0);
+    memcpy(s_msgs[i].to, nvsBuf[i].to, protocol::NODE_ID_LEN);
+    s_msgs[i].payloadLen = nvsBuf[i].payloadLen;
+    s_msgs[i].opcode = nvsBuf[i].opcode;
+    s_msgs[i].flags = nvsBuf[i].flags;
+    memcpy(s_msgs[i].payload, nvsBuf[i].payload, OFFLINE_MAX_LEN);
     s_msgs[i].queuedAtMs = millis();
     s_msgs[i].seq = ++s_seqCounter;
   }
@@ -134,7 +129,7 @@ static void loadFromNvs() {
 
 namespace offline_queue {
 
-#define NVS_TASK_STACK 2048
+#define NVS_TASK_STACK 5632  // StoredMsgNvs[16] = 4688 B на стеке + ~900 B overhead (NVS API + FreeRTOS)
 #define NVS_TASK_PRIO 1
 
 void init() {

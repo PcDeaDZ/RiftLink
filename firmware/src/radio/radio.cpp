@@ -7,6 +7,7 @@
 #include "radio.h"
 #include "region/region.h"
 #include "duty_cycle/duty_cycle.h"
+#include "log.h"
 #include "async_queues.h"
 #include "async_tasks.h"
 #include <RadioLib.h>
@@ -258,6 +259,8 @@ void setAsyncMode(bool on) { s_asyncMode = on; }
 bool sendDirectInternal(const uint8_t* data, size_t len, char* reasonBuf, size_t reasonLen) {
   if (!lora || len > RADIOLIB_SX126X_MAX_PACKET_LENGTH) {
     radioSendReason(reasonBuf, reasonLen, !lora ? "no_lora" : "pkt_too_long");
+    RIFTLINK_DIAG("RADIO", "event=TX_RESULT ok=0 cause=%s len=%u",
+        !lora ? "no_lora" : "pkt_too_long", (unsigned)len);
     return false;
   }
 
@@ -273,6 +276,8 @@ bool sendDirectInternal(const uint8_t* data, size_t len, char* reasonBuf, size_t
   if (!duty_cycle::canSend(toa)) {
     Serial.println("[RiftLink] Duty cycle limit (EU 1%) — TX skipped, попробуйте позже");
     radioSendReason(reasonBuf, reasonLen, "duty_cycle");
+    RIFTLINK_DIAG("RADIO", "event=TX_RESULT ok=0 cause=duty_cycle len=%u toa_us=%lu sf=%u",
+        (unsigned)len, (unsigned long)toa, (unsigned)getSpreadingFactor());
     return false;
   }
 
@@ -281,6 +286,8 @@ bool sendDirectInternal(const uint8_t* data, size_t len, char* reasonBuf, size_t
   for (int attempt = 0; attempt < CAD_MAX_RETRIES; attempt++) {
     int16_t cad = lora->scanChannel();
     if (cad == RADIOLIB_CHANNEL_FREE) break;
+    RIFTLINK_DIAG("RADIO", "event=CAD_BUSY attempt=%d sf=%u len=%u",
+        attempt + 1, (unsigned)getSpreadingFactor(), (unsigned)len);
     if (attempt < CAD_MAX_RETRIES - 1) {
       // BEB: CW = min(CW_MIN * 2^s_cadBusyCount, CW_MAX)
       uint8_t c = s_cadBusyCount.load(std::memory_order_relaxed);
@@ -294,11 +301,15 @@ bool sendDirectInternal(const uint8_t* data, size_t len, char* reasonBuf, size_t
       if (backoff > 0) {
         queueDeferredSend(data, len, getSpreadingFactor(), backoff);
         radioSendReason(reasonBuf, reasonLen, "cad_defer");
+        RIFTLINK_DIAG("RADIO", "event=CAD_DEFER backoff_ms=%lu cw=%lu sf=%u len=%u",
+            (unsigned long)backoff, (unsigned long)cw, (unsigned)getSpreadingFactor(), (unsigned)len);
         return false;
       }
     }
   }
 
+  RIFTLINK_DIAG("RADIO", "event=CAD_FREE_TX sf=%u len=%u toa_us=%lu",
+      (unsigned)getSpreadingFactor(), (unsigned)len, (unsigned long)toa);
   int16_t st = lora->transmit(const_cast<uint8_t*>(data), len);
   if (st != RADIOLIB_ERR_NONE) {
     // -705 = SPI_CMD_TIMEOUT — радио могло зависнуть после RX, пробуем standby и повторить
@@ -312,11 +323,16 @@ bool sendDirectInternal(const uint8_t* data, size_t len, char* reasonBuf, size_t
       if (reasonBuf && reasonLen > 0) {
         snprintf(reasonBuf, reasonLen, "tx_err_%d", (int)st);
       }
+      RIFTLINK_DIAG("RADIO", "event=TX_RESULT ok=0 cause=tx_err_%d sf=%u len=%u",
+          (int)st, (unsigned)getSpreadingFactor(), (unsigned)len);
       return false;
     }
   }
   duty_cycle::recordSend(toa);
   s_cadBusyCount.store(0, std::memory_order_relaxed);  // успешная TX — сброс BEB
+  uint8_t op = (len > 2 && data[0] == protocol::SYNC_BYTE) ? data[2] : 0xFF;
+  RIFTLINK_DIAG("RADIO", "event=TX_RESULT ok=1 sf=%u len=%u op=0x%02X toa_us=%lu",
+      (unsigned)getSpreadingFactor(), (unsigned)len, (unsigned)op, (unsigned long)toa);
   return true;
 }
 

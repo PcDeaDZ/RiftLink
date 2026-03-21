@@ -78,7 +78,7 @@ class VoiceService {
   }
 
   /// Остановить запись и вернуть bytes (обрезает до maxBytes).
-  static Future<List<int>?> stopRecord({int maxBytes = 30720}) async {
+  static Future<List<int>?> stopRecord({int maxBytes = 15360}) async {
     try {
       await _recorder.stopRecorder();
       final path = _recordPath;
@@ -143,7 +143,7 @@ class VoiceService {
           if (!done.isCompleted) done.complete();
         },
       );
-      await done.future.timeout(const Duration(seconds: 30));
+      await done.future.timeout(const Duration(seconds: 20));
       return true;
     } catch (_) {
       return false;

@@ -79,7 +79,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   _VoiceAdaptivePlan _voicePlan = const _VoiceAdaptivePlan(
     profileCode: 2,
     bitRate: 32000,
-    maxBytes: 20480,
+    maxBytes: 15360,
     chunkSize: 240,
   );
   DateTime? _voiceRecordStartTime;
@@ -904,12 +904,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         ? -100.0
         : rssiValues.reduce((a, b) => a + b) / rssiValues.length;
     if ((_sf ?? 12) >= 11 || _neighbors.length <= 1 || avgRssi <= -95.0) {
-      return const _VoiceAdaptivePlan(profileCode: 3, bitRate: 16000, maxBytes: 12288, chunkSize: 180);
+      return const _VoiceAdaptivePlan(profileCode: 3, bitRate: 16000, maxBytes: 15360, chunkSize: 180);
     }
     if ((_sf ?? 12) >= 10 || avgRssi <= -82.0) {
-      return const _VoiceAdaptivePlan(profileCode: 2, bitRate: 32000, maxBytes: 20480, chunkSize: 240);
+      return const _VoiceAdaptivePlan(profileCode: 2, bitRate: 32000, maxBytes: 15360, chunkSize: 240);
     }
-    return const _VoiceAdaptivePlan(profileCode: 1, bitRate: 64000, maxBytes: 30720, chunkSize: 300);
+    return const _VoiceAdaptivePlan(profileCode: 1, bitRate: 64000, maxBytes: 15360, chunkSize: 300);
   }
 
   String _voiceProfileLabel(int code) {
@@ -1472,6 +1472,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             if (!mounted || !_voiceRecording) return;
             tickCount++;
             if (tickCount % 3 == 0) setState(() {});
+            if (elapsed.inSeconds >= 15) {
+              _toggleVoiceRecord();
+            }
           })..start();
         } else {
           _showSnack(context.l10n.tr('voice_mic_error'));

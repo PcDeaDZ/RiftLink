@@ -34,6 +34,9 @@ git reset --hard "origin/$BRANCH"
 echo "Удаление неотслеживаемых файлов..."
 git clean -fd
 
+echo "Восстановление прав на скрипты..."
+chmod +x "$0" build.sh install.sh 2>/dev/null || true
+
 echo ""
 echo "========================================"
 echo "  Готово! Репозиторий обновлён."

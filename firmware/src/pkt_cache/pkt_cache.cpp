@@ -9,9 +9,9 @@
 #include "async_queues.h"
 #include <string.h>
 
-#define CACHE_SIZE 8
-#define OVERHEAR_SIZE 4
-#define BATCH_CACHE_SIZE 2
+#define CACHE_SIZE 4
+#define OVERHEAR_SIZE 2
+#define BATCH_CACHE_SIZE 1
 
 struct CachedPkt {
   uint8_t to[protocol::NODE_ID_LEN];
