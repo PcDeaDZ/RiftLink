@@ -44,12 +44,21 @@
 
 ### 1.3 Payload
 
-Следует после заголовка. Для MSG — зашифрованный текст (ChaCha20-Poly1305). Для broadcast — без шифрования (опционально).
+Следует после заголовка. Для MSG/LOCATION/TELEMETRY/GROUP_MSG/SOS используется ChaCha20-Poly1305 (encrypted payload).  
+Для `GROUP_MSG`: `public` группы шифруются channel key, `private` группы — отдельным `groupKey` (32B) на каждый `groupId`.
 
 ### 1.4 Node ID и никнейм
 
 - **Node ID:** 8 байт, генерируется при первом запуске, хранится в NVS. Broadcast = все 0xFF.
 - **Никнейм:** до 16 символов, опционально, хранится в NVS. Отображается в приложении вместо/вместе с ID.
+
+### 1.5 Channel / Lane
+
+- `channel=0` — normal lane (`CHANNEL_DEFAULT`)
+- `channel=1` — critical lane (`CHANNEL_CRITICAL`)
+
+Critical lane используется для SOS/приоритетных сообщений и обрабатывается отдельной политикой ретрансляции.
+Для SOS используется адаптивный TTL (по плотности соседей) и лимит relay как глобально, так и per-source.
 
 ---
 
@@ -74,6 +83,9 @@
 | 0x0F | POLL | RIT: broadcast «присылайте пакеты для меня» (payload пустой) |
 | 0x10 | MSG_BATCH | Packet Fusion: count(1) + [len(2)+enc]* — несколько MSG в одном пакете |
 | 0x11 | XOR_RELAY | Network Coding: XOR(A,B) broadcast, meta: pktIdA/B, fromA/B, toA/B |
+| 0x12 | SF_BEACON | Broadcast beacon с текущим mesh SF |
+| 0x13 | ACK_BATCH | Батч ACK: count(1) + msgId(4)* |
+| 0x14 | SOS | Критический emergency flood (encrypted broadcast) |
 | 0xFE | PONG | Ответ на PING |
 | 0xFF | PING | Проверка связи (получатель отвечает PONG) |
 
@@ -83,7 +95,10 @@
 
 - **Алгоритм:** ChaCha20-Poly1305 (libsodium)
 - **Unicast (E2E):** X25519 per-peer. KEY_EXCHANGE (32 байта pub_key) при HELLO. Shared secret = crypto_box_beforenm.
-- **Broadcast:** общий ключ 32 байта в NVS (fallback для unicast до обмена ключами)
+- **Broadcast:** общий ключ 32 байта в NVS.
+- **Важно:** unicast `encryptFor()` требует pairwise-ключ; fallback на channel key для DM не используется.
+- При принятом invite публичный ключ пира считается pinned; при последующем `KEY_EXCHANGE` с другим pubKey устройство отправляет `evt:error` (`code:"invite"`).
+- При принятом invite публичный ключ пира считается pinned; при последующем `KEY_EXCHANGE` с другим pubKey устройство отправляет `evt:error` (`code:"invite_peer_key_mismatch"`).
 - **Nonce:** 12 байт (случайный на пакет)
 - **Overhead:** 28 байт (nonce + tag)
 
@@ -136,8 +151,15 @@
 
 | cmd | Параметры | Описание |
 |-----|-----------|----------|
-| send | text, to? | Отправить сообщение (to = hex8 для unicast) |
-| location | lat, lon, alt | Отправить геолокацию (broadcast) |
+| send | text, to?, lane?, trigger?, triggerAtMs? | Отправить сообщение (normal/critical, Time Capsule trigger) |
+| sos | text? | Emergency flood |
+| location | lat, lon, alt, radiusM?, expiryEpochSec? | Геолокация (в т.ч. geofence) |
+
+GeoFence baseline hardening (приёмник):
+- валидный диапазон координат (`lat/lon`);
+- ограничение `radiusM <= 50000`;
+- фильтрация явно некорректного `expiryEpochSec`;
+- anti-spoof по нереалистичному скачку позиции относительно предыдущего пакета от того же узла.
 | ota | — | Запустить OTA (WiFi AP) |
 | region | region | Установить регион (EU, RU, US, AU) |
 | routes | — | Запросить маршруты (evt "routes") |
@@ -148,10 +170,12 @@
 |-----|------|----------|
 | info | id, nickname?, region, freq, power, channel?, neighbors?, version? | При подключении |
 | neighbors | neighbors | Обновление списка соседей (при новом HELLO) |
-| routes | routes | Маршруты: [{dest, nextHop, hops, rssi}] для mesh-визуализации |
-| msg | from, text | Входящее сообщение |
+| routes | routes | Маршруты: [{dest, nextHop, hops, rssi, trustScore}] |
+| msg | from, text, lane?, type? | Входящее сообщение (normal/critical, text/sos/...) |
 | location | from, lat, lon, alt | Геолокация от узла |
 | telemetry | from, battery, heapKb | Телеметрия |
+| relayProof | relayedBy, from, to, pktId, opcode | Proof-of-Relay Lite (sampling) |
+| timeCapsuleQueued | to, trigger, triggerAtMs? | Подтверждение постановки в отложенную отправку |
 | ota | ip, ssid, password | OTA запущен |
 | region | region, freq, power | Регион изменён |
 
@@ -174,6 +198,9 @@ AODV-подобный поиск маршрута:
 - **Кодек:** Opus 8 kbps на телефоне.
 - **Лимит:** ~30 KB (30 сек).
 - **BLE:** cmd "voice" — чанки base64; evt "voice" — чанки на приём.
+- **Mesh-adaptive профиль (baseline):** `fast / balanced / resilient` (приложение выбирает по RSSI/SF/числу соседей, прошивка адаптирует SF/channel/пейсинг фрагментов).
+- **RX/playback strategy (app baseline+):** при неполной сборке допускается salvage непрерывного префикса (chunk 0..N без дыр) с явной маркировкой packet-loss; при воспроизведении рекомендуется fallback попытка по альтернативному codec-path (Opus/AAC).
+- **Acceptance baseline (app debug):** quality verdict `PASS/WARN/FAIL/WARMUP` по метрикам `avgLoss/hardLoss/minSessions`; пороги задаются в Settings и фиксируются в debug snapshot.
 
 ---
 

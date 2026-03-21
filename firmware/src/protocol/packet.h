@@ -30,6 +30,7 @@ constexpr uint8_t OP_MSG_BATCH = 0x10;  // Packet Fusion: count(1) + [len(2)+enc
 constexpr uint8_t OP_XOR_RELAY = 0x11;  // Network Coding: XOR(A,B) broadcast, meta: pktIdA/B, fromA/B, toA/B
 constexpr uint8_t OP_SF_BEACON = 0x12;  // broadcast: payload 1B = mesh SF (7,9,10,12) — новый узел узнаёт, на каком SF искать
 constexpr uint8_t OP_ACK_BATCH = 0x13;  // unicast: count(1) + msgId(4)* — батч ACK для MSG_BATCH (pipelining)
+constexpr uint8_t OP_SOS = 0x14;        // broadcast emergency flood: msgId(4) + text (encrypted)
 constexpr uint8_t OP_PONG = 0xFE;
 constexpr uint8_t OP_PING = 0xFF;
 
@@ -46,6 +47,7 @@ constexpr size_t HEADER_LEN_PKTID = 1 + 1 + 1 + PKTID_LEN + NODE_ID_LEN * 2 + 1 
 constexpr size_t SYNC_LEN = 1;
 constexpr size_t PAYLOAD_OFFSET = SYNC_LEN + HEADER_LEN;  // смещение payload в пакете с sync
 constexpr uint8_t CHANNEL_DEFAULT = 0;  // Публичный канал
+constexpr uint8_t CHANNEL_CRITICAL = 1;  // Критический lane (SOS/команды)
 constexpr size_t MAC_LEN = 16;
 constexpr size_t MAX_PAYLOAD = 200;
 

@@ -158,7 +158,7 @@ bool encryptFor(const uint8_t* peerId, const uint8_t* plain, size_t len, uint8_t
   if (peerId && x25519_keys::getKeyFor(peerId, peerKey)) {
     return encryptWithKey(peerKey, plain, len, out, outLen);
   }
-  return encrypt(plain, len, out, outLen);
+  return false;
 }
 
 bool decryptFrom(const uint8_t* senderId, const uint8_t* cipher, size_t len, uint8_t* out, size_t* outLen) {
@@ -169,6 +169,16 @@ bool decryptFrom(const uint8_t* senderId, const uint8_t* cipher, size_t len, uin
     if (decryptWithKey(peerKey, cipher, len, out, outLen)) return true;
   }
   return decrypt(cipher, len, out, outLen);
+}
+
+bool encryptWithGroupKey(const uint8_t* key32, const uint8_t* plain, size_t len, uint8_t* out, size_t* outLen) {
+  if (!s_inited || !key32 || !outLen) return false;
+  return encryptWithKey(key32, plain, len, out, outLen);
+}
+
+bool decryptWithGroupKey(const uint8_t* key32, const uint8_t* cipher, size_t len, uint8_t* out, size_t* outLen) {
+  if (!s_inited || !key32 || !outLen) return false;
+  return decryptWithKey(key32, cipher, len, out, outLen);
 }
 
 bool setChannelKey(const uint8_t* key) {

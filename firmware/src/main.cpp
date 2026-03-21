@@ -153,11 +153,24 @@ static UcDedupEntry s_ucDedup[UC_DEDUP_SIZE];
 #define RELAY_DEDUP_SIZE 24
 #define RELAY_RATE_MAX 3
 #define RELAY_RATE_WINDOW_MS 1000
+#define SOS_RELAY_RATE_MAX 5
+#define SOS_RELAY_RATE_WINDOW_MS 2000
+#define SOS_RELAY_PER_SRC_MAX 2
+#define SOS_RELAY_PER_SRC_WINDOW_MS 2500
 struct RelayDedupEntry { uint8_t from[protocol::NODE_ID_LEN]; uint32_t payloadHash; };
 static RelayDedupEntry s_relayDedup[RELAY_DEDUP_SIZE];
 static uint8_t s_relayDedupIdx = 0;
 static uint32_t s_relayRateWindowStart = 0;
 static uint8_t s_relayRateCount = 0;
+static uint32_t s_sosRelayRateWindowStart = 0;
+static uint8_t s_sosRelayRateCount = 0;
+struct SosRelaySrcQuota {
+  uint8_t from[protocol::NODE_ID_LEN];
+  uint32_t windowStartMs;
+  uint8_t count;
+  bool used;
+};
+static SosRelaySrcQuota s_sosSrcQuota[8];
 
 static uint32_t relayPayloadHash(const uint8_t* p, size_t n) {
   uint32_t h = 5381;
@@ -185,7 +198,127 @@ static bool relayRateLimitExceeded() {
   return s_relayRateCount >= RELAY_RATE_MAX;
 }
 static void relayRateRecord() { s_relayRateCount++; }
+static bool relaySosRateLimitExceeded() {
+  uint32_t now = millis();
+  if (now - s_sosRelayRateWindowStart >= SOS_RELAY_RATE_WINDOW_MS) {
+    s_sosRelayRateWindowStart = now;
+    s_sosRelayRateCount = 0;
+  }
+  return s_sosRelayRateCount >= SOS_RELAY_RATE_MAX;
+}
+static void relaySosRateRecord() { s_sosRelayRateCount++; }
+static int findSosSrcQuota(const uint8_t* from) {
+  for (int i = 0; i < 8; i++) {
+    if (s_sosSrcQuota[i].used &&
+        memcmp(s_sosSrcQuota[i].from, from, protocol::NODE_ID_LEN) == 0) return i;
+  }
+  return -1;
+}
+static int findFreeSosSrcQuota() {
+  uint32_t now = millis();
+  for (int i = 0; i < 8; i++) {
+    if (!s_sosSrcQuota[i].used) return i;
+    if (now - s_sosSrcQuota[i].windowStartMs >= SOS_RELAY_PER_SRC_WINDOW_MS) return i;
+  }
+  int oldest = 0;
+  uint32_t oldestTs = s_sosSrcQuota[0].windowStartMs;
+  for (int i = 1; i < 8; i++) {
+    if (s_sosSrcQuota[i].windowStartMs < oldestTs) {
+      oldestTs = s_sosSrcQuota[i].windowStartMs;
+      oldest = i;
+    }
+  }
+  return oldest;
+}
+static bool relaySosPerSourceLimitExceeded(const uint8_t* from) {
+  uint32_t now = millis();
+  int idx = findSosSrcQuota(from);
+  if (idx < 0) {
+    idx = findFreeSosSrcQuota();
+    memcpy(s_sosSrcQuota[idx].from, from, protocol::NODE_ID_LEN);
+    s_sosSrcQuota[idx].windowStartMs = now;
+    s_sosSrcQuota[idx].count = 0;
+    s_sosSrcQuota[idx].used = true;
+  }
+  if (now - s_sosSrcQuota[idx].windowStartMs >= SOS_RELAY_PER_SRC_WINDOW_MS) {
+    s_sosSrcQuota[idx].windowStartMs = now;
+    s_sosSrcQuota[idx].count = 0;
+  }
+  return s_sosSrcQuota[idx].count >= SOS_RELAY_PER_SRC_MAX;
+}
+static void relaySosPerSourceRecord(const uint8_t* from) {
+  int idx = findSosSrcQuota(from);
+  if (idx < 0) {
+    idx = findFreeSosSrcQuota();
+    memcpy(s_sosSrcQuota[idx].from, from, protocol::NODE_ID_LEN);
+    s_sosSrcQuota[idx].windowStartMs = millis();
+    s_sosSrcQuota[idx].count = 0;
+    s_sosSrcQuota[idx].used = true;
+  }
+  s_sosSrcQuota[idx].count++;
+}
 static uint8_t s_ucDedupIdx = 0;
+
+// GeoFence anti-spoof baseline: sanity check координат и нереалистичных скачков позиции.
+#define LOCATION_TRUST_SLOTS 12
+#define LOCATION_MAX_SPEED_MPS 90.0f
+#define LOCATION_BASE_JITTER_M 250.0f
+#define GEOFENCE_RADIUS_MAX_M 50000
+struct LocationTrustEntry {
+  uint8_t from[protocol::NODE_ID_LEN];
+  float lat;
+  float lon;
+  uint32_t lastSeenMs;
+  bool used;
+};
+static LocationTrustEntry s_locationTrust[LOCATION_TRUST_SLOTS];
+
+static int findLocationTrust(const uint8_t* from) {
+  for (int i = 0; i < LOCATION_TRUST_SLOTS; i++) {
+    if (s_locationTrust[i].used &&
+        memcmp(s_locationTrust[i].from, from, protocol::NODE_ID_LEN) == 0) return i;
+  }
+  return -1;
+}
+
+static int findLocationTrustSlot() {
+  for (int i = 0; i < LOCATION_TRUST_SLOTS; i++) {
+    if (!s_locationTrust[i].used) return i;
+  }
+  int oldest = 0;
+  uint32_t oldestMs = s_locationTrust[0].lastSeenMs;
+  for (int i = 1; i < LOCATION_TRUST_SLOTS; i++) {
+    if (s_locationTrust[i].lastSeenMs < oldestMs) {
+      oldestMs = s_locationTrust[i].lastSeenMs;
+      oldest = i;
+    }
+  }
+  return oldest;
+}
+
+static bool isLocationSpoofLike(const uint8_t* from, float lat, float lon, uint32_t nowMs) {
+  if (!from) return true;
+  if (lat < -90.0f || lat > 90.0f || lon < -180.0f || lon > 180.0f) return true;
+  int idx = findLocationTrust(from);
+  if (idx < 0) return false;
+  uint32_t dtMs = nowMs - s_locationTrust[idx].lastSeenMs;
+  if (dtMs == 0) return false;
+  float dLat = (lat - s_locationTrust[idx].lat) * 111000.0f;
+  float dLon = (lon - s_locationTrust[idx].lon) * 111000.0f;
+  float dist2 = dLat * dLat + dLon * dLon;
+  float maxDist = LOCATION_BASE_JITTER_M + LOCATION_MAX_SPEED_MPS * ((float)dtMs / 1000.0f);
+  return dist2 > (maxDist * maxDist);
+}
+
+static void rememberLocationTrust(const uint8_t* from, float lat, float lon, uint32_t nowMs) {
+  int idx = findLocationTrust(from);
+  if (idx < 0) idx = findLocationTrustSlot();
+  memcpy(s_locationTrust[idx].from, from, protocol::NODE_ID_LEN);
+  s_locationTrust[idx].lat = lat;
+  s_locationTrust[idx].lon = lon;
+  s_locationTrust[idx].lastSeenMs = nowMs;
+  s_locationTrust[idx].used = true;
+}
 
 static bool ucDedupSeen(const uint8_t* from, uint32_t msgId) {
   for (int i = 0; i < UC_DEDUP_SIZE; i++) {
@@ -416,29 +549,36 @@ void sendPoll() {
   radio::send(pkt, len, txSf, false);
 }
 
-void sendMsg(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
+void sendMsg(const uint8_t* to, const char* text, uint8_t ttlMinutes = 0,
+    bool critical = false, uint8_t triggerType = msg_queue::TRIGGER_NONE,
+    uint32_t triggerValueMs = 0, bool isSos = false) {
   if (text == nullptr || strlen(text) == 0) {
     ble::notifyError("send_empty", "Пустое сообщение не отправляется");
     return;
   }
-  if (!msg_queue::enqueue(to, text, ttlMinutes)) {
+  bool ok = isSos ? msg_queue::enqueueSos(text)
+                  : msg_queue::enqueue(to, text, ttlMinutes, critical,
+                      (msg_queue::TriggerType)triggerType, triggerValueMs);
+  if (!ok) {
     ble::notifyError("send_failed", "Очередь полна или нет ключа шифрования");
   }
   // broadcast "sent" с msgId — через setOnBroadcastSent (сопоставление с delivery)
 }
 
-void sendLocation(float lat, float lon, int16_t alt) {
-  // Payload: lat (int32, 1e-7°), lon (int32), alt (int16) = 10 bytes
+void sendLocation(float lat, float lon, int16_t alt, uint16_t radiusM = 0, uint32_t expiryEpochSec = 0) {
+  // Payload: lat (int32), lon (int32), alt (int16), radiusM (u16), expiryEpochSec (u32)
   int32_t lat7 = (int32_t)(lat * 1e7f);
   int32_t lon7 = (int32_t)(lon * 1e7f);
-  uint8_t plain[10];
+  uint8_t plain[16];
   memcpy(plain, &lat7, 4);
   memcpy(plain + 4, &lon7, 4);
   memcpy(plain + 8, &alt, 2);
+  memcpy(plain + 10, &radiusM, 2);
+  memcpy(plain + 12, &expiryEpochSec, 4);
 
   uint8_t encBuf[protocol::MAX_PAYLOAD + crypto::OVERHEAD];
   size_t encLen = sizeof(encBuf);
-  if (!crypto::encrypt(plain, 10, encBuf, &encLen)) {
+  if (!crypto::encrypt(plain, sizeof(plain), encBuf, &encLen)) {
     RIFTLINK_LOG_ERR("[RiftLink] Location encrypt FAILED\n");
     ble::notifyError("location_encrypt", "Шифрование локации не удалось");
     return;
@@ -611,7 +751,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       (hdr.opcode != protocol::OP_ROUTE_REPLY) && (hdr.opcode != protocol::OP_HELLO) &&
       (hdr.opcode != protocol::OP_SF_BEACON) && (hdr.opcode != protocol::OP_NACK) && (
       (!node::isForMe(hdr.to) && !node::isBroadcast(hdr.to)) ||
-      ((hdr.opcode == protocol::OP_GROUP_MSG || hdr.opcode == protocol::OP_VOICE_MSG) &&
+      ((hdr.opcode == protocol::OP_GROUP_MSG || hdr.opcode == protocol::OP_VOICE_MSG || hdr.opcode == protocol::OP_SOS) &&
        neighbors::getCount() >= 2));
   uint32_t relayPayloadHashVal = 0;
   if (needRelay) {
@@ -620,13 +760,23 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       needRelay = false;
       relayHeard(hdr.from, relayPayloadHashVal);
     }
-    if (needRelay && relayRateLimitExceeded()) needRelay = false;
+    if (needRelay) {
+      if (hdr.opcode == protocol::OP_SOS) {
+        if (relaySosRateLimitExceeded() || relaySosPerSourceLimitExceeded(hdr.from)) needRelay = false;
+      } else if (relayRateLimitExceeded()) {
+        needRelay = false;
+      }
+    }
   }
   if (needRelay) {
     relayDedupAdd(hdr.from, relayPayloadHashVal);
-    relayRateRecord();
+    if (hdr.opcode == protocol::OP_SOS) {
+      relaySosRateRecord();
+      relaySosPerSourceRecord(hdr.from);
+    } else relayRateRecord();
     if (hdr.opcode == protocol::OP_MSG && hdr.pktId != 0 && !node::isBroadcast(hdr.to)) {
       pkt_cache::addOverheard(hdr.from, hdr.to, hdr.pktId, buf, len);
+      offline_queue::enqueueCourier(buf, len);  // SCF courier для разорванных сегментов
     }
 
     uint8_t txSf = 0;
@@ -644,6 +794,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     int rssiClamp = (rssi < -120) ? -120 : (rssi > -40 ? -40 : rssi);
     int32_t d = 10 * (rssiClamp + 100);
     uint32_t delayMs = (d <= 0) ? 0 : ((d > 500) ? 500 : (uint32_t)d);
+    if (hdr.opcode == protocol::OP_SOS) {
+      delayMs += 60 + (uint32_t)(esp_random() % 90);  // anti-storm backoff
+    }
 
     bool xorSent = false;
     if (network_coding::addForXor(buf, len, hdr.from, hdr.to)) {
@@ -686,6 +839,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       }
       if (ttlOff < len) fwdBuf[ttlOff]--;
       queueDeferredRelay(fwdBuf, len, txSf, delayMs, hdr.from, relayPayloadHashVal);
+      if ((esp_random() % 100) < 35) {  // Proof-of-Relay Lite sampling
+        ble::notifyRelayProof(node::getId(), hdr.from, hdr.to, hdr.pktId, hdr.opcode);
+      }
     }
   }
 
@@ -704,6 +860,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       if (neighbors::onHello(hdr.from, rssi)) {
         queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info
         RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
+      }
+      if (x25519_keys::isPeerPubKeyMismatch(hdr.from, payload)) {
+        RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE mismatch for %02X%02X — possible key substitution\n",
+            hdr.from[0], hdr.from[1]);
+        ble::notifyError("invite_peer_key_mismatch", "Peer public key mismatch");
+        return;
       }
       bool hadKey = x25519_keys::hasKeyFor(hdr.from);
       RIFTLINK_LOG_EVENT("[RiftLink] KEY_EXCHANGE rx parsed payload=%u from %02X%02X (→ onKeyExchange)\n",
@@ -741,6 +903,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           ble::requestNeighborsNotify();
           queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info
           RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
+        }
+        if (x25519_keys::isPeerPubKeyMismatch(hdr.from, payload)) {
+          RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE mismatch for %02X%02X — possible key substitution\n",
+              hdr.from[0], hdr.from[1]);
+          ble::notifyError("invite_peer_key_mismatch", "Peer public key mismatch");
+          break;
         }
         bool hadKey = x25519_keys::hasKeyFor(hdr.from);
         RIFTLINK_LOG_EVENT("[RiftLink] KEY_EXCHANGE rx parsed payload=%u from %02X%02X (→ onKeyExchange)\n",
@@ -850,7 +1018,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
                 strncpy(msgStrBuf, "(пустое)", sizeof(msgStrBuf) - 1);
                 msgStrBuf[sizeof(msgStrBuf) - 1] = '\0';
               }
-              ble::requestMsgNotify(hdr.from, msgStrBuf, msgId, rssi, ttlMinutes);
+              ble::requestMsgNotify(hdr.from, msgStrBuf, msgId, rssi, ttlMinutes,
+                  (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal", "text");
               char fromHex[17];
               snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
               queueDisplayLastMsg(fromHex, msgStrBuf);
@@ -865,7 +1034,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
               strncpy(msgStrBuf, "(пустое)", sizeof(msgStrBuf) - 1);
               msgStrBuf[sizeof(msgStrBuf) - 1] = '\0';
             }
-            ble::requestMsgNotify(hdr.from, msgStrBuf, 0, rssi);
+            ble::requestMsgNotify(hdr.from, msgStrBuf, 0, rssi, 0,
+                (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal", "text");
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
             queueDisplayLastMsg(fromHex, msgStrBuf);
@@ -904,7 +1074,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
                 ucDedupAdd(hdr.from, msgId);
                 memcpy(msgStrBuf, decBuf + msgOff, msgLen);
                 msgStrBuf[msgLen] = '\0';
-                ble::requestMsgNotify(hdr.from, msgStrBuf, msgId, rssi, decBuf[0]);
+                ble::requestMsgNotify(hdr.from, msgStrBuf, msgId, rssi, decBuf[0],
+                    (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal", "text");
                 char fromHex[17];
                 snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
                 queueDisplayLastMsg(fromHex, msgStrBuf);
@@ -972,7 +1143,18 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       break;
 
     case protocol::OP_TELEMETRY:
-      // Системная инфо (батарея, heap) — не отправляем в приложение, не для чатов
+      if (payloadLen > 0 && protocol::isEncrypted(hdr)) {
+        uint8_t tbuf[64];
+        size_t tlen = 0;
+        if (crypto::decrypt(payload, payloadLen, tbuf, &tlen) && tlen >= 4) {
+          uint16_t batteryMv = 0;
+          uint16_t heapKb = 0;
+          memcpy(&batteryMv, tbuf, 2);
+          memcpy(&heapKb, tbuf + 2, 2);
+          neighbors::updateBattery(hdr.from, batteryMv);
+          ble::notifyTelemetry(hdr.from, batteryMv, heapKb, rssi);
+        }
+      }
       break;
 
     case protocol::OP_LOCATION:
@@ -987,7 +1169,63 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           memcpy(&alt, decBuf + 8, 2);
           float lat = float(lat7) / 1e7f;
           float lon = float(lon7) / 1e7f;
-          ble::notifyLocation(hdr.from, lat, lon, alt, rssi);
+          uint32_t nowMs = millis();
+          if (isLocationSpoofLike(hdr.from, lat, lon, nowMs)) {
+            RIFTLINK_LOG_ERR("[RiftLink] LOCATION dropped (anti-spoof) from %02X%02X lat=%.5f lon=%.5f\n",
+                hdr.from[0], hdr.from[1], lat, lon);
+            break;
+          }
+          bool inGeo = true;
+          if (decLen >= 16) {
+            uint16_t radiusM = 0;
+            uint32_t expiryEpochSec = 0;
+            memcpy(&radiusM, decBuf + 10, 2);
+            memcpy(&expiryEpochSec, decBuf + 12, 4);
+            if (radiusM > GEOFENCE_RADIUS_MAX_M) {
+              RIFTLINK_LOG_ERR("[RiftLink] LOCATION dropped (radius too large=%u) from %02X%02X\n",
+                  (unsigned)radiusM, hdr.from[0], hdr.from[1]);
+              break;
+            }
+            if (expiryEpochSec > 0 && expiryEpochSec < 1700000000UL) {
+              RIFTLINK_LOG_ERR("[RiftLink] LOCATION dropped (bad expiry=%u) from %02X%02X\n",
+                  (unsigned)expiryEpochSec, hdr.from[0], hdr.from[1]);
+              break;
+            }
+            if (expiryEpochSec > 0) {
+              uint32_t nowEpoch = 0;
+              if (gps::getEpochSec(&nowEpoch)) {
+                if (nowEpoch > expiryEpochSec) inGeo = false;
+              } else {
+                inGeo = true;  // без epoch-времени не отбрасываем пакет
+              }
+            }
+            if (inGeo && radiusM > 0 && gps::hasFix()) {
+              float dLat = (gps::getLat() - lat) * 111000.0f;
+              float dLon = (gps::getLon() - lon) * 111000.0f;
+              float dist2 = dLat * dLat + dLon * dLon;
+              inGeo = dist2 <= (float)radiusM * (float)radiusM;
+            }
+          }
+          if (inGeo) {
+            rememberLocationTrust(hdr.from, lat, lon, nowMs);
+            ble::notifyLocation(hdr.from, lat, lon, alt, rssi);
+          }
+        }
+      }
+      break;
+
+    case protocol::OP_SOS:
+      if (payloadLen > 0 && protocol::isEncrypted(hdr)) {
+        size_t decLen = 0;
+        if (crypto::decrypt(payload, payloadLen, decBuf, &decLen) && decLen >= msg_queue::MSG_ID_LEN) {
+          uint32_t msgId = 0;
+          memcpy(&msgId, decBuf, msg_queue::MSG_ID_LEN);
+          size_t msgLen = decLen - msg_queue::MSG_ID_LEN;
+          if (msgLen > 0 && msgLen < sizeof(msgStrBuf)) {
+            memcpy(msgStrBuf, decBuf + msg_queue::MSG_ID_LEN, msgLen);
+            msgStrBuf[msgLen] = '\0';
+            ble::requestMsgNotify(hdr.from, msgStrBuf, msgId, rssi, 0, "critical", "sos");
+          }
         }
       }
       break;
@@ -1036,13 +1274,39 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       if (payloadLen > 0 && protocol::isEncrypted(hdr)) {
         if (node::isForMe(hdr.from)) break;  // своё сообщение (relay echo) — пропуск
         size_t decLen = 0;
-        if (!crypto::decrypt(payload, payloadLen, decBuf, &decLen) || decLen < GROUP_ID_LEN) break;
-        if (protocol::isCompressed(hdr)) {
+        bool decrypted = crypto::decrypt(payload, payloadLen, decBuf, &decLen);
+        if (!decrypted) {
+          // Private groups: пробуем ключи подписанных групп по очереди.
+          for (int gi = 0; gi < groups::getCount(); gi++) {
+            if (!groups::isPrivateAt(gi)) continue;
+            uint8_t gk[32];
+            const uint32_t gid = groups::getId(gi);
+            if (gid == 0 || !groups::getGroupKey(gid, gk)) continue;
+            size_t tryLen = 0;
+            if (!crypto::decryptWithGroupKey(gk, payload, payloadLen, tmpBuf, &tryLen) || tryLen < GROUP_ID_LEN) continue;
+            size_t plainLen = tryLen;
+            uint8_t* plainPtr = tmpBuf;
+            if (protocol::isCompressed(hdr)) {
+              size_t d = compress::decompress(tmpBuf, tryLen, decBuf, sizeof(decBuf));
+              if (d == 0 || d < GROUP_ID_LEN) continue;
+              plainPtr = decBuf;
+              plainLen = d;
+            }
+            uint32_t testGroupId = 0;
+            memcpy(&testGroupId, plainPtr, GROUP_ID_LEN);
+            if (testGroupId != gid) continue;
+            memcpy(decBuf, plainPtr, plainLen);
+            decLen = plainLen;
+            decrypted = true;
+            break;
+          }
+        } else if (protocol::isCompressed(hdr)) {
           size_t d = compress::decompress(decBuf, decLen, tmpBuf, sizeof(tmpBuf));
           if (d == 0 || d < GROUP_ID_LEN) break;
           memcpy(decBuf, tmpBuf, d);
           decLen = d;
         }
+        if (!decrypted || decLen < GROUP_ID_LEN) break;
         uint32_t groupId;
         memcpy(&groupId, decBuf, GROUP_ID_LEN);
         // GROUP_ALL — служебный id широковещательных сообщений; не хранится в списке подписок
@@ -1075,7 +1339,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         if (msgLen < 256) {
           memcpy(msgStrBuf, msg, msgLen);
           msgStrBuf[msgLen] = '\0';
-          ble::requestMsgNotify(hdr.from, msgStrBuf, 0, rssi);
+          ble::requestMsgNotify(hdr.from, msgStrBuf, 0, rssi, 0,
+              (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal", "text");
           char fromHex[17];
           snprintf(fromHex, sizeof(fromHex), "grp%u %02X%02X", (unsigned)groupId, hdr.from[0], hdr.from[1]);
           queueDisplayLastMsg(fromHex, msgStrBuf);
@@ -1091,7 +1356,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           if (outLen > 0 && outLen < sizeof(s_fragOutBuf)) {
             s_fragOutBuf[outLen] = '\0';
             const char* msgStr = (const char*)s_fragOutBuf;
-            ble::requestMsgNotify(hdr.from, msgStr, 0, rssi);
+            ble::requestMsgNotify(hdr.from, msgStr, 0, rssi, 0,
+                (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal", "text");
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X", hdr.from[0], hdr.from[1], hdr.from[2], hdr.from[3]);
             queueDisplayLastMsg(fromHex, msgStr);
@@ -1247,6 +1513,9 @@ static void runBootStateMachine() {
   });
   msg_queue::setOnBroadcastSent([](uint32_t msgId) { ble::notifySent(protocol::BROADCAST_ID, msgId); });
   msg_queue::setOnBroadcastDelivery([](uint32_t msgId, int d, int t) { ble::notifyBroadcastDelivery(msgId, d, t); });
+  msg_queue::setOnTimeCapsuleReleased([](const uint8_t* to, uint32_t msgId, uint8_t triggerType) {
+    ble::notifyTimeCapsuleReleased(to, msgId, triggerType);
+  });
   frag::init();
   Serial.printf("[RiftLink] Heap after frag::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   telemetry::init();

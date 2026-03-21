@@ -6,6 +6,8 @@ import 'package:flutter_sound/flutter_sound.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+enum VoiceMeshProfile { fast, balanced, resilient }
+
 class VoiceService {
   static final _recorder = FlutterSoundRecorder();
   static final _player = FlutterSoundPlayer();
@@ -41,7 +43,7 @@ class VoiceService {
   }
 
   /// Начать запись. Вызвать stopRecord() для завершения.
-  static Future<bool> startRecord() async {
+  static Future<bool> startRecord({int bitRate = 64000}) async {
     if (!await requestPermission()) return false;
     if (!await _initRecorder()) return false;
 
@@ -54,7 +56,7 @@ class VoiceService {
         codec: _recordCodec,
         sampleRate: 16000,
         numChannels: 1,
-        bitRate: 64000,
+        bitRate: bitRate,
       );
       return true;
     } catch (e) {
@@ -75,8 +77,8 @@ class VoiceService {
     } catch (_) {}
   }
 
-  /// Остановить запись и вернуть bytes (макс. 30 KB)
-  static Future<List<int>?> stopRecord() async {
+  /// Остановить запись и вернуть bytes (обрезает до maxBytes).
+  static Future<List<int>?> stopRecord({int maxBytes = 30720}) async {
     try {
       await _recorder.stopRecorder();
       final path = _recordPath;
@@ -86,7 +88,7 @@ class VoiceService {
         if (await file.exists()) {
           var bytes = await file.readAsBytes();
           await file.delete();
-          if (bytes.length > 30720) bytes = bytes.sublist(0, 30720);
+          if (bytes.length > maxBytes) bytes = bytes.sublist(0, maxBytes);
           return bytes;
         }
       }
@@ -112,20 +114,42 @@ class VoiceService {
   /// Воспроизвести голос (автоопределение AAC/Opus по заголовку)
   static Future<void> play(List<int> bytes) async {
     if (!await _initPlayer()) return;
+    if (_player.isPlaying) {
+      try {
+        await _player.stopPlayer();
+      } catch (_) {}
+    }
+    final detected = _detectCodec(bytes);
+    final fallback = detected == Codec.opusOGG ? Codec.aacADTS : Codec.opusOGG;
+    final tried = <Codec>[detected, fallback];
+    for (final codec in tried) {
+      final ok = await _playWithCodec(bytes, codec);
+      if (ok) return;
+    }
+  }
 
-    final codec = _detectCodec(bytes);
+  static Future<bool> _playWithCodec(List<int> bytes, Codec codec) async {
     final ext = codec == Codec.opusOGG ? 'ogg' : 'aac';
     final dir = await getTemporaryDirectory();
     final path = '${dir.path}/riftlink_play_${DateTime.now().millisecondsSinceEpoch}.$ext';
     final file = File(path);
     await file.writeAsBytes(bytes);
-
     try {
       final done = Completer<void>();
-      await _player.startPlayer(fromURI: path, codec: codec, whenFinished: () => done.complete());
-      await done.future;
-    } catch (_) {}
-    if (await file.exists()) await file.delete();
+      await _player.startPlayer(
+        fromURI: path,
+        codec: codec,
+        whenFinished: () {
+          if (!done.isCompleted) done.complete();
+        },
+      );
+      await done.future.timeout(const Duration(seconds: 30));
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      if (await file.exists()) await file.delete();
+    }
   }
 
   static Future<void> stopPlay() async {

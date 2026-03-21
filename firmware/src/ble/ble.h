@@ -15,10 +15,13 @@ bool init();
 void deinit();
 void update();  // вызов из loop()
 
-void setOnSend(void (*cb)(const uint8_t* to, const char* text, uint8_t ttlMinutes));
-void setOnLocation(void (*cb)(float lat, float lon, int16_t alt));
-void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId = 0, int rssi = 0, uint8_t ttlMinutes = 0);
-void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId = 0, int rssi = 0, uint8_t ttlMinutes = 0);  // отложить — снизить стек в handlePacket
+void setOnSend(void (*cb)(const uint8_t* to, const char* text, uint8_t ttlMinutes,
+    bool critical, uint8_t triggerType, uint32_t triggerValueMs, bool isSos));
+void setOnLocation(void (*cb)(float lat, float lon, int16_t alt, uint16_t radiusM, uint32_t expiryEpochSec));
+void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId = 0, int rssi = 0, uint8_t ttlMinutes = 0,
+    const char* lane = "normal", const char* type = "text");
+void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId = 0, int rssi = 0, uint8_t ttlMinutes = 0,
+    const char* lane = "normal", const char* type = "text");  // отложить — снизить стек в handlePacket
 void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi = 0);
 void notifyRead(const uint8_t* from, uint32_t msgId, int rssi = 0);
 /** evt "sent" — unicast поставлен в очередь (to, msgId) */
@@ -29,6 +32,8 @@ void notifyUndelivered(const uint8_t* to, uint32_t msgId);
 void notifyBroadcastDelivery(uint32_t msgId, int delivered, int total);
 void notifyLocation(const uint8_t* from, float lat, float lon, int16_t alt, int rssi = 0);
 void notifyTelemetry(const uint8_t* from, uint16_t batteryMv, uint16_t heapKb, int rssi = 0);
+void notifyRelayProof(const uint8_t* relayedBy, const uint8_t* from, const uint8_t* to, uint16_t pktId, uint8_t opcode);
+void notifyTimeCapsuleReleased(const uint8_t* to, uint32_t msgId, uint8_t triggerType);
 void notifyInfo();
 /** evt "invite" — id + pubKey (base64) для QR приглашения */
 void notifyInvite();

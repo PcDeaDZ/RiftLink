@@ -23,14 +23,14 @@ void init();
 /** Получить next_hop для dest. Возвращает true если маршрут есть */
 bool getNextHop(const uint8_t* dest, uint8_t* nextHopOut);
 
-/** Получить маршрут: nextHop, hops, rssi (dBm). Возвращает true если маршрут есть */
-bool getRoute(const uint8_t* dest, uint8_t* nextHopOut, uint8_t* hopsOut, int8_t* rssiOut);
+/** Получить маршрут: nextHop, hops, rssi (dBm), trustScore (0..100, опц.). */
+bool getRoute(const uint8_t* dest, uint8_t* nextHopOut, uint8_t* hopsOut, int8_t* rssiOut, int* trustScoreOut = nullptr);
 
 /** Число активных маршрутов */
 int getRouteCount();
 
-/** Записать маршрут i (0..getRouteCount()-1): dest, nextHop, hops, rssi. Возвращает false если i неверный */
-bool getRouteAt(int i, uint8_t* destOut, uint8_t* nextHopOut, uint8_t* hopsOut, int8_t* rssiOut);
+/** Записать маршрут i (0..getRouteCount()-1): dest, nextHop, hops, rssi, trustScore(опц.). */
+bool getRouteAt(int i, uint8_t* destOut, uint8_t* nextHopOut, uint8_t* hopsOut, int8_t* rssiOut, int* trustScoreOut = nullptr);
 
 /** Запросить маршрут до target (отправить ROUTE_REQ) */
 void requestRoute(const uint8_t* target);

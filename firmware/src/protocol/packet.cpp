@@ -63,7 +63,7 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
 constexpr int OPCODE_OFFSET_V2 = 2;  // sync(1) + version(1)
 
 static bool isValidOpcode(uint8_t op) {
-  return (op >= 0x01 && op <= 0x12) || op == OP_PONG || op == OP_PING;
+  return (op >= 0x01 && op <= 0x14) || op == OP_PONG || op == OP_PING;
 }
 
 // Только v2 (0x20) и v2.1 (0x30) — все устройства на одной версии
@@ -267,6 +267,10 @@ bool getExpectedPayloadRange(uint8_t opcode, size_t* minOut, size_t* maxOut) {
       return true;
     case OP_SF_BEACON:
       *minOut = *maxOut = 1;  // mesh SF (7, 9, 10, 12)
+      return true;
+    case OP_SOS:
+      *minOut = 28;  // msgId(4) + crypto::OVERHEAD
+      *maxOut = MAX_PAYLOAD;
       return true;
     case OP_TELEMETRY:
       *minOut = 28;  // 4 plain + crypto::OVERHEAD

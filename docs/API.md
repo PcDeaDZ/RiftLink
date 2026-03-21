@@ -56,11 +56,38 @@
 {"cmd":"send","to":"A1B2C3D4","text":"Привет"}
 ```
 
-### 2.2 location — отправить геолокацию (broadcast)
+**Critical lane + Time Capsule:**
+```json
+{"cmd":"send","to":"A1B2C3D4","text":"Приоритет","lane":"critical"}
+{"cmd":"send","to":"A1B2C3D4","text":"Когда онлайн","trigger":"target_online"}
+{"cmd":"send","to":"A1B2C3D4","text":"Позже","trigger":"deliver_after_time","triggerAtMs":1760000000000}
+```
+
+`lane`: `normal` (по умолчанию) или `critical`.  
+`trigger`: `target_online` или `deliver_after_time`.  
+`triggerAtMs`: Unix time в миллисекундах.
+
+### 2.1.1 sos — emergency flood
+
+```json
+{"cmd":"sos","text":"SOS"}
+```
+
+Критический широковещательный режим с anti-storm политиками в mesh.
+
+### 2.2 location — отправить геолокацию (broadcast / geofence)
 
 ```json
 {"cmd":"location","lat":55.7558,"lon":37.6173,"alt":150}
 ```
+
+```json
+{"cmd":"location","lat":55.7558,"lon":37.6173,"alt":150,"radiusM":300,"expiryEpochSec":1760000000}
+```
+
+`radiusM` и `expiryEpochSec` — опциональные поля для GeoFence Broadcast.  
+Baseline anti-spoof на приёмнике: координаты вне диапазона, `radiusM > 50000`, а также заведомо некорректный `expiryEpochSec` отклоняются.
+Проверка `expiryEpochSec` применяется при доступном epoch-времени (например, от `gps_sync` телефона).
 
 ### 2.3 ota — запустить OTA режим
 
@@ -106,7 +133,8 @@
 {"cmd":"voice","to":"A1B2C3D4","chunk":0,"total":10,"data":"base64..."}
 ```
 
-`chunk`: 0..total-1. `total`: число чанков. `data`: base64-encoded Opus/AAC. **Один чанк:** сырой фрагмент **≤300 байт** (base64 ≤~400 символов), чтобы весь JSON помещался в **512 байт** одной GATT-записи. Общий объём записи — по-прежнему до **~30 KB** за счёт числа чанков.
+`chunk`: 0..total-1. `total`: число чанков. `data`: base64-encoded Opus/AAC. **Один чанк:** сырой фрагмент **≤300 байт** (base64 ≤~400 символов), чтобы весь JSON помещался в **512 байт** одной GATT-записи. Общий объём записи — по-прежнему до **~30 KB** за счёт числа чанков.  
+Приложение может применять mesh-adaptive профиль (`fast/balanced/resilient`) и динамически менять bitrate/размер чанка; профиль влияет на параметры передачи голоса в mesh.
 
 ### 2.8 info — запрос информации об устройстве
 
@@ -140,17 +168,38 @@
 {"cmd":"invite"}
 ```
 
-Ответ: `{"evt":"invite","id":"A1B2C3D4E5F60708","pubKey":"base64...","channelKey":"base64..."}` — Node ID, публичный ключ X25519 и опционально ключ канала (32 байта base64) для QR.
+Ответ: `{"evt":"invite","id":"A1B2C3D4E5F60708","pubKey":"base64...","channelKey":"base64...","inviteToken":"hex16","inviteTtlMs":600000}` — Node ID, публичный ключ X25519, опционально ключ канала и одноразовый короткоживущий токен.
 
 ### 2.12 acceptInvite — принять приглашение (сканирование QR)
 
 ```json
-{"cmd":"acceptInvite","id":"A1B2C3D4E5F60708","pubKey":"base64...","channelKey":"base64..."}
+{"cmd":"acceptInvite","id":"A1B2C3D4E5F60708","pubKey":"base64...","channelKey":"base64...","inviteToken":"hex16"}
 ```
 
 Добавляет ключ узла и отправляет ему свой KEY_EXCHANGE. `channelKey` — опционально, ключ канала 32 байта (base64) для присоединения к приватной сети. Формат QR: `riftlink:id:pubKey` или JSON с channelKey.
+`inviteToken` (если передаётся) должен быть ровно `hex16` (8 байт).
 
 Ответ: `{"evt":"region","region":"EU","freq":868.0,"power":14}`
+
+### 2.13 groups / addGroup / removeGroup — подписки на группы
+
+```json
+{"cmd":"groups"}
+{"cmd":"addGroup","group":42}
+{"cmd":"removeGroup","group":42}
+```
+
+### 2.14 setGroupKey / clearGroupKey / getGroupKey — приватные группы
+
+```json
+{"cmd":"setGroupKey","group":42,"key":"base64_32_bytes"}
+{"cmd":"clearGroupKey","group":42}
+{"cmd":"getGroupKey","group":42}
+```
+
+`setGroupKey` делает группу private (или ротирует ключ).  
+`clearGroupKey` переводит группу обратно в public.  
+`getGroupKey` используется для формирования invite-пayload группы.
 
 ---
 
@@ -164,15 +213,17 @@
 {"evt":"info","id":"A1B2C3D4E5F60708","nickname":"Alice","region":"EU","freq":868.1,"power":14,"channel":0,"version":"1.3.6"}
 ```
 
-`nickname` — опционально. `channel` — только для EU/UK (0–2). `neighbors` — массив Node ID (hex) видимых соседей. `version` — версия прошивки (например 1.3.6).
+`nickname` — опционально. `channel` — только для EU/UK (0–2). `neighbors` — массив Node ID (hex) видимых соседей. `version` — версия прошивки (например 1.3.6).  
+Для наблюдаемости SCF могут приходить поля `offlineCourierPending` (курьерские) и `offlineDirectPending` (обычные офлайн).
 
 ### 3.2 msg — входящее сообщение
 
 ```json
-{"evt":"msg","from":"A1B2C3D4E5F60708","text":"Hello!","msgId":123456,"rssi":-72}
+{"evt":"msg","from":"A1B2C3D4E5F60708","text":"Hello!","msgId":123456,"rssi":-72,"lane":"normal","type":"text"}
 ```
 
-`msgId` — только для unicast (для отправки READ при просмотре). `rssi` — уровень сигнала LoRa в dBm (опционально).
+`msgId` — только для unicast (для отправки READ при просмотре). `rssi` — уровень сигнала LoRa в dBm (опционально).  
+`lane` — `normal|critical`. `type` — `text|sos|...`.
 
 ### 3.3 sent — отправлено (unicast поставлен в очередь)
 
@@ -232,13 +283,23 @@
 
 Отправляется при появлении нового узла (HELLO).
 
+### 3.10.1 groups — список групп с признаком private/public
+
+```json
+{"evt":"groups","groups":[42,77],"groupsPrivate":[true,false]}
+```
+
+`groupsPrivate[i]` соответствует `groups[i]`.
+
 ### 3.11 voice — голосовое сообщение (чанками)
 
 ```json
 {"evt":"voice","from":"A1B2C3D4E5F60708","chunk":0,"total":20,"data":"base64..."}
 ```
 
-Собрать все чанки, декодировать base64 → Opus/AAC, воспроизвести. Размер одного чанка в `data` — как у команды `voice` (сырой payload ≤300 B на чанк после base64-decode).
+Собрать все чанки, декодировать base64 → Opus/AAC, воспроизвести. Размер одного чанка в `data` — как у команды `voice` (сырой payload ≤300 B на чанк после base64-decode).  
+Рекомендация для клиента: при таймауте неполной сборки можно воспроизводить непрерывный префикс (`chunk` от 0 без дыр) и явно маркировать это как partial/lossy playback для полевых тестов.  
+Для полевых прогонов пороги verdict (`avgLoss/hardLoss/minSessions`) рекомендуется задавать через Settings, а итог проверять в `Debug -> Voice RX diagnostics` и в экспортированном snapshot.
 
 ### 3.12 pong — ответ на PING (проверка связи)
 
@@ -247,6 +308,52 @@
 ```
 
 `rssi` — уровень сигнала в dBm (опционально).
+
+### 3.13 relayProof — Proof-of-Relay Lite
+
+```json
+{"evt":"relayProof","relayedBy":"A1B2...","from":"...","to":"...","pktId":1234,"opcode":1}
+```
+
+Примечание для клиента: для `critical` сообщений рекомендуется агрегировать `relayProof` по `pktId` и формировать итоговую цепочку (relay hops) вместе с финальным статусом (`delivered/read/undelivered`).
+
+Лёгкая диагностическая квитанция ретрансляции (sampling).
+
+### 3.14 timeCapsuleQueued — сообщение поставлено в отложенную отправку
+
+```json
+{"evt":"timeCapsuleQueued","to":"A1B2C3D4","trigger":"deliver_after_time","triggerAtMs":1760000000000}
+```
+
+### 3.15 timeCapsuleReleased — триггер сработал, сообщение выпущено в эфир
+
+```json
+{"evt":"timeCapsuleReleased","to":"A1B2C3D4E5F60708","msgId":123456,"trigger":"target_online"}
+```
+
+### 3.16 error — ошибка выполнения команды/валидации
+
+```json
+{"evt":"error","code":"invite_peer_key_mismatch","msg":"Peer public key mismatch"}
+```
+
+Для invite-потока используются коды:
+- `invite_token_bad_length`
+- `invite_token_bad_format`
+- `invite_peer_key_mismatch`
+
+Для private-group потока могут приходить коды:
+- `group_key_bad`
+- `group_key_set_failed`
+- `group_key_clear_failed`
+- `group_key_not_found`
+- `group_key_encode_failed`
+
+### 3.17 groupKey — выдача ключа группы (по `getGroupKey`)
+
+```json
+{"evt":"groupKey","group":42,"key":"base64_32_bytes"}
+```
 
 ---
 

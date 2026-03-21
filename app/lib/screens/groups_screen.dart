@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -31,6 +33,7 @@ class GroupsScreen extends StatefulWidget {
 
 class _GroupsScreenState extends State<GroupsScreen> {
   List<int> _groups = [];
+  final Map<int, bool> _groupPrivate = <int, bool>{};
   bool _loading = false;
   StreamSubscription<RiftLinkEvent>? _sub;
 
@@ -40,17 +43,32 @@ class _GroupsScreenState extends State<GroupsScreen> {
     return out;
   }
 
+  void _applyGroups(Iterable<int> groups, [List<bool>? privateFlags]) {
+    final normalized = _normalizeGroups(groups);
+    final nextPriv = <int, bool>{};
+    for (var i = 0; i < normalized.length; i++) {
+      final gid = normalized[i];
+      bool isPriv = _groupPrivate[gid] ?? false;
+      if (privateFlags != null && i < privateFlags.length) isPriv = privateFlags[i];
+      nextPriv[gid] = isPriv;
+    }
+    _groups = normalized;
+    _groupPrivate
+      ..clear()
+      ..addAll(nextPriv);
+  }
+
   @override
   void initState() {
     super.initState();
-    _groups = _normalizeGroups(widget.initialGroups);
+    _applyGroups(widget.initialGroups);
     _sub = widget.ble.events.listen((evt) {
       if (!mounted) return;
       // Ответ на getGroups — и поле groups в evt:info (как в чате), иначе список не обновлялся без отдельного notify.
       if (evt is RiftLinkGroupsEvent) {
-        setState(() => _groups = _normalizeGroups(evt.groups));
+        setState(() => _applyGroups(evt.groups, evt.groupsPrivate));
       } else if (evt is RiftLinkInfoEvent) {
-        setState(() => _groups = _normalizeGroups(evt.groups));
+        setState(() => _applyGroups(evt.groups, evt.groupsPrivate));
       }
     });
     _refresh();
@@ -67,6 +85,95 @@ class _GroupsScreenState extends State<GroupsScreen> {
     setState(() => _loading = true);
     await widget.ble.getGroups();
     if (mounted) setState(() => _loading = false);
+  }
+
+  String _generateGroupKeyB64() {
+    final rnd = Random.secure();
+    final bytes = List<int>.generate(32, (_) => rnd.nextInt(256));
+    return base64Encode(bytes);
+  }
+
+  Future<void> _setGroupPrivate(int gid, bool privateMode) async {
+    final l = context.l10n;
+    if (!widget.ble.isConnected) return;
+    if (privateMode) {
+      final keyB64 = _generateGroupKeyB64();
+      final ok = await widget.ble.setGroupKey(gid, keyB64);
+      if (ok && mounted) {
+        _snack(l.tr('group_set_private', {'id': '$gid'}));
+        await Clipboard.setData(ClipboardData(text: jsonEncode({'group': gid, 'groupKey': keyB64})));
+        _snack(l.tr('group_invite_copied', {'id': '$gid'}));
+      } else if (mounted) {
+        _snack(l.tr('error'), backgroundColor: context.palette.error);
+      }
+    } else {
+      final ok = await widget.ble.clearGroupKey(gid);
+      if (ok && mounted) {
+        _snack(l.tr('group_set_public', {'id': '$gid'}));
+      } else if (mounted) {
+        _snack(l.tr('error'), backgroundColor: context.palette.error);
+      }
+    }
+    await _refresh();
+  }
+
+  Future<void> _rotatePrivateKey(int gid) async {
+    final l = context.l10n;
+    final keyB64 = _generateGroupKeyB64();
+    final ok = await widget.ble.setGroupKey(gid, keyB64);
+    if (ok && mounted) {
+      await Clipboard.setData(ClipboardData(text: jsonEncode({'group': gid, 'groupKey': keyB64})));
+      _snack(l.tr('group_key_rotated', {'id': '$gid'}));
+      _snack(l.tr('group_invite_copied', {'id': '$gid'}));
+      await _refresh();
+    } else if (mounted) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+    }
+  }
+
+  Future<void> _copyInvite(int gid) async {
+    final l = context.l10n;
+    if (!widget.ble.isConnected) return;
+    if (!await widget.ble.getGroupKey(gid)) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
+    }
+    try {
+      final evt = await widget.ble.events
+          .where((e) => e is RiftLinkGroupKeyEvent && (e as RiftLinkGroupKeyEvent).group == gid)
+          .cast<RiftLinkGroupKeyEvent>()
+          .first
+          .timeout(const Duration(seconds: 3));
+      await Clipboard.setData(ClipboardData(text: jsonEncode({'group': gid, 'groupKey': evt.key})));
+      if (mounted) _snack(l.tr('group_invite_copied', {'id': '$gid'}));
+    } catch (_) {
+      if (mounted) _snack(l.tr('error'), backgroundColor: context.palette.error);
+    }
+  }
+
+  Future<void> _pasteInviteAndJoin() async {
+    final l = context.l10n;
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text?.trim();
+    if (text == null || text.isEmpty) {
+      _snack(l.tr('group_invite_bad'), backgroundColor: context.palette.error);
+      return;
+    }
+    try {
+      final m = jsonDecode(text);
+      if (m is! Map) throw Exception('bad');
+      final group = int.tryParse('${m['group'] ?? ''}') ?? 0;
+      final key = (m['groupKey'] as String?)?.trim();
+      if (group <= 1) throw Exception('bad');
+      await widget.ble.addGroup(group);
+      if (key != null && key.isNotEmpty) {
+        await widget.ble.setGroupKey(group, key);
+      }
+      await _refresh();
+      if (mounted) _snack(l.tr('group_invite_joined', {'id': '$group'}));
+    } catch (_) {
+      _snack(l.tr('group_invite_bad'), backgroundColor: context.palette.error);
+    }
   }
 
   void _snack(String msg, {Color? backgroundColor}) {
@@ -132,6 +239,17 @@ class _GroupsScreenState extends State<GroupsScreen> {
                             ),
                           ),
                           IconButton(
+                            icon: Icon(Icons.content_paste_rounded, color: context.palette.onSurfaceVariant.withOpacity(0.85)),
+                            onPressed: () async {
+                              Navigator.pop(ctx);
+                              await _pasteInviteAndJoin();
+                            },
+                            visualDensity: VisualDensity.compact,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                            tooltip: l.tr('paste'),
+                          ),
+                          IconButton(
                             icon: Icon(Icons.close_rounded, color: context.palette.onSurfaceVariant.withOpacity(0.85)),
                             onPressed: () => Navigator.pop(ctx),
                             visualDensity: VisualDensity.compact,
@@ -184,7 +302,9 @@ class _GroupsScreenState extends State<GroupsScreen> {
                           Navigator.pop(ctx);
                           final ok = await widget.ble.addGroup(val);
                           if (ok && mounted) {
-                            setState(() => _groups = _normalizeGroups([..._groups, val]));
+                            setState(() {
+                              _applyGroups([..._groups, val]);
+                            });
                           }
                           await _refresh();
                           if (mounted) {
@@ -223,7 +343,11 @@ class _GroupsScreenState extends State<GroupsScreen> {
     );
     if (ok != true) return;
     await widget.ble.removeGroup(gid);
-    if (mounted) setState(() => _groups = _normalizeGroups(_groups.where((g) => g != gid)));
+    if (mounted) {
+      setState(() {
+        _applyGroups(_groups.where((g) => g != gid));
+      });
+    }
   }
 
   @override
@@ -337,10 +461,44 @@ class _GroupsScreenState extends State<GroupsScreen> {
                                   ),
                                   const SizedBox(width: 10),
                                   Expanded(
-                                    child: Text(
-                                      '${l.tr('group')} $gid',
-                                      style: TextStyle(color: context.palette.onSurface, fontWeight: FontWeight.w600, fontSize: 15),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          '${l.tr('group')} $gid',
+                                          style: TextStyle(color: context.palette.onSurface, fontWeight: FontWeight.w600, fontSize: 15),
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          _groupPrivate[gid] == true ? l.tr('group_private') : l.tr('group_public'),
+                                          style: TextStyle(
+                                            color: _groupPrivate[gid] == true ? context.palette.primary : context.palette.onSurfaceVariant,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                      ],
                                     ),
+                                  ),
+                                  PopupMenuButton<String>(
+                                    tooltip: l.tr('settings'),
+                                    onSelected: (v) async {
+                                      if (v == 'private') await _setGroupPrivate(gid, true);
+                                      if (v == 'public') await _setGroupPrivate(gid, false);
+                                      if (v == 'rotate') await _rotatePrivateKey(gid);
+                                      if (v == 'invite') await _copyInvite(gid);
+                                    },
+                                    itemBuilder: (ctx) => [
+                                      if (_groupPrivate[gid] == true)
+                                        PopupMenuItem(value: 'invite', child: Text(l.tr('group_copy_invite')))
+                                      else
+                                        PopupMenuItem(value: 'private', child: Text(l.tr('group_make_private'))),
+                                      if (_groupPrivate[gid] == true)
+                                        PopupMenuItem(value: 'rotate', child: Text(l.tr('group_rotate_key'))),
+                                      if (_groupPrivate[gid] == true)
+                                        PopupMenuItem(value: 'public', child: Text(l.tr('group_make_public'))),
+                                    ],
+                                    icon: Icon(Icons.lock_outline_rounded, color: context.palette.onSurfaceVariant),
                                   ),
                                   IconButton(
                                     visualDensity: VisualDensity.compact,

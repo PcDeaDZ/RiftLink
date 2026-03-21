@@ -56,6 +56,10 @@ struct PendingMsg {
   bool inUse;
   bool triggerSend;  // RIT: отправить при следующем update (получили POLL от получателя)
   int8_t lastAction;  // MAB: последнее действие (0..2) для reward
+  bool critical;
+  uint8_t triggerType;
+  uint32_t triggerValueMs;
+  bool triggerReleasedNotified;
 };
 
 struct PendingBroadcast {
@@ -85,6 +89,7 @@ static void (*s_onUnicastSent)(const uint8_t* to, uint32_t msgId) = nullptr;
 static void (*s_onUnicastUndelivered)(const uint8_t* to, uint32_t msgId) = nullptr;
 static void (*s_onBroadcastSent)(uint32_t msgId) = nullptr;
 static void (*s_onBroadcastDelivery)(uint32_t msgId, int delivered, int total) = nullptr;
+static void (*s_onTimeCapsuleReleased)(const uint8_t* to, uint32_t msgId, uint8_t triggerType) = nullptr;
 
 namespace msg_queue {
 
@@ -148,7 +153,8 @@ constexpr size_t MAX_SINGLE_PLAIN = protocol::MAX_PAYLOAD - crypto::OVERHEAD;
 
 constexpr size_t MSG_TTL_LEN = 1;
 
-bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
+bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
+    bool critical, TriggerType triggerType, uint32_t triggerValueMs) {
   if (!s_inited) return false;
   if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
 
@@ -216,9 +222,10 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     }
 
     uint16_t pktId = (uint16_t)(msgId & 0xFFFF);
+    uint8_t channel = critical ? protocol::CHANNEL_CRITICAL : protocol::CHANNEL_DEFAULT;
     size_t pktLen = protocol::buildPacket(slot->pkt, sizeof(slot->pkt),
         node::getId(), to, 31, protocol::OP_MSG,
-        encBuf, encLen, true, true, useCompressed, protocol::CHANNEL_DEFAULT, pktId);
+        encBuf, encLen, true, true, useCompressed, channel, pktId);
     if (pktLen == 0) {
       xSemaphoreGive(s_mutex);
       return false;
@@ -233,6 +240,10 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     slot->inUse = true;
     slot->triggerSend = false;
     slot->lastAction = -1;
+    slot->critical = critical;
+    slot->triggerType = (uint8_t)triggerType;
+    slot->triggerValueMs = triggerValueMs;
+    slot->triggerReleasedNotified = false;
 
     uint8_t txSf = neighbors::rssiToSfOrthogonal(to);
     if (txSf == 0) txSf = 12;  // неизвестный сосед — SF12 для дальности
@@ -247,10 +258,11 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     if (esp_now_slots::sendRtsBeforeLora(to, slot->pktLen)) delay(50);
 
     // Unicast: только одна отправка. Повтор — только при отсутствии ACK (update), не слепые копии
-    bool ok = radio::send(slot->pkt, slot->pktLen, txSf);
+    bool ok = radio::send(slot->pkt, slot->pktLen, txSf, critical);
     if (!ok) {
       RIFTLINK_LOG_ERR("[RiftLink] MSG radioCmdQueue full, to %02X%02X — retry via update\n", to[0], to[1]);
     }
+    neighbors::recordAckSent(to);
     if (s_onUnicastSent) s_onUnicastSent(to, msgId);
     xSemaphoreGive(s_mutex);
     return true;
@@ -287,7 +299,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes) {
     uint8_t pkt[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
     size_t len = protocol::buildPacket(pkt, sizeof(pkt),
         node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_GROUP_MSG,
-        encBuf, encLen, true, false, useCompressed);
+        encBuf, encLen, true, false, useCompressed, protocol::CHANNEL_DEFAULT);
     if (len > 0) {
       registerBroadcastPending(bcMsgId, neighbors::getCount());
     }
@@ -342,7 +354,14 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
 
   uint8_t encBuf[protocol::MAX_PAYLOAD + crypto::OVERHEAD];
   size_t encLen = sizeof(encBuf);
-  if (!crypto::encrypt(toEncrypt, toEncryptLen, encBuf, &encLen)) {
+  bool encOk = false;
+  uint8_t groupKey[32];
+  if (groups::getGroupKey(groupId, groupKey)) {
+    encOk = crypto::encryptWithGroupKey(groupKey, toEncrypt, toEncryptLen, encBuf, &encLen);
+  } else {
+    encOk = crypto::encrypt(toEncrypt, toEncryptLen, encBuf, &encLen);
+  }
+  if (!encOk) {
     xSemaphoreGive(s_mutex);
     return false;
   }
@@ -372,12 +391,53 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
   return false;
 }
 
+bool enqueueSos(const char* text) {
+  if (!s_inited || !text) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
+  size_t textLen = strlen(text);
+  if (textLen == 0 || textLen > (MAX_SINGLE_PLAIN - MSG_ID_LEN)) {
+    xSemaphoreGive(s_mutex);
+    return false;
+  }
+  uint8_t plainBuf[256];
+  uint32_t msgId = ++s_msgIdCounter;
+  memcpy(plainBuf, &msgId, MSG_ID_LEN);
+  memcpy(plainBuf + MSG_ID_LEN, text, textLen);
+  size_t plainLen = MSG_ID_LEN + textLen;
+  uint8_t encBuf[protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+  size_t encLen = sizeof(encBuf);
+  if (!crypto::encrypt(plainBuf, plainLen, encBuf, &encLen)) {
+    xSemaphoreGive(s_mutex);
+    return false;
+  }
+  uint8_t pkt[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+  int n = neighbors::getCount();
+  uint8_t ttl = 31;
+  if (n <= 1) ttl = 31;
+  else if (n <= 3) ttl = 24;
+  else if (n <= 6) ttl = 18;
+  else ttl = 12;
+  size_t len = protocol::buildPacket(pkt, sizeof(pkt), node::getId(), protocol::BROADCAST_ID, ttl,
+      protocol::OP_SOS, encBuf, encLen, true, false, false, protocol::CHANNEL_CRITICAL, (uint16_t)(msgId & 0xFFFF));
+  xSemaphoreGive(s_mutex);
+  if (len == 0) return false;
+  uint8_t sf = neighbors::rssiToSf(neighbors::getMinRssi());
+  if (sf == 0) sf = 12;
+  if (!radio::send(pkt, len, sf, true)) return false;
+  if (s_onBroadcastSent) s_onBroadcastSent(msgId);
+  return true;
+}
+
 void setOnBroadcastSent(void (*cb)(uint32_t msgId)) {
   s_onBroadcastSent = cb;
 }
 
 void setOnBroadcastDelivery(void (*cb)(uint32_t msgId, int delivered, int total)) {
   s_onBroadcastDelivery = cb;
+}
+
+void setOnTimeCapsuleReleased(void (*cb)(const uint8_t* to, uint32_t msgId, uint8_t triggerType)) {
+  s_onTimeCapsuleReleased = cb;
 }
 
 void setOnUnicastSent(void (*cb)(const uint8_t* to, uint32_t msgId)) {
@@ -398,6 +458,7 @@ bool onAckReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLe
   if (p && memcmp(p->to, from, protocol::NODE_ID_LEN) == 0) {
     if (p->lastAction >= 0) mab::reward(p->lastAction, 1);
     p->inUse = false;
+    neighbors::recordAckReceived(from);
     unicastCleared = true;
   } else {
     for (int i = 0; i < 2; i++) {
@@ -456,6 +517,10 @@ bool registerPendingFromFusion(const uint8_t* to, uint32_t msgId, const uint8_t*
   slot->inUse = true;
   slot->triggerSend = false;
   slot->lastAction = -1;
+  slot->critical = false;
+  slot->triggerType = TRIGGER_NONE;
+  slot->triggerValueMs = 0;
+  slot->triggerReleasedNotified = false;
   return true;
 }
 
@@ -522,6 +587,12 @@ void update() {
     }
 
     uint32_t ackTimeout = getAckTimeoutMs(p->txSf);
+    if (p->triggerType == TRIGGER_TARGET_ONLINE && !neighbors::isOnline(p->to)) continue;
+    if (p->triggerType == TRIGGER_DELIVER_AFTER && (int32_t)(now - p->triggerValueMs) < 0) continue;
+    if (p->triggerType != TRIGGER_NONE && !p->triggerReleasedNotified) {
+      p->triggerReleasedNotified = true;
+      if (s_onTimeCapsuleReleased) s_onTimeCapsuleReleased(p->to, p->msgId, p->triggerType);
+    }
     int action = mab::selectAction();
     uint32_t jitter = mab::getDelayMs(action) + collision_slots::getAvoidanceDelayMs()
         + beacon_sync::getAvoidanceDelayMs();
@@ -529,10 +600,12 @@ void update() {
     if (quietMs > 0 && quietMs > jitter) jitter = quietMs;  // предпочесть «тихое» окно соседа
     if (now - p->lastSendTime < ackTimeout + jitter) continue;
 
-    if (p->retries >= MAX_RETRIES) {
+    uint8_t maxRetries = p->critical ? (MAX_RETRIES + 2) : MAX_RETRIES;
+    if (p->retries >= maxRetries) {
       if (p->lastAction >= 0) mab::reward(p->lastAction, -1);
       if (s_onUnicastUndelivered) s_onUnicastUndelivered(p->to, p->msgId);
       uint8_t flags = (p->pkt[protocol::SYNC_LEN] & 0x04) ? 1 : 0;  // compressed (version_flags)
+      if (p->critical) flags |= 2;
       offline_queue::enqueue(p->to, p->pkt + protocol::PAYLOAD_OFFSET,
           p->pktLen - protocol::PAYLOAD_OFFSET, protocol::OP_MSG, flags);
       p->inUse = false;
@@ -547,7 +620,8 @@ void update() {
     p->lastAction = action;
     p->retries++;
     p->lastSendTime = now;
-    radio::send(p->pkt, p->pktLen, p->txSf, true);
+    neighbors::recordAckSent(p->to);
+    radio::send(p->pkt, p->pktLen, p->txSf, p->critical);
   }
   xSemaphoreGive(s_mutex);
 }

@@ -21,6 +21,9 @@
 
 #define NVS_NAMESPACE "riftlink"
 #define NVS_KEY_OFFLINE "offline_q"
+#define OFFLINE_FLAG_COMPRESSED 0x01
+#define OFFLINE_FLAG_CRITICAL   0x02
+#define OFFLINE_FLAG_COURIER    0x04
 
 #pragma pack(push, 1)
 struct StoredMsgNvs {
@@ -39,6 +42,8 @@ struct StoredMsg {
   size_t payloadLen;
   uint8_t opcode;
   uint8_t flags;
+  uint32_t queuedAtMs;
+  uint32_t seq;
   bool inUse;
 };
 
@@ -47,9 +52,12 @@ static bool s_inited = false;
 static volatile bool s_dirty = false;  // отложенное сохранение в NVS — не блокировать handlePacket
 static SemaphoreHandle_t s_mutex = nullptr;
 static StoredMsgNvs s_nvsBuf[OFFLINE_MAX_MSGS];  // статика — saveToNvs/loadFromNvs вызываются из handlePacket (stack overflow)
+static uint32_t s_seqCounter = 0;
 
 #define NVS_SAVE_INTERVAL_MS 2000
 #define MUTEX_TIMEOUT_MS 100
+#define OFFLINE_EXPIRY_NORMAL_MS (6UL * 60UL * 60UL * 1000UL)
+#define OFFLINE_EXPIRY_COURIER_MS (24UL * 60UL * 60UL * 1000UL)
 
 /** Копирование под mutex (быстро). Вызывать с захваченным mutex. */
 static void copyToNvsBuffer() {
@@ -119,6 +127,8 @@ static void loadFromNvs() {
     s_msgs[i].opcode = s_nvsBuf[i].opcode;
     s_msgs[i].flags = s_nvsBuf[i].flags;
     memcpy(s_msgs[i].payload, s_nvsBuf[i].payload, OFFLINE_MAX_LEN);
+    s_msgs[i].queuedAtMs = millis();
+    s_msgs[i].seq = ++s_seqCounter;
   }
 }
 
@@ -143,10 +153,32 @@ void init() {
 }
 
 static StoredMsg* findFree() {
+  int oldestIdx = -1;
+  uint32_t oldestSeq = 0xFFFFFFFFUL;
+  int oldestCourierIdx = -1;
+  uint32_t oldestCourierSeq = 0xFFFFFFFFUL;
   for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
     if (!s_msgs[i].inUse) return &s_msgs[i];
+    if ((s_msgs[i].flags & OFFLINE_FLAG_COURIER) != 0) {
+      if (s_msgs[i].seq < oldestCourierSeq) {
+        oldestCourierSeq = s_msgs[i].seq;
+        oldestCourierIdx = i;
+      }
+    } else if (s_msgs[i].seq < oldestSeq) {
+      oldestSeq = s_msgs[i].seq;
+      oldestIdx = i;
+    }
   }
+  // Eviction policy: сначала вытесняем самый старый обычный пакет, иначе courier.
+  int evictIdx = (oldestIdx >= 0) ? oldestIdx : oldestCourierIdx;
+  if (evictIdx >= 0) return &s_msgs[evictIdx];
   return nullptr;
+}
+
+static bool isExpired(const StoredMsg* m, uint32_t nowMs) {
+  if (!m || !m->inUse) return false;
+  uint32_t ttlMs = (m->flags & OFFLINE_FLAG_COURIER) ? OFFLINE_EXPIRY_COURIER_MS : OFFLINE_EXPIRY_NORMAL_MS;
+  return (nowMs - m->queuedAtMs) > ttlMs;
 }
 
 bool enqueue(const uint8_t* to, const uint8_t* encPayload, size_t encLen, uint8_t opcode, uint8_t flags) {
@@ -164,6 +196,35 @@ bool enqueue(const uint8_t* to, const uint8_t* encPayload, size_t encLen, uint8_
   slot->payloadLen = encLen;
   slot->opcode = opcode;
   slot->flags = flags;
+  slot->queuedAtMs = millis();
+  slot->seq = ++s_seqCounter;
+  slot->inUse = true;
+  s_dirty = true;
+  xSemaphoreGive(s_mutex);
+  return true;
+}
+
+bool enqueueCourier(const uint8_t* pkt, size_t len) {
+  if (!s_inited || !pkt || len == 0 || len > OFFLINE_MAX_LEN) return false;
+  protocol::PacketHeader hdr;
+  const uint8_t* pl = nullptr;
+  size_t plLen = 0;
+  if (!protocol::parsePacket(pkt, len, &hdr, &pl, &plLen)) return false;
+  if (node::isBroadcast(hdr.to)) return false;
+  if (hdr.opcode != protocol::OP_MSG && hdr.opcode != protocol::OP_SOS) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
+  StoredMsg* slot = findFree();
+  if (!slot) {
+    xSemaphoreGive(s_mutex);
+    return false;
+  }
+  memcpy(slot->to, hdr.to, protocol::NODE_ID_LEN);
+  memcpy(slot->payload, pkt, len);
+  slot->payloadLen = len;
+  slot->opcode = hdr.opcode;
+  slot->flags = OFFLINE_FLAG_COURIER | ((hdr.channel == protocol::CHANNEL_CRITICAL) ? OFFLINE_FLAG_CRITICAL : 0);
+  slot->queuedAtMs = millis();
+  slot->seq = ++s_seqCounter;
   slot->inUse = true;
   s_dirty = true;
   xSemaphoreGive(s_mutex);
@@ -177,18 +238,35 @@ void onNodeOnline(const uint8_t* nodeId) {
   if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
 
   bool modified = false;
+  uint32_t now = millis();
   for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
     StoredMsg* m = &s_msgs[i];
     if (!m->inUse) continue;
+    if (isExpired(m, now)) {
+      m->inUse = false;
+      modified = true;
+      continue;
+    }
     if (memcmp(m->to, nodeId, protocol::NODE_ID_LEN) != 0) continue;
 
     uint8_t* pkt = s_onlinePktBuf;
-    bool compressed = (m->flags & 1) != 0;
-    size_t len = protocol::buildPacket(pkt, sizeof(s_onlinePktBuf),
-        node::getId(), m->to, 31, m->opcode,
-        m->payload, m->payloadLen, true, true, compressed);
+    size_t len = 0;
+    bool isCourier = (m->flags & OFFLINE_FLAG_COURIER) != 0;
+    bool isCritical = (m->flags & OFFLINE_FLAG_CRITICAL) != 0;
+    if (isCourier) {
+      if (m->payloadLen <= sizeof(s_onlinePktBuf)) {
+        memcpy(pkt, m->payload, m->payloadLen);
+        len = m->payloadLen;
+      }
+    } else {
+      bool compressed = (m->flags & OFFLINE_FLAG_COMPRESSED) != 0;
+      uint8_t channel = isCritical ? protocol::CHANNEL_CRITICAL : protocol::CHANNEL_DEFAULT;
+      len = protocol::buildPacket(pkt, sizeof(s_onlinePktBuf),
+          node::getId(), m->to, 31, m->opcode,
+          m->payload, m->payloadLen, true, true, compressed, channel);
+    }
     if (len > 0) {
-      radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(nodeId)), true);  // priority
+      radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(nodeId)), isCritical);  // priority for critical lane
       Serial.printf("[RiftLink] Offline delivery to %02X%02X\n", nodeId[0], nodeId[1]);
     }
     m->inUse = false;
@@ -203,6 +281,26 @@ int getPendingCount() {
   int n = 0;
   for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
     if (s_msgs[i].inUse) n++;
+  }
+  xSemaphoreGive(s_mutex);
+  return n;
+}
+
+int getCourierPendingCount() {
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return 0;
+  int n = 0;
+  for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
+    if (s_msgs[i].inUse && (s_msgs[i].flags & OFFLINE_FLAG_COURIER) != 0) n++;
+  }
+  xSemaphoreGive(s_mutex);
+  return n;
+}
+
+int getDirectPendingCount() {
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return 0;
+  int n = 0;
+  for (int i = 0; i < OFFLINE_MAX_MSGS; i++) {
+    if (s_msgs[i].inUse && (s_msgs[i].flags & OFFLINE_FLAG_COURIER) == 0) n++;
   }
   xSemaphoreGive(s_mutex);
   return n;

@@ -60,6 +60,27 @@ class _MapScreenState extends State<MapScreen> {
         title: Text(context.l10n.tr('map')),
         leading: IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => Navigator.pop(context)),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.radar),
+            tooltip: context.l10n.tr('geofence_send'),
+            onPressed: () async {
+              try {
+                final pos = await Geolocator.getCurrentPosition();
+                final expiry = DateTime.now().add(const Duration(minutes: 30)).millisecondsSinceEpoch ~/ 1000;
+                await widget.ble.sendLocation(
+                  lat: pos.latitude,
+                  lon: pos.longitude,
+                  alt: pos.altitude.toInt(),
+                  radiusM: 300,
+                  expiryEpochSec: expiry,
+                );
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(context.l10n.tr('geofence_sent'))),
+                );
+              } catch (_) {}
+            },
+          ),
           IconButton(icon: const Icon(Icons.my_location), tooltip: context.l10n.tr('map_my_location'), onPressed: () async {
             try {
               final pos = await Geolocator.getCurrentPosition();

@@ -17,6 +17,9 @@ struct Entry {
   uint8_t id[protocol::NODE_ID_LEN];
   uint32_t lastSeenMs;
   int8_t lastRssi;  // dBm, 0 = unknown
+  uint16_t batteryMv;
+  uint16_t ackSent;
+  uint16_t ackReceived;
   bool used;
 };
 
@@ -99,6 +102,67 @@ void updateRssi(const uint8_t* nodeId, int rssi) {
     s_entries[idx].lastSeenMs = millis();  // любой пакет — продлеваем «онлайн»
   }
   xSemaphoreGive(s_mutex);
+}
+
+void updateBattery(const uint8_t* nodeId, uint16_t batteryMv) {
+  if (!nodeId || batteryMv == 0) return;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
+  int idx = findSlot(nodeId);
+  if (idx >= 0) {
+    s_entries[idx].batteryMv = batteryMv;
+    s_entries[idx].lastSeenMs = millis();
+  }
+  xSemaphoreGive(s_mutex);
+}
+
+int getBatteryMv(const uint8_t* nodeId) {
+  if (!nodeId) return 0;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return 0;
+  uint32_t now = millis();
+  int mv = 0;
+  for (int i = 0; i < NEIGHBORS_MAX; i++) {
+    if (!s_entries[i].used || (now - s_entries[i].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
+    if (memcmp(s_entries[i].id, nodeId, protocol::NODE_ID_LEN) == 0) {
+      mv = s_entries[i].batteryMv;
+      break;
+    }
+  }
+  xSemaphoreGive(s_mutex);
+  return mv;
+}
+
+void recordAckSent(const uint8_t* nodeId) {
+  if (!nodeId) return;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
+  int idx = findSlot(nodeId);
+  if (idx >= 0 && s_entries[idx].ackSent < 65535) s_entries[idx].ackSent++;
+  xSemaphoreGive(s_mutex);
+}
+
+void recordAckReceived(const uint8_t* nodeId) {
+  if (!nodeId) return;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
+  int idx = findSlot(nodeId);
+  if (idx >= 0 && s_entries[idx].ackReceived < 65535) s_entries[idx].ackReceived++;
+  xSemaphoreGive(s_mutex);
+}
+
+int getAckRatePermille(const uint8_t* nodeId) {
+  if (!nodeId) return -1;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return -1;
+  uint32_t now = millis();
+  int rate = -1;
+  for (int i = 0; i < NEIGHBORS_MAX; i++) {
+    if (!s_entries[i].used || (now - s_entries[i].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
+    if (memcmp(s_entries[i].id, nodeId, protocol::NODE_ID_LEN) == 0) {
+      if (s_entries[i].ackSent > 0) {
+        rate = (int)((uint32_t)s_entries[i].ackReceived * 1000U / (uint32_t)s_entries[i].ackSent);
+      }
+      break;
+    }
+  }
+  xSemaphoreGive(s_mutex);
+  return rate;
 }
 
 int getRssi(int i) {
@@ -192,6 +256,39 @@ int getCount() {
   }
   xSemaphoreGive(s_mutex);
   return n;
+}
+
+bool isOnline(const uint8_t* nodeId) {
+  if (!nodeId) return false;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
+  uint32_t now = millis();
+  bool ok = false;
+  for (int i = 0; i < NEIGHBORS_MAX; i++) {
+    if (!s_entries[i].used || (now - s_entries[i].lastSeenMs) >= NEIGHBOR_TIMEOUT_MS) continue;
+    if (memcmp(s_entries[i].id, nodeId, protocol::NODE_ID_LEN) == 0) {
+      ok = true;
+      break;
+    }
+  }
+  xSemaphoreGive(s_mutex);
+  return ok;
+}
+
+uint32_t getFreshnessMs(const uint8_t* nodeId) {
+  if (!nodeId) return UINT32_MAX;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return UINT32_MAX;
+  uint32_t now = millis();
+  uint32_t out = UINT32_MAX;
+  for (int i = 0; i < NEIGHBORS_MAX; i++) {
+    if (!s_entries[i].used) continue;
+    if (memcmp(s_entries[i].id, nodeId, protocol::NODE_ID_LEN) == 0) {
+      uint32_t age = now - s_entries[i].lastSeenMs;
+      if (age < NEIGHBOR_TIMEOUT_MS) out = age;
+      break;
+    }
+  }
+  xSemaphoreGive(s_mutex);
+  return out;
 }
 
 bool getId(int i, uint8_t* out) {

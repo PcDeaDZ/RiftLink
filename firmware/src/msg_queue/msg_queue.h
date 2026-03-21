@@ -13,15 +13,25 @@ namespace msg_queue {
 
 // msg_id в plaintext: первые 4 байта для unicast
 constexpr size_t MSG_ID_LEN = 4;
+enum TriggerType : uint8_t {
+  TRIGGER_NONE = 0,
+  TRIGGER_TARGET_ONLINE = 1,
+  TRIGGER_DELIVER_AFTER = 2,
+};
 
 void init();
 void update();  // Вызывать из loop — проверка таймаутов, retransmit
 
-// Отправка (добавляет в очередь, для unicast — ждёт ACK). ttlMinutes: 0 = постоянное
-bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes = 0);
+// Отправка (добавляет в очередь, для unicast — ждёт ACK).
+// critical=true -> CHANNEL_CRITICAL + приоритетная отправка.
+// triggerType/triggerValueMs: Time Capsule MVP.
+bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes = 0,
+    bool critical = false, TriggerType triggerType = TRIGGER_NONE, uint32_t triggerValueMs = 0);
 
 // Отправка в группу (group_id 4B, broadcast, без ACK)
 bool enqueueGroup(uint32_t groupId, const char* text);
+/** Emergency flood (SOS): encrypted broadcast, отдельный opcode. */
+bool enqueueSos(const char* text);
 
 // Обработка входящего ACK. from = кто прислал ACK. Возвращает true если unicast доставлен (для notifyDelivered)
 bool onAckReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLen);
@@ -47,5 +57,7 @@ void setOnUnicastUndelivered(void (*cb)(const uint8_t* to, uint32_t msgId));
 void setOnBroadcastSent(void (*cb)(uint32_t msgId));
 // Callback при broadcast delivery — delivered, total (evt "broadcast_delivery" или "undelivered" при 0/total)
 void setOnBroadcastDelivery(void (*cb)(uint32_t msgId, int delivered, int total));
+// Callback когда Time Capsule триггер сработал и пакет пошел в эфир.
+void setOnTimeCapsuleReleased(void (*cb)(const uint8_t* to, uint32_t msgId, uint8_t triggerType));
 
 }  // namespace msg_queue

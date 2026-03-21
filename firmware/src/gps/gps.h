@@ -42,6 +42,10 @@ bool hasPhoneSync();
 
 /** Есть ли валидное время (GPS NMEA или phone sync) */
 bool hasTime();
+/** Есть ли epoch-время (секунды UTC) для проверок expiry. */
+bool hasEpochTime();
+/** Текущее epoch-время UTC (сек), false если недоступно. */
+bool getEpochSec(uint32_t* outEpochSec);
 /** Час (0-23 UTC), -1 если нет источника */
 int getHour();
 /** Минуты (0-59), -1 если нет источника */

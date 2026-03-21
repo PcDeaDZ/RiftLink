@@ -388,6 +388,7 @@ class _MeshScreenState extends State<MeshScreen> {
     final sf = (route['sf'] as num?)?.toInt();
     final bw = (route['bw'] as num?)?.toDouble();
     final cr = (route['cr'] as num?)?.toInt();
+    final trust = (route['trustScore'] as num?)?.toInt();
     String? modem;
     if (modemPreset != null) {
       modem = _modemPresetLabel(l, modemPreset);
@@ -400,6 +401,7 @@ class _MeshScreenState extends State<MeshScreen> {
       '$hops ${l.tr('mesh_route_hops')}',
       if (rssi != 0) 'RSSI $rssi dBm',
       if (modem != null) '${l.tr('mesh_modem')}: $modem',
+      if (trust != null) 'trust $trust',
     ];
     return '$base\n${details.join(' · ')}';
   }
@@ -648,6 +650,7 @@ class _ListTab extends StatelessWidget {
                                 final sf = (r['sf'] as num?)?.toInt();
                                 final bw = (r['bw'] as num?)?.toDouble();
                                 final cr = (r['cr'] as num?)?.toInt();
+                                final trust = (r['trustScore'] as num?)?.toInt();
                                 String? modem;
                                 if (modemPreset != null) {
                                   modem = _modemPresetLabel(l, modemPreset);
@@ -664,7 +667,7 @@ class _ListTab extends StatelessWidget {
                                     style: TextStyle(fontFamily: 'monospace', fontSize: 14, fontWeight: FontWeight.w600, color: context.palette.onSurface),
                                   ),
                                   subtitle: Text(
-                                    '${l.tr('mesh_col_next')}: ${next.isNotEmpty ? _idLabel(next) : '—'} · $hops ${l.tr('mesh_route_hops')}${rssi != 0 ? ' · RSSI $rssi' : ''}${modem != null ? ' · ${l.tr('mesh_modem')}: $modem' : ''}',
+                                    '${l.tr('mesh_col_next')}: ${next.isNotEmpty ? _idLabel(next) : '—'} · $hops ${l.tr('mesh_route_hops')}${rssi != 0 ? ' · RSSI $rssi' : ''}${modem != null ? ' · ${l.tr('mesh_modem')}: $modem' : ''}${trust != null ? ' · trust $trust' : ''}',
                                     style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant.withOpacity(0.95)),
                                   ),
                                 );

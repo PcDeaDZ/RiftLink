@@ -77,20 +77,61 @@ class ContactsGroupsHubScreen extends StatelessWidget {
               ),
             ),
           ),
-          body: TabBarView(
-            physics: const BouncingScrollPhysics(),
+          body: Column(
             children: [
               Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: ContactsScreen(neighbors: neighbors, embedded: true),
+                padding: const EdgeInsets.fromLTRB(10, 8, 10, 2),
+                child: Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    _uxChip(context, Icons.lock_outline_rounded, l.tr('pairwise_key_required')),
+                    _uxChip(context, Icons.priority_high_rounded, l.tr('critical_lane_label')),
+                    _uxChip(context, Icons.schedule_rounded, l.tr('time_capsule_label')),
+                  ],
+                ),
               ),
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: GroupsScreen(ble: ble, initialGroups: initialGroups, embedded: true),
+              Expanded(
+                child: TabBarView(
+                  physics: const BouncingScrollPhysics(),
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: ContactsScreen(neighbors: neighbors, embedded: true),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: GroupsScreen(ble: ble, initialGroups: initialGroups, embedded: true),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _uxChip(BuildContext context, IconData icon, String text) {
+    final p = context.palette;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: p.primary.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: p.primary.withOpacity(0.3)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: p.primary),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: p.primary),
+          ),
+        ],
       ),
     );
   }

@@ -52,6 +52,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   String? _version;
   int? _sf;
   int? _offlinePending;
+  int? _offlineCourierPending;
+  int? _offlineDirectPending;
+  int _timeCapsulePending = 0;
   bool _gpsPresent = false;
   bool _gpsEnabled = false;
   bool _gpsFix = false;
@@ -70,13 +73,21 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   bool _locationLoading = false;
   bool _voiceRecording = false;
   int _voiceTtlMinutes = 0;  // TTL для текущей записи (выбирается до старта)
+  int _voiceProfileCode = 2; // 1=fast,2=balanced,3=resilient
+  _VoiceAdaptivePlan _voicePlan = const _VoiceAdaptivePlan(
+    profileCode: 2,
+    bitRate: 32000,
+    maxBytes: 20480,
+    chunkSize: 240,
+  );
   DateTime? _voiceRecordStartTime;
   Ticker? _voiceRecordTicker;
   bool _hasText = false;
-  final Map<String, Map<int, String>> _voiceChunks = {};
+  final Map<String, _VoiceRxAssembly> _voiceChunks = {};
   final Set<String> _readSent = {};
   final Set<String> _pendingPings = {};
   Timer? _ttlTimer;
+  Timer? _voiceRxCleanupTimer;
   Timer? _neighborsPollTimer;
   Timer? _gpsSyncTimer;
   bool _meshAnimationEnabled = true;
@@ -126,6 +137,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _ttlTimer = Timer.periodic(const Duration(minutes: 1), (_) {
       if (mounted && _messages.any((m) => m.deleteAt != null && DateTime.now().isAfter(m.deleteAt!))) setState(() {});
     });
+    _voiceRxCleanupTimer = Timer.periodic(const Duration(seconds: 5), (_) => _cleanupStaleVoiceAssemblies());
     // Периодический getInfo: пустые соседи — discovery; есть без ключа — обновить hasKey после KEY_EXCHANGE
     _neighborsPollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (!mounted || !widget.ble.isConnected) return;
@@ -180,6 +192,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _controller.removeListener(_onTextChanged);
     localeNotifier.removeListener(_onLocaleChanged);
     _ttlTimer?.cancel();
+    _voiceRxCleanupTimer?.cancel();
     _neighborsPollTimer?.cancel();
     _gpsSyncTimer?.cancel();
     _voiceRecordTicker?.dispose();
@@ -418,6 +431,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _nodeId = '';
     _nickname = null;
     _offlinePending = null;
+    _offlineCourierPending = null;
+    _offlineDirectPending = null;
+    _timeCapsulePending = 0;
     _neighbors = [];
     _neighborsRssi = [];
     _neighborsHasKey = [];
@@ -701,6 +717,166 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     }
   }
 
+  bool _sameNodeId(String? a, String? b) {
+    if (a == null || b == null || a.isEmpty || b.isEmpty) return false;
+    final an = a.toUpperCase();
+    final bn = b.toUpperCase();
+    return an == bn || an.startsWith(bn) || bn.startsWith(an);
+  }
+
+  void _cleanupStaleVoiceAssemblies() {
+    if (_voiceChunks.isEmpty || !mounted) return;
+    final now = DateTime.now();
+    final expired = <String>[];
+    _voiceChunks.forEach((from, assembly) {
+      final inactiveSec = now.difference(assembly.lastUpdated).inSeconds;
+      final ageSec = now.difference(assembly.startedAt).inSeconds;
+      if (inactiveSec > 20 || ageSec > 45) {
+        expired.add(from);
+      }
+    });
+    if (expired.isEmpty) return;
+    for (final from in expired) {
+      final a = _voiceChunks.remove(from);
+      if (a == null) continue;
+      final partialMsg = _buildPartialVoiceMessage(from, a);
+      if (partialMsg != null) {
+        _messages.add(partialMsg);
+      } else {
+        _messages.add(_Msg(
+          from: from,
+          text: context.l10n.tr('voice_rx_incomplete', {
+            'got': '${a.parts.length}',
+            'total': '${a.total}',
+          }),
+          isIncoming: true,
+          lane: 'normal',
+          type: 'voiceLoss',
+        ));
+      }
+    }
+    _scrollToBottom();
+    setState(() {});
+  }
+
+  _Msg? _buildPartialVoiceMessage(String from, _VoiceRxAssembly assembly) {
+    if (!assembly.parts.containsKey(0)) return null;
+    final prefix = <String>[];
+    for (var i = 0; i < assembly.total; i++) {
+      final p = assembly.parts[i];
+      if (p == null) break;
+      prefix.add(p);
+    }
+    if (prefix.length < 2) return null;
+    try {
+      final bytes = base64Decode(prefix.join());
+      final decoded = _decodeVoicePayload(bytes);
+      if (decoded.bytes.length < 256) return null;
+      final lossPercent = assembly.total <= 0
+          ? 0
+          : (((assembly.total - prefix.length) * 100) / assembly.total).round();
+      final profileLabel = decoded.voiceProfileCode != null
+          ? ' [${_voiceProfileLabel(decoded.voiceProfileCode!)}]'
+          : '';
+      return _Msg(
+        from: from,
+        text: '🎤 ${context.l10n.tr('voice')}$profileLabel ${context.l10n.tr('voice_rx_partial', {
+          'got': '${prefix.length}',
+          'total': '${assembly.total}',
+          'loss': '$lossPercent',
+        })}',
+        isIncoming: true,
+        lane: 'normal',
+        type: 'voicePartial',
+        isVoice: true,
+        voiceData: decoded.bytes,
+        deleteAt: decoded.deleteAt,
+        voiceProfileCode: decoded.voiceProfileCode,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _DecodedVoicePayload _decodeVoicePayload(List<int> rawBytes) {
+    var bytes = rawBytes;
+    int? voiceProfileCode;
+    if (bytes.length >= 2 && bytes[0] == 0xFE && bytes[1] >= 1 && bytes[1] <= 3) {
+      voiceProfileCode = bytes[1];
+      bytes = bytes.sublist(2);
+    }
+    DateTime? deleteAt;
+    if (bytes.length >= 2 && bytes[0] == 0xFF && bytes[1] >= 1 && bytes[1] <= 255) {
+      final ttl = bytes[1];
+      bytes = bytes.sublist(2);
+      deleteAt = DateTime.now().add(Duration(minutes: ttl));
+    }
+    return _DecodedVoicePayload(bytes: bytes, voiceProfileCode: voiceProfileCode, deleteAt: deleteAt);
+  }
+
+  _VoiceAdaptivePlan _selectVoicePlan() {
+    final rssiValues = _neighborsRssi.where((v) => v != 0).toList();
+    final avgRssi = rssiValues.isEmpty
+        ? -100.0
+        : rssiValues.reduce((a, b) => a + b) / rssiValues.length;
+    if ((_sf ?? 12) >= 11 || _neighbors.length <= 1 || avgRssi <= -95.0) {
+      return const _VoiceAdaptivePlan(profileCode: 3, bitRate: 16000, maxBytes: 12288, chunkSize: 180);
+    }
+    if ((_sf ?? 12) >= 10 || avgRssi <= -82.0) {
+      return const _VoiceAdaptivePlan(profileCode: 2, bitRate: 32000, maxBytes: 20480, chunkSize: 240);
+    }
+    return const _VoiceAdaptivePlan(profileCode: 1, bitRate: 64000, maxBytes: 30720, chunkSize: 300);
+  }
+
+  String _voiceProfileLabel(int code) {
+    if (code == 1) return context.l10n.tr('voice_profile_fast');
+    if (code == 3) return context.l10n.tr('voice_profile_resilient');
+    return context.l10n.tr('voice_profile_balanced');
+  }
+
+  bool _isCriticalMessage(_Msg m) => m.lane == 'critical' || m.type == 'sos';
+
+  bool _shouldEmitCriticalSummary(_Msg m, _St finalStatus) {
+    if (m.isIncoming || !_isCriticalMessage(m) || m.relaySummarySent) return false;
+    return finalStatus == _St.delivered || finalStatus == _St.read || finalStatus == _St.undelivered;
+  }
+
+  _Msg _buildCriticalSummaryMessage(_Msg m, _St finalStatus) {
+    final l = context.l10n;
+    final relayPath = m.relayPeers.isEmpty
+        ? l.tr('critical_chain_direct')
+        : l.tr('critical_chain_relays', {'hops': m.relayPeers.join(' -> ')});
+    String outcome;
+    if (finalStatus == _St.read) {
+      outcome = l.tr('critical_outcome_read');
+    } else if (finalStatus == _St.undelivered) {
+      if ((m.total ?? 0) > 0) {
+        outcome = l.tr('critical_outcome_undelivered_ratio', {
+          'd': '${m.delivered ?? 0}',
+          't': '${m.total ?? 0}',
+        });
+      } else {
+        outcome = l.tr('critical_outcome_undelivered');
+      }
+    } else {
+      if ((m.total ?? 0) > 0) {
+        outcome = l.tr('critical_outcome_delivered_ratio', {
+          'd': '${m.delivered ?? 0}',
+          't': '${m.total ?? 0}',
+        });
+      } else {
+        outcome = l.tr('critical_outcome_delivered');
+      }
+    }
+    return _Msg(
+      from: _nodeId,
+      text: l.tr('critical_chain_summary', {'path': relayPath, 'outcome': outcome}),
+      isIncoming: true,
+      lane: 'critical',
+      type: 'relaySummary',
+    );
+  }
+
   void _onInfoEvent(RiftLinkInfoEvent evt) {
     final bleDev = widget.ble.device;
     if (bleDev != null) _currentBleRemoteId = bleDev.remoteId.toString();
@@ -721,6 +897,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       if (evt.hasChannelField) _channel = evt.channel;
       _version = evt.version; _sf = evt.sf;
       if (evt.hasOfflinePendingField) _offlinePending = evt.offlinePending;
+      if (evt.hasOfflineCourierPendingField) _offlineCourierPending = evt.offlineCourierPending;
+      if (evt.hasOfflineDirectPendingField) _offlineDirectPending = evt.offlineDirectPending;
       _gpsPresent = evt.gpsPresent; _gpsEnabled = evt.gpsEnabled;
       _gpsFix = evt.gpsFix; _powersave = evt.powersave; _neighbors = evt.neighbors;
       _neighborsRssi = evt.neighborsRssi; _neighborsHasKey = evt.neighborsHasKey; _routes = evt.routes;
@@ -761,6 +939,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       setState(() {
         final ttl = evt.ttlMinutes ?? 0;
         _messages.add(_Msg(from: evt.from, text: evt.text, isIncoming: true, msgId: evt.msgId, rssi: evt.rssi,
+            lane: evt.lane, type: evt.type,
             deleteAt: ttl > 0 ? DateTime.now().add(Duration(minutes: ttl)) : null));
       });
       if (_appLifecycle != AppLifecycleState.resumed) {
@@ -780,9 +959,35 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         }
       });
     } else if (evt is RiftLinkDeliveredEvent) {
-      setState(() { for (var i = 0; i < _messages.length; i++) { final m = _messages[i]; if (!m.isIncoming && m.to == evt.from && m.msgId == evt.msgId) { _messages[i] = m.copyWith(status: _St.delivered); break; } } });
+      setState(() {
+        for (var i = 0; i < _messages.length; i++) {
+          final m = _messages[i];
+          if (!m.isIncoming && m.to == evt.from && m.msgId == evt.msgId) {
+            var updated = m.copyWith(status: _St.delivered);
+            if (_shouldEmitCriticalSummary(updated, _St.delivered)) {
+              updated = updated.copyWith(relaySummarySent: true);
+              _messages.add(_buildCriticalSummaryMessage(updated, _St.delivered));
+            }
+            _messages[i] = updated;
+            break;
+          }
+        }
+      });
     } else if (evt is RiftLinkReadEvent) {
-      setState(() { for (var i = 0; i < _messages.length; i++) { final m = _messages[i]; if (!m.isIncoming && m.to == evt.from && m.msgId == evt.msgId) { _messages[i] = m.copyWith(status: _St.read); break; } } });
+      setState(() {
+        for (var i = 0; i < _messages.length; i++) {
+          final m = _messages[i];
+          if (!m.isIncoming && m.to == evt.from && m.msgId == evt.msgId) {
+            var updated = m.copyWith(status: _St.read);
+            if (_shouldEmitCriticalSummary(updated, _St.read)) {
+              updated = updated.copyWith(relaySummarySent: true);
+              _messages.add(_buildCriticalSummaryMessage(updated, _St.read));
+            }
+            _messages[i] = updated;
+            break;
+          }
+        }
+      });
     } else if (evt is RiftLinkUndeliveredEvent) {
       setState(() {
         for (var i = 0; i < _messages.length; i++) {
@@ -790,7 +995,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           if (!m.isIncoming && m.msgId == evt.msgId) {
             final isBroadcast = evt.to.isEmpty || m.to == _broadcastTo;
             if (isBroadcast || m.to == evt.to) {
-              _messages[i] = m.copyWith(status: _St.undelivered, delivered: evt.delivered ?? 0, total: evt.total ?? 0);
+              var updated = m.copyWith(status: _St.undelivered, delivered: evt.delivered ?? 0, total: evt.total ?? 0);
+              if (_shouldEmitCriticalSummary(updated, _St.undelivered)) {
+                updated = updated.copyWith(relaySummarySent: true);
+                _messages.add(_buildCriticalSummaryMessage(updated, _St.undelivered));
+              }
+              _messages[i] = updated;
               break;
             }
           }
@@ -801,7 +1011,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         for (var i = 0; i < _messages.length; i++) {
           final m = _messages[i];
           if (!m.isIncoming && m.msgId == evt.msgId && (m.to == _broadcastTo || m.to == null)) {
-            _messages[i] = m.copyWith(status: evt.delivered > 0 ? _St.delivered : _St.undelivered, delivered: evt.delivered, total: evt.total);
+            final st = evt.delivered > 0 ? _St.delivered : _St.undelivered;
+            var updated = m.copyWith(status: st, delivered: evt.delivered, total: evt.total);
+            if (_shouldEmitCriticalSummary(updated, st)) {
+              updated = updated.copyWith(relaySummarySent: true);
+              _messages.add(_buildCriticalSummaryMessage(updated, st));
+            }
+            _messages[i] = updated;
             break;
           }
         }
@@ -831,7 +1047,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _pendingPings.remove(fromNorm);
       _showSnack('✓ ${context.l10n.tr('link_ok', {'from': evt.from})}', backgroundColor: context.palette.success, duration: const Duration(seconds: 4));
     }
-    else if (evt is RiftLinkErrorEvent) { _showSnack('${context.l10n.tr('error')}: ${evt.msg}', backgroundColor: context.palette.error); }
+    else if (evt is RiftLinkErrorEvent) {
+      var msg = evt.msg;
+      if (evt.code == 'invite_peer_key_mismatch') {
+        msg = context.l10n.tr('invite_status_mismatch');
+      } else if (evt.code == 'invite_token_bad_length' || evt.code == 'invite_token_bad_format') {
+        msg = context.l10n.tr('invite_status_token_bad');
+      }
+      _showSnack('${context.l10n.tr('error')}: $msg', backgroundColor: context.palette.error);
+    }
     else if (evt is RiftLinkWifiEvent) {
       _showSnack(
         evt.connected
@@ -840,28 +1064,119 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       );
     }
     else if (evt is RiftLinkGpsEvent) { setState(() { _gpsPresent = evt.present; _gpsEnabled = evt.enabled; _gpsFix = evt.hasFix; }); }
-    else if (evt is RiftLinkInviteEvent) { _showInviteDialog(evt.id, evt.pubKey, evt.channelKey); }
+    else if (evt is RiftLinkInviteEvent) {
+      _showInviteDialog(evt.id, evt.pubKey, evt.channelKey, evt.inviteToken, evt.inviteExpiresMs, evt.inviteTtlMs);
+    }
+    else if (evt is RiftLinkRelayProofEvent) {
+      final from4 = evt.from.length >= 4 ? evt.from.substring(0, 4) : evt.from;
+      final to4 = evt.to.length >= 4 ? evt.to.substring(0, 4) : evt.to;
+      setState(() {
+        for (var i = _messages.length - 1; i >= 0; i--) {
+          final m = _messages[i];
+          if (m.isIncoming || m.msgId == null || m.to == null) continue;
+          if (!_sameNodeId(m.to, evt.to)) continue;
+          final pktId = m.msgId! & 0xFFFF;
+          if (pktId == evt.pktId) {
+            final shortRelay = evt.relayedBy.length >= 4 ? evt.relayedBy.substring(0, 4).toUpperCase() : evt.relayedBy.toUpperCase();
+            final nextPeers = List<String>.from(m.relayPeers);
+            if (!nextPeers.contains(shortRelay) && nextPeers.length < 5) nextPeers.add(shortRelay);
+            _messages[i] = m.copyWith(
+              relayCount: (m.relayCount ?? 0) + 1,
+              relayPeers: nextPeers,
+            );
+            break;
+          }
+        }
+        _messages.add(_Msg(
+          from: evt.relayedBy,
+          text: context.l10n.tr('relay_proof_line', {'from': from4, 'to': to4, 'pkt': '${evt.pktId}'}),
+          isIncoming: true,
+          lane: 'normal',
+          type: 'relayProof',
+        ));
+      });
+      _scrollToBottom();
+    }
+    else if (evt is RiftLinkTimeCapsuleQueuedEvent) {
+      final triggerLabel = evt.trigger == 'target_online'
+          ? context.l10n.tr('time_capsule_trigger_online')
+          : context.l10n.tr('time_capsule_trigger_after');
+      setState(() {
+        _timeCapsulePending += 1;
+        _messages.add(_Msg(
+          from: _nodeId,
+          text: context.l10n.tr('time_capsule_queued', {'trigger': triggerLabel}),
+          isIncoming: true,
+          lane: 'normal',
+          type: 'timeCapsule',
+        ));
+      });
+      _scrollToBottom();
+    }
+    else if (evt is RiftLinkTimeCapsuleReleasedEvent) {
+      final triggerLabel = evt.trigger == 'target_online'
+          ? context.l10n.tr('time_capsule_trigger_online')
+          : context.l10n.tr('time_capsule_trigger_after');
+      setState(() {
+        if (_timeCapsulePending > 0) _timeCapsulePending -= 1;
+        _messages.add(_Msg(
+          from: _nodeId,
+          text: context.l10n.tr('time_capsule_released', {'trigger': triggerLabel}),
+          isIncoming: true,
+          lane: 'normal',
+          type: 'timeCapsule',
+        ));
+      });
+      _scrollToBottom();
+    }
     else if (evt is RiftLinkSelftestEvent) {
       if (mounted) _showSelftestDialog(evt);
       if (evt.batteryMv > 0) setState(() => _batteryMv = evt.batteryMv);
     } else if (evt is RiftLinkVoiceEvent) {
-      _voiceChunks[evt.from] ??= {};
-      _voiceChunks[evt.from]![evt.chunk] = evt.data;
-      final chunks = _voiceChunks[evt.from]!;
-      if (chunks.length == evt.total) {
-        final parts = List.generate(evt.total, (i) => chunks[i] ?? '');
+      final assembly = _voiceChunks.putIfAbsent(
+        evt.from,
+        () => _VoiceRxAssembly(total: evt.total, startedAt: DateTime.now(), lastUpdated: DateTime.now()),
+      );
+      if (assembly.total != evt.total) {
+        assembly.total = evt.total;
+        assembly.parts.clear();
+      }
+      assembly.parts[evt.chunk] = evt.data;
+      assembly.lastUpdated = DateTime.now();
+      if (assembly.parts.length == evt.total) {
+        final parts = List.generate(evt.total, (i) => assembly.parts[i] ?? '');
         try {
-          var bytes = base64Decode(parts.join());
-          DateTime? deleteAt;
-          if (bytes.length >= 2 && bytes[0] == 0xFF && bytes[1] >= 1 && bytes[1] <= 255) {
-            final ttl = bytes[1];
-            bytes = bytes.sublist(2);
-            deleteAt = DateTime.now().add(Duration(minutes: ttl));
-          }
+          final bytes = base64Decode(parts.join());
+          final decoded = _decodeVoicePayload(bytes);
           _voiceChunks.remove(evt.from);
-          setState(() { _messages.add(_Msg(from: evt.from, text: '🎤 ${context.l10n.tr('voice')}', isIncoming: true, isVoice: true, voiceData: bytes, deleteAt: deleteAt)); });
+          final profileLabel = decoded.voiceProfileCode != null
+              ? ' [${_voiceProfileLabel(decoded.voiceProfileCode!)}]'
+              : '';
+          setState(() {
+            _messages.add(_Msg(
+              from: evt.from,
+              text: '🎤 ${context.l10n.tr('voice')}$profileLabel',
+              isIncoming: true,
+              isVoice: true,
+              voiceData: decoded.bytes,
+              deleteAt: decoded.deleteAt,
+              voiceProfileCode: decoded.voiceProfileCode,
+            ));
+          });
           _scrollToBottom();
-        } catch (_) {}
+        } catch (_) {
+          _voiceChunks.remove(evt.from);
+          setState(() {
+            _messages.add(_Msg(
+              from: evt.from,
+              text: context.l10n.tr('voice_decode_error'),
+              isIncoming: true,
+              lane: 'normal',
+              type: 'voiceLoss',
+            ));
+          });
+          _scrollToBottom();
+        }
       }
     }
   }
@@ -876,15 +1191,32 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   static const _broadcastTo = 'FFFFFFFFFFFFFFFF';  // совпадает с evt.to в "sent" для broadcast
 
-  Future<void> _send({int ttlMinutes = 0}) async {
+  Future<void> _send({int ttlMinutes = 0, String lane = 'normal', String? trigger, int? triggerAtMs}) async {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
     _controller.clear();
     // Broadcast: to = FFFF... чтобы RiftLinkSentEvent нашёл сообщение; group = null
     final toForMsg = _group > 0 ? null : (_unicastTo ?? _broadcastTo);
-    setState(() { _messages.add(_Msg(from: _nodeId, text: text, isIncoming: false, to: toForMsg)); });
+    setState(() {
+      _messages.add(_Msg(
+        from: _nodeId,
+        text: text,
+        isIncoming: false,
+        to: toForMsg,
+        lane: lane,
+        type: trigger == null ? 'text' : 'timeCapsule',
+      ));
+    });
     _scrollToBottom();
-    await widget.ble.send(text: text, to: _unicastTo, group: _group > 0 ? _group : null, ttlMinutes: ttlMinutes);
+    await widget.ble.send(
+      text: text,
+      to: _unicastTo,
+      group: _group > 0 ? _group : null,
+      ttlMinutes: ttlMinutes,
+      lane: lane,
+      trigger: trigger,
+      triggerAtMs: triggerAtMs,
+    );
   }
 
   Future<void> _showTtlSendMenu() async {
@@ -892,6 +1224,55 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     if (text.isEmpty) return;
     final v = await _pickTtlMinutes();
     if (v != null && mounted) _send(ttlMinutes: v);
+  }
+
+  Future<void> _sendCritical() async {
+    if (_controller.text.trim().isEmpty) return;
+    await _send(lane: 'critical');
+  }
+
+  Future<void> _sendSosQuick() async {
+    final ok = await widget.ble.sendSos(text: 'SOS');
+    if (!mounted) return;
+    if (ok) {
+      setState(() {
+        _messages.add(_Msg(from: _nodeId, text: 'SOS', isIncoming: false, lane: 'critical', type: 'sos'));
+      });
+      _scrollToBottom();
+    } else {
+      _showSnack(context.l10n.tr('sos_send_failed'), backgroundColor: context.palette.error);
+    }
+  }
+
+  Future<void> _showTimeCapsuleMenu() async {
+    if (_controller.text.trim().isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final choice = await showAppModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.wifi_tethering),
+              title: Text(context.l10n.tr('time_capsule_send_online')),
+              onTap: () => Navigator.pop(ctx, 'target_online'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.schedule_send),
+              title: Text(context.l10n.tr('time_capsule_send_after')),
+              onTap: () => Navigator.pop(ctx, 'deliver_after_time'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || choice == null) return;
+    if (choice == 'target_online') {
+      await _send(trigger: 'target_online');
+    } else if (choice == 'deliver_after_time') {
+      await _send(trigger: 'deliver_after_time', triggerAtMs: now + 5 * 60 * 1000);
+    }
   }
 
   Future<int?> _pickTtlMinutes() async {
@@ -938,7 +1319,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _voiceRecordTicker?.dispose();
       _voiceRecordTicker = null;
       setState(() => _voiceRecording = false);
-      final bytes = await VoiceService.stopRecord();
+      final bytes = await VoiceService.stopRecord(maxBytes: _voicePlan.maxBytes);
       if (!mounted || bytes == null || bytes.isEmpty) {
         if (mounted) _showSnack(context.l10n.tr('voice_mic_error'));
         return;
@@ -948,14 +1329,26 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       if (to == null || !mounted) return;
       final ttl = _voiceTtlMinutes;
       List<int> payload = bytes;
-      if (ttl > 0) payload = [0xFF, ttl, ...bytes];
+      if (ttl > 0) payload = [0xFF, ttl, ...payload];
+      payload = [0xFE, _voiceProfileCode, ...payload];
       // Согласовано с прошивкой: BLE_ATT_MAX_JSON_BYTES=512, один JSON на write; сырой чанк ≤300 B → base64 ≤400.
-      const chunkSize = 300;
+      final chunkSize = _voicePlan.chunkSize;
       final chunks = <String>[];
       for (var i = 0; i < payload.length; i += chunkSize) { chunks.add(base64Encode(payload.sublist(i, (i + chunkSize < payload.length) ? i + chunkSize : payload.length))); }
       final ok = await widget.ble.sendVoice(to: to, chunks: chunks);
       if (mounted) {
-        if (ok) { setState(() { _messages.add(_Msg(from: _nodeId, text: '🎤 ${context.l10n.tr('voice')}', isIncoming: false, isVoice: true)); }); _scrollToBottom(); }
+        if (ok) {
+          setState(() {
+            _messages.add(_Msg(
+              from: _nodeId,
+              text: '🎤 ${context.l10n.tr('voice')} [${_voiceProfileLabel(_voiceProfileCode)}]',
+              isIncoming: false,
+              isVoice: true,
+              voiceProfileCode: _voiceProfileCode,
+            ));
+          });
+          _scrollToBottom();
+        }
         else { _showSnack(context.l10n.tr('voice_send_error')); }
       }
     } else {
@@ -967,14 +1360,18 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   Future<void> _startVoiceRecord({required int ttlMinutes}) async {
     FocusScope.of(context).unfocus();
     try {
-      final ok = await VoiceService.startRecord();
+      final plan = _selectVoicePlan();
+      final ok = await VoiceService.startRecord(bitRate: plan.bitRate);
       if (mounted) {
         setState(() {
           _voiceTtlMinutes = ttlMinutes;
+          _voicePlan = plan;
+          _voiceProfileCode = plan.profileCode;
           _voiceRecording = ok;
           _voiceRecordStartTime = ok ? DateTime.now() : null;
         });
         if (ok) {
+          _showSnack(context.l10n.tr('voice_profile_selected', {'profile': _voiceProfileLabel(_voiceProfileCode)}));
           _voiceRecordTicker?.dispose();
           var tickCount = 0;
           _voiceRecordTicker = createTicker((elapsed) {
@@ -1189,9 +1586,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     ));
   }
 
-  void _showInviteDialog(String id, String pubKey, [String? channelKey]) {
+  void _showInviteDialog(
+    String id,
+    String pubKey, [
+    String? channelKey,
+    String? inviteToken,
+    int? inviteExpiresMs,
+    int? inviteTtlMs,
+  ]) {
     final map = <String, String>{'id': id, 'pubKey': pubKey};
     if (channelKey != null && channelKey.isNotEmpty) map['channelKey'] = channelKey;
+    if (inviteToken != null && inviteToken.isNotEmpty) map['inviteToken'] = inviteToken;
     final data = jsonEncode(map);
     final p = context.palette;
     final l = context.l10n;
@@ -1219,10 +1624,24 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                   children: [
                     Text('ID: $id', style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: p.onSurface)),
                     const SizedBox(height: 8),
-                    Text(
-                      'PubKey: ${pubKey.length > 40 ? '${pubKey.substring(0, 40)}…' : pubKey}',
-                      style: TextStyle(fontFamily: 'monospace', fontSize: 11, color: p.onSurface),
-                    ),
+                    Text('PubKey: ${pubKey.length > 40 ? '${pubKey.substring(0, 40)}…' : pubKey}',
+                        style: TextStyle(fontFamily: 'monospace', fontSize: 11, color: p.onSurface)),
+                    if (inviteToken != null && inviteToken.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Text('Token: $inviteToken',
+                          style: TextStyle(fontFamily: 'monospace', fontSize: 11, color: p.onSurface)),
+                    ],
+                    if (inviteTtlMs != null && inviteTtlMs > 0) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        'TTL: ${(inviteTtlMs / 1000).round()} sec',
+                        style: TextStyle(fontSize: 11, color: p.onSurfaceVariant),
+                      ),
+                    ] else if (inviteExpiresMs != null) ...[
+                      const SizedBox(height: 8),
+                      Text('ExpiresAt(raw): $inviteExpiresMs',
+                          style: TextStyle(fontSize: 11, color: p.onSurfaceVariant)),
+                    ],
                   ],
                 ),
               ),
@@ -1312,6 +1731,27 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       case 'send_location':
         if (widget.ble.isConnected) {
           _sendLocation();
+        } else {
+          _showSnack(context.l10n.tr('connect_first'));
+        }
+        break;
+      case 'send_critical':
+        if (widget.ble.isConnected) {
+          _sendCritical();
+        } else {
+          _showSnack(context.l10n.tr('connect_first'));
+        }
+        break;
+      case 'send_sos':
+        if (widget.ble.isConnected) {
+          _sendSosQuick();
+        } else {
+          _showSnack(context.l10n.tr('connect_first'));
+        }
+        break;
+      case 'time_capsule':
+        if (widget.ble.isConnected) {
+          _showTimeCapsuleMenu();
         } else {
           _showSnack(context.l10n.tr('connect_first'));
         }
@@ -1466,6 +1906,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
             Divider(height: 1, color: context.palette.divider),
+            _buildStatusPanel(l),
             Expanded(
               child: Stack(
                 children: [
@@ -1515,6 +1956,73 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             _buildInputBar(l),
               ],
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatusPanel(AppLocalizations l) {
+    final chips = <Widget>[];
+    chips.add(_statusChip(
+      l.tr('pairwise_key_required'),
+      icon: Icons.lock_outline_rounded,
+      color: context.palette.primary,
+    ));
+    chips.add(_statusChip(
+      l.tr('critical_lane_label'),
+      icon: Icons.priority_high_rounded,
+      color: context.palette.error,
+    ));
+    if (_timeCapsulePending > 0) {
+      chips.add(_statusChip(
+        l.tr('time_capsule_status_count', {'n': '$_timeCapsulePending'}),
+        icon: Icons.schedule_rounded,
+        color: context.palette.primary,
+      ));
+    }
+    if ((_offlineCourierPending ?? 0) > 0) {
+      chips.add(_statusChip(
+        l.tr('scf_courier_status_count', {'n': '${_offlineCourierPending ?? 0}'}),
+        icon: Icons.local_shipping_outlined,
+        color: context.palette.success,
+      ));
+    }
+    if ((_offlineDirectPending ?? 0) > 0) {
+      chips.add(_statusChip(
+        l.tr('offline_direct_status_count', {'n': '${_offlineDirectPending ?? 0}'}),
+        icon: Icons.mark_email_unread_outlined,
+        color: context.palette.primary,
+      ));
+    }
+    if (chips.length <= 2) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 6, 10, 2),
+      color: context.palette.surface.withOpacity(0.92),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        children: chips,
+      ),
+    );
+  }
+
+  Widget _statusChip(String text, {required IconData icon, required Color color}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.12),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withOpacity(0.35)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: color),
           ),
         ],
       ),
@@ -1683,18 +2191,47 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
               _nicknameForId(m.from) ?? m.from,
               style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: context.palette.primary),
             )),
+          if (m.type == 'sos' || m.lane == 'critical')
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: m.type == 'sos' ? context.palette.error.withOpacity(0.14) : context.palette.primary.withOpacity(0.14),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  m.type == 'sos' ? 'SOS' : 'CRITICAL',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    color: m.type == 'sos' ? context.palette.error : context.palette.primary,
+                  ),
+                ),
+              ),
+            ),
           Row(mainAxisSize: MainAxisSize.min, children: [
             Flexible(child: Text(m.text, style: TextStyle(color: context.palette.onSurface, fontSize: 14))),
-            if (!m.isIncoming) Padding(padding: const EdgeInsets.only(left: 6), child: Text(
-              m.status == _St.undelivered
-                  ? (m.total != null && m.total! > 0 ? '✗ 0/${m.total}' : '✗')
-                  : m.status == _St.read
-                      ? '✓✓'
-                      : m.status == _St.delivered
-                          ? (m.delivered != null && m.total != null && m.total! > 0 ? '✓ ${m.delivered}/${m.total}' : '✓✓')
-                          : '✓',
-              style: TextStyle(fontSize: 10, color: m.status == _St.undelivered ? context.palette.error : (m.status == _St.read ? context.palette.primary : context.palette.onSurfaceVariant)),
-            )),
+            if (!m.isIncoming)
+              Padding(
+                padding: const EdgeInsets.only(left: 6),
+                child: Text(
+                  (m.status == _St.undelivered
+                          ? (m.total != null && m.total! > 0 ? '✗ 0/${m.total}' : '✗')
+                          : m.status == _St.read
+                              ? '✓✓'
+                              : m.status == _St.delivered
+                                  ? (m.delivered != null && m.total != null && m.total! > 0 ? '✓ ${m.delivered}/${m.total}' : '✓✓')
+                                  : '✓') +
+                      ((m.relayCount ?? 0) > 0 ? '  ↻${m.relayCount}' : ''),
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: m.status == _St.undelivered
+                        ? context.palette.error
+                        : (m.status == _St.read ? context.palette.primary : context.palette.onSurfaceVariant),
+                  ),
+                ),
+              ),
             if (m.isIncoming && m.rssi != null && m.rssi != 0) Padding(padding: const EdgeInsets.only(left: 6), child: Text('${m.rssi}dBm', style: TextStyle(fontSize: 9, color: context.palette.onSurfaceVariant))),
             if (m.isVoice && m.voiceData != null) IconButton(
               icon: Icon(Icons.play_circle_outline, color: context.palette.primary, size: 22),
@@ -2120,6 +2657,9 @@ class _AppMenuPopoverState extends State<_AppMenuPopover> {
         Divider(height: 1, color: context.palette.divider),
         _popoverItem(context, Icons.map, l.tr('map'), 'map'),
         _popoverItem(context, Icons.location_on, l.tr('location'), 'send_location'),
+        _popoverItem(context, Icons.priority_high, l.tr('menu_send_critical'), 'send_critical'),
+        _popoverItem(context, Icons.emergency, l.tr('menu_send_sos'), 'send_sos'),
+        _popoverItem(context, Icons.hourglass_bottom, l.tr('menu_time_capsule'), 'time_capsule'),
         _popoverItem(context, Icons.hub, l.tr('mesh_topology'), 'mesh'),
         _popoverItem(context, Icons.radar, l.tr('ping'), 'ping'),
         _popoverItem(context, Icons.health_and_safety, l.tr('selftest'), 'selftest'),
@@ -2297,6 +2837,45 @@ class _TtlPickerSheet extends StatelessWidget {
 
 enum _St { sent, delivered, read, undelivered }
 
+class _VoiceAdaptivePlan {
+  final int profileCode;
+  final int bitRate;
+  final int maxBytes;
+  final int chunkSize;
+
+  const _VoiceAdaptivePlan({
+    required this.profileCode,
+    required this.bitRate,
+    required this.maxBytes,
+    required this.chunkSize,
+  });
+}
+
+class _VoiceRxAssembly {
+  int total;
+  final DateTime startedAt;
+  DateTime lastUpdated;
+  final Map<int, String> parts = <int, String>{};
+
+  _VoiceRxAssembly({
+    required this.total,
+    required this.startedAt,
+    required this.lastUpdated,
+  });
+}
+
+class _DecodedVoicePayload {
+  final List<int> bytes;
+  final int? voiceProfileCode;
+  final DateTime? deleteAt;
+
+  const _DecodedVoicePayload({
+    required this.bytes,
+    required this.voiceProfileCode,
+    required this.deleteAt,
+  });
+}
+
 /// Для broadcast: delivered/total — доставлено X из Y
 class _Msg {
   final String from;
@@ -2305,6 +2884,7 @@ class _Msg {
   final bool isLocation;
   final bool isVoice;
   final List<int>? voiceData;
+  final int? voiceProfileCode;
   final int? msgId;
   final String? to;
   final int? rssi;
@@ -2312,12 +2892,41 @@ class _Msg {
   final _St status;
   final int? delivered;  // broadcast: доставлено X
   final int? total;     // broadcast: всего Y
+  final int? relayCount; // кол-во observed relayProof для pktId
+  final List<String> relayPeers; // короткая цепочка relay-узлов
+  final bool relaySummarySent; // итоговая critical summary уже показана
+  final String lane;
+  final String type;
 
-  _Msg({required this.from, required this.text, required this.isIncoming, this.isLocation = false, this.isVoice = false, this.voiceData, this.msgId, this.to, this.rssi, this.deleteAt, this.status = _St.sent, this.delivered, this.total});
+  _Msg({
+    required this.from,
+    required this.text,
+    required this.isIncoming,
+    this.isLocation = false,
+    this.isVoice = false,
+    this.voiceData,
+    this.voiceProfileCode,
+    this.msgId,
+    this.to,
+    this.rssi,
+    this.deleteAt,
+    this.status = _St.sent,
+    this.delivered,
+    this.total,
+    this.relayCount,
+    this.relayPeers = const [],
+    this.relaySummarySent = false,
+    this.lane = 'normal',
+    this.type = 'text',
+  });
 
-  _Msg copyWith({int? msgId, String? to, _St? status, int? delivered, int? total}) => _Msg(
-    from: from, text: text, isIncoming: isIncoming, isLocation: isLocation, isVoice: isVoice, voiceData: voiceData,
+  _Msg copyWith({int? msgId, String? to, _St? status, int? delivered, int? total, int? relayCount, List<String>? relayPeers, bool? relaySummarySent, String? lane, String? type, int? voiceProfileCode}) => _Msg(
+    from: from, text: text, isIncoming: isIncoming, isLocation: isLocation, isVoice: isVoice, voiceData: voiceData, voiceProfileCode: voiceProfileCode ?? this.voiceProfileCode,
     msgId: msgId ?? this.msgId, to: to ?? this.to, rssi: rssi, deleteAt: deleteAt, status: status ?? this.status,
     delivered: delivered ?? this.delivered, total: total ?? this.total,
+    relayCount: relayCount ?? this.relayCount,
+    relayPeers: relayPeers ?? this.relayPeers,
+    relaySummarySent: relaySummarySent ?? this.relaySummarySent,
+    lane: lane ?? this.lane, type: type ?? this.type,
   );
 }

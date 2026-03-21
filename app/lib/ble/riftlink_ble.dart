@@ -486,9 +486,21 @@ class RiftLinkBle {
     _lastRxIncompleteLogLen = 0;
   }
 
-  /// Отправка геолокации (broadcast)
-  Future<bool> sendLocation({required double lat, required double lon, int alt = 0}) async =>
-      _sendCmd({'cmd': 'location', 'lat': lat, 'lon': lon, 'alt': alt});
+  /// Отправка геолокации (broadcast), опционально с geofence и expiry.
+  Future<bool> sendLocation({
+    required double lat,
+    required double lon,
+    int alt = 0,
+    int radiusM = 0,
+    int? expiryEpochSec,
+  }) async => _sendCmd({
+        'cmd': 'location',
+        'lat': lat,
+        'lon': lon,
+        'alt': alt,
+        if (radiusM > 0) 'radiusM': radiusM,
+        if (expiryEpochSec != null && expiryEpochSec > 0) 'expiryEpochSec': expiryEpochSec,
+      });
 
   /// GPS sync от телефона: UTC ms, lat, lon, alt — для beacon-sync (устройство без GPS)
   Future<bool> sendGpsSync({required int utcMs, required double lat, required double lon, int alt = 0}) async =>
@@ -532,13 +544,14 @@ class RiftLinkBle {
   Future<bool> sendVoice({required String to, required List<String> chunks}) async {
     if (to.length < 8 || chunks.isEmpty) return false;
     for (var i = 0; i < chunks.length; i++) {
-      await _sendCmd({
+      final ok = await _sendCmd({
         'cmd': 'voice',
         'to': to,
         'chunk': i,
         'total': chunks.length,
         'data': chunks[i],
       });
+      if (!ok) return false;
     }
     return true;
   }
@@ -562,6 +575,18 @@ class RiftLinkBle {
   /// Удалить группу
   Future<bool> removeGroup(int groupId) async =>
       groupId <= 0 ? false : _sendCmd({'cmd': 'removeGroup', 'group': groupId});
+
+  /// Установить/обновить приватный ключ группы (base64, 32 байта).
+  Future<bool> setGroupKey(int groupId, String keyB64) async =>
+      groupId <= 0 || keyB64.trim().isEmpty ? false : _sendCmd({'cmd': 'setGroupKey', 'group': groupId, 'key': keyB64.trim()});
+
+  /// Удалить приватный ключ группы (группа станет public).
+  Future<bool> clearGroupKey(int groupId) async =>
+      groupId <= 0 ? false : _sendCmd({'cmd': 'clearGroupKey', 'group': groupId});
+
+  /// Запросить приватный ключ группы (ответ evt:groupKey).
+  Future<bool> getGroupKey(int groupId) async =>
+      groupId <= 0 ? false : _sendCmd({'cmd': 'getGroupKey', 'group': groupId});
 
   /// Отправить PING на узел (проверка связи)
   Future<bool> sendPing(String to) async =>
@@ -692,13 +717,19 @@ class RiftLinkBle {
   Future<bool> setLang(String lang) async =>
       _sendCmd({'cmd': 'lang', 'lang': lang});
 
-  /// Создать E2E invite (evt "invite")
-  Future<bool> createInvite() async => _sendCmd({'cmd': 'invite'});
+  /// Создать E2E invite (evt "invite"), TTL ограничен на устройстве.
+  Future<bool> createInvite({int ttlSec = 600}) async => _sendCmd({'cmd': 'invite', 'ttlSec': ttlSec});
 
-  /// Принять invite (id + pubKey base64, опционально channelKey base64)
-  Future<bool> acceptInvite({required String id, required String pubKey, String? channelKey}) async {
+  /// Принять invite (id + pubKey base64, опционально channelKey/inviteToken).
+  Future<bool> acceptInvite({
+    required String id,
+    required String pubKey,
+    String? channelKey,
+    String? inviteToken,
+  }) async {
     final payload = <String, dynamic>{'cmd': 'acceptInvite', 'id': id, 'pubKey': pubKey};
     if (channelKey != null && channelKey.isNotEmpty) payload['channelKey'] = channelKey;
+    if (inviteToken != null && inviteToken.isNotEmpty) payload['inviteToken'] = inviteToken;
     return _sendCmd(payload);
   }
 
@@ -708,15 +739,49 @@ class RiftLinkBle {
   /// Selftest (evt "selftest")
   Future<bool> selftest() async => _sendCmd({'cmd': 'selftest'});
 
-  /// Отправка сообщения (broadcast, unicast или в группу). ttlMinutes: 0 = постоянное
-  Future<bool> send({String? to, int? group, required String text, int ttlMinutes = 0}) async {
+  /// Отправка сообщения (broadcast, unicast или в группу).
+  Future<bool> send({
+    String? to,
+    int? group,
+    required String text,
+    int ttlMinutes = 0,
+    String lane = 'normal',
+    String? trigger,
+    int? triggerAtMs,
+  }) async {
     final payload = group != null && group > 0
-        ? {'cmd': 'send', 'group': group, 'text': text, if (ttlMinutes > 0) 'ttl': ttlMinutes}
+        ? {
+            'cmd': 'send',
+            'group': group,
+            'text': text,
+            if (ttlMinutes > 0) 'ttl': ttlMinutes,
+            if (lane != 'normal') 'lane': lane,
+            if (trigger != null && trigger.isNotEmpty) 'trigger': trigger,
+            if (triggerAtMs != null) 'triggerAtMs': triggerAtMs,
+          }
         : to != null
-            ? {'cmd': 'send', 'to': to, 'text': text, if (ttlMinutes > 0) 'ttl': ttlMinutes}
-            : {'cmd': 'send', 'text': text, if (ttlMinutes > 0) 'ttl': ttlMinutes};
+            ? {
+                'cmd': 'send',
+                'to': to,
+                'text': text,
+                if (ttlMinutes > 0) 'ttl': ttlMinutes,
+                if (lane != 'normal') 'lane': lane,
+                if (trigger != null && trigger.isNotEmpty) 'trigger': trigger,
+                if (triggerAtMs != null) 'triggerAtMs': triggerAtMs,
+              }
+            : {
+                'cmd': 'send',
+                'text': text,
+                if (ttlMinutes > 0) 'ttl': ttlMinutes,
+                if (lane != 'normal') 'lane': lane,
+                if (trigger != null && trigger.isNotEmpty) 'trigger': trigger,
+                if (triggerAtMs != null) 'triggerAtMs': triggerAtMs,
+              };
     return _sendCmd(payload);
   }
+
+  /// Emergency flood
+  Future<bool> sendSos({String text = 'SOS'}) => _sendCmd({'cmd': 'sos', 'text': text});
 
   /// Все подписчики получают каждое событие (multicast). Длинные JSON склеиваются в [_drainRxAccum].
   Stream<RiftLinkEvent> get events => _eventBus.stream;
@@ -903,6 +968,7 @@ Map<String, dynamic> _normalizeRouteMap(Map<dynamic, dynamic> raw) {
   if (m.containsKey('sf')) out['sf'] = _jsonIntNullable(m['sf']);
   if (m.containsKey('bw')) out['bw'] = _jsonDoubleNullable(m['bw']);
   if (m.containsKey('cr')) out['cr'] = _jsonIntNullable(m['cr']);
+  if (m.containsKey('trustScore')) out['trustScore'] = _jsonIntNullable(m['trustScore']);
   return out;
 }
 
@@ -917,6 +983,8 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       msgId: (json['msgId'] as num?)?.toInt(),
       rssi: (json['rssi'] as num?)?.toInt(),
       ttlMinutes: (json['ttl'] as num?)?.toInt(),
+      lane: json['lane']?.toString() ?? 'normal',
+      type: json['type']?.toString() ?? 'text',
     );
   }
   if (evt == 'sent') {
@@ -963,6 +1031,10 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
         : <bool>[];
     final grpList = json['groups'];
     final groups = grpList is List ? (grpList as List).map(_jsonInt).toList() : <int>[];
+    final grpPrivList = json['groupsPrivate'];
+    final groupsPrivate = grpPrivList is List
+        ? (grpPrivList as List).map((e) => e == true || e == 1).toList()
+        : <bool>[];
     final routesList = json['routes'];
     final routes = <Map<String, dynamic>>[];
     if (routesList is List) {
@@ -980,6 +1052,8 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       hasNicknameField: json.containsKey('nickname'),
       hasChannelField: json.containsKey('channel'),
       hasOfflinePendingField: json.containsKey('offlinePending'),
+      hasOfflineCourierPendingField: json.containsKey('offlineCourierPending'),
+      hasOfflineDirectPendingField: json.containsKey('offlineDirectPending'),
       region: _regionCodeOrDefault(json['region']),
       freq: _jsonDouble(json['freq']),
       power: _jsonIntDefault(json['power'], 14),
@@ -994,12 +1068,15 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       neighborsRssi: neighborsRssi,
       neighborsHasKey: neighborsHasKey,
       groups: groups,
+      groupsPrivate: groupsPrivate,
       routes: routes,
       sf: _jsonIntNullable(json['sf']),
       bw: _jsonDoubleNullable(json['bw']),
       cr: _jsonIntNullable(json['cr']),
       modemPreset: _jsonIntNullable(json['modemPreset']),
       offlinePending: _jsonIntNullable(json['offlinePending']),
+      offlineCourierPending: _jsonIntNullable(json['offlineCourierPending']),
+      offlineDirectPending: _jsonIntNullable(json['offlineDirectPending']),
       batteryMv: _jsonIntNullable(json['batteryMv']) ?? _jsonIntNullable(json['battery']),
       batteryPercent: _jsonIntNullable(json['batteryPercent']),
       charging: json['charging'] == true || json['charging'] == 1,
@@ -1028,8 +1105,18 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
   }
   if (evt == 'groups') {
     final grpList = json['groups'];
+    final grpPrivList = json['groupsPrivate'];
     return RiftLinkGroupsEvent(
       groups: grpList is List ? (grpList as List).map(_jsonInt).toList() : <int>[],
+      groupsPrivate: grpPrivList is List
+          ? (grpPrivList as List).map((e) => e == true || e == 1).toList()
+          : <bool>[],
+    );
+  }
+  if (evt == 'groupKey') {
+    return RiftLinkGroupKeyEvent(
+      group: _jsonIntDefault(json['group'], 0),
+      key: json['key']?.toString() ?? '',
     );
   }
   if (evt == 'telemetry') {
@@ -1127,6 +1214,32 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       id: json['id'] as String? ?? '',
       pubKey: json['pubKey'] as String? ?? '',
       channelKey: json['channelKey'] as String?,
+      inviteToken: json['inviteToken'] as String?,
+      inviteExpiresMs: _jsonIntNullable(json['inviteExpiresMs']),
+      inviteTtlMs: _jsonIntNullable(json['inviteTtlMs']),
+    );
+  }
+  if (evt == 'relayProof') {
+    return RiftLinkRelayProofEvent(
+      relayedBy: json['relayedBy'] as String? ?? '',
+      from: json['from'] as String? ?? '',
+      to: json['to'] as String? ?? '',
+      pktId: _jsonIntDefault(json['pktId'], 0),
+      opcode: _jsonIntDefault(json['opcode'], 0),
+    );
+  }
+  if (evt == 'timeCapsuleQueued') {
+    return RiftLinkTimeCapsuleQueuedEvent(
+      to: json['to'] as String?,
+      trigger: json['trigger']?.toString() ?? '',
+      triggerAtMs: _jsonIntNullable(json['triggerAtMs']),
+    );
+  }
+  if (evt == 'timeCapsuleReleased') {
+    return RiftLinkTimeCapsuleReleasedEvent(
+      to: json['to'] as String? ?? '',
+      msgId: _jsonIntDefault(json['msgId'], 0),
+      trigger: json['trigger']?.toString() ?? '',
     );
   }
   if (evt == 'selftest') {
@@ -1151,7 +1264,17 @@ class RiftLinkMsgEvent extends RiftLinkEvent {
   final int? msgId;
   final int? rssi;
   final int? ttlMinutes;
-  RiftLinkMsgEvent({required this.from, required this.text, this.msgId, this.rssi, this.ttlMinutes});
+  final String lane; // normal|critical
+  final String type; // text|sos|...
+  RiftLinkMsgEvent({
+    required this.from,
+    required this.text,
+    this.msgId,
+    this.rssi,
+    this.ttlMinutes,
+    this.lane = 'normal',
+    this.type = 'text',
+  });
 }
 
 class RiftLinkSentEvent extends RiftLinkEvent {
@@ -1195,6 +1318,8 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
   final bool hasNicknameField;
   final bool hasChannelField;
   final bool hasOfflinePendingField;
+  final bool hasOfflineCourierPendingField;
+  final bool hasOfflineDirectPendingField;
   final String region;
   final double freq;
   final int power;
@@ -1209,12 +1334,15 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
   final List<int> neighborsRssi;
   final List<bool> neighborsHasKey;
   final List<int> groups;
+  final List<bool> groupsPrivate;
   final List<Map<String, dynamic>> routes;
   final int? sf;
   final double? bw;
   final int? cr;
   final int? modemPreset;   // 0=Speed,1=Normal,2=Range,3=MaxRange,4=Custom
   final int? offlinePending;
+  final int? offlineCourierPending;
+  final int? offlineDirectPending;
   final int? batteryMv;
   final int? batteryPercent;
   final bool charging;
@@ -1233,6 +1361,8 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
     this.hasNicknameField = false,
     this.hasChannelField = false,
     this.hasOfflinePendingField = false,
+    this.hasOfflineCourierPendingField = false,
+    this.hasOfflineDirectPendingField = false,
     this.region = 'EU',
     this.freq = 868.0,
     this.power = 14,
@@ -1247,12 +1377,15 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
     this.neighborsRssi = const [],
     this.neighborsHasKey = const [],
     this.groups = const [],
+    this.groupsPrivate = const [],
     this.routes = const [],
     this.sf,
     this.bw,
     this.cr,
     this.modemPreset,
     this.offlinePending,
+    this.offlineCourierPending,
+    this.offlineDirectPending,
     this.batteryMv,
     this.batteryPercent,
     this.charging = false,
@@ -1286,7 +1419,54 @@ class RiftLinkInviteEvent extends RiftLinkEvent {
   final String id;
   final String pubKey;
   final String? channelKey;  // base64, опционально
-  RiftLinkInviteEvent({required this.id, required this.pubKey, this.channelKey});
+  final String? inviteToken;
+  final int? inviteExpiresMs;
+  final int? inviteTtlMs;
+  RiftLinkInviteEvent({
+    required this.id,
+    required this.pubKey,
+    this.channelKey,
+    this.inviteToken,
+    this.inviteExpiresMs,
+    this.inviteTtlMs,
+  });
+}
+
+class RiftLinkRelayProofEvent extends RiftLinkEvent {
+  final String relayedBy;
+  final String from;
+  final String to;
+  final int pktId;
+  final int opcode;
+  RiftLinkRelayProofEvent({
+    required this.relayedBy,
+    required this.from,
+    required this.to,
+    required this.pktId,
+    required this.opcode,
+  });
+}
+
+class RiftLinkTimeCapsuleQueuedEvent extends RiftLinkEvent {
+  final String? to;
+  final String trigger;
+  final int? triggerAtMs;
+  RiftLinkTimeCapsuleQueuedEvent({
+    this.to,
+    required this.trigger,
+    this.triggerAtMs,
+  });
+}
+
+class RiftLinkTimeCapsuleReleasedEvent extends RiftLinkEvent {
+  final String to;
+  final int msgId;
+  final String trigger;
+  RiftLinkTimeCapsuleReleasedEvent({
+    required this.to,
+    required this.msgId,
+    required this.trigger,
+  });
 }
 
 class RiftLinkSelftestEvent extends RiftLinkEvent {
@@ -1315,7 +1495,14 @@ class RiftLinkRoutesEvent extends RiftLinkEvent {
 
 class RiftLinkGroupsEvent extends RiftLinkEvent {
   final List<int> groups;
-  RiftLinkGroupsEvent({required this.groups});
+  final List<bool> groupsPrivate;
+  RiftLinkGroupsEvent({required this.groups, this.groupsPrivate = const []});
+}
+
+class RiftLinkGroupKeyEvent extends RiftLinkEvent {
+  final int group;
+  final String key;
+  RiftLinkGroupKeyEvent({required this.group, required this.key});
 }
 
 class RiftLinkNeighborsEvent extends RiftLinkEvent {

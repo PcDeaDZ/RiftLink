@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
+import '../prefs/mesh_prefs.dart';
 import '../theme/app_theme.dart';
 import '../theme/theme_notifier.dart';
 import '../widgets/mesh_background.dart';
@@ -629,6 +630,10 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
   late final TextEditingController _inviteIdController;
   late final TextEditingController _inviteKeyController;
   late final TextEditingController _inviteChannelKeyController;
+  late final TextEditingController _inviteTokenController;
+  late final TextEditingController _voiceAcceptAvgLossController;
+  late final TextEditingController _voiceAcceptHardLossController;
+  late final TextEditingController _voiceAcceptMinSessionsController;
 
   late String _region;
   late int? _channel;
@@ -642,6 +647,8 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
   late bool _powersave;
   late bool _meshAnimationEnabled;
   int? _offlinePending;
+  int? _offlineCourierPending;
+  int? _offlineDirectPending;
   int? _batteryMv;
   int? _batteryPercent;
   bool _charging = false;
@@ -656,6 +663,11 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
   bool _espNowAdaptive = false;
   bool _modemApplying = false;
   bool _radioModeApplying = false;
+  String? _inviteStatusText;
+  bool _inviteStatusError = false;
+  String? _invitePendingPeerId;
+  Timer? _inviteExpiryTimer;
+  bool _voiceAcceptanceSaving = false;
 
   /// Актуальный ID (обновляется по evt info, пока открыты настройки).
   late String _nodeIdLive;
@@ -682,6 +694,8 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
       _gpsFix = evt.gpsFix;
       _powersave = evt.powersave;
       if (evt.hasOfflinePendingField) _offlinePending = evt.offlinePending;
+      if (evt.hasOfflineCourierPendingField) _offlineCourierPending = evt.offlineCourierPending;
+      if (evt.hasOfflineDirectPendingField) _offlineDirectPending = evt.offlineDirectPending;
       if (evt.batteryMv != null && evt.batteryMv! > 0) _batteryMv = evt.batteryMv;
       _batteryPercent = evt.batteryPercent;
       _charging = evt.charging;
@@ -697,6 +711,14 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
       }
       _espNowAdaptive = evt.espNowAdaptive;
     });
+    final pendingPeer = _invitePendingPeerId;
+    if (pendingPeer != null && _peerHasKey(evt, pendingPeer) && mounted) {
+      setState(() {
+        _inviteStatusError = false;
+        _inviteStatusText = context.l10n.tr('invite_status_key_ready');
+        _invitePendingPeerId = null;
+      });
+    }
     // Ключ nickname в JSON может отсутствовать (прошивка) — не перезаписываем поле из «пустого» evt.
     if (evt.hasNicknameField) {
       final nick = evt.nickname?.trim();
@@ -726,6 +748,8 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     _gpsFix = li?.gpsFix ?? widget.gpsFix;
     _powersave = li?.powersave ?? widget.powersave;
     _offlinePending = li?.offlinePending ?? widget.offlinePending;
+    _offlineCourierPending = li?.offlineCourierPending;
+    _offlineDirectPending = li?.offlineDirectPending;
     _batteryMv = li?.batteryMv ?? widget.batteryMv;
     _batteryPercent = li?.batteryPercent;
     _charging = li?.charging ?? false;
@@ -750,6 +774,11 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     _inviteIdController = TextEditingController();
     _inviteKeyController = TextEditingController();
     _inviteChannelKeyController = TextEditingController();
+    _inviteTokenController = TextEditingController();
+    _voiceAcceptAvgLossController = TextEditingController();
+    _voiceAcceptHardLossController = TextEditingController();
+    _voiceAcceptMinSessionsController = TextEditingController();
+    _loadVoiceAcceptancePrefs();
 
     _bleSub?.cancel();
     _bleSub = widget.ble.events.listen((evt) {
@@ -766,6 +795,26 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
           _gpsPresent = evt.present;
           _gpsEnabled = evt.enabled;
           _gpsFix = evt.hasFix;
+        });
+      } else if (evt is RiftLinkInviteEvent) {
+        final ttlSec = evt.inviteTtlMs != null ? (evt.inviteTtlMs! / 1000).round() : null;
+        _armInviteExpiryTimer(evt.inviteTtlMs);
+        setState(() {
+          _inviteStatusError = false;
+          _inviteStatusText = ttlSec != null
+              ? context.l10n.tr('invite_status_created_ttl', {'sec': '$ttlSec'})
+              : context.l10n.tr('invite_created');
+        });
+      } else if (evt is RiftLinkErrorEvent && evt.code.startsWith('invite_')) {
+        String mapped = evt.msg;
+        if (evt.code == 'invite_peer_key_mismatch') {
+          mapped = context.l10n.tr('invite_status_mismatch');
+        } else if (evt.code == 'invite_token_bad_length' || evt.code == 'invite_token_bad_format') {
+          mapped = context.l10n.tr('invite_status_token_bad');
+        }
+        setState(() {
+          _inviteStatusError = true;
+          _inviteStatusText = mapped;
         });
       }
     });
@@ -811,6 +860,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     WidgetsBinding.instance.removeObserver(this);
     _bleSub?.cancel();
     _infoRetryTimer?.cancel();
+    _inviteExpiryTimer?.cancel();
     _nickFocus.dispose();
     _nickController.dispose();
     _wifiSsidController.dispose();
@@ -818,10 +868,90 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     _inviteIdController.dispose();
     _inviteKeyController.dispose();
     _inviteChannelKeyController.dispose();
+    _inviteTokenController.dispose();
+    _voiceAcceptAvgLossController.dispose();
+    _voiceAcceptHardLossController.dispose();
+    _voiceAcceptMinSessionsController.dispose();
     super.dispose();
   }
 
   void _snack(String t) => showAppSnackBar(context, t);
+
+  String _normHex(String raw) => raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+
+  bool _samePeerId(String a, String b) {
+    final an = _normHex(a);
+    final bn = _normHex(b);
+    if (an.isEmpty || bn.isEmpty) return false;
+    return an == bn || an.startsWith(bn) || bn.startsWith(an);
+  }
+
+  bool _peerHasKey(RiftLinkInfoEvent evt, String peerId) {
+    for (var i = 0; i < evt.neighbors.length; i++) {
+      if (!_samePeerId(evt.neighbors[i], peerId)) continue;
+      if (i < evt.neighborsHasKey.length && evt.neighborsHasKey[i] == true) return true;
+      return false;
+    }
+    return false;
+  }
+
+  void _armInviteExpiryTimer(int? ttlMs) {
+    _inviteExpiryTimer?.cancel();
+    if (ttlMs == null || ttlMs <= 0) return;
+    _inviteExpiryTimer = Timer(Duration(milliseconds: ttlMs), () {
+      if (!mounted) return;
+      setState(() {
+        // Не затираем успешный handshake, если он уже завершился.
+        if (_invitePendingPeerId == null && _inviteStatusError == false &&
+            _inviteStatusText == context.l10n.tr('invite_status_key_ready')) {
+          return;
+        }
+        _inviteStatusError = true;
+        _inviteStatusText = context.l10n.tr('invite_status_expired');
+      });
+    });
+  }
+
+  String? _validateInviteToken(String raw) {
+    if (raw.isEmpty) return null;
+    if (raw.length != 16) return context.l10n.tr('invite_status_token_bad');
+    final ok = RegExp(r'^[0-9A-Fa-f]{16}$').hasMatch(raw);
+    return ok ? null : context.l10n.tr('invite_status_token_bad');
+  }
+
+  Future<void> _loadVoiceAcceptancePrefs() async {
+    final avg = await MeshPrefs.getVoiceAcceptMaxAvgLossPercent();
+    final hard = await MeshPrefs.getVoiceAcceptMaxHardLossPercent();
+    final minSessions = await MeshPrefs.getVoiceAcceptMinSessions();
+    if (!mounted) return;
+    setState(() {
+      _voiceAcceptAvgLossController.text = '$avg';
+      _voiceAcceptHardLossController.text = '$hard';
+      _voiceAcceptMinSessionsController.text = '$minSessions';
+    });
+  }
+
+  Future<void> _saveVoiceAcceptancePrefs() async {
+    final l = context.l10n;
+    final avg = int.tryParse(_voiceAcceptAvgLossController.text.trim());
+    final hard = int.tryParse(_voiceAcceptHardLossController.text.trim());
+    final minSessions = int.tryParse(_voiceAcceptMinSessionsController.text.trim());
+    if (avg == null || hard == null || minSessions == null) {
+      _snack(l.tr('voice_acceptance_bad_values'));
+      return;
+    }
+    if (avg < 0 || avg > 100 || hard < 0 || hard > 100 || minSessions < 1 || minSessions > 500) {
+      _snack(l.tr('voice_acceptance_bad_values'));
+      return;
+    }
+    setState(() => _voiceAcceptanceSaving = true);
+    await MeshPrefs.setVoiceAcceptMaxAvgLossPercent(avg);
+    await MeshPrefs.setVoiceAcceptMaxHardLossPercent(hard);
+    await MeshPrefs.setVoiceAcceptMinSessions(minSessions);
+    if (!mounted) return;
+    setState(() => _voiceAcceptanceSaving = false);
+    _snack(l.tr('saved'));
+  }
 
   bool _isModemMatch(
     RiftLinkInfoEvent info, {
@@ -1588,6 +1718,10 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       onPressed: connected
                           ? () {
                               HapticFeedback.lightImpact();
+                              setState(() {
+                                _inviteStatusError = false;
+                                _inviteStatusText = l.tr('invite_status_creating');
+                              });
                               widget.ble.createInvite();
                             }
                           : null,
@@ -1647,9 +1781,15 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                                       final id = (m['id'] as String?) ?? '';
                                       final pk = (m['pubKey'] as String?) ?? '';
                                       final ck = (m['channelKey'] as String?) ?? '';
+                                      final tok = (m['inviteToken'] as String?) ?? '';
+                                      final ttlMs = (m['inviteTtlMs'] as num?)?.toInt();
                                       _inviteIdController.text = id.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
                                       _inviteKeyController.text = pk;
                                       _inviteChannelKeyController.text = ck;
+                                      _inviteTokenController.text = tok.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
+                                      if (ttlMs != null && mounted) {
+                                        _snack(l.tr('invite_ttl', {'sec': '${(ttlMs / 1000).round()}'}));
+                                      }
                                       if (mounted) setState(() {});
                                     }
                                   } catch (_) {}
@@ -1682,6 +1822,16 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                             maxLines: 2,
                             minLines: 1,
                           ),
+                          const SizedBox(height: 12),
+                          TextField(
+                            controller: _inviteTokenController,
+                            style: TextStyle(color: context.palette.onSurface, fontFamily: 'monospace', fontSize: 13),
+                            decoration: InputDecoration(
+                              isDense: true,
+                              labelText: l.tr('invite_token_optional'),
+                            ),
+                            maxLength: 16,
+                          ),
                         ],
                       ),
                     ),
@@ -1697,19 +1847,62 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                               final id = _inviteIdController.text.trim().replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
                               final key = _inviteKeyController.text.trim();
                               final ck = _inviteChannelKeyController.text.trim();
+                              final token = _inviteTokenController.text.trim().replaceAll(RegExp(r'[^0-9A-Fa-f]'), '');
                               if (id.length < 8 || key.isEmpty) return;
+                              final tokenErr = _validateInviteToken(token);
+                              if (tokenErr != null) {
+                                setState(() {
+                                  _inviteStatusError = true;
+                                  _inviteStatusText = tokenErr;
+                                });
+                                _snack(tokenErr);
+                                return;
+                              }
+                              setState(() {
+                                _inviteStatusError = false;
+                                _inviteStatusText = l.tr('invite_status_handshake_pending');
+                              });
                               if (await widget.ble.acceptInvite(
                                 id: id.substring(0, id.length > 16 ? 16 : id.length),
                                 pubKey: key,
                                 channelKey: ck.isEmpty ? null : ck,
+                                inviteToken: token.isEmpty ? null : token,
                               )) {
-                                if (mounted) _snack(l.tr('invite_accepted'));
+                                if (mounted) {
+                                  setState(() {
+                                    _inviteStatusError = false;
+                                    _inviteStatusText = l.tr('invite_status_accepted_wait_key');
+                                    _invitePendingPeerId = id.substring(0, id.length > 16 ? 16 : id.length);
+                                  });
+                                  _snack(l.tr('invite_accepted'));
+                                }
                               }
                             }
                           : null,
                       icon: const Icon(Icons.check_circle_outline_rounded, size: 22),
                       label: Text(l.tr('accept_invite'), style: const TextStyle(fontWeight: FontWeight.w600)),
                     ),
+                    if (_inviteStatusText != null && _inviteStatusText!.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: (_inviteStatusError ? context.palette.error : context.palette.success).withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(
+                            color: (_inviteStatusError ? context.palette.error : context.palette.success).withOpacity(0.35),
+                          ),
+                        ),
+                        child: Text(
+                          _inviteStatusText!,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: _inviteStatusError ? context.palette.error : context.palette.success,
+                          ),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -1719,12 +1912,91 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    Text(
+                      l.tr('voice_acceptance_title'),
+                      style: TextStyle(
+                        color: context.palette.onSurface,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      l.tr('voice_acceptance_hint'),
+                      style: TextStyle(
+                        color: context.palette.onSurfaceVariant,
+                        fontSize: 12,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _voiceAcceptAvgLossController,
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                      decoration: InputDecoration(
+                        isDense: true,
+                        labelText: l.tr('voice_acceptance_avg_loss'),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _voiceAcceptHardLossController,
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                      decoration: InputDecoration(
+                        isDense: true,
+                        labelText: l.tr('voice_acceptance_hard_loss'),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: _voiceAcceptMinSessionsController,
+                      keyboardType: TextInputType.number,
+                      inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                      decoration: InputDecoration(
+                        isDense: true,
+                        labelText: l.tr('voice_acceptance_min_sessions'),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    FilledButton.tonalIcon(
+                      onPressed: _voiceAcceptanceSaving ? null : _saveVoiceAcceptancePrefs,
+                      icon: _voiceAcceptanceSaving
+                          ? SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: context.palette.primary,
+                              ),
+                            )
+                          : const Icon(Icons.tune_rounded, size: 18),
+                      label: Text(l.tr('voice_acceptance_apply')),
+                    ),
+                    const SizedBox(height: 12),
                     if (_offlinePending != null && _offlinePending! > 0)
                       ListTile(
                         contentPadding: EdgeInsets.zero,
                         leading: Icon(Icons.schedule, color: context.palette.onSurfaceVariant),
                         title: Text(
                           '${l.tr('offline_pending')}: $_offlinePending',
+                          style: TextStyle(color: context.palette.onSurface),
+                        ),
+                      ),
+                    if (_offlineCourierPending != null && _offlineCourierPending! > 0)
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.local_shipping_outlined, color: context.palette.onSurfaceVariant),
+                        title: Text(
+                          '${l.tr('scf_courier_status_count', {'n': '$_offlineCourierPending'})}',
+                          style: TextStyle(color: context.palette.onSurface),
+                        ),
+                      ),
+                    if (_offlineDirectPending != null && _offlineDirectPending! > 0)
+                      ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        leading: Icon(Icons.mark_email_unread_outlined, color: context.palette.onSurfaceVariant),
+                        title: Text(
+                          '${l.tr('offline_direct_status_count', {'n': '$_offlineDirectPending'})}',
                           style: TextStyle(color: context.palette.onSurface),
                         ),
                       ),

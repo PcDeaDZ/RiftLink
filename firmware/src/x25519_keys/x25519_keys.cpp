@@ -23,6 +23,7 @@
 
 struct PeerKey {
   uint8_t peerId[protocol::NODE_ID_LEN];
+  uint8_t peerPubKey[X25519_PUBKEY_LEN];
   uint8_t sharedKey[32];
   uint32_t timestamp;
   bool used;
@@ -151,10 +152,23 @@ void onKeyExchange(const uint8_t* peerId, const uint8_t* theirPubKey) {
   }
 
   memcpy(s_peers[idx].peerId, peerId, protocol::NODE_ID_LEN);
+  memcpy(s_peers[idx].peerPubKey, theirPubKey, X25519_PUBKEY_LEN);
   s_peers[idx].timestamp = millis();
   s_peers[idx].used = true;
   xSemaphoreGive(s_mutex);
   RIFTLINK_LOG_EVENT("[RiftLink] X25519 key with %02X%02X\n", peerId[0], peerId[1]);
+}
+
+bool isPeerPubKeyMismatch(const uint8_t* peerId, const uint8_t* theirPubKey) {
+  if (!peerId || !theirPubKey || !s_mutex) return false;
+  if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
+  int idx = findPeer(peerId);
+  bool mismatch = false;
+  if (idx >= 0 && s_peers[idx].used) {
+    mismatch = memcmp(s_peers[idx].peerPubKey, theirPubKey, X25519_PUBKEY_LEN) != 0;
+  }
+  xSemaphoreGive(s_mutex);
+  return mismatch;
 }
 
 bool hasKeyFor(const uint8_t* peerId) {

@@ -28,6 +28,16 @@ void main() {
       expect(parsed['channelKey'], channelKey);
     });
 
+    test('buildInviteJson with token', () {
+      const id = 'A1B2C3D4E5F60708';
+      const pubKey = 'dGVzdF9wdWJfa2V5';
+      const inviteToken = 'AABBCCDD00112233';
+      final map = <String, String>{'id': id, 'pubKey': pubKey, 'inviteToken': inviteToken};
+      final data = jsonEncode(map);
+      final parsed = jsonDecode(data) as Map<String, dynamic>;
+      expect(parsed['inviteToken'], inviteToken);
+    });
+
     test('buildInviteJson escapes special chars', () {
       const id = 'A1B2C3D4';
       const pubKey = 'key"with\\quotes';
@@ -75,15 +85,20 @@ void main() {
         id: 'A1B2C3D4',
         pubKey: 'pk',
         channelKey: 'ck',
+        inviteToken: 'AABB',
+        inviteTtlMs: 5000,
       );
       expect(evt.id, 'A1B2C3D4');
       expect(evt.pubKey, 'pk');
       expect(evt.channelKey, 'ck');
+      expect(evt.inviteToken, 'AABB');
+      expect(evt.inviteTtlMs, 5000);
     });
 
     test('creates without channelKey', () {
       final evt = RiftLinkInviteEvent(id: 'X', pubKey: 'Y');
       expect(evt.channelKey, isNull);
+      expect(evt.inviteToken, isNull);
     });
   });
 
@@ -95,6 +110,15 @@ void main() {
       final payload = <String, dynamic>{'cmd': 'acceptInvite', 'id': id, 'pubKey': pubKey};
       if (channelKey.isNotEmpty) payload['channelKey'] = channelKey;
       expect(payload['channelKey'], 'ck');
+    });
+
+    test('payload includes inviteToken when non-empty', () {
+      const id = 'A1B2C3D4';
+      const pubKey = 'pk';
+      const inviteToken = 'AABBCCDD00112233';
+      final payload = <String, dynamic>{'cmd': 'acceptInvite', 'id': id, 'pubKey': pubKey};
+      if (inviteToken.isNotEmpty) payload['inviteToken'] = inviteToken;
+      expect(payload['inviteToken'], inviteToken);
     });
 
     test('payload excludes channelKey when empty', () {

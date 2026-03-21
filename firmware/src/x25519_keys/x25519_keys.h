@@ -21,6 +21,8 @@ bool getOurPublicKey(uint8_t* out);
 
 /** Обработать KEY_EXCHANGE от peer: сохранить их pub_key, вычислить shared secret */
 void onKeyExchange(const uint8_t* peerId, const uint8_t* theirPubKey);
+/** Проверка pinning: true, если для peer уже есть известный pubKey и пришёл другой. */
+bool isPeerPubKeyMismatch(const uint8_t* peerId, const uint8_t* theirPubKey);
 
 /** Есть ли shared secret для peer? */
 bool hasKeyFor(const uint8_t* peerId);

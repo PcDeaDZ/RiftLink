@@ -136,6 +136,8 @@ static char s_pendingMsgText[256] = {0};
 static uint32_t s_pendingMsgId = 0;
 static int s_pendingMsgRssi = 0;
 static uint8_t s_pendingMsgTtl = 0;
+static char s_pendingMsgLane[10] = "normal";
+static char s_pendingMsgType[10] = "text";
 static volatile bool s_pendingNickname = false;
 static char s_pendingNicknameBuf[17] = {0};
 static volatile bool s_pendingGps = false;
@@ -143,8 +145,12 @@ static bool s_pendingGpsHasEnabled = false;
 static bool s_pendingGpsEnabled = false;
 static bool s_pendingGpsHasPins = false;
 static int s_pendingGpsRx = -1, s_pendingGpsTx = -1, s_pendingGpsEn = -1;
-static void (*s_onSend)(const uint8_t* to, const char* text, uint8_t ttlMinutes) = nullptr;
-static void (*s_onLocation)(float lat, float lon, int16_t alt) = nullptr;
+static void (*s_onSend)(const uint8_t* to, const char* text, uint8_t ttlMinutes,
+    bool critical, uint8_t triggerType, uint32_t triggerValueMs, bool isSos) = nullptr;
+static void (*s_onLocation)(float lat, float lon, int16_t alt, uint16_t radiusM, uint32_t expiryEpochSec) = nullptr;
+static uint32_t s_inviteExpiryMs = 0;
+static uint8_t s_inviteToken[8] = {0};
+static bool s_inviteTokenValid = false;
 
 static inline void scheduleInfoNotify(uint32_t delayMs = 0) {
   s_pendingInfo = true;
@@ -455,6 +461,14 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     }
 
     if (strcmp(cmd, "invite") == 0) {
+      uint32_t ttlSec = doc["ttlSec"] | 600;
+      if (ttlSec < 60) ttlSec = 60;
+      if (ttlSec > 3600) ttlSec = 3600;
+      for (size_t i = 0; i < sizeof(s_inviteToken); i++) {
+        s_inviteToken[i] = (uint8_t)(esp_random() & 0xFF);
+      }
+      s_inviteExpiryMs = millis() + ttlSec * 1000UL;
+      s_inviteTokenValid = true;
       s_pendingInvite = true;
       return;
     }
@@ -477,6 +491,21 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       const char* idStr = doc["id"];
       const char* pubKeyB64 = doc["pubKey"];
       const char* channelKeyB64 = doc["channelKey"];
+      const char* inviteTokenHex = doc["inviteToken"];
+      if (inviteTokenHex && inviteTokenHex[0]) {
+        if (strlen(inviteTokenHex) != 16) {
+          ble::notifyError("invite_token_bad_length", "Bad inviteToken length");
+          return;
+        }
+        for (int i = 0; i < 16; i++) {
+          char c = inviteTokenHex[i];
+          bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+          if (!ok) {
+            ble::notifyError("invite_token_bad_format", "Bad inviteToken format");
+            return;
+          }
+        }
+      }
       if (idStr && strlen(idStr) >= 8 && pubKeyB64) {
         if (channelKeyB64) {
           size_t decLen;
@@ -497,6 +526,16 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         if (mbedtls_base64_decode(pubKey, 32, &decLen, (const unsigned char*)pubKeyB64, strlen(pubKeyB64)) == 0 && decLen == 32) {
           x25519_keys::onKeyExchange(nodeId, pubKey);
           x25519_keys::sendKeyExchange(nodeId, true, false, "ble");  // forceSend — отправить наш ключ пиру для завершения обмена
+          // Local one-time consume: если приняли именно наш текущий inviteToken, сразу инвалидируем.
+          if (inviteTokenHex && inviteTokenHex[0] && s_inviteTokenValid && (int32_t)(millis() - s_inviteExpiryMs) < 0) {
+            char tokHex[17] = {0};
+            for (int i = 0; i < 8; i++) snprintf(tokHex + i * 2, 3, "%02X", s_inviteToken[i]);
+            if (strncmp(tokHex, inviteTokenHex, 16) == 0) {
+              s_inviteTokenValid = false;
+              memset(s_inviteToken, 0, sizeof(s_inviteToken));
+              s_inviteExpiryMs = 0;
+            }
+          }
           scheduleInfoNotify();
         }
       }
@@ -506,6 +545,17 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     if (strcmp(cmd, "send") == 0) {
       const char* text = doc["text"];
       if (!text || strlen(text) == 0) return;  // пустые — не отправлять
+      const char* lane = doc["lane"] | "normal";
+      const char* trigger = doc["trigger"] | "";
+      bool critical = (strcmp(lane, "critical") == 0);
+      uint8_t triggerType = 0;
+      uint32_t triggerValueMs = 0;
+      if (strcmp(trigger, "target_online") == 0) {
+        triggerType = 1;
+      } else if (strcmp(trigger, "deliver_after_time") == 0) {
+        triggerType = 2;
+        triggerValueMs = (uint32_t)(doc["triggerAtMs"] | 0);
+      }
       uint32_t groupId = doc["group"] | 0;
       if (groupId > 0) {
         if (strlen(text) == 0) return;  // пустые в группу — не отправлять
@@ -525,8 +575,24 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
           }
         }
         uint8_t ttl = (doc["ttl"] | 0) & 0xFF;
-        if (s_onSend) s_onSend(to, text, ttl);
+        if (s_onSend) s_onSend(to, text, ttl, critical, triggerType, triggerValueMs, false);
+        if (triggerType != 0) {
+          JsonDocument qdoc(&s_bleJsonAllocator);
+          qdoc["evt"] = "timeCapsuleQueued";
+          if (toStr && strlen(toStr) > 0) qdoc["to"] = toStr;
+          qdoc["trigger"] = trigger;
+          if (triggerValueMs > 0) qdoc["triggerAtMs"] = triggerValueMs;
+          char qbuf[180];
+          size_t qlen = serializeJson(qdoc, qbuf);
+          notifyJsonToApp(qbuf, qlen);
+        }
       }
+      return;
+    }
+
+    if (strcmp(cmd, "sos") == 0) {
+      const char* text = doc["text"] | "SOS";
+      if (s_onSend) s_onSend(protocol::BROADCAST_ID, text, 0, true, 0, 0, true);
       return;
     }
 
@@ -534,7 +600,9 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       float lat = doc["lat"] | 0.0f;
       float lon = doc["lon"] | 0.0f;
       int16_t alt = doc["alt"] | 0;
-      if (s_onLocation) s_onLocation(lat, lon, alt);
+      uint16_t radiusM = (uint16_t)(doc["radiusM"] | 0);
+      uint32_t expiryEpochSec = (uint32_t)(doc["expiryEpochSec"] | 0);
+      if (s_onLocation) s_onLocation(lat, lon, alt, radiusM, expiryEpochSec);
       return;
     }
 
@@ -700,6 +768,61 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         groups::removeGroup(gid);
         s_pendingGroups = true;
       }
+      return;
+    }
+    if (strcmp(cmd, "setGroupKey") == 0) {
+      uint32_t gid = doc["group"] | 0;
+      const char* keyB64 = doc["key"];
+      if (gid == 0 || !keyB64 || !keyB64[0]) {
+        ble::notifyError("group_key_bad", "Missing group/key");
+        return;
+      }
+      size_t decLen = 0;
+      uint8_t key[32];
+      if (mbedtls_base64_decode(key, sizeof(key), &decLen, (const unsigned char*)keyB64, strlen(keyB64)) != 0 || decLen != 32) {
+        ble::notifyError("group_key_bad", "Bad group key");
+        return;
+      }
+      if (!groups::setGroupKey(gid, key)) {
+        ble::notifyError("group_key_set_failed", "Failed to set group key");
+        return;
+      }
+      s_pendingGroups = true;
+      scheduleInfoNotify();
+      return;
+    }
+    if (strcmp(cmd, "clearGroupKey") == 0) {
+      uint32_t gid = doc["group"] | 0;
+      if (gid == 0 || !groups::clearGroupKey(gid)) {
+        ble::notifyError("group_key_clear_failed", "Failed to clear group key");
+        return;
+      }
+      s_pendingGroups = true;
+      scheduleInfoNotify();
+      return;
+    }
+    if (strcmp(cmd, "getGroupKey") == 0) {
+      uint32_t gid = doc["group"] | 0;
+      uint8_t key[32];
+      if (gid == 0 || !groups::getGroupKey(gid, key)) {
+        ble::notifyError("group_key_not_found", "Group key not found");
+        return;
+      }
+      size_t b64Len = 0;
+      mbedtls_base64_encode(nullptr, 0, &b64Len, key, sizeof(key));
+      char keyB64[64] = {0};
+      if (mbedtls_base64_encode((unsigned char*)keyB64, sizeof(keyB64), &b64Len, key, sizeof(key)) != 0) {
+        ble::notifyError("group_key_encode_failed", "Group key encode failed");
+        return;
+      }
+      keyB64[b64Len] = '\0';
+      JsonDocument ev(&s_bleJsonAllocator);
+      ev["evt"] = "groupKey";
+      ev["group"] = gid;
+      ev["key"] = keyB64;
+      char buf[140];
+      size_t len = serializeJson(ev, buf);
+      notifyJsonToApp(buf, len);
       return;
     }
 
@@ -933,15 +1056,17 @@ void deinit() {
       (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
 
-void setOnSend(void (*cb)(const uint8_t* to, const char* text, uint8_t ttlMinutes)) {
+void setOnSend(void (*cb)(const uint8_t* to, const char* text, uint8_t ttlMinutes,
+    bool critical, uint8_t triggerType, uint32_t triggerValueMs, bool isSos)) {
   s_onSend = cb;
 }
 
-void setOnLocation(void (*cb)(float lat, float lon, int16_t alt)) {
+void setOnLocation(void (*cb)(float lat, float lon, int16_t alt, uint16_t radiusM, uint32_t expiryEpochSec)) {
   s_onLocation = cb;
 }
 
-void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes) {
+void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes,
+    const char* lane, const char* type) {
   if (!from || !text) return;
   memcpy(s_pendingMsgFrom, from, 8);
   strncpy(s_pendingMsgText, text, 255);
@@ -949,10 +1074,15 @@ void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId, int
   s_pendingMsgId = msgId;
   s_pendingMsgRssi = rssi;
   s_pendingMsgTtl = ttlMinutes;
+  strncpy(s_pendingMsgLane, lane ? lane : "normal", sizeof(s_pendingMsgLane) - 1);
+  s_pendingMsgLane[sizeof(s_pendingMsgLane) - 1] = '\0';
+  strncpy(s_pendingMsgType, type ? type : "text", sizeof(s_pendingMsgType) - 1);
+  s_pendingMsgType[sizeof(s_pendingMsgType) - 1] = '\0';
   s_pendingMsg = true;
 }
 
-void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes) {
+void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes,
+    const char* lane, const char* type) {
   if (!pRxChar || !s_connected) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
@@ -964,6 +1094,8 @@ void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, 
   if (msgId != 0) doc["msgId"] = msgId;
   if (rssi != 0) doc["rssi"] = rssi;
   if (ttlMinutes != 0) doc["ttl"] = ttlMinutes;
+  if (lane && lane[0]) doc["lane"] = lane;
+  if (type && type[0]) doc["type"] = type;
 
   char buf[400];
   size_t len = serializeJson(doc, buf);
@@ -1069,8 +1201,55 @@ void notifyLocation(const uint8_t* from, float lat, float lon, int16_t alt, int 
 }
 
 void notifyTelemetry(const uint8_t* from, uint16_t batteryMv, uint16_t heapKb, int rssi) {
-  (void)from; (void)batteryMv; (void)heapKb; (void)rssi;
-  // Телеметрия не отправляется в приложение — системная инфо, не для чатов
+  if (!pRxChar || !s_connected) return;
+  JsonDocument doc(&s_bleJsonAllocator);
+  doc["evt"] = "telemetry";
+  char fromHex[17] = {0};
+  for (int i = 0; i < 8; i++) snprintf(fromHex + i*2, 3, "%02X", from[i]);
+  doc["from"] = fromHex;
+  doc["battery"] = batteryMv;
+  doc["heapKb"] = heapKb;
+  if (rssi != 0) doc["rssi"] = rssi;
+  char buf[220];
+  size_t len = serializeJson(doc, buf);
+  notifyJsonToApp(buf, len);
+}
+
+void notifyRelayProof(const uint8_t* relayedBy, const uint8_t* from, const uint8_t* to, uint16_t pktId, uint8_t opcode) {
+  if (!pRxChar || !s_connected) return;
+  JsonDocument doc(&s_bleJsonAllocator);
+  doc["evt"] = "relayProof";
+  char byHex[17] = {0};
+  char fromHex[17] = {0};
+  char toHex[17] = {0};
+  for (int i = 0; i < 8; i++) {
+    snprintf(byHex + i * 2, 3, "%02X", relayedBy[i]);
+    snprintf(fromHex + i * 2, 3, "%02X", from[i]);
+    snprintf(toHex + i * 2, 3, "%02X", to[i]);
+  }
+  doc["relayedBy"] = byHex;
+  doc["from"] = fromHex;
+  doc["to"] = toHex;
+  doc["pktId"] = pktId;
+  doc["opcode"] = opcode;
+  char buf[220];
+  size_t len = serializeJson(doc, buf);
+  notifyJsonToApp(buf, len);
+}
+
+void notifyTimeCapsuleReleased(const uint8_t* to, uint32_t msgId, uint8_t triggerType) {
+  if (!pRxChar || !s_connected) return;
+  JsonDocument doc(&s_bleJsonAllocator);
+  doc["evt"] = "timeCapsuleReleased";
+  char toHex[17] = {0};
+  for (int i = 0; i < 8; i++) snprintf(toHex + i * 2, 3, "%02X", to[i]);
+  doc["to"] = toHex;
+  doc["msgId"] = msgId;
+  if (triggerType == 1) doc["trigger"] = "target_online";
+  else if (triggerType == 2) doc["trigger"] = "deliver_after_time";
+  char buf[140];
+  size_t len = serializeJson(doc, buf);
+  notifyJsonToApp(buf, len);
 }
 
 void notifyInfo() {
@@ -1117,6 +1296,10 @@ void notifyInfo() {
   }
   int offlinePending = offline_queue::getPendingCount();
   if (offlinePending > 0) doc["offlinePending"] = offlinePending;
+  int offlineCourierPending = offline_queue::getCourierPendingCount();
+  int offlineDirectPending = offline_queue::getDirectPendingCount();
+  if (offlineCourierPending > 0) doc["offlineCourierPending"] = offlineCourierPending;
+  if (offlineDirectPending > 0) doc["offlineDirectPending"] = offlineDirectPending;
   doc["gpsPresent"] = gps::isPresent();
   doc["gpsEnabled"] = gps::isEnabled();
   doc["gpsFix"] = gps::hasFix();
@@ -1124,9 +1307,11 @@ void notifyInfo() {
   doc["blePin"] = s_passkey;
 
   JsonArray grpArr = doc["groups"].to<JsonArray>();
+  JsonArray grpPrivArr = doc["groupsPrivate"].to<JsonArray>();
   int ng = groups::getCount();
   for (int i = 0; i < ng; i++) {
     grpArr.add((uint32_t)groups::getId(i));
+    grpPrivArr.add(groups::isPrivateAt(i));
   }
 
   JsonArray arr = doc["neighbors"].to<JsonArray>();
@@ -1148,8 +1333,9 @@ void notifyInfo() {
   uint8_t dest[8], nextHop[8];
   uint8_t hops;
   int8_t rssi;
+  int trustScore;
   for (int i = 0; i < nr; i++) {
-    if (!routing::getRouteAt(i, dest, nextHop, &hops, &rssi)) continue;
+    if (!routing::getRouteAt(i, dest, nextHop, &hops, &rssi, &trustScore)) continue;
     JsonObject ro = routesArr.add<JsonObject>();
     char d[17], nh[17];
     for (int j = 0; j < 8; j++) { snprintf(d + j*2, 3, "%02X", dest[j]); snprintf(nh + j*2, 3, "%02X", nextHop[j]); }
@@ -1162,6 +1348,7 @@ void notifyInfo() {
     ro["sf"] = radio::getSpreadingFactor();
     ro["bw"] = radio::getBandwidth();
     ro["cr"] = radio::getCodingRate();
+    ro["trustScore"] = trustScore;
   }
 
   // Буфер 600 обрезал большой `info` (соседи/маршруты) → невалидный JSON в приложении.
@@ -1189,6 +1376,12 @@ void notifyInvite() {
   for (int i = 0; i < 8; i++) snprintf(idHex + i*2, 3, "%02X", id[i]);
   doc["id"] = idHex;
   doc["pubKey"] = pubKeyB64;
+  if (s_inviteTokenValid && (int32_t)(millis() - s_inviteExpiryMs) < 0) {
+    char tokHex[17] = {0};
+    for (int i = 0; i < 8; i++) snprintf(tokHex + i * 2, 3, "%02X", s_inviteToken[i]);
+    doc["inviteToken"] = tokHex;
+    doc["inviteTtlMs"] = (uint32_t)(s_inviteExpiryMs - millis());
+  }
 
   uint8_t chKey[32];
   if (crypto::getChannelKey(chKey)) {
@@ -1216,9 +1409,10 @@ void notifyRoutes() {
   uint8_t dest[8], nextHop[8];
   uint8_t hops;
   int8_t rssi;
+  int trustScore;
   char d[17], nh[17];
   for (int i = 0; i < n; i++) {
-    if (!routing::getRouteAt(i, dest, nextHop, &hops, &rssi)) continue;
+    if (!routing::getRouteAt(i, dest, nextHop, &hops, &rssi, &trustScore)) continue;
     JsonObject ro = arr.add<JsonObject>();
     for (int j = 0; j < 8; j++) { snprintf(d + j*2, 3, "%02X", dest[j]); snprintf(nh + j*2, 3, "%02X", nextHop[j]); }
     d[16] = nh[16] = '\0';
@@ -1230,6 +1424,7 @@ void notifyRoutes() {
     ro["sf"] = radio::getSpreadingFactor();
     ro["bw"] = radio::getBandwidth();
     ro["cr"] = radio::getCodingRate();
+    ro["trustScore"] = trustScore;
   }
   char buf[400];
   size_t len = serializeJson(doc, buf);
@@ -1242,9 +1437,11 @@ void notifyGroups() {
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "groups";
   JsonArray arr = doc["groups"].to<JsonArray>();
+  JsonArray arrPriv = doc["groupsPrivate"].to<JsonArray>();
   int n = groups::getCount();
   for (int i = 0; i < n; i++) {
     arr.add((uint32_t)groups::getId(i));
+    arrPriv.add(groups::isPrivateAt(i));
   }
 
   char buf[120];
@@ -1438,7 +1635,8 @@ void update() {
     }
     if (s_pendingMsg) {
       s_pendingMsg = false;
-      notifyMsg(s_pendingMsgFrom, s_pendingMsgText, s_pendingMsgId, s_pendingMsgRssi, s_pendingMsgTtl);
+      notifyMsg(s_pendingMsgFrom, s_pendingMsgText, s_pendingMsgId, s_pendingMsgRssi, s_pendingMsgTtl,
+          s_pendingMsgLane, s_pendingMsgType);
       return;
     }
     if (s_pendingGroups) { s_pendingGroups = false; notifyGroups(); return; }

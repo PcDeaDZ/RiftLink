@@ -20,6 +20,13 @@
 #endif
 #define VOICE_TIMEOUT_MS 60000
 
+struct VoiceMeshTxProfile {
+  uint8_t code;
+  uint8_t minSf;
+  uint8_t channel;
+  uint16_t interFragDelayMs;
+};
+
 /** Пул слотов в BSS — без malloc на каждую сборку (цена: постоянный RAM на слот). */
 struct VoiceSlot {
   uint32_t msgId;
@@ -41,6 +48,24 @@ static void lazyInit() {
   memset(s_slots, 0, sizeof(s_slots));
   s_msgIdCounter = (uint32_t)esp_random();
   s_inited = true;
+}
+
+static VoiceMeshTxProfile detectTxProfile(const uint8_t* plain, size_t plainLen) {
+  VoiceMeshTxProfile p{voice_frag::VOICE_PROFILE_BALANCED, 9, protocol::CHANNEL_DEFAULT, 16};
+  if (plain && plainLen >= 2 && plain[0] == 0xFE && plain[1] >= voice_frag::VOICE_PROFILE_FAST &&
+      plain[1] <= voice_frag::VOICE_PROFILE_RESILIENT) {
+    p.code = plain[1];
+  }
+  if (p.code == voice_frag::VOICE_PROFILE_FAST) {
+    p.minSf = 7;
+    p.channel = protocol::CHANNEL_DEFAULT;
+    p.interFragDelayMs = 8;
+  } else if (p.code == voice_frag::VOICE_PROFILE_RESILIENT) {
+    p.minSf = 11;
+    p.channel = protocol::CHANNEL_CRITICAL;
+    p.interFragDelayMs = 30;
+  }
+  return p;
 }
 
 namespace voice_frag {
@@ -80,6 +105,7 @@ static VoiceSlot* findFreeSlot() {
 bool send(const uint8_t* to, const uint8_t* data, size_t dataLen) {
   lazyInit();
   if (dataLen == 0 || dataLen > MAX_VOICE_PLAIN || node::isBroadcast(to)) return false;
+  VoiceMeshTxProfile txProfile = detectTxProfile(data, dataLen);
 
   uint8_t encBuf[MAX_VOICE_PLAIN + 1024 + crypto::OVERHEAD];
   size_t encLen = sizeof(encBuf);
@@ -101,12 +127,22 @@ bool send(const uint8_t* to, const uint8_t* data, size_t dataLen) {
     memcpy(fragPayload + FRAG_HEADER_LEN, encBuf + offset, chunkLen);
 
     uint8_t pkt[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD];
+    uint8_t txSf = neighbors::rssiToSfOrthogonal(to);
+    if (txSf == 0) txSf = neighbors::rssiToSf(neighbors::getRssiFor(to));
+    if (txSf == 0) txSf = 12;
+    if (txSf < txProfile.minSf) txSf = txProfile.minSf;
     size_t pktLen = protocol::buildPacket(pkt, sizeof(pkt),
         node::getId(), to, 31, protocol::OP_VOICE_MSG,
-        fragPayload, FRAG_HEADER_LEN + chunkLen, true, false, false);
-    if (pktLen > 0) radio::send(pkt, pktLen, neighbors::rssiToSf(neighbors::getRssiFor(to)));
+        fragPayload, FRAG_HEADER_LEN + chunkLen, true, false, false, txProfile.channel);
+    if (pktLen > 0) {
+      radio::send(pkt, pktLen, txSf, txProfile.channel == protocol::CHANNEL_CRITICAL);
+      if (part < nFrags && txProfile.interFragDelayMs > 0) {
+        delay(txProfile.interFragDelayMs);
+      }
+    }
   }
-  Serial.printf("[RiftLink] VOICE_MSG sent %u bytes, %u frags\n", (unsigned)dataLen, (unsigned)nFrags);
+  Serial.printf("[RiftLink] VOICE_MSG sent %u bytes, %u frags, profile=%u sf>=%u\n",
+      (unsigned)dataLen, (unsigned)nFrags, (unsigned)txProfile.code, (unsigned)txProfile.minSf);
   return true;
 }
 

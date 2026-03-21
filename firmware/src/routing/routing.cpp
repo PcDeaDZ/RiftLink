@@ -48,6 +48,31 @@ static SemaphoreHandle_t s_mutex = nullptr;
 
 namespace routing {
 
+static int computeTrustScore(const uint8_t* nextHop, int8_t routeRssi) {
+  // Простая линейная модель trust score для MVP (0..100).
+  int ackPermille = neighbors::getAckRatePermille(nextHop);
+  int ackScore = (ackPermille >= 0) ? (ackPermille / 10) : 50;
+  int freshnessMs = (int)neighbors::getFreshnessMs(nextHop);
+  int freshnessScore = 0;
+  if (freshnessMs >= 0 && freshnessMs < 180000) {
+    freshnessScore = 100 - (freshnessMs * 100 / 180000);
+  }
+  int rssi = routeRssi;
+  if (rssi == 0) rssi = neighbors::getRssiFor(nextHop);
+  int rssiScore = 0;
+  if (rssi <= -120) rssiScore = 0;
+  else if (rssi >= -50) rssiScore = 100;
+  else rssiScore = (rssi + 120) * 100 / 70;
+  int batteryMv = neighbors::getBatteryMv(nextHop);
+  int batteryScore = 50;
+  if (batteryMv >= 3300 && batteryMv <= 4300) batteryScore = (batteryMv - 3300) * 100 / 1000;
+  if (batteryMv > 4300) batteryScore = 100;
+  int score = (ackScore * 45 + freshnessScore * 20 + rssiScore * 25 + batteryScore * 10) / 100;
+  if (score < 0) score = 0;
+  if (score > 100) score = 100;
+  return score;
+}
+
 void init() {
   if (s_inited) return;
   s_mutex = xSemaphoreCreateMutex();
@@ -57,16 +82,49 @@ void init() {
   s_inited = true;
 }
 
-static int findRoute(const uint8_t* dest) {
+static bool routeAliveAt(int idx, uint32_t now) {
+  if (idx < 0 || idx >= ROUTING_MAX_ROUTES || !s_routes[idx].used) return false;
+  if ((now - s_routes[idx].timestamp) >= ROUTING_ROUTE_TTL_MS) {
+    s_routes[idx].used = false;
+    return false;
+  }
+  return true;
+}
+
+static int findRouteByDestNextHop(const uint8_t* dest, const uint8_t* nextHop) {
   uint32_t now = millis();
   for (int i = 0; i < ROUTING_MAX_ROUTES; i++) {
-    if (s_routes[i].used && memcmp(s_routes[i].dest, dest, protocol::NODE_ID_LEN) == 0) {
-      if ((now - s_routes[i].timestamp) < ROUTING_ROUTE_TTL_MS) return i;
-      s_routes[i].used = false;
-      return -1;
+    if (!routeAliveAt(i, now)) continue;
+    if (memcmp(s_routes[i].dest, dest, protocol::NODE_ID_LEN) == 0 &&
+        memcmp(s_routes[i].nextHop, nextHop, protocol::NODE_ID_LEN) == 0) {
+      return i;
     }
   }
   return -1;
+}
+
+static int findBestRoute(const uint8_t* dest) {
+  uint32_t now = millis();
+  int best = -1;
+  int bestScore = -10000;
+  int bestOnline = -1;
+  uint8_t bestHops = 255;
+  for (int i = 0; i < ROUTING_MAX_ROUTES; i++) {
+    if (!routeAliveAt(i, now)) continue;
+    if (memcmp(s_routes[i].dest, dest, protocol::NODE_ID_LEN) != 0) continue;
+    int trust = computeTrustScore(s_routes[i].nextHop, s_routes[i].rssi);
+    int online = neighbors::isOnline(s_routes[i].nextHop) ? 1 : 0;
+    // Сначала предпочитаем online next-hop, затем trust, затем меньше hops.
+    if (online > bestOnline ||
+        (online == bestOnline && (trust > bestScore ||
+            (trust == bestScore && s_routes[i].hops < bestHops)))) {
+      best = i;
+      bestOnline = online;
+      bestScore = trust;
+      bestHops = s_routes[i].hops;
+    }
+  }
+  return best;
 }
 
 static int findFreeRouteSlot() {
@@ -92,22 +150,23 @@ static int findFreeRouteSlot() {
 bool getNextHop(const uint8_t* dest, uint8_t* nextHopOut) {
   if (!dest || !nextHopOut) return false;
   if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
-  int idx = findRoute(dest);
+  int idx = findBestRoute(dest);
   bool ok = (idx >= 0);
   if (ok) memcpy(nextHopOut, s_routes[idx].nextHop, protocol::NODE_ID_LEN);
   xSemaphoreGive(s_mutex);
   return ok;
 }
 
-bool getRoute(const uint8_t* dest, uint8_t* nextHopOut, uint8_t* hopsOut, int8_t* rssiOut) {
+bool getRoute(const uint8_t* dest, uint8_t* nextHopOut, uint8_t* hopsOut, int8_t* rssiOut, int* trustScoreOut) {
   if (!dest || !nextHopOut) return false;
   if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
-  int idx = findRoute(dest);
+  int idx = findBestRoute(dest);
   bool ok = (idx >= 0);
   if (ok) {
     memcpy(nextHopOut, s_routes[idx].nextHop, protocol::NODE_ID_LEN);
     if (hopsOut) *hopsOut = s_routes[idx].hops;
     if (rssiOut) *rssiOut = s_routes[idx].rssi;
+    if (trustScoreOut) *trustScoreOut = computeTrustScore(s_routes[idx].nextHop, s_routes[idx].rssi);
   }
   xSemaphoreGive(s_mutex);
   return ok;
@@ -124,7 +183,7 @@ int getRouteCount() {
   return n;
 }
 
-bool getRouteAt(int i, uint8_t* destOut, uint8_t* nextHopOut, uint8_t* hopsOut, int8_t* rssiOut) {
+bool getRouteAt(int i, uint8_t* destOut, uint8_t* nextHopOut, uint8_t* hopsOut, int8_t* rssiOut, int* trustScoreOut) {
   if (i < 0 || !destOut || !nextHopOut) return false;
   if (!s_mutex || xSemaphoreTake(s_mutex, portMAX_DELAY) != pdTRUE) return false;
   uint32_t now = millis();
@@ -136,6 +195,7 @@ bool getRouteAt(int i, uint8_t* destOut, uint8_t* nextHopOut, uint8_t* hopsOut, 
       memcpy(nextHopOut, s_routes[j].nextHop, protocol::NODE_ID_LEN);
       if (hopsOut) *hopsOut = s_routes[j].hops;
       if (rssiOut) *rssiOut = s_routes[j].rssi;
+      if (trustScoreOut) *trustScoreOut = computeTrustScore(s_routes[j].nextHop, s_routes[j].rssi);
       xSemaphoreGive(s_mutex);
       return true;
     }
@@ -146,13 +206,16 @@ bool getRouteAt(int i, uint8_t* destOut, uint8_t* nextHopOut, uint8_t* hopsOut, 
 }
 
 static void addRoute(const uint8_t* dest, const uint8_t* nextHop, uint8_t hops, int8_t rssi) {
-  int idx = findRoute(dest);
+  int idx = findRouteByDestNextHop(dest, nextHop);
   if (idx >= 0) {
     RouteEntry& e = s_routes[idx];
-    if (hops > e.hops) return;
-    if (hops == e.hops && rssi < e.rssi && e.rssi != 0) return;
+    int newScore = computeTrustScore(nextHop, rssi);
+    int oldScore = computeTrustScore(e.nextHop, e.rssi);
+    // Обновляем существующий кандидат только если путь не стал заметно хуже.
+    if (hops > e.hops + 1 && newScore + 8 < oldScore) return;
+  } else {
+    idx = findFreeRouteSlot();
   }
-  if (idx < 0) idx = findFreeRouteSlot();
   memcpy(s_routes[idx].dest, dest, protocol::NODE_ID_LEN);
   memcpy(s_routes[idx].nextHop, nextHop, protocol::NODE_ID_LEN);
   s_routes[idx].hops = hops;

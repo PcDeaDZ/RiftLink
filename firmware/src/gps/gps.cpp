@@ -261,6 +261,17 @@ bool hasTime() {
   return hasPhoneSync();
 }
 
+bool hasEpochTime() {
+  return hasPhoneSync();
+}
+
+bool getEpochSec(uint32_t* outEpochSec) {
+  if (!outEpochSec || !hasPhoneSync()) return false;
+  uint64_t now = (uint64_t)s_phoneUtcMs + (millis() - s_phoneSyncTime);
+  *outEpochSec = (uint32_t)(now / 1000ULL);
+  return true;
+}
+
 int getHour() {
   if (s_gps.time.isValid() && s_gps.time.age() < 10000) return s_gps.time.hour();
   if (hasPhoneSync()) {

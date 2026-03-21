@@ -17,6 +17,9 @@ constexpr size_t MAX_VOICE_PLAIN = 10240;   // Paper: ~10 KB (~10 сек), эк�
 constexpr size_t MAX_VOICE_PLAIN = 30720;   // ~30 KB (30 сек Opus 8 kbps)
 #endif
 constexpr size_t MAX_FRAGMENTS = 160;       // 30KB / 194
+constexpr uint8_t VOICE_PROFILE_FAST = 1;
+constexpr uint8_t VOICE_PROFILE_BALANCED = 2;
+constexpr uint8_t VOICE_PROFILE_RESILIENT = 3;
 
 /** Отправка голоса (unicast). data = Opus, plainLen ≤ MAX_VOICE_PLAIN */
 bool send(const uint8_t* to, const uint8_t* data, size_t dataLen);
