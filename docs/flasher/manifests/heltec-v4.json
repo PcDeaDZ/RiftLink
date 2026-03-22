@@ -7,7 +7,7 @@
       "chipFamily": "ESP32-S3",
       "parts": [
         {
-          "path": "https://github.com/PcDeaDZ/RiftLink/releases/latest/download/heltec_v4_full.bin",
+          "path": "../firmware/heltec_v4_full.bin",
           "offset": 0
         }
       ]

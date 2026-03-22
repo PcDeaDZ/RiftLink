@@ -135,6 +135,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   Timer? _voiceRxCleanupTimer;
   Timer? _neighborsPollTimer;
   Timer? _gpsSyncTimer;
+  Timer? _directOnlineTtlTimer;
+  bool _directPeerOnline = false;
   bool _meshAnimationEnabled = true;
   AnimationController? _meshAnimController;
   bool _reconnecting = false;
@@ -278,6 +280,72 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     }
   }
 
+  Color? _chatContextIconColor() {
+    if (_chatContextType() == ChatContextType.direct && _directPeerOnline) {
+      return context.palette.success;
+    }
+    return null;
+  }
+
+  void _setDirectPeerOnline(bool value) {
+    if (!mounted) return;
+    if (_directPeerOnline == value) return;
+    setState(() => _directPeerOnline = value);
+  }
+
+  Future<void> _pingDirectPeer({
+    required String peerId,
+    required bool showSuccessSnack,
+    required bool showTimeoutSnack,
+  }) async {
+    if (!widget.ble.isConnected) {
+      if (showSuccessSnack) _showSnack(context.l10n.tr('connect_first'));
+      return;
+    }
+    final ok = await widget.ble.sendPing(peerId);
+    if (!mounted) return;
+    if (!ok) {
+      if (showSuccessSnack) _showSnack(context.l10n.tr('error'));
+      return;
+    }
+    final peerNorm = _normNodeId(peerId);
+    if (peerNorm.isEmpty) return;
+    _pendingPings.add(peerNorm);
+    if (showSuccessSnack) {
+      _showSnack(context.l10n.tr('ping_sent', {'id': peerId}));
+    }
+    Future.delayed(const Duration(seconds: 20), () {
+      if (!mounted) return;
+      if (_pendingPings.remove(peerNorm)) {
+        if (_sameNodeId(_activeDirectPeerId() ?? '', peerNorm)) {
+          _setDirectPeerOnline(false);
+        }
+        if (showTimeoutSnack) {
+          _showSnack(
+            context.l10n.tr('ping_timeout', {'id': peerId}),
+            backgroundColor: context.palette.error,
+            duration: const Duration(seconds: 4),
+          );
+        }
+      }
+    });
+  }
+
+  void _scheduleDirectPeerAutoPing() {
+    final peer = _activeDirectPeerId();
+    if (peer == null || !widget.ble.isConnected) return;
+    _setDirectPeerOnline(false);
+    Future<void>.delayed(const Duration(milliseconds: 180), () async {
+      if (!mounted) return;
+      if (!_sameNodeId(_activeDirectPeerId() ?? '', peer)) return;
+      await _pingDirectPeer(
+        peerId: peer,
+        showSuccessSnack: false,
+        showTimeoutSnack: false,
+      );
+    });
+  }
+
   Future<void> _initConversationContext() async {
     if (widget.conversationId != null && widget.conversationId!.isNotEmpty) {
       _conversationId = widget.conversationId;
@@ -350,6 +418,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     if (draft.isNotEmpty) _controller.text = draft;
     final history = await _chatRepo.listMessages(_conversationId!);
     await _chatRepo.markConversationRead(_conversationId!);
+    if (_chatContextType() == ChatContextType.direct) {
+      _scheduleDirectPeerAutoPing();
+    }
     if (history.isEmpty || !mounted) return;
     setState(() {
       _messages
@@ -500,6 +571,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _voiceRxCleanupTimer?.cancel();
     _neighborsPollTimer?.cancel();
     _gpsSyncTimer?.cancel();
+    _directOnlineTtlTimer?.cancel();
     _voiceRecordTicker?.dispose();
     _meshAnimController?.dispose();
     _screenController.dispose();
@@ -1307,6 +1379,18 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       onPongEvent: (event) {
         final fromNorm = _normNodeId(event.from);
         if (fromNorm.isNotEmpty) _pendingPings.remove(fromNorm);
+        final activePeer = _activeDirectPeerId();
+        if (activePeer != null && _sameNodeId(activePeer, fromNorm)) {
+          _setDirectPeerOnline(true);
+          _directOnlineTtlTimer?.cancel();
+          _directOnlineTtlTimer = Timer(const Duration(seconds: 45), () {
+            if (!mounted) return;
+            final current = _activeDirectPeerId();
+            if (current != null && _sameNodeId(current, fromNorm)) {
+              _setDirectPeerOnline(false);
+            }
+          });
+        }
         _showSnack(
           '✓ ${context.l10n.tr('link_ok', {'from': event.from})}',
           backgroundColor: context.palette.success,
@@ -2033,7 +2117,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       case 'ping_current':
         final peer = _activeDirectPeerId();
         if (peer != null) {
-          _showPingDialog(prefilledId: peer);
+          _pingDirectPeer(
+            peerId: peer,
+            showSuccessSnack: true,
+            showTimeoutSnack: true,
+          );
         } else {
           _showSnack(context.l10n.tr('error'));
         }
@@ -2091,6 +2179,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           builder: (context) {
             return ChatAppBarTitle(
               chatIcon: _chatContextIcon(),
+              chatIconColor: _chatContextIconColor(),
               label: _chatTitle(l),
               subtitle: _chatSubtitle(l),
             );

@@ -7,11 +7,13 @@ class ChatAppBarTitle extends StatelessWidget {
   const ChatAppBarTitle({
     super.key,
     required this.chatIcon,
+    this.chatIconColor,
     required this.label,
     this.subtitle,
   });
 
   final IconData chatIcon;
+  final Color? chatIconColor;
   final String label;
   final String? subtitle;
 
@@ -25,7 +27,7 @@ class ChatAppBarTitle extends StatelessWidget {
         Icon(
           chatIcon,
           size: 18,
-          color: titleColor,
+          color: chatIconColor ?? titleColor,
         ),
         const SizedBox(width: AppSpacing.sm),
         Flexible(

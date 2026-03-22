@@ -191,7 +191,28 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       return _sortConversationsForTab(filtered, _activeTab);
     }
     final filtered = _visible.where((c) => _matchesTab(c, _activeTab)).toList();
-    return _sortConversationsForTab(filtered, _activeTab);
+    final sorted = _sortConversationsForTab(filtered, _activeTab);
+    if (_activeTab != _ChatsTab.all) return sorted;
+    return _withBroadcastAlwaysOnTop(sorted);
+  }
+
+  List<ChatConversation> _withBroadcastAlwaysOnTop(List<ChatConversation> chats) {
+    final broadcastId = ChatRepository.broadcastConversationId();
+    ChatConversation? broadcast;
+    for (final c in chats) {
+      if (c.kind == ConversationKind.broadcast || c.id == broadcastId) {
+        broadcast = c;
+        break;
+      }
+    }
+    broadcast ??= ChatConversation(
+      id: broadcastId,
+      kind: ConversationKind.broadcast,
+      peerRef: 'broadcast',
+      title: context.l10n.tr('broadcast'),
+    );
+    final rest = chats.where((c) => c.id != broadcast!.id).toList();
+    return [broadcast, ...rest];
   }
 
   RiftLinkGroupV2Info? _groupV2ById(int groupId) {
@@ -1865,6 +1886,17 @@ class _ConversationTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final l = context.l10n;
     final p = context.palette;
+    final hasUnread = conversation.unreadCount > 0;
+    final kindIcon = switch (conversation.kind) {
+      ConversationKind.direct => Icons.person_rounded,
+      ConversationKind.group => Icons.group_rounded,
+      ConversationKind.broadcast => Icons.campaign_rounded,
+    };
+    final kindTint = switch (conversation.kind) {
+      ConversationKind.direct => p.primary,
+      ConversationKind.group => p.success,
+      ConversationKind.broadcast => p.onSurfaceVariant,
+    };
     final v2RoleText = switch (groupRole) {
       'owner' => l.tr('group_role_owner'),
       'admin' => l.tr('group_role_admin'),
@@ -1882,77 +1914,119 @@ class _ConversationTile extends StatelessWidget {
         ? (conversation.lastMessagePreview ?? '')
         : statusText;
     return AppSectionCard(
-      margin: const EdgeInsets.only(bottom: AppSpacing.xs + 2),
+      margin: const EdgeInsets.only(bottom: AppSpacing.sm),
       padding: EdgeInsets.zero,
-      child: ListTile(
-        onTap: onTap,
-        onLongPress: () => _showActions(context),
-        dense: true,
-        contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: 2),
-        leading: CircleAvatar(
-          radius: 19,
-          backgroundColor: p.primary.withOpacity(0.14),
-          child: Icon(
-            switch (conversation.kind) {
-              ConversationKind.direct => Icons.person_rounded,
-              ConversationKind.group => Icons.group_rounded,
-              ConversationKind.broadcast => Icons.campaign_rounded,
-            },
-            color: p.primary,
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(AppSpacing.md),
+          border: Border.all(
+            color: hasUnread ? p.primary.withOpacity(0.20) : p.divider.withOpacity(0.72),
           ),
+          color: hasUnread ? p.primary.withOpacity(0.05) : p.card.withOpacity(0.88),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.14),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            ),
+          ],
         ),
-        title: Row(
-          children: [
-            Expanded(
-              child: Text(
-                titleOverride ?? conversation.title,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: p.onSurface, fontWeight: FontWeight.w600),
+        child: ListTile(
+          onTap: onTap,
+          onLongPress: () => _showActions(context),
+          dense: true,
+          visualDensity: const VisualDensity(horizontal: 0, vertical: -2),
+          minVerticalPadding: 2,
+          contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: 1),
+          leading: Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(11),
+              color: kindTint.withOpacity(0.14),
+              border: Border.all(
+                color: kindTint.withOpacity(0.28),
               ),
             ),
-            if (groupRole != null) ...[
-              Icon(
-                groupRole == 'owner'
-                    ? Icons.workspace_premium_rounded
-                    : (groupRole == 'admin' ? Icons.admin_panel_settings_rounded : Icons.shield_outlined),
-                size: 14,
-                color: (groupRole == 'owner' || groupRole == 'admin') ? p.primary : p.onSurfaceVariant,
-              ),
-              const SizedBox(width: 6),
-            ],
-            if (timeText.isNotEmpty)
-              Text(
-                timeText,
-                style: TextStyle(color: p.onSurfaceVariant, fontSize: 10.5),
-              ),
-          ],
-        ),
-        subtitle: Text(
-          subtitleText,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(color: p.onSurfaceVariant),
-        ),
-        trailing: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (conversation.pinned) Icon(Icons.push_pin_rounded, size: 16, color: p.primary),
-            if (conversation.muted) const SizedBox(width: 4),
-            if (conversation.muted) Icon(Icons.notifications_off_rounded, size: 16, color: p.onSurfaceVariant),
-            if (conversation.unreadCount > 0) const SizedBox(width: 6),
-            if (conversation.unreadCount > 0)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: p.primary.withOpacity(0.15),
-                  borderRadius: BorderRadius.circular(12),
-                ),
+            child: Icon(kindIcon, color: kindTint, size: 18),
+          ),
+          title: Row(
+            children: [
+              Expanded(
                 child: Text(
-                  '${conversation.unreadCount}',
-                  style: TextStyle(color: p.primary.withOpacity(0.92), fontWeight: FontWeight.w600, fontSize: 11),
+                  titleOverride ?? conversation.title,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: p.onSurface,
+                    fontWeight: hasUnread ? FontWeight.w700 : FontWeight.w600,
+                    letterSpacing: 0.1,
+                  ),
                 ),
               ),
-          ],
+              if (groupRole != null) ...[
+                Icon(
+                  groupRole == 'owner'
+                      ? Icons.workspace_premium_rounded
+                      : (groupRole == 'admin' ? Icons.admin_panel_settings_rounded : Icons.shield_outlined),
+                  size: 14,
+                  color: (groupRole == 'owner' || groupRole == 'admin') ? p.primary : p.onSurfaceVariant,
+                ),
+                const SizedBox(width: 6),
+              ],
+            ],
+          ),
+          subtitle: Text(
+            subtitleText,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: hasUnread ? p.onSurfaceVariant.withOpacity(0.98) : p.onSurfaceVariant.withOpacity(0.92),
+              fontWeight: hasUnread ? FontWeight.w500 : FontWeight.w400,
+              fontSize: 13,
+            ),
+          ),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (timeText.isNotEmpty)
+                Text(
+                  timeText,
+                  style: TextStyle(
+                    color: hasUnread ? p.primary.withOpacity(0.92) : p.onSurfaceVariant,
+                    fontSize: 10.5,
+                    fontWeight: hasUnread ? FontWeight.w600 : FontWeight.w500,
+                  ),
+                ),
+              if (timeText.isNotEmpty &&
+                  (conversation.pinned || conversation.muted || hasUnread))
+                const SizedBox(width: 7),
+              if (conversation.pinned)
+                Icon(Icons.push_pin_rounded, size: 15, color: p.primary.withOpacity(0.9)),
+              if (conversation.muted) const SizedBox(width: 4),
+              if (conversation.muted)
+                Icon(Icons.notifications_off_rounded, size: 15, color: p.onSurfaceVariant),
+              if (hasUnread) const SizedBox(width: 7),
+              if (hasUnread)
+                Container(
+                  constraints: const BoxConstraints(minWidth: 22),
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: p.primary.withOpacity(0.20),
+                    border: Border.all(color: p.primary.withOpacity(0.36)),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    '${conversation.unreadCount}',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: p.primary.withOpacity(0.98),
+                      fontWeight: FontWeight.w700,
+                      fontSize: 11,
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );

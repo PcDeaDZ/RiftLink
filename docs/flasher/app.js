@@ -45,7 +45,7 @@ const I18N = {
     faqTitle: "FAQ",
     faqQ1: "Устройство не определяется в браузере. Что делать?",
     faqA1:
-      "Проверьте USB-кабель (должен быть data), попробуйте другой порт, перезапустите вкладку и переподключите устройство.",
+      "Проверьте USB-кабель (должен быть data), попробуйте другой порт, перезапустите вкладку и переподключите устройство. Закройте Serial Monitor/PlatformIO/другие вкладки, которые могут держать COM-порт открытым.",
     faqQ2: "Нужно ли стирать устройство перед прошивкой?",
     faqA2:
       "При переходе между разными конфигурациями (например, V3/Paper) лучше соглашаться на Erase. Это удалит старые данные и снизит риск конфликтов.",
@@ -107,7 +107,7 @@ const I18N = {
     faqTitle: "FAQ",
     faqQ1: "Browser cannot detect the device. What should I do?",
     faqA1:
-      "Check the USB cable (must support data), try another port, reload the tab, and reconnect the device.",
+      "Check the USB cable (must support data), try another port, reload the tab, and reconnect the device. Close Serial Monitor/PlatformIO/other tabs that may keep the COM port open.",
     faqQ2: "Should I erase the device before flashing?",
     faqA2:
       "When switching between different configurations (for example V3/Paper), Erase is recommended to avoid old state conflicts.",
@@ -187,7 +187,6 @@ const langRuBtn = document.getElementById("langRu");
 const langEnBtn = document.getElementById("langEn");
 
 const runtimeManifestUrls = { ...STATIC_MANIFESTS };
-const manifestBlobUrls = [];
 let currentLang = "ru";
 let releaseState = {
   tag: "...",
@@ -401,29 +400,6 @@ function setApkLink(url, versionText) {
   apkDownloadLinkEl.setAttribute("aria-disabled", "false");
 }
 
-function makeManifestBlobUrl(name, version, binUrl) {
-  const manifest = {
-    name,
-    version,
-    new_install_prompt_erase: true,
-    builds: [
-      {
-        chipFamily: "ESP32-S3",
-        parts: [
-          {
-            path: binUrl,
-            offset: 0,
-          },
-        ],
-      },
-    ],
-  };
-  const blob = new Blob([JSON.stringify(manifest)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  manifestBlobUrls.push(url);
-  return url;
-}
-
 async function loadLatestRelease() {
   try {
     const response = await fetch(RELEASE_API_URL, {
@@ -459,27 +435,6 @@ async function loadLatestRelease() {
     };
     renderReleaseState();
 
-    if (fwV3?.browser_download_url) {
-      runtimeManifestUrls["heltec-v3"] = makeManifestBlobUrl(
-        "RiftLink Heltec V3",
-        firmwareVersion,
-        fwV3.browser_download_url,
-      );
-    }
-    if (fwV4?.browser_download_url) {
-      runtimeManifestUrls["heltec-v4"] = makeManifestBlobUrl(
-        "RiftLink Heltec V4",
-        firmwareVersion,
-        fwV4.browser_download_url,
-      );
-    }
-    if (fwPaper?.browser_download_url) {
-      runtimeManifestUrls["heltec-v3-paper"] = makeManifestBlobUrl(
-        "RiftLink Heltec V3 Paper",
-        firmwareVersion,
-        fwPaper.browser_download_url,
-      );
-    }
   } catch (error) {
     releaseState = {
       tag: t("latestUnavailable"),
@@ -533,10 +488,4 @@ releaseState = {
 renderLanguage();
 await Promise.all([loadLatestRelease(), loadRoadmap()]);
 setDevice(selectEl.value);
-
-window.addEventListener("beforeunload", () => {
-  for (const url of manifestBlobUrls) {
-    URL.revokeObjectURL(url);
-  }
-});
 
