@@ -10,6 +10,7 @@ import '../ble/riftlink_ble.dart';
 import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
 import '../app_navigator.dart';
+import '../app_lifecycle_bridge.dart';
 import '../theme/app_theme.dart';
 import '../theme/design_tokens.dart';
 import '../widgets/app_primitives.dart';
@@ -118,8 +119,8 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         }
       }
     }
-    final list = _sortConversations(await _repo.listConversations(query: _query));
-    final archived = _sortConversations(await _repo.listArchivedConversations());
+    final list = await _repo.listConversations(query: _query);
+    final archived = await _repo.listArchivedConversations();
     final contacts = await ContactsService.load();
     final nickById = ContactsService.buildNicknameMap(contacts);
     final neighbors = (widget.ble.lastInfo?.neighbors ?? const <String>[])
@@ -142,6 +143,23 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       if (aBroadcast != bBroadcast) return aBroadcast ? -1 : 1;
       if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
       return (b.lastMessageAtMs ?? 0).compareTo(a.lastMessageAtMs ?? 0);
+    });
+    return items;
+  }
+
+  List<ChatConversation> _sortConversationsForTab(List<ChatConversation> chats, _ChatsTab tab) {
+    final items = [...chats];
+    items.sort((a, b) {
+      final aAt = a.lastMessageAtMs ?? 0;
+      final bAt = b.lastMessageAtMs ?? 0;
+      if (tab == _ChatsTab.all) {
+        final aBroadcast = a.kind == ConversationKind.broadcast;
+        final bBroadcast = b.kind == ConversationKind.broadcast;
+        if (aBroadcast != bBroadcast) return aBroadcast ? -1 : 1;
+        return bAt.compareTo(aAt);
+      }
+      if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
+      return bAt.compareTo(aAt);
     });
     return items;
   }
@@ -170,9 +188,11 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
 
   List<ChatConversation> _tabItems() {
     if (_activeTab == _ChatsTab.archived) {
-      return _archived.where((c) => _matchesTab(c, _activeTab)).toList();
+      final filtered = _archived.where((c) => _matchesTab(c, _activeTab)).toList();
+      return _sortConversationsForTab(filtered, _activeTab);
     }
-    return _visible.where((c) => _matchesTab(c, _activeTab)).toList();
+    final filtered = _visible.where((c) => _matchesTab(c, _activeTab)).toList();
+    return _sortConversationsForTab(filtered, _activeTab);
   }
 
   RiftLinkGroupV2Info? _groupV2ById(int groupId) {
@@ -414,6 +434,28 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     };
   }
 
+  ({String tooltip, IconData icon, VoidCallback onPressed})? _fabConfigForTab(AppLocalizations l) {
+    return switch (_activeTab) {
+      _ChatsTab.all => (
+        tooltip: l.tr('compose_message'),
+        icon: Icons.add_comment_rounded,
+        onPressed: _showNewChatSheet,
+      ),
+      _ChatsTab.personal => (
+        tooltip: l.tr('new_chat'),
+        icon: Icons.person_add_alt_1_rounded,
+        onPressed: _showNewChatSheet,
+      ),
+      _ChatsTab.groups => (
+        tooltip: l.tr('groups'),
+        icon: Icons.group_add_rounded,
+        onPressed: _showGroupFabSheet,
+      ),
+      _ChatsTab.neighbors => null,
+      _ChatsTab.archived => null,
+    };
+  }
+
   Future<void> _openConversation(ChatConversation c) async {
     if (mounted) setState(() => _activeConversationId = c.id);
     await _repo.markConversationRead(c.id);
@@ -521,6 +563,11 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   }
 
   Future<void> _setFolder(ChatConversation c, String folderId) async {
+    if (folderId == 'groups' &&
+        (c.kind == ConversationKind.group || c.kind == ConversationKind.direct)) {
+      _snack(context.l10n.tr('error'));
+      return;
+    }
     await _repo.setFolder(c.id, folderId);
     await _load();
   }
@@ -1172,16 +1219,27 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     final l = context.l10n;
     final p = context.palette;
     final tabMeta = _tabMeta(l);
+    final fabConfig = _fabConfigForTab(l);
     final tabChats = _activeTab == _ChatsTab.groups ? _groupTabItemsFull() : _tabItems();
     final reachableNeighbors = _activeTab == _ChatsTab.neighbors ? _reachableNeighbors() : const <_ReachableNodeItem>[];
     final allChatsForDrawer = _sortConversations([..._visible, ..._archived]);
     final pinnedForDrawer = allChatsForDrawer.where((c) => c.pinned && !c.archived).toList();
     final regularForDrawer = allChatsForDrawer.where((c) => !(c.pinned && !c.archived)).toList();
 
-    return Scaffold(
-      key: _scaffoldKey,
-      backgroundColor: p.surface,
-      drawer: Drawer(
+    return PopScope(
+      canPop: true,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        if (Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+          return;
+        }
+        await AppLifecycleBridge.moveToBackground();
+      },
+      child: Scaffold(
+        key: _scaffoldKey,
+        backgroundColor: p.surface,
+        drawer: Drawer(
         backgroundColor: p.surface,
         child: SafeArea(
           child: Column(
@@ -1689,19 +1747,20 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
           ),
         ),
       ),
-      floatingActionButton: _activeTab == _ChatsTab.neighbors
-          ? null
-          : FloatingActionButton(
-              tooltip: _activeTab == _ChatsTab.groups ? l.tr('groups') : l.tr('compose_message'),
-              backgroundColor: p.card.withOpacity(0.92),
-              foregroundColor: p.onSurface,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              elevation: 1,
-              hoverElevation: 2,
-              highlightElevation: 2,
-              onPressed: _activeTab == _ChatsTab.groups ? _showGroupFabSheet : _showNewChatSheet,
-              child: const Icon(Icons.add_comment_rounded, size: 22),
-            ),
+        floatingActionButton: fabConfig == null
+            ? null
+            : FloatingActionButton(
+                tooltip: fabConfig.tooltip,
+                backgroundColor: p.card.withOpacity(0.92),
+                foregroundColor: p.onSurface,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                elevation: 1,
+                hoverElevation: 2,
+                highlightElevation: 2,
+                onPressed: fabConfig.onPressed,
+                child: Icon(fabConfig.icon, size: 22),
+              ),
+      ),
     );
   }
 }
@@ -1864,11 +1923,13 @@ class _ConversationTile extends StatelessWidget {
                 title: Text(context.l10n.tr('chats_action_to_personal')),
                 onTap: () => Navigator.pop(ctx, 'folder_personal'),
               ),
-              ListTile(
-                leading: const Icon(Icons.folder_rounded),
-                title: Text(context.l10n.tr('chats_action_to_groups')),
-                onTap: () => Navigator.pop(ctx, 'folder_groups'),
-              ),
+              if (conversation.kind != ConversationKind.group &&
+                  conversation.kind != ConversationKind.direct)
+                ListTile(
+                  leading: const Icon(Icons.folder_rounded),
+                  title: Text(context.l10n.tr('chats_action_to_groups')),
+                  onTap: () => Navigator.pop(ctx, 'folder_groups'),
+                ),
               if (canCopyInvite)
                 ListTile(
                   leading: const Icon(Icons.key_rounded),

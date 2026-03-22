@@ -1,0 +1,793 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:geolocator/geolocator.dart';
+
+import '../../ble/riftlink_ble.dart';
+import '../../chat/chat_models.dart';
+import '../../chat/chat_repository.dart';
+import '../../voice/voice_service.dart';
+import 'chat_ui_models.dart';
+
+class ChatBleHandlerDeps {
+  final bool isMounted;
+  final List<ChatUiMessage> messages;
+  final String? conversationId;
+  final String nodeId;
+  final String broadcastTo;
+  final AppLifecycleState appLifecycle;
+  final Map<String, ChatUiVoiceRxAssembly> voiceChunks;
+  final Set<String> pendingPings;
+  final String Function(String raw) normalizeId;
+  final bool Function(String? a, String? b) sameNodeId;
+  final String Function(String key, [Map<String, String>? params]) tr;
+  final ChatUiDecodedVoicePayload Function(List<int> rawBytes) decodeVoicePayload;
+  final String Function(int code) voiceProfileLabel;
+  final bool Function(ChatUiMessage m, ChatUiMessageStatus finalStatus) shouldEmitCriticalSummary;
+  final ChatUiMessage Function(ChatUiMessage m, ChatUiMessageStatus finalStatus) buildCriticalSummaryMessage;
+  final void Function(void Function() fn) setState;
+  final void Function(String from, String text) showIncomingNotification;
+  final void Function(String text, {bool isError, bool isSuccess, Duration duration}) showSnack;
+  final void Function() sendReadForUnread;
+  final void Function() scrollToBottom;
+  final Future<void> Function(String conversationId) markConversationRead;
+  final void Function(RiftLinkInfoEvent evt) onInfoEvent;
+  final void Function(RiftLinkRoutesEvent evt) onRoutesEvent;
+  final void Function(RiftLinkGroupsEvent evt) onGroupsEvent;
+  final void Function(RiftLinkTelemetryEvent evt) onTelemetryEvent;
+  final void Function(RiftLinkLocationEvent evt) onLocationEvent;
+  final void Function(RiftLinkRegionEvent evt) onRegionEvent;
+  final void Function(RiftLinkNeighborsEvent evt) onNeighborsEvent;
+  final void Function(RiftLinkPongEvent evt) onPongEvent;
+  final void Function(RiftLinkErrorEvent evt) onErrorEvent;
+  final void Function(RiftLinkGroupSecurityErrorEvent evt) onGroupSecurityErrorEvent;
+  final void Function() onWaitingKeyEvent;
+  final void Function(RiftLinkWifiEvent evt) onWifiEvent;
+  final void Function(RiftLinkGpsEvent evt) onGpsEvent;
+  final void Function(RiftLinkInviteEvent evt) onInviteEvent;
+  final void Function(RiftLinkSelftestEvent evt) onSelftestEvent;
+  final void Function(RiftLinkTimeCapsuleQueuedEvent evt) onTimeCapsuleQueued;
+  final void Function(RiftLinkTimeCapsuleReleasedEvent evt) onTimeCapsuleReleased;
+
+  ChatBleHandlerDeps({
+    required this.isMounted,
+    required this.messages,
+    required this.conversationId,
+    required this.nodeId,
+    required this.broadcastTo,
+    required this.appLifecycle,
+    required this.voiceChunks,
+    required this.pendingPings,
+    required this.normalizeId,
+    required this.sameNodeId,
+    required this.tr,
+    required this.decodeVoicePayload,
+    required this.voiceProfileLabel,
+    required this.shouldEmitCriticalSummary,
+    required this.buildCriticalSummaryMessage,
+    required this.setState,
+    required this.showIncomingNotification,
+    required this.showSnack,
+    required this.sendReadForUnread,
+    required this.scrollToBottom,
+    required this.markConversationRead,
+    required this.onInfoEvent,
+    required this.onRoutesEvent,
+    required this.onGroupsEvent,
+    required this.onTelemetryEvent,
+    required this.onLocationEvent,
+    required this.onRegionEvent,
+    required this.onNeighborsEvent,
+    required this.onPongEvent,
+    required this.onErrorEvent,
+    required this.onGroupSecurityErrorEvent,
+    required this.onWaitingKeyEvent,
+    required this.onWifiEvent,
+    required this.onGpsEvent,
+    required this.onInviteEvent,
+    required this.onSelftestEvent,
+    required this.onTimeCapsuleQueued,
+    required this.onTimeCapsuleReleased,
+  });
+}
+
+class ChatScreenController {
+  StreamSubscription<RiftLinkEvent>? _eventSub;
+  StreamSubscription<BluetoothConnectionState>? _connectionSub;
+
+  void bindEvents({
+    required RiftLinkBle ble,
+    required bool Function() isMounted,
+    required void Function(RiftLinkEvent evt) onEvent,
+    void Function(RiftLinkInfoEvent info)? onLastInfoReplay,
+  }) {
+    _eventSub?.cancel();
+    debugPrint('[BLE_CHAIN] stage=app_listener action=chat_subscribe');
+    _eventSub = ble.events.listen((evt) {
+      if (!isMounted()) return;
+      debugPrint('[BLE_CHAIN] stage=app_listener action=chat_event evt=${evt.runtimeType}');
+      onEvent(evt);
+    });
+    final li = ble.lastInfo;
+    if (li != null && isMounted()) {
+      debugPrint('[BLE_CHAIN] stage=app_listener action=chat_last_info_replay');
+      onLastInfoReplay?.call(li);
+    }
+  }
+
+  void sendReadForUnread(ChatReadDeps deps) {
+    if (!deps.ble.isConnected) return;
+    for (final m in deps.messages) {
+      if (m.isIncoming && m.msgId != null) {
+        final key = '${m.from}_${m.msgId}';
+        if (!deps.readSent.contains(key)) {
+          deps.readSent.add(key);
+          deps.ble.sendRead(from: m.from, msgId: m.msgId!);
+        }
+      }
+    }
+  }
+
+  void bindConnectionState({
+    required RiftLinkBle ble,
+    required bool Function() shouldHandleDisconnect,
+    required void Function() onDisconnected,
+  }) {
+    final dev = ble.device;
+    if (dev == null) return;
+    _connectionSub?.cancel();
+    _connectionSub = dev.connectionState.listen((state) {
+      if (!shouldHandleDisconnect()) return;
+      if (state == BluetoothConnectionState.disconnected) {
+        if (ble.isWifiMode) return;
+        onDisconnected();
+      }
+    });
+  }
+
+  void handleBleEvent(RiftLinkEvent evt, ChatBleHandlerDeps deps) {
+    if (!deps.isMounted) return;
+    if (evt is RiftLinkMsgEvent) {
+      deps.setState(() {
+        final ttl = evt.ttlMinutes ?? 0;
+        deps.messages.add(ChatUiMessage(
+          from: evt.from,
+          text: evt.text,
+          isIncoming: true,
+          msgId: evt.msgId,
+          rssi: evt.rssi,
+          lane: evt.lane,
+          type: evt.type,
+          deleteAt: ttl > 0 ? DateTime.now().add(Duration(minutes: ttl)) : null,
+        ));
+      });
+      final active = deps.conversationId;
+      if (active != null) {
+        final incomingConv = ChatRepository.directConversationId(deps.normalizeId(evt.from));
+        if (active == incomingConv) {
+          deps.markConversationRead(active);
+        }
+      }
+      if (deps.appLifecycle != AppLifecycleState.resumed) {
+        deps.showIncomingNotification(evt.from, evt.text);
+      }
+      deps.sendReadForUnread();
+      deps.scrollToBottom();
+      return;
+    }
+    if (evt is RiftLinkSentEvent) {
+      deps.setState(() {
+        final toMatch = evt.to.isEmpty ? null : evt.to;
+        for (var i = deps.messages.length - 1; i >= 0; i--) {
+          final m = deps.messages[i];
+          final sameTo = (m.to == null && toMatch == null) || deps.sameNodeId(m.to, toMatch);
+          if (!m.isIncoming && m.msgId == null && sameTo) {
+            deps.messages[i] = m.copyWith(msgId: evt.msgId, to: evt.to, status: ChatUiMessageStatus.sent);
+            break;
+          }
+        }
+      });
+      return;
+    }
+    if (evt is RiftLinkDeliveredEvent) {
+      deps.setState(() {
+        for (var i = 0; i < deps.messages.length; i++) {
+          final m = deps.messages[i];
+          if (!m.isIncoming && deps.sameNodeId(m.to, evt.from) && m.msgId == evt.msgId) {
+            var updated = m.copyWith(status: ChatUiMessageStatus.delivered);
+            if (deps.shouldEmitCriticalSummary(updated, ChatUiMessageStatus.delivered)) {
+              updated = updated.copyWith(relaySummarySent: true);
+              deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.delivered));
+            }
+            deps.messages[i] = updated;
+            break;
+          }
+        }
+      });
+      return;
+    }
+    if (evt is RiftLinkReadEvent) {
+      deps.setState(() {
+        for (var i = 0; i < deps.messages.length; i++) {
+          final m = deps.messages[i];
+          if (!m.isIncoming && deps.sameNodeId(m.to, evt.from) && m.msgId == evt.msgId) {
+            var updated = m.copyWith(status: ChatUiMessageStatus.read);
+            if (deps.shouldEmitCriticalSummary(updated, ChatUiMessageStatus.read)) {
+              updated = updated.copyWith(relaySummarySent: true);
+              deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.read));
+            }
+            deps.messages[i] = updated;
+            break;
+          }
+        }
+      });
+      return;
+    }
+    if (evt is RiftLinkUndeliveredEvent) {
+      deps.setState(() {
+        for (var i = 0; i < deps.messages.length; i++) {
+          final m = deps.messages[i];
+          if (!m.isIncoming && m.msgId == evt.msgId) {
+            final isBroadcast = evt.to.isEmpty || deps.sameNodeId(m.to, deps.broadcastTo);
+            if (isBroadcast || deps.sameNodeId(m.to, evt.to)) {
+              var updated = m.copyWith(
+                status: ChatUiMessageStatus.undelivered,
+                delivered: evt.delivered ?? 0,
+                total: evt.total ?? 0,
+              );
+              if (deps.shouldEmitCriticalSummary(updated, ChatUiMessageStatus.undelivered)) {
+                updated = updated.copyWith(relaySummarySent: true);
+                deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.undelivered));
+              }
+              deps.messages[i] = updated;
+              break;
+            }
+          }
+        }
+      });
+      return;
+    }
+    if (evt is RiftLinkBroadcastDeliveryEvent) {
+      deps.setState(() {
+        for (var i = 0; i < deps.messages.length; i++) {
+          final m = deps.messages[i];
+          if (!m.isIncoming && m.msgId == evt.msgId && (m.to == deps.broadcastTo || m.to == null)) {
+            final st = evt.delivered > 0 ? ChatUiMessageStatus.delivered : ChatUiMessageStatus.undelivered;
+            var updated = m.copyWith(status: st, delivered: evt.delivered, total: evt.total);
+            if (deps.shouldEmitCriticalSummary(updated, st)) {
+              updated = updated.copyWith(relaySummarySent: true);
+              deps.messages.add(deps.buildCriticalSummaryMessage(updated, st));
+            }
+            deps.messages[i] = updated;
+            break;
+          }
+        }
+      });
+      return;
+    }
+    if (evt is RiftLinkRelayProofEvent) {
+      deps.setState(() {
+        for (var i = deps.messages.length - 1; i >= 0; i--) {
+          final m = deps.messages[i];
+          if (m.isIncoming || m.msgId == null || m.to == null) continue;
+          if (!deps.sameNodeId(m.to, evt.to)) continue;
+          final pktId = m.msgId! & 0xFFFF;
+          if (pktId == evt.pktId) {
+            final shortRelay = deps.normalizeId(evt.relayedBy);
+            final nextPeers = List<String>.from(m.relayPeers);
+            if (shortRelay.isNotEmpty && !nextPeers.contains(shortRelay) && nextPeers.length < 5) {
+              nextPeers.add(shortRelay);
+            }
+            deps.messages[i] = m.copyWith(
+              relayCount: (m.relayCount ?? 0) + 1,
+              relayPeers: nextPeers,
+            );
+            break;
+          }
+        }
+        deps.messages.add(ChatUiMessage(
+          from: evt.relayedBy,
+          text: deps.tr('relay_proof_line', {
+            'from': deps.normalizeId(evt.from),
+            'to': deps.normalizeId(evt.to),
+            'pkt': '${evt.pktId}',
+          }),
+          isIncoming: true,
+          lane: 'normal',
+          type: 'relayProof',
+        ));
+      });
+      deps.scrollToBottom();
+      return;
+    }
+    if (evt is RiftLinkTimeCapsuleQueuedEvent) {
+      deps.onTimeCapsuleQueued(evt);
+      return;
+    }
+    if (evt is RiftLinkTimeCapsuleReleasedEvent) {
+      deps.onTimeCapsuleReleased(evt);
+      return;
+    }
+    if (evt is RiftLinkVoiceEvent) {
+      final assembly = deps.voiceChunks.putIfAbsent(
+        evt.from,
+        () => ChatUiVoiceRxAssembly(
+          total: evt.total,
+          startedAt: DateTime.now(),
+          lastUpdated: DateTime.now(),
+        ),
+      );
+      if (assembly.total != evt.total) {
+        assembly.total = evt.total;
+        assembly.parts.clear();
+      }
+      assembly.parts[evt.chunk] = evt.data;
+      assembly.lastUpdated = DateTime.now();
+      if (assembly.parts.length == evt.total) {
+        final parts = List.generate(evt.total, (i) => assembly.parts[i] ?? '');
+        try {
+          final bytes = base64Decode(parts.join());
+          final decoded = deps.decodeVoicePayload(bytes);
+          deps.voiceChunks.remove(evt.from);
+          final profileLabel = decoded.voiceProfileCode != null
+              ? ' [${deps.voiceProfileLabel(decoded.voiceProfileCode!)}]'
+              : '';
+          deps.setState(() {
+            deps.messages.add(ChatUiMessage(
+              from: evt.from,
+              text: '🎤 ${deps.tr('voice')}$profileLabel',
+              isIncoming: true,
+              isVoice: true,
+              voiceData: decoded.bytes,
+              deleteAt: decoded.deleteAt,
+              voiceProfileCode: decoded.voiceProfileCode,
+            ));
+          });
+          final active = deps.conversationId;
+          if (active != null && active == ChatRepository.directConversationId(deps.normalizeId(evt.from))) {
+            deps.markConversationRead(active);
+          }
+          deps.scrollToBottom();
+        } catch (_) {
+          deps.voiceChunks.remove(evt.from);
+          deps.setState(() {
+            deps.messages.add(ChatUiMessage(
+              from: evt.from,
+              text: deps.tr('voice_decode_error'),
+              isIncoming: true,
+              lane: 'normal',
+              type: 'voiceLoss',
+            ));
+          });
+          deps.scrollToBottom();
+        }
+      }
+      return;
+    }
+    if (evt is RiftLinkInfoEvent) {
+      deps.onInfoEvent(evt);
+      return;
+    }
+    if (evt is RiftLinkRoutesEvent) {
+      deps.onRoutesEvent(evt);
+      return;
+    }
+    if (evt is RiftLinkGroupsEvent) {
+      deps.onGroupsEvent(evt);
+      return;
+    }
+    if (evt is RiftLinkTelemetryEvent) {
+      deps.onTelemetryEvent(evt);
+      return;
+    }
+    if (evt is RiftLinkLocationEvent) {
+      deps.onLocationEvent(evt);
+      return;
+    }
+    if (evt is RiftLinkRegionEvent) {
+      deps.onRegionEvent(evt);
+      return;
+    }
+    if (evt is RiftLinkNeighborsEvent) {
+      deps.onNeighborsEvent(evt);
+      return;
+    }
+    if (evt is RiftLinkPongEvent) {
+      deps.onPongEvent(evt);
+      return;
+    }
+    if (evt is RiftLinkErrorEvent) {
+      deps.onErrorEvent(evt);
+      return;
+    }
+    if (evt is RiftLinkGroupSecurityErrorEvent) {
+      deps.onGroupSecurityErrorEvent(evt);
+      return;
+    }
+    if (evt is RiftLinkWaitingKeyEvent) {
+      deps.onWaitingKeyEvent();
+      return;
+    }
+    if (evt is RiftLinkWifiEvent) {
+      deps.onWifiEvent(evt);
+      return;
+    }
+    if (evt is RiftLinkGpsEvent) {
+      deps.onGpsEvent(evt);
+      return;
+    }
+    if (evt is RiftLinkInviteEvent) {
+      deps.onInviteEvent(evt);
+      return;
+    }
+    if (evt is RiftLinkSelftestEvent) {
+      deps.onSelftestEvent(evt);
+    }
+  }
+
+  Future<void> sendTextMessage(
+    ChatActionDeps deps, {
+    int ttlMinutes = 0,
+    String lane = 'normal',
+    String? trigger,
+    int? triggerAtMs,
+  }) async {
+    final text = deps.textController.text.trim();
+    if (text.isEmpty) return;
+    deps.textController.clear();
+    final conversationId = deps.activeConversationId();
+    deps.setConversationId(conversationId);
+    final toNorm = deps.unicastTo != null ? deps.normalizeId(deps.unicastTo!) : null;
+    if (conversationId.startsWith('direct:') && toNorm != null) {
+      await deps.repo.ensureConversation(
+        id: conversationId,
+        kind: ConversationKind.direct,
+        peerRef: toNorm,
+        title: deps.contactNicknames[toNorm] ?? toNorm,
+      );
+    } else if (conversationId.startsWith('groupv2:')) {
+      await deps.repo.ensureConversation(
+        id: conversationId,
+        kind: ConversationKind.group,
+        peerRef: deps.groupUid != null && deps.groupUid!.isNotEmpty
+            ? ChatRepository.groupPeerRefByUid(deps.groupUid!)
+            : '${deps.group}',
+        title: deps.groupTitle,
+      );
+    } else {
+      await deps.repo.ensureConversation(
+        id: conversationId,
+        kind: ConversationKind.broadcast,
+        peerRef: 'broadcast',
+        title: 'Broadcast',
+      );
+    }
+
+    final toForMsg = deps.group > 0 ? null : (deps.unicastTo ?? deps.broadcastTo);
+    deps.setState(() {
+      deps.messages.add(ChatUiMessage(
+        from: deps.nodeId,
+        text: text,
+        isIncoming: false,
+        to: toForMsg,
+        lane: lane,
+        type: trigger == null ? 'text' : 'timeCapsule',
+      ));
+    });
+    deps.scrollToBottom();
+    await deps.repo.setDraft(conversationId, '');
+    await deps.repo.appendMessage(
+      ChatMessage(
+        conversationId: conversationId,
+        from: deps.nodeId,
+        to: toForMsg,
+        groupId: deps.group > 0 ? deps.group : null,
+        groupUid: deps.groupUid,
+        text: text,
+        type: trigger == null ? 'text' : 'timeCapsule',
+        lane: lane,
+        direction: MessageDirection.outgoing,
+        status: MessageStatus.pending,
+        createdAtMs: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
+    await deps.ble.send(
+      text: text,
+      to: deps.unicastTo,
+      group: deps.group > 0 ? deps.group : null,
+      ttlMinutes: ttlMinutes,
+      lane: lane,
+      trigger: trigger,
+      triggerAtMs: triggerAtMs,
+    );
+  }
+
+  Future<void> sendWithTtlPipeline(
+    ChatActionDeps deps, {
+    required Future<int?> Function() pickTtl,
+  }) async {
+    final text = deps.textController.text.trim();
+    if (text.isEmpty) return;
+    final ttl = await pickTtl();
+    if (ttl != null && deps.isMounted()) {
+      await sendTextMessage(deps, ttlMinutes: ttl);
+    }
+  }
+
+  Future<void> sendCriticalIfAny(ChatActionDeps deps) async {
+    if (deps.textController.text.trim().isEmpty) return;
+    await sendTextMessage(deps, lane: 'critical');
+  }
+
+  Future<void> sendTimeCapsuleByChoice(
+    ChatActionDeps deps, {
+    required String choice,
+    required int nowMs,
+  }) async {
+    if (choice == 'target_online') {
+      await sendTextMessage(deps, trigger: 'target_online');
+      return;
+    }
+    if (choice == 'deliver_after_time') {
+      await sendTextMessage(
+        deps,
+        trigger: 'deliver_after_time',
+        triggerAtMs: nowMs + 5 * 60 * 1000,
+      );
+    }
+  }
+
+  Future<void> sendSosQuick(ChatActionDeps deps) async {
+    final ok = await deps.ble.sendSos(text: 'SOS');
+    if (!deps.isMounted()) return;
+    if (ok) {
+      deps.setState(() {
+        deps.messages.add(ChatUiMessage(
+          from: deps.nodeId,
+          text: 'SOS',
+          isIncoming: false,
+          lane: 'critical',
+          type: 'sos',
+        ));
+      });
+      deps.scrollToBottom();
+      return;
+    }
+    deps.showSnack(deps.tr('sos_send_failed'), isError: true);
+  }
+
+  Future<void> sendLocation(ChatActionDeps deps) async {
+    if (!deps.ble.isConnected) return;
+    deps.onLocationLoading(true);
+    try {
+      var perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) perm = await Geolocator.requestPermission();
+      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
+        if (deps.isMounted()) deps.showSnack(deps.tr('loc_denied'));
+        return;
+      }
+      final pos = await Geolocator.getCurrentPosition();
+      await deps.ble.sendLocation(
+        lat: pos.latitude,
+        lon: pos.longitude,
+        alt: pos.altitude.toInt(),
+      );
+      if (deps.isMounted()) {
+        deps.setState(() {
+          deps.messages.add(ChatUiMessage(
+            from: deps.nodeId,
+            text: '📍 ${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)}',
+            isIncoming: false,
+            isLocation: true,
+          ));
+        });
+        deps.scrollToBottom();
+      }
+    } catch (e) {
+      if (deps.isMounted()) deps.showSnack(e.toString());
+    } finally {
+      if (deps.isMounted()) deps.onLocationLoading(false);
+    }
+  }
+
+  Future<void> sendGpsSyncFromPhone(ChatActionDeps deps) async {
+    if (!deps.isMounted() || !deps.ble.isConnected) return;
+    try {
+      final perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) return;
+      final pos = await Geolocator.getCurrentPosition();
+      final utcMs = DateTime.now().millisecondsSinceEpoch;
+      await deps.ble.sendGpsSync(
+        utcMs: utcMs,
+        lat: pos.latitude,
+        lon: pos.longitude,
+        alt: pos.altitude.toInt(),
+      );
+    } catch (_) {}
+  }
+
+  Future<void> stopVoiceAndSend(ChatActionDeps deps) async {
+    final bytes = await VoiceService.stopRecord(maxBytes: deps.voicePlan.maxBytes);
+    if (!deps.isMounted() || bytes == null || bytes.isEmpty) {
+      if (deps.isMounted()) deps.showSnack(deps.tr('voice_mic_error'));
+      return;
+    }
+    if (deps.neighbors.isEmpty) {
+      deps.showSnack(deps.tr('no_neighbors_voice'));
+      return;
+    }
+    final to = await deps.pickNeighbor();
+    if (to == null || !deps.isMounted()) return;
+    List<int> payload = bytes;
+    if (deps.voiceTtlMinutes > 0) payload = [0xFF, deps.voiceTtlMinutes, ...payload];
+    payload = [0xFE, deps.voiceProfileCode, ...payload];
+    final chunkSize = deps.voicePlan.chunkSize;
+    final chunks = <String>[];
+    for (var i = 0; i < payload.length; i += chunkSize) {
+      chunks.add(base64Encode(payload.sublist(
+        i,
+        (i + chunkSize < payload.length) ? i + chunkSize : payload.length,
+      )));
+    }
+    final ok = await deps.ble.sendVoice(to: to, chunks: chunks);
+    if (!deps.isMounted()) return;
+    if (ok) {
+      deps.setState(() {
+        deps.messages.add(ChatUiMessage(
+          from: deps.nodeId,
+          text: '🎤 ${deps.tr('voice')} [${deps.voiceProfileLabel(deps.voiceProfileCode)}]',
+          isIncoming: false,
+          isVoice: true,
+          voiceProfileCode: deps.voiceProfileCode,
+        ));
+      });
+      deps.scrollToBottom();
+      return;
+    }
+    deps.showSnack(deps.tr('voice_send_error'));
+  }
+
+  Future<bool> startVoiceRecord(ChatUiVoiceAdaptivePlan plan) async {
+    return VoiceService.startRecord(bitRate: plan.bitRate);
+  }
+
+  Future<void> cancelVoiceRecord() async {
+    await VoiceService.cancelRecord();
+  }
+
+  Future<void> reconnectWithRetry(ChatReconnectDeps deps) async {
+    if (deps.ble.isWifiMode) return;
+    if (deps.isReconnecting() || !deps.isMounted()) return;
+    final remoteId = deps.currentRemoteId() ?? deps.ble.device?.remoteId.toString();
+    if (remoteId == null || remoteId.isEmpty) return;
+    deps.setReconnectState(reconnecting: true, attempt: 1);
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      if (!deps.isMounted()) return;
+      deps.setReconnectState(reconnecting: true, attempt: attempt);
+      deps.showReconnectAttempt(attempt);
+      try {
+        deps.ble.disconnect();
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        final device = BluetoothDevice.fromId(remoteId);
+        final ok = await deps.ble.connect(device);
+        if (deps.isMounted() && ok) {
+          await deps.onReconnectSuccess(remoteId);
+          deps.setReconnectState(reconnecting: false, attempt: attempt);
+          deps.showReconnectSuccess();
+          return;
+        }
+      } catch (_) {}
+      if (attempt < 3) await Future<void>.delayed(const Duration(seconds: 2));
+    }
+    if (!deps.isMounted()) return;
+    deps.setReconnectState(reconnecting: false, attempt: null);
+    await deps.ble.disconnect();
+    if (!deps.isMounted()) return;
+    await deps.onReconnectFailed();
+  }
+
+  void dispose() {
+    _eventSub?.cancel();
+    _connectionSub?.cancel();
+    _eventSub = null;
+    _connectionSub = null;
+  }
+}
+
+class ChatActionDeps {
+  final RiftLinkBle ble;
+  final ChatRepository repo;
+  final TextEditingController textController;
+  final List<ChatUiMessage> messages;
+  final String nodeId;
+  final String? unicastTo;
+  final int group;
+  final String? groupUid;
+  final String groupTitle;
+  final String broadcastTo;
+  final Map<String, String> contactNicknames;
+  final List<String> neighbors;
+  final ChatUiVoiceAdaptivePlan voicePlan;
+  final int voiceTtlMinutes;
+  final int voiceProfileCode;
+  final String Function(String) normalizeId;
+  final String Function(String key, [Map<String, String>? params]) tr;
+  final String Function(int code) voiceProfileLabel;
+  final bool Function() isMounted;
+  final String Function() activeConversationId;
+  final void Function(String id) setConversationId;
+  final void Function(void Function()) setState;
+  final void Function() scrollToBottom;
+  final void Function(String text, {bool isError, bool isSuccess, Duration duration}) showSnack;
+  final void Function(bool value) onLocationLoading;
+  final Future<String?> Function() pickNeighbor;
+
+  ChatActionDeps({
+    required this.ble,
+    required this.repo,
+    required this.textController,
+    required this.messages,
+    required this.nodeId,
+    required this.unicastTo,
+    required this.group,
+    required this.groupUid,
+    required this.groupTitle,
+    required this.broadcastTo,
+    required this.contactNicknames,
+    required this.neighbors,
+    required this.voicePlan,
+    required this.voiceTtlMinutes,
+    required this.voiceProfileCode,
+    required this.normalizeId,
+    required this.tr,
+    required this.voiceProfileLabel,
+    required this.isMounted,
+    required this.activeConversationId,
+    required this.setConversationId,
+    required this.setState,
+    required this.scrollToBottom,
+    required this.showSnack,
+    required this.onLocationLoading,
+    required this.pickNeighbor,
+  });
+}
+
+class ChatReadDeps {
+  final RiftLinkBle ble;
+  final List<ChatUiMessage> messages;
+  final Set<String> readSent;
+
+  ChatReadDeps({
+    required this.ble,
+    required this.messages,
+    required this.readSent,
+  });
+}
+
+class ChatReconnectDeps {
+  final RiftLinkBle ble;
+  final bool Function() isMounted;
+  final bool Function() isReconnecting;
+  final String? Function() currentRemoteId;
+  final void Function({required bool reconnecting, int? attempt}) setReconnectState;
+  final void Function(int attempt) showReconnectAttempt;
+  final void Function() showReconnectSuccess;
+  final Future<void> Function(String remoteId) onReconnectSuccess;
+  final Future<void> Function() onReconnectFailed;
+
+  ChatReconnectDeps({
+    required this.ble,
+    required this.isMounted,
+    required this.isReconnecting,
+    required this.currentRemoteId,
+    required this.setReconnectState,
+    required this.showReconnectAttempt,
+    required this.showReconnectSuccess,
+    required this.onReconnectSuccess,
+    required this.onReconnectFailed,
+  });
+}

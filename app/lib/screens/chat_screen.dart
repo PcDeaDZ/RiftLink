@@ -6,13 +6,14 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
-import 'package:geolocator/geolocator.dart';
 import '../ble/riftlink_ble.dart';
 import '../voice/voice_service.dart';
+import '../voice/voice_assembly_service.dart';
 import '../contacts/contacts_service.dart';
 import '../recent_devices/recent_devices_service.dart';
 import '../prefs/mesh_prefs.dart';
 import '../app_navigator.dart';
+import '../app_lifecycle_bridge.dart';
 import '../l10n/app_localizations.dart';
 import 'map_screen.dart';
 import 'mesh_screen.dart';
@@ -32,6 +33,13 @@ import '../widgets/app_snackbar.dart';
 import '../widgets/rift_dialogs.dart';
 import '../chat/chat_models.dart';
 import '../chat/chat_repository.dart';
+import 'chat/chat_screen_controller.dart';
+import 'chat/chat_ui_models.dart';
+import 'chat/widgets/chat_input_bar.dart';
+import 'chat/widgets/chat_message_list.dart';
+import 'chat/widgets/chat_app_bar.dart';
+import 'chat/widgets/recipient_picker_sheet.dart';
+import 'chat/widgets/chat_status_panel.dart';
 
 List<int> _filterUserGroups(List<int> raw) =>
     raw.where((g) => g != kMeshBroadcastGroupId).toList();
@@ -59,11 +67,11 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, WidgetsBindingObserver {
   final ChatRepository _chatRepo = ChatRepository.instance;
+  final ChatScreenController _screenController = ChatScreenController();
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
   final _messages = <_Msg>[];
   String? _conversationId;
-  StreamSubscription<RiftLinkEvent>? _sub;
   String _nodeId = '';
   String? _nickname;
   /// Пусто, пока не пришёл evt info (избегаем ложного EU в настройках).
@@ -105,6 +113,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   Ticker? _voiceRecordTicker;
   bool _hasText = false;
   final Map<String, _VoiceRxAssembly> _voiceChunks = {};
+  final VoiceAssemblyService _voiceAssemblyService = VoiceAssemblyService();
   final Set<String> _readSent = {};
   final Set<String> _pendingPings = {};
   Timer? _ttlTimer;
@@ -113,7 +122,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   Timer? _gpsSyncTimer;
   bool _meshAnimationEnabled = true;
   AnimationController? _meshAnimController;
-  StreamSubscription? _connStateSub;
   bool _reconnecting = false;
   int _reconnectAttempt = 0;
   bool _intentionalDisconnect = false;
@@ -397,7 +405,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _chatRepo.setDraft(convId, _controller.text);
     }
     WidgetsBinding.instance.removeObserver(this);
-    _connStateSub?.cancel();
     _controller.removeListener(_onTextChanged);
     localeNotifier.removeListener(_onLocaleChanged);
     _ttlTimer?.cancel();
@@ -406,8 +413,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _gpsSyncTimer?.cancel();
     _voiceRecordTicker?.dispose();
     _meshAnimController?.dispose();
-    _sub?.cancel();
-    _sub = null;
+    _screenController.dispose();
     _controller.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -419,18 +425,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   void _listenConnectionState() {
-    final dev = widget.ble.device;
-    if (dev == null) return;
-    _connStateSub?.cancel();
-    _connStateSub = dev.connectionState.listen((state) {
-      if (!mounted || _intentionalDisconnect) return;
-      if (state == BluetoothConnectionState.disconnected) {
-        // When node switches to Wi-Fi transport, BLE disconnect (often status=133 on Android)
-        // is expected and should not trigger BLE reconnect flow.
-        if (widget.ble.isWifiMode) return;
-        _onConnectionLost();
-      }
-    });
+    _screenController.bindConnectionState(
+      ble: widget.ble,
+      shouldHandleDisconnect: () => mounted && !_intentionalDisconnect,
+      onDisconnected: _onConnectionLost,
+    );
   }
 
   Future<void> _onConnectionLost() async {
@@ -741,10 +740,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         .where((c) => !neighborNorm.contains(_normNodeId(c.id)))
         .toList();
 
-    await showAppModalBottomSheet<void>(
+    await RecipientPickerSheet.show<void>(
       context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
       builder: (ctx) {
         final searchCtrl = TextEditingController();
         var query = '';
@@ -1033,15 +1030,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   void _cleanupStaleVoiceAssemblies() {
     if (_voiceChunks.isEmpty || !mounted) return;
-    final now = DateTime.now();
-    final expired = <String>[];
-    _voiceChunks.forEach((from, assembly) {
-      final inactiveSec = now.difference(assembly.lastUpdated).inSeconds;
-      final ageSec = now.difference(assembly.startedAt).inSeconds;
-      if (inactiveSec > 20 || ageSec > 45) {
-        expired.add(from);
-      }
-    });
+    final expired = _voiceAssemblyService.collectExpiredSenders(_voiceChunks, DateTime.now());
     if (expired.isEmpty) return;
     for (final from in expired) {
       final a = _voiceChunks.remove(from);
@@ -1106,19 +1095,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   _DecodedVoicePayload _decodeVoicePayload(List<int> rawBytes) {
-    var bytes = rawBytes;
-    int? voiceProfileCode;
-    if (bytes.length >= 2 && bytes[0] == 0xFE && bytes[1] >= 1 && bytes[1] <= 3) {
-      voiceProfileCode = bytes[1];
-      bytes = bytes.sublist(2);
-    }
-    DateTime? deleteAt;
-    if (bytes.length >= 2 && bytes[0] == 0xFF && bytes[1] >= 1 && bytes[1] <= 255) {
-      final ttl = bytes[1];
-      bytes = bytes.sublist(2);
-      deleteAt = DateTime.now().add(Duration(minutes: ttl));
-    }
-    return _DecodedVoicePayload(bytes: bytes, voiceProfileCode: voiceProfileCode, deleteAt: deleteAt);
+    return _voiceAssemblyService.decodePayload(rawBytes);
   }
 
   _VoiceAdaptivePlan _selectVoicePlan() {
@@ -1253,291 +1230,233 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   /// Синхронная подписка: `async` + `await cancel` откладывал listen — broadcast терял notify до первого кадра.
   void _listenEvents() {
-    _sub?.cancel();
-    debugPrint('[BLE_CHAIN] stage=app_listener action=chat_subscribe');
-    _sub = widget.ble.events.listen((evt) {
-      if (!mounted) return;
-      debugPrint('[BLE_CHAIN] stage=app_listener action=chat_event evt=${evt.runtimeType}');
-      _handleBleEvent(evt);
-    });
-    final li = widget.ble.lastInfo;
-    if (li != null && mounted) {
-      debugPrint('[BLE_CHAIN] stage=app_listener action=chat_last_info_replay');
-      _onInfoEvent(li);
-    }
+    _screenController.bindEvents(
+      ble: widget.ble,
+      isMounted: () => mounted,
+      onEvent: _handleBleEvent,
+      onLastInfoReplay: _onInfoEvent,
+    );
   }
 
   void _handleBleEvent(RiftLinkEvent evt) {
-    if (!mounted) return;
-    if (evt is RiftLinkMsgEvent) {
-      setState(() {
-        final ttl = evt.ttlMinutes ?? 0;
-        _messages.add(_Msg(from: evt.from, text: evt.text, isIncoming: true, msgId: evt.msgId, rssi: evt.rssi,
-            lane: evt.lane, type: evt.type,
-            deleteAt: ttl > 0 ? DateTime.now().add(Duration(minutes: ttl)) : null));
-      });
-      final active = _conversationId;
-      if (active != null) {
-        final incomingConv = ChatRepository.directConversationId(_normalizeId(evt.from));
-        if (active == incomingConv) {
+    _screenController.handleBleEvent(evt, _buildBleEventDeps());
+  }
+
+  ChatBleHandlerDeps _buildBleEventDeps() {
+    return ChatBleHandlerDeps(
+      isMounted: mounted,
+      messages: _messages,
+      conversationId: _conversationId,
+      nodeId: _nodeId,
+      broadcastTo: _broadcastTo,
+      appLifecycle: _appLifecycle,
+      voiceChunks: _voiceChunks,
+      pendingPings: _pendingPings,
+      normalizeId: _normalizeId,
+      sameNodeId: _sameNodeId,
+      tr: (key, params) => context.l10n.tr(key, params),
+      decodeVoicePayload: _decodeVoicePayload,
+      voiceProfileLabel: _voiceProfileLabel,
+      shouldEmitCriticalSummary: _shouldEmitCriticalSummary,
+      buildCriticalSummaryMessage: _buildCriticalSummaryMessage,
+      setState: (fn) => setState(fn),
+      showIncomingNotification: (from, text) {
+        LocalNotificationsService.showIncomingMessage(from: from, text: text);
+      },
+      showSnack: (text, {isError = false, isSuccess = false, duration = const Duration(seconds: 3)}) {
+        _showSnack(
+          text,
+          backgroundColor: isError
+              ? context.palette.error
+              : (isSuccess ? context.palette.success : null),
+          duration: duration,
+        );
+      },
+      sendReadForUnread: _sendReadForUnread,
+      scrollToBottom: _scrollToBottom,
+      markConversationRead: _chatRepo.markConversationRead,
+      onInfoEvent: _onInfoEvent,
+      onRoutesEvent: (event) {
+        setState(() => _routes = event.routes);
+      },
+      onGroupsEvent: (event) {
+        setState(() {
+          final groupsFromV2 = event.groupsV2
+              .map((g) => g.channelId32)
+              .where((g) => g > 1 && g != kMeshBroadcastGroupId);
+          _groups = _filterUserGroups(<int>[...event.groups, ...groupsFromV2]);
+          if ((_groupUid == null || _group == 0) && _groupUid != null && _groupUid!.isNotEmpty) {
+            _group = _resolveGroupIdByUid(_groupUid!);
+          }
+          if (_group > 0 && !_groups.contains(_group)) _group = 0;
+        });
+      },
+      onTelemetryEvent: (event) {
+        setState(() {
+          if (event.from == _nodeId && event.batteryMv > 0) _batteryMv = event.batteryMv;
+        });
+      },
+      onLocationEvent: (event) {
+        setState(() {
+          _messages.add(_Msg(
+            from: event.from,
+            text: '📍 ${event.lat.toStringAsFixed(5)}, ${event.lon.toStringAsFixed(5)}',
+            isIncoming: true,
+            isLocation: true,
+          ));
+        });
+        final active = _conversationId;
+        if (active != null && active == ChatRepository.directConversationId(_normalizeId(event.from))) {
           _chatRepo.markConversationRead(active);
         }
-      }
-      if (_appLifecycle != AppLifecycleState.resumed) {
-        LocalNotificationsService.showIncomingMessage(from: evt.from, text: evt.text);
-      }
-      _sendReadForUnread();
-      _scrollToBottom();
-    } else if (evt is RiftLinkSentEvent) {
-      setState(() {
-        final toMatch = evt.to.isEmpty ? null : evt.to;
-        for (var i = _messages.length - 1; i >= 0; i--) {
-          final m = _messages[i];
-          final sameTo = (m.to == null && toMatch == null) || _sameNodeId(m.to, toMatch);
-          if (!m.isIncoming && m.msgId == null && sameTo) {
-            _messages[i] = m.copyWith(msgId: evt.msgId, to: evt.to, status: _St.sent);
-            break;
-          }
+        _scrollToBottom();
+      },
+      onRegionEvent: (event) {
+        setState(() {
+          _region = event.region;
+          _channel = event.channel;
+        });
+      },
+      onNeighborsEvent: (event) {
+        setState(() {
+          _neighbors = event.neighbors;
+          _neighborsRssi = event.rssi;
+          _neighborsHasKey = event.hasKey;
+        });
+      },
+      onPongEvent: (event) {
+        final fromNorm = _normNodeId(event.from);
+        if (fromNorm.isNotEmpty) _pendingPings.remove(fromNorm);
+        _showSnack(
+          '✓ ${context.l10n.tr('link_ok', {'from': event.from})}',
+          backgroundColor: context.palette.success,
+          duration: const Duration(seconds: 4),
+        );
+      },
+      onErrorEvent: (event) {
+        var msg = event.msg;
+        if (event.code == 'invite_peer_key_mismatch') {
+          msg = context.l10n.tr('invite_status_mismatch');
+        } else if (event.code == 'invite_token_bad_length' || event.code == 'invite_token_bad_format') {
+          msg = context.l10n.tr('invite_status_token_bad');
         }
-      });
-    } else if (evt is RiftLinkDeliveredEvent) {
-      setState(() {
-        for (var i = 0; i < _messages.length; i++) {
-          final m = _messages[i];
-          if (!m.isIncoming && _sameNodeId(m.to, evt.from) && m.msgId == evt.msgId) {
-            var updated = m.copyWith(status: _St.delivered);
-            if (_shouldEmitCriticalSummary(updated, _St.delivered)) {
-              updated = updated.copyWith(relaySummarySent: true);
-              _messages.add(_buildCriticalSummaryMessage(updated, _St.delivered));
-            }
-            _messages[i] = updated;
-            break;
-          }
-        }
-      });
-    } else if (evt is RiftLinkReadEvent) {
-      setState(() {
-        for (var i = 0; i < _messages.length; i++) {
-          final m = _messages[i];
-          if (!m.isIncoming && _sameNodeId(m.to, evt.from) && m.msgId == evt.msgId) {
-            var updated = m.copyWith(status: _St.read);
-            if (_shouldEmitCriticalSummary(updated, _St.read)) {
-              updated = updated.copyWith(relaySummarySent: true);
-              _messages.add(_buildCriticalSummaryMessage(updated, _St.read));
-            }
-            _messages[i] = updated;
-            break;
-          }
-        }
-      });
-    } else if (evt is RiftLinkUndeliveredEvent) {
-      setState(() {
-        for (var i = 0; i < _messages.length; i++) {
-          final m = _messages[i];
-          if (!m.isIncoming && m.msgId == evt.msgId) {
-            final isBroadcast = evt.to.isEmpty || _sameNodeId(m.to, _broadcastTo);
-            if (isBroadcast || _sameNodeId(m.to, evt.to)) {
-              var updated = m.copyWith(status: _St.undelivered, delivered: evt.delivered ?? 0, total: evt.total ?? 0);
-              if (_shouldEmitCriticalSummary(updated, _St.undelivered)) {
-                updated = updated.copyWith(relaySummarySent: true);
-                _messages.add(_buildCriticalSummaryMessage(updated, _St.undelivered));
-              }
-              _messages[i] = updated;
-              break;
-            }
-          }
-        }
-      });
-    } else if (evt is RiftLinkBroadcastDeliveryEvent) {
-      setState(() {
-        for (var i = 0; i < _messages.length; i++) {
-          final m = _messages[i];
-          if (!m.isIncoming && m.msgId == evt.msgId && (m.to == _broadcastTo || m.to == null)) {
-            final st = evt.delivered > 0 ? _St.delivered : _St.undelivered;
-            var updated = m.copyWith(status: st, delivered: evt.delivered, total: evt.total);
-            if (_shouldEmitCriticalSummary(updated, st)) {
-              updated = updated.copyWith(relaySummarySent: true);
-              _messages.add(_buildCriticalSummaryMessage(updated, st));
-            }
-            _messages[i] = updated;
-            break;
-          }
-        }
-      });
-    } else if (evt is RiftLinkInfoEvent) {
-      _onInfoEvent(evt);
-    } else if (evt is RiftLinkRoutesEvent) { setState(() => _routes = evt.routes); }
-    else if (evt is RiftLinkGroupsEvent) {
-      setState(() {
-        final groupsFromV2 = evt.groupsV2
-            .map((g) => g.channelId32)
-            .where((g) => g > 1 && g != kMeshBroadcastGroupId);
-        _groups = _filterUserGroups(<int>[...evt.groups, ...groupsFromV2]);
-        if ((_groupUid == null || _group == 0) && _groupUid != null && _groupUid!.isNotEmpty) {
-          _group = _resolveGroupIdByUid(_groupUid!);
-        }
-        if (_group > 0 && !_groups.contains(_group)) _group = 0;
-      });
-    }
-    else if (evt is RiftLinkTelemetryEvent) {
-      setState(() {
-        if (evt.from == _nodeId && evt.batteryMv > 0) _batteryMv = evt.batteryMv;
-      });
-    } else if (evt is RiftLinkLocationEvent) {
-      setState(() { _messages.add(_Msg(from: evt.from, text: '📍 ${evt.lat.toStringAsFixed(5)}, ${evt.lon.toStringAsFixed(5)}', isIncoming: true, isLocation: true)); });
-      final active = _conversationId;
-      if (active != null && active == ChatRepository.directConversationId(_normalizeId(evt.from))) {
-        _chatRepo.markConversationRead(active);
-      }
-      _scrollToBottom();
-    } else if (evt is RiftLinkRegionEvent) { setState(() { _region = evt.region; _channel = evt.channel; }); }
-    else if (evt is RiftLinkNeighborsEvent) { setState(() { _neighbors = evt.neighbors; _neighborsRssi = evt.rssi; _neighborsHasKey = evt.hasKey; }); }
-    else if (evt is RiftLinkPongEvent) {
-      final fromNorm = _normNodeId(evt.from);
-      if (fromNorm.isNotEmpty) _pendingPings.remove(fromNorm);
-      _showSnack('✓ ${context.l10n.tr('link_ok', {'from': evt.from})}', backgroundColor: context.palette.success, duration: const Duration(seconds: 4));
-    }
-    else if (evt is RiftLinkErrorEvent) {
-      var msg = evt.msg;
-      if (evt.code == 'invite_peer_key_mismatch') {
-        msg = context.l10n.tr('invite_status_mismatch');
-      } else if (evt.code == 'invite_token_bad_length' || evt.code == 'invite_token_bad_format') {
-        msg = context.l10n.tr('invite_status_token_bad');
-      }
-      _showSnack('${context.l10n.tr('error')}: $msg', backgroundColor: context.palette.error);
-    }
-    else if (evt is RiftLinkGroupSecurityErrorEvent) {
-      final msg = evt.msg.trim().isEmpty ? evt.code : evt.msg;
-      _showSnack('${context.l10n.tr('error')}: $msg', backgroundColor: context.palette.error);
-    }
-    else if (evt is RiftLinkWaitingKeyEvent) {
-      _showSnack(context.l10n.tr('waiting_key'));
-    }
-    else if (evt is RiftLinkWifiEvent) {
-      _showSnack(
-        evt.connected
-            ? context.l10n.tr('wifi_status_connected', {'ssid': evt.ssid, 'ip': evt.ip})
-            : context.l10n.tr('wifi_status_disconnected'),
-      );
-    }
-    else if (evt is RiftLinkGpsEvent) { setState(() { _gpsPresent = evt.present; _gpsEnabled = evt.enabled; _gpsFix = evt.hasFix; }); }
-    else if (evt is RiftLinkInviteEvent) {
-      _showInviteDialog(evt.id, evt.pubKey, evt.channelKey, evt.inviteToken, evt.inviteExpiresMs, evt.inviteTtlMs);
-    }
-    else if (evt is RiftLinkRelayProofEvent) {
-      setState(() {
-        for (var i = _messages.length - 1; i >= 0; i--) {
-          final m = _messages[i];
-          if (m.isIncoming || m.msgId == null || m.to == null) continue;
-          if (!_sameNodeId(m.to, evt.to)) continue;
-          final pktId = m.msgId! & 0xFFFF;
-          if (pktId == evt.pktId) {
-            final shortRelay = _normNodeId(evt.relayedBy);
-            final nextPeers = List<String>.from(m.relayPeers);
-            if (shortRelay.isNotEmpty && !nextPeers.contains(shortRelay) && nextPeers.length < 5) nextPeers.add(shortRelay);
-            _messages[i] = m.copyWith(
-              relayCount: (m.relayCount ?? 0) + 1,
-              relayPeers: nextPeers,
-            );
-            break;
-          }
-        }
-        _messages.add(_Msg(
-          from: evt.relayedBy,
-          text: context.l10n.tr('relay_proof_line', {'from': _normNodeId(evt.from), 'to': _normNodeId(evt.to), 'pkt': '${evt.pktId}'}),
-          isIncoming: true,
-          lane: 'normal',
-          type: 'relayProof',
-        ));
-      });
-      _scrollToBottom();
-    }
-    else if (evt is RiftLinkTimeCapsuleQueuedEvent) {
-      final triggerLabel = evt.trigger == 'target_online'
-          ? context.l10n.tr('time_capsule_trigger_online')
-          : context.l10n.tr('time_capsule_trigger_after');
-      setState(() {
-        _timeCapsulePending += 1;
-        _messages.add(_Msg(
-          from: _nodeId,
-          text: context.l10n.tr('time_capsule_queued', {'trigger': triggerLabel}),
-          isIncoming: true,
-          lane: 'normal',
-          type: 'timeCapsule',
-        ));
-      });
-      _scrollToBottom();
-    }
-    else if (evt is RiftLinkTimeCapsuleReleasedEvent) {
-      final triggerLabel = evt.trigger == 'target_online'
-          ? context.l10n.tr('time_capsule_trigger_online')
-          : context.l10n.tr('time_capsule_trigger_after');
-      setState(() {
-        if (_timeCapsulePending > 0) _timeCapsulePending -= 1;
-        _messages.add(_Msg(
-          from: _nodeId,
-          text: context.l10n.tr('time_capsule_released', {'trigger': triggerLabel}),
-          isIncoming: true,
-          lane: 'normal',
-          type: 'timeCapsule',
-        ));
-      });
-      _scrollToBottom();
-    }
-    else if (evt is RiftLinkSelftestEvent) {
-      if (mounted) _showSelftestDialog(evt);
-      if (evt.batteryMv > 0) setState(() => _batteryMv = evt.batteryMv);
-    } else if (evt is RiftLinkVoiceEvent) {
-      final assembly = _voiceChunks.putIfAbsent(
-        evt.from,
-        () => _VoiceRxAssembly(total: evt.total, startedAt: DateTime.now(), lastUpdated: DateTime.now()),
-      );
-      if (assembly.total != evt.total) {
-        assembly.total = evt.total;
-        assembly.parts.clear();
-      }
-      assembly.parts[evt.chunk] = evt.data;
-      assembly.lastUpdated = DateTime.now();
-      if (assembly.parts.length == evt.total) {
-        final parts = List.generate(evt.total, (i) => assembly.parts[i] ?? '');
-        try {
-          final bytes = base64Decode(parts.join());
-          final decoded = _decodeVoicePayload(bytes);
-          _voiceChunks.remove(evt.from);
-          final profileLabel = decoded.voiceProfileCode != null
-              ? ' [${_voiceProfileLabel(decoded.voiceProfileCode!)}]'
-              : '';
-          setState(() {
-            _messages.add(_Msg(
-              from: evt.from,
-              text: '🎤 ${context.l10n.tr('voice')}$profileLabel',
-              isIncoming: true,
-              isVoice: true,
-              voiceData: decoded.bytes,
-              deleteAt: decoded.deleteAt,
-              voiceProfileCode: decoded.voiceProfileCode,
-            ));
-          });
-          final active = _conversationId;
-          if (active != null && active == ChatRepository.directConversationId(_normalizeId(evt.from))) {
-            _chatRepo.markConversationRead(active);
-          }
-          _scrollToBottom();
-        } catch (_) {
-          _voiceChunks.remove(evt.from);
-          setState(() {
-            _messages.add(_Msg(
-              from: evt.from,
-              text: context.l10n.tr('voice_decode_error'),
-              isIncoming: true,
-              lane: 'normal',
-              type: 'voiceLoss',
-            ));
-          });
-          _scrollToBottom();
-        }
-      }
-    }
+        _showSnack('${context.l10n.tr('error')}: $msg', backgroundColor: context.palette.error);
+      },
+      onGroupSecurityErrorEvent: (event) {
+        final msg = event.msg.trim().isEmpty ? event.code : event.msg;
+        _showSnack('${context.l10n.tr('error')}: $msg', backgroundColor: context.palette.error);
+      },
+      onWaitingKeyEvent: () {
+        _showSnack(context.l10n.tr('waiting_key'));
+      },
+      onWifiEvent: (event) {
+        _showSnack(
+          event.connected
+              ? context.l10n.tr('wifi_status_connected', {'ssid': event.ssid, 'ip': event.ip})
+              : context.l10n.tr('wifi_status_disconnected'),
+        );
+      },
+      onGpsEvent: (event) {
+        setState(() {
+          _gpsPresent = event.present;
+          _gpsEnabled = event.enabled;
+          _gpsFix = event.hasFix;
+        });
+      },
+      onInviteEvent: (event) {
+        _showInviteDialog(
+          event.id,
+          event.pubKey,
+          event.channelKey,
+          event.inviteToken,
+          event.inviteExpiresMs,
+          event.inviteTtlMs,
+        );
+      },
+      onSelftestEvent: (event) {
+        if (mounted) _showSelftestDialog(event);
+        if (event.batteryMv > 0) setState(() => _batteryMv = event.batteryMv);
+      },
+      onTimeCapsuleQueued: (event) {
+        final triggerLabel = event.trigger == 'target_online'
+            ? context.l10n.tr('time_capsule_trigger_online')
+            : context.l10n.tr('time_capsule_trigger_after');
+        setState(() {
+          _timeCapsulePending += 1;
+          _messages.add(_Msg(
+            from: _nodeId,
+            text: context.l10n.tr('time_capsule_queued', {'trigger': triggerLabel}),
+            isIncoming: true,
+            lane: 'normal',
+            type: 'timeCapsule',
+          ));
+        });
+        _scrollToBottom();
+      },
+      onTimeCapsuleReleased: (event) {
+        final triggerLabel = event.trigger == 'target_online'
+            ? context.l10n.tr('time_capsule_trigger_online')
+            : context.l10n.tr('time_capsule_trigger_after');
+        setState(() {
+          if (_timeCapsulePending > 0) _timeCapsulePending -= 1;
+          _messages.add(_Msg(
+            from: _nodeId,
+            text: context.l10n.tr('time_capsule_released', {'trigger': triggerLabel}),
+            isIncoming: true,
+            lane: 'normal',
+            type: 'timeCapsule',
+          ));
+        });
+        _scrollToBottom();
+      },
+    );
+  }
+
+  ChatActionDeps _buildActionDeps() {
+    final activeGroup = _activeGroupV2Info();
+    final groupTitle = activeGroup != null && activeGroup.canonicalName.trim().isNotEmpty
+        ? activeGroup.canonicalName.trim()
+        : 'Group $_group';
+    return ChatActionDeps(
+      ble: widget.ble,
+      repo: _chatRepo,
+      textController: _controller,
+      messages: _messages,
+      nodeId: _nodeId,
+      unicastTo: _unicastTo,
+      group: _group,
+      groupUid: _groupUid,
+      groupTitle: groupTitle,
+      broadcastTo: _broadcastTo,
+      contactNicknames: _contactNicknames,
+      neighbors: _neighbors,
+      voicePlan: _voicePlan,
+      voiceTtlMinutes: _voiceTtlMinutes,
+      voiceProfileCode: _voiceProfileCode,
+      normalizeId: _normalizeId,
+      tr: (key, params) => context.l10n.tr(key, params),
+      voiceProfileLabel: _voiceProfileLabel,
+      isMounted: () => mounted,
+      activeConversationId: _activeConversationId,
+      setConversationId: (id) {
+        _conversationId = id;
+      },
+      setState: (fn) => setState(fn),
+      scrollToBottom: _scrollToBottom,
+      showSnack: (text, {isError = false, isSuccess = false, duration = const Duration(seconds: 3)}) {
+        _showSnack(
+          text,
+          backgroundColor: isError
+              ? context.palette.error
+              : (isSuccess ? context.palette.success : null),
+          duration: duration,
+        );
+      },
+      onLocationLoading: (value) {
+        setState(() => _locationLoading = value);
+      },
+      pickNeighbor: _pickNeighborDialog,
+    );
   }
 
   void _scrollToBottom() {
@@ -1551,69 +1470,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   static const _broadcastTo = 'FFFFFFFFFFFFFFFF';  // совпадает с evt.to в "sent" для broadcast
 
   Future<void> _send({int ttlMinutes = 0, String lane = 'normal', String? trigger, int? triggerAtMs}) async {
-    final text = _controller.text.trim();
-    if (text.isEmpty) return;
-    _controller.clear();
-    final conversationId = _activeConversationId();
-    _conversationId = conversationId;
-    final toNorm = _unicastTo != null ? _normalizeId(_unicastTo!) : null;
-    if (conversationId.startsWith('direct:') && toNorm != null) {
-      await _chatRepo.ensureConversation(
-        id: conversationId,
-        kind: ConversationKind.direct,
-        peerRef: toNorm,
-        title: _contactNicknames[toNorm] ?? toNorm,
-      );
-    } else if (conversationId.startsWith('groupv2:')) {
-      await _chatRepo.ensureConversation(
-        id: conversationId,
-        kind: ConversationKind.group,
-        peerRef: _groupUid != null && _groupUid!.isNotEmpty
-            ? ChatRepository.groupPeerRefByUid(_groupUid!)
-            : '$_group',
-        title: 'Group $_group',
-      );
-    } else {
-      await _chatRepo.ensureConversation(
-        id: conversationId,
-        kind: ConversationKind.broadcast,
-        peerRef: 'broadcast',
-        title: 'Broadcast',
-      );
-    }
-    // Broadcast: to = FFFF... чтобы RiftLinkSentEvent нашёл сообщение; group = null
-    final toForMsg = _group > 0 ? null : (_unicastTo ?? _broadcastTo);
-    setState(() {
-      _messages.add(_Msg(
-        from: _nodeId,
-        text: text,
-        isIncoming: false,
-        to: toForMsg,
-        lane: lane,
-        type: trigger == null ? 'text' : 'timeCapsule',
-      ));
-    });
-    _scrollToBottom();
-    await _chatRepo.setDraft(conversationId, '');
-    await _chatRepo.appendMessage(
-      ChatMessage(
-        conversationId: conversationId,
-        from: _nodeId,
-        to: toForMsg,
-        groupId: _group > 0 ? _group : null,
-        groupUid: _groupUid,
-        text: text,
-        type: trigger == null ? 'text' : 'timeCapsule',
-        lane: lane,
-        direction: MessageDirection.outgoing,
-        status: MessageStatus.pending,
-        createdAtMs: DateTime.now().millisecondsSinceEpoch,
-      ),
-    );
-    await widget.ble.send(
-      text: text,
-      to: _unicastTo,
-      group: _group > 0 ? _group : null,
+    await _screenController.sendTextMessage(
+      _buildActionDeps(),
       ttlMinutes: ttlMinutes,
       lane: lane,
       trigger: trigger,
@@ -1634,16 +1492,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   Future<void> _sendSosQuick() async {
-    final ok = await widget.ble.sendSos(text: 'SOS');
-    if (!mounted) return;
-    if (ok) {
-      setState(() {
-        _messages.add(_Msg(from: _nodeId, text: 'SOS', isIncoming: false, lane: 'critical', type: 'sos'));
-      });
-      _scrollToBottom();
-    } else {
-      _showSnack(context.l10n.tr('sos_send_failed'), backgroundColor: context.palette.error);
-    }
+    await _screenController.sendSosQuick(_buildActionDeps());
   }
 
   Future<void> _showTimeCapsuleMenu() async {
@@ -1691,29 +1540,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   Future<void> _sendLocation() async {
-    if (!widget.ble.isConnected) return;
-    setState(() => _locationLoading = true);
-    try {
-      var perm = await Geolocator.checkPermission();
-      if (perm == LocationPermission.denied) perm = await Geolocator.requestPermission();
-      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) { if (mounted) _showSnack(context.l10n.tr('loc_denied')); return; }
-      final pos = await Geolocator.getCurrentPosition();
-      await widget.ble.sendLocation(lat: pos.latitude, lon: pos.longitude, alt: pos.altitude.toInt());
-      if (mounted) { setState(() { _messages.add(_Msg(from: _nodeId, text: '📍 ${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)}', isIncoming: false, isLocation: true)); }); _scrollToBottom(); }
-    } catch (e) { if (mounted) _showSnack(e.toString()); }
-    finally { if (mounted) setState(() => _locationLoading = false); }
+    await _screenController.sendLocation(_buildActionDeps());
   }
 
   /// Периодическая отправка GPS от телефона для beacon-sync (устройство без аппаратного GPS)
   Future<void> _sendGpsSyncFromPhone() async {
-    if (!mounted || !widget.ble.isConnected) return;
-    try {
-      final perm = await Geolocator.checkPermission();
-      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) return;
-      final pos = await Geolocator.getCurrentPosition();
-      final utcMs = DateTime.now().millisecondsSinceEpoch;
-      await widget.ble.sendGpsSync(utcMs: utcMs, lat: pos.latitude, lon: pos.longitude, alt: pos.altitude.toInt());
-    } catch (_) {}
+    await _screenController.sendGpsSyncFromPhone(_buildActionDeps());
   }
 
   Future<void> _toggleVoiceRecord() async {
@@ -1721,38 +1553,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _voiceRecordTicker?.dispose();
       _voiceRecordTicker = null;
       setState(() => _voiceRecording = false);
-      final bytes = await VoiceService.stopRecord(maxBytes: _voicePlan.maxBytes);
-      if (!mounted || bytes == null || bytes.isEmpty) {
-        if (mounted) _showSnack(context.l10n.tr('voice_mic_error'));
-        return;
-      }
-      if (_neighbors.isEmpty) { _showSnack(context.l10n.tr('no_neighbors_voice')); return; }
-      final to = await _pickNeighborDialog();
-      if (to == null || !mounted) return;
-      final ttl = _voiceTtlMinutes;
-      List<int> payload = bytes;
-      if (ttl > 0) payload = [0xFF, ttl, ...payload];
-      payload = [0xFE, _voiceProfileCode, ...payload];
-      // Согласовано с прошивкой: BLE_ATT_MAX_JSON_BYTES=512, один JSON на write; сырой чанк ≤300 B → base64 ≤400.
-      final chunkSize = _voicePlan.chunkSize;
-      final chunks = <String>[];
-      for (var i = 0; i < payload.length; i += chunkSize) { chunks.add(base64Encode(payload.sublist(i, (i + chunkSize < payload.length) ? i + chunkSize : payload.length))); }
-      final ok = await widget.ble.sendVoice(to: to, chunks: chunks);
-      if (mounted) {
-        if (ok) {
-          setState(() {
-            _messages.add(_Msg(
-              from: _nodeId,
-              text: '🎤 ${context.l10n.tr('voice')} [${_voiceProfileLabel(_voiceProfileCode)}]',
-              isIncoming: false,
-              isVoice: true,
-              voiceProfileCode: _voiceProfileCode,
-            ));
-          });
-          _scrollToBottom();
-        }
-        else { _showSnack(context.l10n.tr('voice_send_error')); }
-      }
+      await _screenController.stopVoiceAndSend(_buildActionDeps());
     } else {
       _startVoiceRecord(ttlMinutes: 0);
     }
@@ -1763,7 +1564,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     FocusScope.of(context).unfocus();
     try {
       final plan = _selectVoicePlan();
-      final ok = await VoiceService.startRecord(bitRate: plan.bitRate);
+      final ok = await _screenController.startVoiceRecord(plan);
       if (mounted) {
         setState(() {
           _voiceTtlMinutes = ttlMinutes;
@@ -1796,7 +1597,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   Future<void> _cancelVoiceRecord() async {
     _voiceRecordTicker?.dispose();
     _voiceRecordTicker = null;
-    await VoiceService.cancelRecord();
+    await _screenController.cancelVoiceRecord();
     if (mounted) setState(() { _voiceRecording = false; _voiceRecordStartTime = null; });
   }
 
@@ -2321,65 +2122,37 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   @override
   Widget build(BuildContext context) {
     final l = context.l10n;
-    return Scaffold(
-      resizeToAvoidBottomInset: true,
-      backgroundColor: context.palette.surface,
-      extendBody: true,
-      appBar: riftAppBar(context, title: '',
+    return PopScope(
+      canPop: true,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        if (Navigator.of(context).canPop()) {
+          Navigator.of(context).pop();
+          return;
+        }
+        await AppLifecycleBridge.moveToBackground();
+      },
+      child: Scaffold(
+        resizeToAvoidBottomInset: true,
+        backgroundColor: context.palette.surface,
+        extendBody: true,
+        appBar: riftAppBar(context, title: '',
         titleWidget: Builder(
           builder: (context) {
             final name = (_nickname ?? _nodeId).trim();
             final label = widget.ble.isConnected
                 ? (name.isNotEmpty ? name : '—')
                 : l.tr('disconnected');
-            final row = Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(widget.ble.isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled, size: 18, color: widget.ble.isConnected ? context.palette.success : context.palette.onSurfaceVariant),
-                const SizedBox(width: AppSpacing.sm),
-                Flexible(
-                  child: Text(
-                    label,
-                    style: AppTypography.bodyBase().copyWith(
-                      fontWeight: FontWeight.w600,
-                      color: widget.ble.isConnected ? context.palette.success : context.palette.onSurfaceVariant,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                if (widget.ble.isConnected && _batteryMv != null && _batteryMv! > 0) ...[
-                  const SizedBox(width: AppSpacing.sm),
-                  _buildBatteryBadge(),
-                ],
-                if (_offlinePending != null && _offlinePending! > 0) ...[
-                  const SizedBox(width: AppSpacing.sm),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.xs / 2),
-                    decoration: BoxDecoration(
-                      color: context.palette.primary.withOpacity(0.16),
-                      borderRadius: BorderRadius.circular(AppRadius.sm),
-                      border: Border.all(color: context.palette.primary.withOpacity(0.45)),
-                    ),
-                    child: Text(
-                      '${_offlinePending!}',
-                      style: AppTypography.chipBase().copyWith(
-                        fontWeight: FontWeight.w700,
-                        color: context.palette.primary,
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            );
-            if (!widget.ble.isConnected) {
-              return GestureDetector(
-                onTap: () => _goToScan(),
-                child: row,
-              );
-            }
-            return GestureDetector(
-              onTap: _showConnectMenu,
-              child: row,
+            return ChatAppBarTitle(
+              label: label,
+              isConnected: widget.ble.isConnected,
+              showBattery: widget.ble.isConnected && _batteryMv != null && _batteryMv! > 0,
+              batteryBadge: _buildBatteryBadge(),
+              offlinePending: _offlinePending,
+              onConnectedTap: _showConnectMenu,
+              onDisconnectedTap: () {
+                _goToScan();
+              },
             );
           },
         ),
@@ -2446,55 +2219,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             Divider(height: 1, color: context.palette.divider),
             _buildStatusPanel(l),
             Expanded(
-              child: Stack(
-                children: [
-                  Container(
-                    color: Colors.transparent,
-                    child: _visibleMessages.isEmpty
-                      ? Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.chat_bubble_outline, size: 48, color: context.palette.onSurfaceVariant.withOpacity(0.4)),
-                              const SizedBox(height: AppSpacing.md),
-                              Text(
-                                l.tr('no_messages'),
-                                style: AppTypography.bodyBase().copyWith(
-                                  fontSize: 14,
-                                  color: context.palette.onSurfaceVariant.withOpacity(0.7),
-                                ),
-                              ),
-                            ],
-                          ),
-                        )
-                      : ListView(
-                          controller: _scrollController,
-                          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
-                          children: _visibleMessages.map((m) => _buildMessageBubble(m)).toList(),
-                        ),
-                  ),
-                  // Градиент-затухание над панелью ввода — плавный переход при смахивании
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    height: AppSpacing.xxl,
-                    child: IgnorePointer(
-                      child: Container(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                            colors: [
-                              context.palette.surface.withOpacity(0),
-                              context.palette.surface.withOpacity(0.95),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
+              child: ChatMessageList<_Msg>(
+                messages: _visibleMessages,
+                scrollController: _scrollController,
+                l10n: l,
+                itemBuilder: _buildMessageBubble,
               ),
             ),
             _buildInputBar(l),
@@ -2503,11 +2232,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           ),
         ],
       ),
+      ),
     );
   }
 
   Widget _buildStatusPanel(AppLocalizations l) {
-    final chips = <Widget>[];
+    final chips = <ChatStatusChipData>[];
     final gv2 = _activeGroupV2Info();
     if (gv2 != null) {
       final roleText = switch (gv2.myRole) {
@@ -2516,80 +2246,49 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         'member' => l.tr('group_role_member'),
         _ => '—',
       };
-      chips.add(_statusChip(
-        '${l.tr('group')} ${gv2.channelId32} · $roleText',
+      chips.add(ChatStatusChipData(
+        text: '${l.tr('group')} ${gv2.channelId32} · $roleText',
         icon: Icons.group_outlined,
         color: context.palette.primary,
       ));
-      chips.add(_statusChip(
-        gv2.ackApplied ? l.tr('group_key_actual') : l.tr('group_key_rekey_required_short'),
+      chips.add(ChatStatusChipData(
+        text: gv2.ackApplied ? l.tr('group_key_actual') : l.tr('group_key_rekey_required_short'),
         icon: gv2.ackApplied ? Icons.verified_rounded : Icons.warning_amber_rounded,
         color: gv2.ackApplied ? context.palette.success : context.palette.error,
       ));
     }
-    chips.add(_statusChip(
-      l.tr('pairwise_key_required'),
+    chips.add(ChatStatusChipData(
+      text: l.tr('pairwise_key_required'),
       icon: Icons.lock_outline_rounded,
       color: context.palette.primary,
     ));
-    chips.add(_statusChip(
-      l.tr('critical_lane_label'),
+    chips.add(ChatStatusChipData(
+      text: l.tr('critical_lane_label'),
       icon: Icons.priority_high_rounded,
       color: context.palette.error,
     ));
     if (_timeCapsulePending > 0) {
-      chips.add(_statusChip(
-        l.tr('time_capsule_status_count', {'n': '$_timeCapsulePending'}),
+      chips.add(ChatStatusChipData(
+        text: l.tr('time_capsule_status_count', {'n': '$_timeCapsulePending'}),
         icon: Icons.schedule_rounded,
         color: context.palette.primary,
       ));
     }
     if ((_offlineCourierPending ?? 0) > 0) {
-      chips.add(_statusChip(
-        l.tr('scf_courier_status_count', {'n': '${_offlineCourierPending ?? 0}'}),
+      chips.add(ChatStatusChipData(
+        text: l.tr('scf_courier_status_count', {'n': '${_offlineCourierPending ?? 0}'}),
         icon: Icons.local_shipping_outlined,
         color: context.palette.success,
       ));
     }
     if ((_offlineDirectPending ?? 0) > 0) {
-      chips.add(_statusChip(
-        l.tr('offline_direct_status_count', {'n': '${_offlineDirectPending ?? 0}'}),
+      chips.add(ChatStatusChipData(
+        text: l.tr('offline_direct_status_count', {'n': '${_offlineDirectPending ?? 0}'}),
         icon: Icons.mark_email_unread_outlined,
         color: context.palette.primary,
       ));
     }
-    if (chips.length <= 2) return const SizedBox.shrink();
-    return Container(
-      padding: const EdgeInsets.fromLTRB(AppSpacing.sm + 2, AppSpacing.sm, AppSpacing.sm + 2, AppSpacing.xs / 2),
-      color: context.palette.surface.withOpacity(0.92),
-      child: Wrap(
-        spacing: AppSpacing.sm,
-        runSpacing: AppSpacing.sm,
-        children: chips,
-      ),
-    );
-  }
-
-  Widget _statusChip(String text, {required IconData icon, required Color color}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.xs),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.12),
-        borderRadius: BorderRadius.circular(AppRadius.sm),
-        border: Border.all(color: color.withOpacity(0.35)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 14, color: color),
-          const SizedBox(width: AppSpacing.xs),
-          Text(
-            text,
-            style: AppTypography.chipBase().copyWith(color: color),
-          ),
-        ],
-      ),
-    );
+    return ChatStatusPanel(chips: chips);
   }
 
   // ── Input bar: одна панель. При записи — кнопка растёт на месте, слева таймер и свайп. ──
@@ -2608,18 +2307,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     final tenths = (elapsed.inMilliseconds % 1000) ~/ 100;
     final timeStr = '${sec ~/ 60}:${(sec % 60).toString().padLeft(2, '0')},$tenths';
 
-    final bottomPad = MediaQuery.of(context).padding.bottom;
-    return Container(
-      padding: EdgeInsets.fromLTRB(
-        AppSpacing.xl,
-        AppSpacing.sm + 2,
-        AppSpacing.sm,
-        AppSpacing.sm + 2 + bottomPad,
-      ),
-      decoration: BoxDecoration(
-        color: context.palette.surfaceVariant.withOpacity(0.92),
-        border: Border(top: BorderSide(color: context.palette.divider, width: 0.5)),
-      ),
+    final bottomInset = MediaQuery.of(context).padding.bottom;
+    return ChatInputBar(
+      bottomInset: bottomInset,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
@@ -2910,6 +2600,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
 }
+
+typedef _St = ChatUiMessageStatus;
+typedef _Msg = ChatUiMessage;
+typedef _VoiceAdaptivePlan = ChatUiVoiceAdaptivePlan;
+typedef _VoiceRxAssembly = ChatUiVoiceRxAssembly;
+typedef _DecodedVoicePayload = ChatUiDecodedVoicePayload;
 
 // ── TTL tap/long-press button (400ms long press для вызова TTL) ──
 
@@ -3298,102 +2994,3 @@ class _TtlPickerSheet extends StatelessWidget {
   }
 }
 
-// ── Data classes ──
-
-enum _St { sent, delivered, read, undelivered }
-
-class _VoiceAdaptivePlan {
-  final int profileCode;
-  final int bitRate;
-  final int maxBytes;
-  final int chunkSize;
-
-  const _VoiceAdaptivePlan({
-    required this.profileCode,
-    required this.bitRate,
-    required this.maxBytes,
-    required this.chunkSize,
-  });
-}
-
-class _VoiceRxAssembly {
-  int total;
-  final DateTime startedAt;
-  DateTime lastUpdated;
-  final Map<int, String> parts = <int, String>{};
-
-  _VoiceRxAssembly({
-    required this.total,
-    required this.startedAt,
-    required this.lastUpdated,
-  });
-}
-
-class _DecodedVoicePayload {
-  final List<int> bytes;
-  final int? voiceProfileCode;
-  final DateTime? deleteAt;
-
-  const _DecodedVoicePayload({
-    required this.bytes,
-    required this.voiceProfileCode,
-    required this.deleteAt,
-  });
-}
-
-/// Для broadcast: delivered/total — доставлено X из Y
-class _Msg {
-  final String from;
-  final String text;
-  final bool isIncoming;
-  final DateTime at;
-  final bool isLocation;
-  final bool isVoice;
-  final List<int>? voiceData;
-  final int? voiceProfileCode;
-  final int? msgId;
-  final String? to;
-  final int? rssi;
-  final DateTime? deleteAt;
-  final _St status;
-  final int? delivered;  // broadcast: доставлено X
-  final int? total;     // broadcast: всего Y
-  final int? relayCount; // кол-во observed relayProof для pktId
-  final List<String> relayPeers; // короткая цепочка relay-узлов
-  final bool relaySummarySent; // итоговая critical summary уже показана
-  final String lane;
-  final String type;
-
-  _Msg({
-    required this.from,
-    required this.text,
-    required this.isIncoming,
-    DateTime? at,
-    this.isLocation = false,
-    this.isVoice = false,
-    this.voiceData,
-    this.voiceProfileCode,
-    this.msgId,
-    this.to,
-    this.rssi,
-    this.deleteAt,
-    this.status = _St.sent,
-    this.delivered,
-    this.total,
-    this.relayCount,
-    this.relayPeers = const [],
-    this.relaySummarySent = false,
-    this.lane = 'normal',
-    this.type = 'text',
-  }) : at = at ?? DateTime.now();
-
-  _Msg copyWith({int? msgId, String? to, _St? status, int? delivered, int? total, int? relayCount, List<String>? relayPeers, bool? relaySummarySent, String? lane, String? type, int? voiceProfileCode}) => _Msg(
-    from: from, text: text, isIncoming: isIncoming, at: at, isLocation: isLocation, isVoice: isVoice, voiceData: voiceData, voiceProfileCode: voiceProfileCode ?? this.voiceProfileCode,
-    msgId: msgId ?? this.msgId, to: to ?? this.to, rssi: rssi, deleteAt: deleteAt, status: status ?? this.status,
-    delivered: delivered ?? this.delivered, total: total ?? this.total,
-    relayCount: relayCount ?? this.relayCount,
-    relayPeers: relayPeers ?? this.relayPeers,
-    relaySummarySent: relaySummarySent ?? this.relaySummarySent,
-    lane: lane ?? this.lane, type: type ?? this.type,
-  );
-}
