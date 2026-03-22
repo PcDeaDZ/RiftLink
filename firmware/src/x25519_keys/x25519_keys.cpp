@@ -55,6 +55,7 @@ static SemaphoreHandle_t s_mutex = nullptr;
 #define KEY_EXCHANGE_THROTTLE_MS 8000    // первичный обмен без ключа: быстрее retry, чтобы не застрять в deadlock
 #define KEY_RESPONSE_THROTTLE_MS 60000  // ответ когда ключ уже был — макс. раз в 60с (пир может повторить)
 #define KEY_DEBOUNCE_MS 1500             // мин. пауза между отправками одному пиру (HELLO+KEY_EXCHANGE подряд → 1 пакет)
+#define KEY_FORCE_MIN_GAP_MS 2500        // аварийный анти-шторм даже для forceSend(!hadKeyBefore)
 #define KEY_HELLO_SLOT_BASE_MS 35
 #define KEY_HELLO_SLOT_STEP_MS 110
 #define KEY_HELLO_SLOT_JITTER_SPAN_MS 25
@@ -428,6 +429,16 @@ void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, c
   // Debounce: HELLO и KEY_EXCHANGE приходят подряд — не слать два пакета, один уже в эфире.
   // Для force-ответа на свежий KEY_EXCHANGE debounce отключаем, иначе второй узел может не получить наш ключ.
   uint32_t now = millis();
+  if (forceSend && !hadKeyBefore) {
+    uint32_t lastSend = 0;
+    if (throttleLastSendFor(peerId, &lastSend) && (now - lastSend < KEY_FORCE_MIN_GAP_MS)) {
+      xSemaphoreGive(s_mutex);
+      RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=force_min_gap peer=%02X%02X delta_ms=%lu min_gap_ms=%lu reason=%s",
+          peerId[0], peerId[1], (unsigned long)(now - lastSend),
+          (unsigned long)KEY_FORCE_MIN_GAP_MS, safeReason(reason));
+      return;
+    }
+  }
   if (!bypassDebounce) {
     uint32_t lastSend = 0;
     if (throttleLastSendFor(peerId, &lastSend) && (now - lastSend < KEY_DEBOUNCE_MS)) {

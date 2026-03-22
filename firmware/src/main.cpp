@@ -1091,7 +1091,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info
         RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
       }
-      if (x25519_keys::isPeerPubKeyMismatch(hdr.from, payload)) {
+      bool keyMismatch = x25519_keys::isPeerPubKeyMismatch(hdr.from, payload);
+      if (keyMismatch) {
         RIFTLINK_DIAG("KEY", "event=KEY_STORE_FAIL cause=pubkey_mismatch peer=%02X%02X pktId=%u",
             hdr.from[0], hdr.from[1], (unsigned)hdr.pktId);
         RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE mismatch for %02X%02X — possible key substitution\n",
@@ -1100,6 +1101,11 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         return;
       }
       bool hadKey = x25519_keys::hasKeyFor(hdr.from);
+      if (hadKey) {
+        RIFTLINK_DIAG("KEY", "event=KEY_RX_DUP from=%02X%02X pktId=%u action=ignore_rekey",
+            hdr.from[0], hdr.from[1], (unsigned)hdr.pktId);
+        return;
+      }
       extendHandshakeQuiet("key_rx_parsed");
       RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSED_OK from=%02X%02X payload=%u pktId=%u hadKey=%u",
           hdr.from[0], hdr.from[1], (unsigned)payloadLen, (unsigned)hdr.pktId, (unsigned)hadKey);
@@ -1107,12 +1113,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           (unsigned)payloadLen, hdr.from[0], hdr.from[1]);
       x25519_keys::onKeyExchange(hdr.from, payload);
       if (x25519_keys::hasKeyFor(hdr.from)) {
-        if (!hadKey) {
-          x25519_keys::sendKeyExchange(hdr.from, true, false, "key_rx");
-        } else {
-          // У нас уже есть ключ — пир мог не получить наш. Ответ с троттлом 60с.
-          x25519_keys::sendKeyExchange(hdr.from, true, true, "key_rx");
-        }
+        x25519_keys::sendKeyExchange(hdr.from, true, false, "key_rx");
       }
     } else if (hdr.opcode == protocol::OP_KEY_EXCHANGE) {
       RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSE_FAIL cause=payload_len_ne_32 from=%02X%02X payload=%u pktId=%u",
@@ -1144,7 +1145,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info
           RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
         }
-        if (x25519_keys::isPeerPubKeyMismatch(hdr.from, payload)) {
+        bool keyMismatch = x25519_keys::isPeerPubKeyMismatch(hdr.from, payload);
+        if (keyMismatch) {
           RIFTLINK_DIAG("KEY", "event=KEY_STORE_FAIL cause=pubkey_mismatch peer=%02X%02X pktId=%u",
               hdr.from[0], hdr.from[1], (unsigned)hdr.pktId);
           RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE mismatch for %02X%02X — possible key substitution\n",
@@ -1153,6 +1155,11 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           break;
         }
         bool hadKey = x25519_keys::hasKeyFor(hdr.from);
+        if (hadKey) {
+          RIFTLINK_DIAG("KEY", "event=KEY_RX_DUP from=%02X%02X pktId=%u action=ignore_rekey",
+              hdr.from[0], hdr.from[1], (unsigned)hdr.pktId);
+          break;
+        }
         extendHandshakeQuiet("key_rx_parsed");
         RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSED_OK from=%02X%02X payload=%u pktId=%u hadKey=%u",
             hdr.from[0], hdr.from[1], (unsigned)payloadLen, (unsigned)hdr.pktId, (unsigned)hadKey);
@@ -1160,12 +1167,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             (unsigned)payloadLen, hdr.from[0], hdr.from[1]);
         x25519_keys::onKeyExchange(hdr.from, payload);
         if (x25519_keys::hasKeyFor(hdr.from)) {
-          if (!hadKey) {
-            ble::requestNeighborsNotify();  // приложение: обновить hasKey (ожидание ключа → готов)
-            x25519_keys::sendKeyExchange(hdr.from, true, false, "key_rx");
-          } else {
-            x25519_keys::sendKeyExchange(hdr.from, true, true, "key_rx");  // троттл 60с — пир мог не получить наш
-          }
+          ble::requestNeighborsNotify();  // приложение: обновить hasKey (ожидание ключа → готов)
+          x25519_keys::sendKeyExchange(hdr.from, true, false, "key_rx");
         }
       }
       else {

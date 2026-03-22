@@ -1916,22 +1916,52 @@ class _ConversationTile extends StatelessWidget {
     return AppSectionCard(
       margin: const EdgeInsets.only(bottom: AppSpacing.sm),
       padding: EdgeInsets.zero,
-      child: Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(AppSpacing.md),
-          border: Border.all(
-            color: hasUnread ? p.primary.withOpacity(0.20) : p.divider.withOpacity(0.72),
-          ),
-          color: hasUnread ? p.primary.withOpacity(0.05) : p.card.withOpacity(0.88),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.14),
-              blurRadius: 10,
-              offset: const Offset(0, 4),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(AppSpacing.md),
+        child: Stack(
+          children: [
+            Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(AppSpacing.md),
+                border: Border.all(
+                  color: hasUnread ? kindTint.withOpacity(0.28) : p.divider.withOpacity(0.72),
+                ),
+                gradient: LinearGradient(
+                  begin: Alignment.centerLeft,
+                  end: Alignment.centerRight,
+                  colors: [
+                    hasUnread ? kindTint.withOpacity(0.08) : p.card.withOpacity(0.92),
+                    p.card.withOpacity(0.88),
+                  ],
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.10),
+                    blurRadius: 8,
+                    offset: const Offset(0, 3),
+                  ),
+                  if (hasUnread)
+                    BoxShadow(
+                      color: kindTint.withOpacity(0.10),
+                      blurRadius: 12,
+                      offset: const Offset(0, 0),
+                    ),
+                ],
+              ),
             ),
-          ],
-        ),
-        child: ListTile(
+            Positioned(
+              left: 0,
+              top: 6,
+              bottom: 6,
+              child: Container(
+                width: 2,
+                decoration: BoxDecoration(
+                  color: kindTint.withOpacity(hasUnread ? 0.82 : 0.58),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+            ),
+            ListTile(
           onTap: onTap,
           onLongPress: () => _showActions(context),
           dense: true,
@@ -1992,7 +2022,7 @@ class _ConversationTile extends StatelessWidget {
                 Text(
                   timeText,
                   style: TextStyle(
-                    color: hasUnread ? p.primary.withOpacity(0.92) : p.onSurfaceVariant,
+                    color: hasUnread ? kindTint.withOpacity(0.95) : p.onSurfaceVariant,
                     fontSize: 10.5,
                     fontWeight: hasUnread ? FontWeight.w600 : FontWeight.w500,
                   ),
@@ -2011,15 +2041,15 @@ class _ConversationTile extends StatelessWidget {
                   constraints: const BoxConstraints(minWidth: 22),
                   padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
                   decoration: BoxDecoration(
-                    color: p.primary.withOpacity(0.20),
-                    border: Border.all(color: p.primary.withOpacity(0.36)),
+                    color: kindTint.withOpacity(0.20),
+                    border: Border.all(color: kindTint.withOpacity(0.36)),
                     borderRadius: BorderRadius.circular(999),
                   ),
                   child: Text(
                     '${conversation.unreadCount}',
                     textAlign: TextAlign.center,
                     style: TextStyle(
-                      color: p.primary.withOpacity(0.98),
+                      color: kindTint.withOpacity(0.98),
                       fontWeight: FontWeight.w700,
                       fontSize: 11,
                     ),
@@ -2027,6 +2057,8 @@ class _ConversationTile extends StatelessWidget {
                 ),
             ],
           ),
+            ),
+          ],
         ),
       ),
     );
