@@ -1,13 +1,13 @@
 {
   "name": "RiftLink Heltec V3 Paper",
-  "version": "1.4.0",
+  "version": "1.5.18",
   "new_install_prompt_erase": true,
   "builds": [
     {
       "chipFamily": "ESP32-S3",
       "parts": [
         {
-          "path": "https://github.com/PcDeaDZ/RiftLink/releases/latest/download/heltec_v3_paper_full_1.4.0.bin",
+          "path": "https://github.com/PcDeaDZ/RiftLink/releases/latest/download/heltec_v3_paper_full.bin",
           "offset": 0
         }
       ]

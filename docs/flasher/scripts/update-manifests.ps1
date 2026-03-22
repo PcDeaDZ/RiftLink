@@ -9,9 +9,9 @@ $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $PSScriptRoot
 $manifests = @{
-  "heltec-v3.json"       = "heltec_v3_full_$Version.bin"
-  "heltec-v4.json"       = "heltec_v4_full_$Version.bin"
-  "heltec-v3-paper.json" = "heltec_v3_paper_full_$Version.bin"
+  "heltec-v3.json"       = "heltec_v3_full.bin"
+  "heltec-v4.json"       = "heltec_v4_full.bin"
+  "heltec-v3-paper.json" = "heltec_v3_paper_full.bin"
 }
 
 foreach ($file in $manifests.Keys) {

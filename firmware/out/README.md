@@ -2,8 +2,8 @@
 
 После сборки в `out/<env>/` создаются:
 - `firmware.bin` — app partition
-- `<env>_<version>.bin` — app с версией
-- `<env>_full_<version>.bin` — merged (bootloader+partitions+app) для прошивки в 0x0
+- `<env>.bin` — app partition (стабильное имя)
+- `<env>_full.bin` — merged (bootloader+partitions+app) для прошивки в 0x0
 
 | Папка | Устройство |
 |-------|------------|
@@ -19,10 +19,10 @@
 cd firmware && pio run -t upload -e heltec_v3_paper
 ```
 
-**Только .bin (esptool):** используй `heltec_v3_paper_full_1.0.0.bin` из `out/heltec_v3_paper/`:
+**Только .bin (esptool):** используй `heltec_v3_paper_full.bin` из `out/heltec_v3_paper/`:
 ```bash
 esptool --chip esp32s3 --port COM3 erase_flash
-esptool --chip esp32s3 --port COM3 --baud 921600 write_flash 0x0 out/heltec_v3_paper/heltec_v3_paper_full_1.0.0.bin
+esptool --chip esp32s3 --port COM3 --baud 921600 write_flash 0x0 out/heltec_v3_paper/heltec_v3_paper_full.bin
 ```
 
 ---
