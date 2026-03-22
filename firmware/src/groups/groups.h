@@ -28,16 +28,25 @@ constexpr uint32_t GROUP_ALL = 1;
 constexpr int MAX_GROUPS_V2 = MAX_GROUPS;
 constexpr int GROUP_UID_MAX_LEN = 64;
 constexpr int GROUP_TAG_MAX_LEN = 32;
+constexpr int GROUP_CANONICAL_NAME_MAX_LEN = 48;
+constexpr int GROUP_OWNER_SIGN_PUBKEY_LEN = 32;
 
 /** Upsert минимального V2-состояния группы на устройстве. */
 bool upsertGroupV2(
     const char* groupUid,
     uint32_t channelId32,
     const char* groupTag,
+    const char* canonicalName,
     const uint8_t* groupKey32,
     uint16_t keyVersion,
     GroupRole myRole,
     uint32_t revocationEpoch);
+/** Обновить canonicalName (разрешено owner-only в BLE handler). */
+bool setCanonicalNameV2(const char* groupUid, const char* canonicalName);
+/** Зафиксировать owner signing public key (32B) для группы. */
+bool setOwnerSignPubKeyV2(const char* groupUid, const uint8_t* ownerSignPubKey32);
+/** Прочитать owner signing public key (32B) для группы. */
+bool getOwnerSignPubKeyV2(const char* groupUid, uint8_t* outOwnerSignPubKey32);
 /** Установить локальную роль узла в группе V2. */
 bool setGroupRoleV2(const char* groupUid, GroupRole role);
 /** Обновить ключ/версию ключа в группе V2 (rekey). */
@@ -52,6 +61,8 @@ bool getGroupV2(
     uint32_t* outChannelId32,
     char* outGroupTag,
     size_t outGroupTagLen,
+    char* outCanonicalName,
+    size_t outCanonicalNameLen,
     uint16_t* outKeyVersion,
     GroupRole* outRole,
     uint32_t* outRevocationEpoch,
@@ -72,6 +83,8 @@ bool getV2At(
     uint32_t* outChannelId32,
     char* outGroupTag,
     size_t outGroupTagLen,
+    char* outCanonicalName,
+    size_t outCanonicalNameLen,
     uint16_t* outKeyVersion,
     GroupRole* outRole,
     uint32_t* outRevocationEpoch,

@@ -187,6 +187,7 @@ Groups V2 работает по `groupUid` и signed grants. Команды `gro
 
 ```json
 {"cmd":"groupCreate","groupUid":"B64_16_or_32B","displayName":"Team Alpha","channelId32":12345,"groupTag":"B64_8_or_16B"}
+{"cmd":"groupCanonicalRename","groupUid":"B64_16_or_32B","canonicalName":"Team Alpha"}
 {"cmd":"groupInviteCreate","groupUid":"B64_16_or_32B","role":"member","ttlSec":600}
 {"cmd":"groupInviteAccept","invite":"B64_payload"}
 {"cmd":"groupGrantIssue","groupUid":"B64_16_or_32B","subjectId":"A1B2C3D4E5F60708","role":"admin","expiresAt":1760000000}
@@ -289,7 +290,7 @@ Groups V2 работает по `groupUid` и signed grants. Команды `gro
 ### 3.10.1 groupStatus — состояние группы V2
 
 ```json
-{"evt":"groupStatus","groupUid":"B64_16_or_32B","myRole":"admin","keyVersion":7,"status":"ok","rekeyRequired":false}
+{"evt":"groupStatus","groupUid":"B64_16_or_32B","canonicalName":"Team Alpha","myRole":"admin","keyVersion":7,"status":"ok","rekeyRequired":false}
 ```
 
 `myRole`: `owner|admin|member|none`.
@@ -385,10 +386,13 @@ Groups V2 работает по `groupUid` и signed grants. Команды `gro
 ### 3.20 groupInvite — сформированный invite для Groups V2
 
 ```json
-{"evt":"groupInvite","groupUid":"B64_16_or_32B","role":"member","invite":"B64_payload","expiresAt":1760000000,"channelId32":12345}
+{"evt":"groupInvite","groupUid":"B64_16_or_32B","canonicalName":"Team Alpha","role":"member","invite":"B64_payload","expiresAt":1760000000,"channelId32":12345}
 ```
 
-`invite` передается получателю и принимается через `{"cmd":"groupInviteAccept","invite":"..."}`.
+`invite` передается получателю и принимается через `{"cmd":"groupInviteAccept","invite":"..."}`.  
+Формат payload invite в V3.1 (signed): `v3.1|groupUid|channelId32|groupTag|canonicalName|keyVersion|groupKeyB64|role|expiresAt|ownerSignPubKeyB64|signatureB64`.  
+`signatureB64` — Ed25519 detached подпись по строке без последнего поля `signatureB64`.  
+`groupInviteCreate` в V3.1 разрешен только owner (fail-closed reject для admin/member).
 
 ---
 

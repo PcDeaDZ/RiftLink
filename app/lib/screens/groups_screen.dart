@@ -93,6 +93,13 @@ class _GroupsScreenState extends State<GroupsScreen> {
     return (uid == null || uid.isEmpty) ? null : uid;
   }
 
+  String _groupDisplayName(int gid) {
+    final v2 = _groupV2ByChannel[gid];
+    final name = v2?.canonicalName.trim();
+    if (name != null && name.isNotEmpty) return name;
+    return '${context.l10n.tr('group')} $gid';
+  }
+
   @override
   void initState() {
     super.initState();
@@ -117,6 +124,9 @@ class _GroupsScreenState extends State<GroupsScreen> {
         final next = RiftLinkGroupV2Info(
           groupUid: evt.groupUid,
           groupTag: prev?.groupTag ?? '',
+          canonicalName: evt.canonicalName.trim().isNotEmpty
+              ? evt.canonicalName
+              : (prev?.canonicalName ?? ''),
           channelId32: gid,
           keyVersion: evt.keyVersion,
           myRole: evt.myRole,
@@ -202,6 +212,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
       _groupV2ByChannel[gid] = RiftLinkGroupV2Info(
         groupUid: v2.groupUid,
         groupTag: v2.groupTag,
+        canonicalName: v2.canonicalName,
         channelId32: v2.channelId32,
         keyVersion: v2.keyVersion,
         myRole: v2.myRole,
@@ -225,6 +236,48 @@ class _GroupsScreenState extends State<GroupsScreen> {
       return;
     }
     _snack('${l.tr('group_rotate_key')} · ${l.tr('group')} $gid');
+  }
+
+  Future<void> _renameCanonicalName(int gid) async {
+    final l = context.l10n;
+    final uid = _uidByChannel(gid);
+    final v2 = _groupV2ByChannel[gid];
+    if (uid == null || v2 == null) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
+    }
+    if (v2.myRole != 'owner') {
+      _snack('Only owner can rename', backgroundColor: context.palette.error);
+      return;
+    }
+    final ctrl = TextEditingController(text: v2.canonicalName.trim().isEmpty ? _groupDisplayName(gid) : v2.canonicalName.trim());
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rename canonical name'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Canonical name'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(l.tr('cancel'))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(l.tr('ok'))),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final name = ctrl.text.trim();
+    if (name.isEmpty) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
+    }
+    final renamed = await widget.ble.groupCanonicalRename(groupUid: uid, canonicalName: name);
+    if (!renamed) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
+    }
+    _snack('Canonical name updated');
   }
 
   Future<void> _showGrantDialog(int gid) async {
@@ -702,7 +755,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
           children: [
             Expanded(
               child: Text(
-                '${l.tr('group')} $gid',
+                _groupDisplayName(gid),
                 style: AppTypography.bodyBase().copyWith(
                   fontWeight: FontWeight.w600,
                   color: p.onSurface,
@@ -746,6 +799,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
             if (v == 'status') await _requestGroupStatus(gid);
             if (v == 'ack') await _ackCurrentGroupKey(gid);
             if (v == 'rekey_v2') await _rekeyGroupV2(gid);
+            if (v == 'rename') await _renameCanonicalName(gid);
             if (v == 'grant') await _showGrantDialog(gid);
             if (v == 'revoke') await _showRevokeDialog(gid);
           },
@@ -756,6 +810,8 @@ class _GroupsScreenState extends State<GroupsScreen> {
               PopupMenuItem(value: 'ack', child: Text('${l.tr('group_key_actual')} ACK')),
             if (v2 != null && canRotate)
               PopupMenuItem(value: 'rekey_v2', child: Text('V2 ${l.tr('group_rotate_key')}')),
+            if (v2 != null && v2.myRole == 'owner')
+              const PopupMenuItem(value: 'rename', child: Text('Rename canonical name')),
             if (v2 != null && v2.myRole == 'owner')
               const PopupMenuItem(value: 'grant', child: Text('Grant role')),
             if (v2 != null && (v2.myRole == 'owner' || v2.myRole == 'admin'))

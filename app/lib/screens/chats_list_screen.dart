@@ -184,6 +184,12 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     return null;
   }
 
+  String _groupDisplayNameById(int groupId) {
+    final name = _groupV2ById(groupId)?.canonicalName.trim();
+    if (name != null && name.isNotEmpty) return name;
+    return 'Group $groupId';
+  }
+
   List<int> _knownGroupIds() {
     final out = <int>{};
     final li = widget.ble.lastInfo;
@@ -250,6 +256,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         .where((g) => g > 1 && g != kMeshBroadcastGroupId);
     for (final gid in groupsFromV2) {
       final uid = _groupUidById(gid);
+      final displayName = _groupDisplayNameById(gid);
       byGroupId.putIfAbsent(
         gid,
         () => ChatConversation(
@@ -260,9 +267,13 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
           peerRef: uid != null && uid.isNotEmpty
               ? ChatRepository.groupPeerRefByUid(uid)
               : '$gid',
-          title: 'Group $gid',
+          title: displayName,
         ),
       );
+      final existing = byGroupId[gid];
+      if (existing != null && existing.title != displayName) {
+        byGroupId[gid] = existing.copyWith(title: displayName);
+      }
     }
     final out = <ChatConversation>[
       ...byGroupId.values,
@@ -451,7 +462,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       id: id,
       kind: ConversationKind.group,
       peerRef: ChatRepository.groupPeerRefByUid(uid),
-      title: 'Group $groupId',
+      title: _groupDisplayNameById(groupId),
     );
     if (mounted) setState(() => _activeConversationId = id);
     if (!mounted) return;

@@ -49,11 +49,19 @@ class ChatEventIngestor {
     );
   }
 
-  Future<void> _ensureConversationForGroupUid(String groupUid, {int? channelId32}) async {
+  Future<void> _ensureConversationForGroupUid(
+    String groupUid, {
+    int? channelId32,
+    String? canonicalName,
+  }) async {
     final uid = groupUid.trim().toUpperCase();
     if (uid.isEmpty) return;
     final id = ChatRepository.groupConversationIdByUid(uid);
-    final title = (channelId32 != null && channelId32 > 1) ? 'Group $channelId32' : 'Group ${uid.substring(0, uid.length > 8 ? 8 : uid.length)}';
+    final title = (canonicalName != null && canonicalName.trim().isNotEmpty)
+        ? canonicalName.trim()
+        : ((channelId32 != null && channelId32 > 1)
+              ? 'Group $channelId32'
+              : 'Group ${uid.substring(0, uid.length > 8 ? 8 : uid.length)}');
     await repo.ensureConversation(
       id: id,
       kind: ConversationKind.group,
@@ -237,7 +245,11 @@ class ChatEventIngestor {
     }
 
     if (event is RiftLinkGroupStatusEvent) {
-      await _ensureConversationForGroupUid(event.groupUid, channelId32: event.channelId32);
+      await _ensureConversationForGroupUid(
+        event.groupUid,
+        channelId32: event.channelId32,
+        canonicalName: event.canonicalName,
+      );
       // Snapshot local role in grants table for thin-device projection in app.
       await repo.upsertGroupGrant(
         groupUid: event.groupUid,

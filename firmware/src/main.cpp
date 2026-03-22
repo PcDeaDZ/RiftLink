@@ -1613,7 +1613,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             char groupUid[groups::GROUP_UID_MAX_LEN + 1] = {0};
             char groupTag[groups::GROUP_TAG_MAX_LEN + 1] = {0};
             uint32_t channelId32 = 0;
-            if (!groups::getV2At(gi, groupUid, sizeof(groupUid), &channelId32, groupTag, sizeof(groupTag), nullptr, nullptr, nullptr, nullptr)) continue;
+            if (!groups::getV2At(gi, groupUid, sizeof(groupUid), &channelId32, groupTag, sizeof(groupTag), nullptr, 0, nullptr, nullptr, nullptr, nullptr)) continue;
             if (channelId32 == 0) continue;
             uint8_t gk[32];
             if (!groups::getGroupKeyV2(groupUid, gk, nullptr)) continue;

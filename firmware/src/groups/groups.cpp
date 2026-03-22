@@ -26,12 +26,14 @@ struct GroupV2Slot {
   char groupUid[GROUP_UID_MAX_LEN + 1];
   uint32_t channelId32;
   char groupTag[GROUP_TAG_MAX_LEN + 1];
+  char canonicalName[GROUP_CANONICAL_NAME_MAX_LEN + 1];
+  uint8_t ownerSignPubKey[GROUP_OWNER_SIGN_PUBKEY_LEN];
   uint8_t groupKey[32];
   uint16_t keyVersion;
   uint8_t role;
   uint32_t revocationEpoch;
   uint8_t ackApplied;
-  uint8_t reserved[1];
+  uint8_t hasOwnerSignPubKey;
 };
 
 static GroupV2Slot s_groupsV2[MAX_GROUPS_V2];
@@ -120,7 +122,7 @@ void init() {
   s_inited = true;
 }
 
-bool upsertGroupV2(const char* groupUid, uint32_t channelId32, const char* groupTag, const uint8_t* groupKey32, uint16_t keyVersion, GroupRole myRole, uint32_t revocationEpoch) {
+bool upsertGroupV2(const char* groupUid, uint32_t channelId32, const char* groupTag, const char* canonicalName, const uint8_t* groupKey32, uint16_t keyVersion, GroupRole myRole, uint32_t revocationEpoch) {
   if (!groupUid || !groupUid[0] || !groupKey32) return false;
   int idx = findV2Index(groupUid);
   if (idx < 0) {
@@ -132,6 +134,7 @@ bool upsertGroupV2(const char* groupUid, uint32_t channelId32, const char* group
   const uint16_t prevKeyVersion = s_groupsV2[idx].keyVersion;
   copySafe(s_groupsV2[idx].groupUid, sizeof(s_groupsV2[idx].groupUid), groupUid);
   copySafe(s_groupsV2[idx].groupTag, sizeof(s_groupsV2[idx].groupTag), groupTag);
+  copySafe(s_groupsV2[idx].canonicalName, sizeof(s_groupsV2[idx].canonicalName), canonicalName);
   s_groupsV2[idx].channelId32 = channelId32;
   memcpy(s_groupsV2[idx].groupKey, groupKey32, 32);
   s_groupsV2[idx].keyVersion = keyVersion;
@@ -140,6 +143,30 @@ bool upsertGroupV2(const char* groupUid, uint32_t channelId32, const char* group
   if (prevKeyVersion != keyVersion) s_groupsV2[idx].ackApplied = 0;
 
   persistV2();
+  return true;
+}
+
+bool setCanonicalNameV2(const char* groupUid, const char* canonicalName) {
+  int idx = findV2Index(groupUid);
+  if (idx < 0 || !canonicalName || !canonicalName[0]) return false;
+  copySafe(s_groupsV2[idx].canonicalName, sizeof(s_groupsV2[idx].canonicalName), canonicalName);
+  persistV2();
+  return true;
+}
+
+bool setOwnerSignPubKeyV2(const char* groupUid, const uint8_t* ownerSignPubKey32) {
+  int idx = findV2Index(groupUid);
+  if (idx < 0 || !ownerSignPubKey32) return false;
+  memcpy(s_groupsV2[idx].ownerSignPubKey, ownerSignPubKey32, GROUP_OWNER_SIGN_PUBKEY_LEN);
+  s_groupsV2[idx].hasOwnerSignPubKey = 1;
+  persistV2();
+  return true;
+}
+
+bool getOwnerSignPubKeyV2(const char* groupUid, uint8_t* outOwnerSignPubKey32) {
+  int idx = findV2Index(groupUid);
+  if (idx < 0 || !outOwnerSignPubKey32 || s_groupsV2[idx].hasOwnerSignPubKey == 0) return false;
+  memcpy(outOwnerSignPubKey32, s_groupsV2[idx].ownerSignPubKey, GROUP_OWNER_SIGN_PUBKEY_LEN);
   return true;
 }
 
@@ -178,11 +205,12 @@ bool setRevocationEpochV2(const char* groupUid, uint32_t revocationEpoch) {
   return true;
 }
 
-bool getGroupV2(const char* groupUid, uint32_t* outChannelId32, char* outGroupTag, size_t outGroupTagLen, uint16_t* outKeyVersion, GroupRole* outRole, uint32_t* outRevocationEpoch, bool* outAckApplied) {
+bool getGroupV2(const char* groupUid, uint32_t* outChannelId32, char* outGroupTag, size_t outGroupTagLen, char* outCanonicalName, size_t outCanonicalNameLen, uint16_t* outKeyVersion, GroupRole* outRole, uint32_t* outRevocationEpoch, bool* outAckApplied) {
   int idx = findV2Index(groupUid);
   if (idx < 0) return false;
   if (outChannelId32) *outChannelId32 = s_groupsV2[idx].channelId32;
   if (outGroupTag && outGroupTagLen > 0) copySafe(outGroupTag, outGroupTagLen, s_groupsV2[idx].groupTag);
+  if (outCanonicalName && outCanonicalNameLen > 0) copySafe(outCanonicalName, outCanonicalNameLen, s_groupsV2[idx].canonicalName);
   if (outKeyVersion) *outKeyVersion = s_groupsV2[idx].keyVersion;
   if (outRole) *outRole = byteToRole(s_groupsV2[idx].role);
   if (outRevocationEpoch) *outRevocationEpoch = s_groupsV2[idx].revocationEpoch;
@@ -227,6 +255,8 @@ bool getV2At(
     uint32_t* outChannelId32,
     char* outGroupTag,
     size_t outGroupTagLen,
+    char* outCanonicalName,
+    size_t outCanonicalNameLen,
     uint16_t* outKeyVersion,
     GroupRole* outRole,
     uint32_t* outRevocationEpoch,
@@ -235,6 +265,7 @@ bool getV2At(
   if (outGroupUid && outGroupUidLen > 0) copySafe(outGroupUid, outGroupUidLen, s_groupsV2[index].groupUid);
   if (outChannelId32) *outChannelId32 = s_groupsV2[index].channelId32;
   if (outGroupTag && outGroupTagLen > 0) copySafe(outGroupTag, outGroupTagLen, s_groupsV2[index].groupTag);
+  if (outCanonicalName && outCanonicalNameLen > 0) copySafe(outCanonicalName, outCanonicalNameLen, s_groupsV2[index].canonicalName);
   if (outKeyVersion) *outKeyVersion = s_groupsV2[index].keyVersion;
   if (outRole) *outRole = byteToRole(s_groupsV2[index].role);
   if (outRevocationEpoch) *outRevocationEpoch = s_groupsV2[index].revocationEpoch;

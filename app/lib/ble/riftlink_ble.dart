@@ -710,6 +710,18 @@ class RiftLinkBle {
     return _sendCmd({'cmd': 'groupStatus', 'groupUid': groupUid.trim()});
   }
 
+  Future<bool> groupCanonicalRename({
+    required String groupUid,
+    required String canonicalName,
+  }) async {
+    if (!_isValidGroupUid(groupUid) || canonicalName.trim().isEmpty) return false;
+    return _sendCmd({
+      'cmd': 'groupCanonicalRename',
+      'groupUid': groupUid.trim(),
+      'canonicalName': canonicalName.trim(),
+    });
+  }
+
   Future<bool> groupSyncSnapshot(List<Map<String, dynamic>> groups) async {
     if (groups.isEmpty) return false;
     return _sendCmd({'cmd': 'groupSyncSnapshot', 'groups': groups});
@@ -1124,6 +1136,7 @@ List<RiftLinkGroupV2Info> _parseGroupsV2(dynamic raw) {
       RiftLinkGroupV2Info(
         groupUid: uid,
         groupTag: (m['groupTag'] ?? '').toString(),
+        canonicalName: (m['canonicalName'] ?? '').toString(),
         channelId32: _jsonIntDefault(m['channelId32'], 0),
         keyVersion: _jsonIntDefault(m['keyVersion'], 0),
         myRole: (m['myRole'] ?? 'none').toString(),
@@ -1275,6 +1288,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     return RiftLinkGroupStatusEvent(
       groupUid: json['groupUid']?.toString() ?? '',
       channelId32: _jsonIntNullable(json['channelId32']),
+      canonicalName: json['canonicalName']?.toString() ?? '',
       myRole: json['myRole']?.toString() ?? 'none',
       keyVersion: _jsonIntDefault(json['keyVersion'], 0),
       status: json['status']?.toString() ?? 'unknown',
@@ -1310,6 +1324,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
   if (evt == 'groupInvite') {
     return RiftLinkGroupInviteEvent(
       groupUid: json['groupUid']?.toString() ?? '',
+      canonicalName: json['canonicalName']?.toString() ?? '',
       role: json['role']?.toString() ?? 'member',
       invite: json['invite']?.toString() ?? '',
       expiresAt: _jsonIntNullable(json['expiresAt']),
@@ -1469,6 +1484,7 @@ sealed class RiftLinkEvent {}
 class RiftLinkGroupV2Info {
   final String groupUid;
   final String groupTag;
+  final String canonicalName;
   final int channelId32;
   final int keyVersion;
   final String myRole;
@@ -1477,6 +1493,7 @@ class RiftLinkGroupV2Info {
   const RiftLinkGroupV2Info({
     required this.groupUid,
     required this.groupTag,
+    this.canonicalName = '',
     required this.channelId32,
     required this.keyVersion,
     required this.myRole,
@@ -1732,6 +1749,7 @@ class RiftLinkGroupsEvent extends RiftLinkEvent {
 class RiftLinkGroupStatusEvent extends RiftLinkEvent {
   final String groupUid;
   final int? channelId32;
+  final String canonicalName;
   final String myRole;
   final int keyVersion;
   final String status;
@@ -1739,6 +1757,7 @@ class RiftLinkGroupStatusEvent extends RiftLinkEvent {
   RiftLinkGroupStatusEvent({
     required this.groupUid,
     this.channelId32,
+    this.canonicalName = '',
     required this.myRole,
     required this.keyVersion,
     required this.status,
@@ -1791,12 +1810,14 @@ class RiftLinkGroupSecurityErrorEvent extends RiftLinkEvent {
 
 class RiftLinkGroupInviteEvent extends RiftLinkEvent {
   final String groupUid;
+  final String canonicalName;
   final String role;
   final String invite;
   final int? expiresAt;
   final int? channelId32;
   RiftLinkGroupInviteEvent({
     required this.groupUid,
+    this.canonicalName = '',
     required this.role,
     required this.invite,
     this.expiresAt,

@@ -71,6 +71,8 @@ Groups V2 использует `groupUID` как основной идентиф
 - `groupUID` — неизменяемый ID группы (не секрет).
 - `channelId32` — короткий transport ID для эфира.
 - `groupTag` — дополнительный контекстный маркер группы.
+- `canonicalName` — каноническое имя группы для UI (управляется owner).
+- `ownerSignPubKey` — owner Ed25519 public key для signed invite.
 - `groupSecret` (32B) + `groupKeyVersion`.
 - Роли: `owner`, `admin`, `member`.
 
@@ -89,7 +91,8 @@ Groups V2 использует `groupUID` как основной идентиф
 
 Для экономии NVS устройство хранит только runtime security state:
 
-- `groupUID/channelId32/groupTag`;
+- `groupUID/channelId32/groupTag/canonicalName`;
+- pinned `ownerSignPubKey` (TOFU при первом `groupInviteAccept`), далее строгая проверка совпадения.
 - текущий `groupSecret` и `groupKeyVersion`;
 - локальная роль узла (`myRole`);
 - `revocationEpoch` (watermark отзывов);

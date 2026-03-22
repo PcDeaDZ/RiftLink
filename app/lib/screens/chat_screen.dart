@@ -244,7 +244,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       title: _conversationId!.startsWith('direct:')
           ? _conversationId!.substring('direct:'.length)
           : _conversationId!.startsWith('groupv2:')
-              ? 'Group ${_group > 0 ? _group : (_groupUid ?? '')}'
+              ? ((_activeGroupV2Info()?.canonicalName.trim().isNotEmpty ?? false)
+                    ? _activeGroupV2Info()!.canonicalName.trim()
+                    : 'Group ${_group > 0 ? _group : (_groupUid ?? '')}')
               : 'Broadcast',
     );
     final draft = await _chatRepo.getDraft(_conversationId!);
