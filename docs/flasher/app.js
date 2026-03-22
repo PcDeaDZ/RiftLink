@@ -1,6 +1,7 @@
 const REPO_OWNER = "PcDeaDZ";
 const REPO_NAME = "RiftLink";
 const RELEASE_API_URL = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest`;
+const ROADMAP_RAW_URL = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/master/docs/CUSTOM_PROTOCOL_PLAN.md`;
 const LANG_STORAGE_KEY = "riftlink_flasher_lang";
 
 const STATIC_MANIFESTS = {
@@ -36,6 +37,9 @@ const I18N = {
     linkGithub: "GitHub репозиторий",
     linkReleases: "Скачать релизы",
     linkDocs: "Документация",
+    roadmapTitle: "Roadmap",
+    roadmapLead: "Ближайшие пункты берутся автоматически из плана проекта.",
+    roadmapFallback: "Roadmap сейчас недоступен.",
     whatsNewTitle: "Что нового в этой версии",
     whatsNewFallback: "Описание изменений пока не добавлено в release notes.",
     faqTitle: "FAQ",
@@ -95,6 +99,9 @@ const I18N = {
     linkGithub: "GitHub repository",
     linkReleases: "Download releases",
     linkDocs: "Documentation",
+    roadmapTitle: "Roadmap",
+    roadmapLead: "Nearest items are loaded automatically from the project plan.",
+    roadmapFallback: "Roadmap is currently unavailable.",
     whatsNewTitle: "What's new in this release",
     whatsNewFallback: "Release notes are not available yet.",
     faqTitle: "FAQ",
@@ -152,6 +159,9 @@ const aboutFeature3TextEl = document.getElementById("aboutFeature3Text");
 const linkGithubEl = document.getElementById("linkGithub");
 const linkReleasesEl = document.getElementById("linkReleases");
 const linkDocsEl = document.getElementById("linkDocs");
+const roadmapTitleEl = document.getElementById("roadmapTitle");
+const roadmapLeadEl = document.getElementById("roadmapLead");
+const roadmapListEl = document.getElementById("roadmapList");
 const whatsNewTitleEl = document.getElementById("whatsNewTitle");
 const whatsNewListEl = document.getElementById("whatsNewList");
 const faqTitleEl = document.getElementById("faqTitle");
@@ -186,6 +196,7 @@ let releaseState = {
   apkUrl: null,
   notes: [],
 };
+let roadmapState = [];
 
 function getLangFromEnv() {
   const saved = localStorage.getItem(LANG_STORAGE_KEY);
@@ -254,6 +265,70 @@ function renderWhatsNew() {
   }
 }
 
+function normalizeRoadmapText(raw) {
+  return raw
+    .replace(/^\-\s*\[[ xX]\]\s*/, "")
+    .replace(/^\-\s*/, "")
+    .replace(/\*\*/g, "")
+    .replace(/`/g, "")
+    .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
+    .trim();
+}
+
+function extractRoadmapItems(markdown) {
+  if (!markdown || typeof markdown !== "string") return [];
+  const lines = markdown.replace(/\r/g, "").split("\n");
+  const sectionStart = lines.findIndex((line) =>
+    /^##\s*6\.1/.test(line) || /Планы на будущее|future plans/i.test(line),
+  );
+
+  let source = lines;
+  if (sectionStart >= 0) {
+    const sub = [];
+    for (let i = sectionStart + 1; i < lines.length; i += 1) {
+      if (/^##\s+/.test(lines[i])) break;
+      sub.push(lines[i]);
+    }
+    source = sub;
+  }
+
+  const bullet = source
+    .map((line) => line.trim())
+    .filter((line) => /^-\s+/.test(line) || /^-\s*\[[ xX]\]\s+/.test(line))
+    .map(normalizeRoadmapText)
+    .filter(Boolean);
+
+  const uncheckedGlobal = lines
+    .map((line) => line.trim())
+    .filter((line) => /^-\s*\[\s\]\s+/.test(line))
+    .map(normalizeRoadmapText)
+    .filter(Boolean);
+
+  const merged = [...bullet, ...uncheckedGlobal];
+  const unique = [];
+  for (const item of merged) {
+    if (!unique.includes(item)) unique.push(item);
+  }
+  return unique.slice(0, 8);
+}
+
+function renderRoadmap() {
+  if (!roadmapListEl) return;
+  roadmapListEl.innerHTML = "";
+  const items = Array.isArray(roadmapState) ? roadmapState : [];
+  if (items.length === 0) {
+    const li = document.createElement("li");
+    li.textContent = t("roadmapFallback");
+    roadmapListEl.appendChild(li);
+    return;
+  }
+  for (const item of items) {
+    const li = document.createElement("li");
+    li.textContent = item;
+    roadmapListEl.appendChild(li);
+  }
+}
+
 function renderLanguage() {
   document.documentElement.lang = currentLang;
   if (titleTextEl) titleTextEl.textContent = t("title");
@@ -275,6 +350,8 @@ function renderLanguage() {
   if (linkGithubEl) linkGithubEl.textContent = t("linkGithub");
   if (linkReleasesEl) linkReleasesEl.textContent = t("linkReleases");
   if (linkDocsEl) linkDocsEl.textContent = t("linkDocs");
+  if (roadmapTitleEl) roadmapTitleEl.textContent = t("roadmapTitle");
+  if (roadmapLeadEl) roadmapLeadEl.textContent = t("roadmapLead");
   if (whatsNewTitleEl) whatsNewTitleEl.textContent = t("whatsNewTitle");
   if (faqTitleEl) faqTitleEl.textContent = t("faqTitle");
   if (faqQ1El) faqQ1El.textContent = t("faqQ1");
@@ -295,6 +372,7 @@ function renderLanguage() {
   if (langEnBtn) langEnBtn.classList.toggle("active", currentLang === "en");
   renderDeviceOptions();
   renderReleaseState();
+  renderRoadmap();
   setDevice(selectEl.value);
 }
 
@@ -415,6 +493,20 @@ async function loadLatestRelease() {
   }
 }
 
+async function loadRoadmap() {
+  try {
+    const response = await fetch(ROADMAP_RAW_URL, { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const markdown = await response.text();
+    roadmapState = extractRoadmapItems(markdown);
+    renderRoadmap();
+  } catch (error) {
+    roadmapState = [];
+    renderRoadmap();
+    console.error("Failed to load roadmap:", error);
+  }
+}
+
 function setDevice(deviceKey) {
   const manifest = runtimeManifestUrls[deviceKey] ?? STATIC_MANIFESTS[deviceKey];
   if (!manifest || !installEl) return;
@@ -439,7 +531,7 @@ releaseState = {
   notes: [],
 };
 renderLanguage();
-await loadLatestRelease();
+await Promise.all([loadLatestRelease(), loadRoadmap()]);
 setDevice(selectEl.value);
 
 window.addEventListener("beforeunload", () => {

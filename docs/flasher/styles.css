@@ -261,6 +261,39 @@ esp-web-install-button::part(button) {
   background: rgba(41, 64, 119, 0.9);
 }
 
+.roadmap-box {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(106, 153, 246, 0.42);
+  background: rgba(8, 16, 34, 0.76);
+}
+
+.roadmap-box h2 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.roadmap-lead {
+  margin: 0 0 10px;
+  color: #b7c9f4;
+  font-size: 0.9rem;
+}
+
+.roadmap-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.roadmap-list li {
+  color: #d4e2ff;
+  line-height: 1.35;
+}
+
+.roadmap-list li + li {
+  margin-top: 6px;
+}
+
 .release-box {
   margin-top: 16px;
   padding: 14px 16px;
