@@ -100,6 +100,9 @@ class MeshBackgroundPainter extends CustomPainter {
     const dotOpacity = 0.06;
     const pulseRadius = 2.0;
     const pulseOpacity = 0.12;
+    // Requested UX tweak: dots should descend up to 70% of screen height,
+    // while still starting from their original upper positions.
+    const pulseVerticalDropFraction = 0.70;
     const animZoneFraction = 1.0;
 
     final paint = Paint()..color = palette.primary.withOpacity(dotOpacity);
@@ -184,7 +187,8 @@ class MeshBackgroundPainter extends CustomPainter {
           })
           .toList();
       if (animEdges.isEmpty) return;
-      final pulsePaint = Paint()..color = palette.primary.withOpacity(pulseOpacity);
+      final pulsePaintSoft = Paint()..color = palette.primary.withOpacity(pulseOpacity * 0.85);
+      final pulsePaintBright = Paint()..color = palette.primary.withOpacity(pulseOpacity * 1.25);
       // Use real time to avoid cycle seams from 0..1 progress reset.
       final timeSec = DateTime.now().microsecondsSinceEpoch / 1000000.0;
       var drawn = 0;
@@ -195,15 +199,45 @@ class MeshBackgroundPainter extends CustomPainter {
         );
         final h = _stableNoise(seed);
         // Deterministic sparse subset: points appear across the whole mesh.
-        if (h > 0.18) continue;
-        final speed = 0.05 + h * 0.08; // edge-local speeds
-        final phase = h * 9.0;
-        final t = _pingPong01(timeSec * speed + phase);
-        final x = edge.a.dx + (edge.b.dx - edge.a.dx) * t;
-        final y = edge.a.dy + (edge.b.dy - edge.a.dy) * t;
-        canvas.drawCircle(Offset(x, y), pulseRadius, pulsePaint);
-        drawn++;
-        if (drawn >= 42) break; // cap cost and visual clutter
+        if (h > 0.26) continue;
+
+        // Denser edges may carry up to 3 independent pulses with unique phases/speeds.
+        final laneCount = h < 0.08 ? 3 : (h < 0.17 ? 2 : 1);
+        for (var lane = 0; lane < laneCount; lane++) {
+          final laneSeed = Offset(seed.dx + lane * 13.7, seed.dy + lane * 9.1);
+          final lh = _stableNoise(laneSeed);
+          // Wide per-lane speed spread makes motion less mechanical.
+          final speed = 0.03 + lh * 0.22;
+          final phase = h * 7.0 + lh * 13.0 + lane * 0.61;
+          final dirForward = lh >= 0.45;
+          final v = timeSec * speed + phase;
+          final f = v - v.floorToDouble();
+          final t = dirForward ? f : (1.0 - f);
+
+          final x = edge.a.dx + (edge.b.dx - edge.a.dx) * t;
+
+          // Small perpendicular wobble so different lanes on one edge diverge slightly.
+          final dx = edge.b.dx - edge.a.dx;
+          final dy = edge.b.dy - edge.a.dy;
+          final len = math.max(1.0, math.sqrt(dx * dx + dy * dy));
+          final nx = -dy / len;
+          final ny = dx / len;
+          final wobble = (lh - 0.5) * 2.0; // -1..1
+          final yRaw = edge.a.dy +
+              (edge.b.dy - edge.a.dy) * t +
+              (size.height * pulseVerticalDropFraction * t) +
+              ny * wobble * 1.6;
+          final xRaw = x + nx * wobble * 1.6;
+          final y = yRaw.clamp(-8.0, size.height + 8.0);
+
+          final paint = (lane % 2 == 0) ? pulsePaintBright : pulsePaintSoft;
+          final radius = pulseRadius * (0.9 + lh * 0.45);
+          canvas.drawCircle(Offset(xRaw, y), radius, paint);
+
+          drawn++;
+          if (drawn >= 64) break; // cap cost and visual clutter
+        }
+        if (drawn >= 64) break;
       }
     }
   }

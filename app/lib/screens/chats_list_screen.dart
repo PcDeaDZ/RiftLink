@@ -1843,25 +1843,6 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                   await _onRightMenuAction('groups_page');
                 },
               ),
-              ListTile(
-                dense: true,
-                minTileHeight: _kMenuItemMinHeight,
-                visualDensity: _kMenuItemDensity,
-                contentPadding: _kMenuItemPadding,
-                leading: const Icon(Icons.developer_board_rounded, size: 18),
-                title: Text(
-                  l.tr('chat_menu_node_status'),
-                  style: const TextStyle(
-                    fontSize: _kMenuItemTitleSize,
-                    fontWeight: _kMenuItemTitleWeight,
-                    height: _kMenuItemLineHeight,
-                  ),
-                ),
-                onTap: () async {
-                  Navigator.pop(context);
-                  await _onRightMenuAction('node_status');
-                },
-              ),
               ExpansionTile(
                 initiallyExpanded: _rightToolsExpanded,
                 onExpansionChanged: (v) => setState(() => _rightToolsExpanded = v),
@@ -1910,6 +1891,25 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                     },
                   ),
                 ],
+              ),
+              ListTile(
+                dense: true,
+                minTileHeight: _kMenuItemMinHeight,
+                visualDensity: _kMenuItemDensity,
+                contentPadding: _kMenuItemPadding,
+                leading: const Icon(Icons.developer_board_rounded, size: 18),
+                title: Text(
+                  l.tr('chat_menu_node_status'),
+                  style: const TextStyle(
+                    fontSize: _kMenuItemTitleSize,
+                    fontWeight: _kMenuItemTitleWeight,
+                    height: _kMenuItemLineHeight,
+                  ),
+                ),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _onRightMenuAction('node_status');
+                },
               ),
               ListTile(
                 dense: true,
