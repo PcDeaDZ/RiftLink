@@ -67,7 +67,10 @@ void GxEPD2_EPD::init(uint32_t serial_diag_bitrate, bool initial, uint16_t reset
   _reset();
   if (_busy >= 0)
   {
-    pinMode(_busy, INPUT);  // FC1: LOW=busy; E0213A367: HIGH=busy — pull зависит от панели
+    // Keep BUSY line in a defined idle state to avoid floating-pin false BUSY storms.
+    // busy_level LOW  -> idle HIGH  -> INPUT_PULLUP
+    // busy_level HIGH -> idle LOW   -> INPUT_PULLDOWN
+    pinMode(_busy, (_busy_level == LOW) ? INPUT_PULLUP : INPUT_PULLDOWN);
   }
   // RiftLink: не вызываем _spi.begin() — display_paper уже делает hspi.begin(pins) до создания дисплея
   // Повторный begin() мог вызывать SPI_PARAM_LOCK hang
@@ -138,6 +141,11 @@ void GxEPD2_EPD::_waitWhileBusy(const char* comment, uint16_t busy_time)
         }
         _power_is_on = false;
         _hibernating = true;  // следующий _Wake вызовет _reset() для полной реинициализации
+        if (_busy >= 0)
+        {
+          // Re-apply BUSY pull after fault reset in case board code touched pin mode.
+          pinMode(_busy, (_busy_level == LOW) ? INPUT_PULLUP : INPUT_PULLDOWN);
+        }
         break;
       }
     }

@@ -1032,7 +1032,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           if (!crypto::decryptFrom(hdr.from, payload, payloadLen, decBuf, &decLen) || decLen >= 256) {
             RIFTLINK_LOG_ERR("[RiftLink] Decrypt FAILED (from %02X%02X — no key?)\n", hdr.from[0], hdr.from[1]);
             if (!x25519_keys::hasKeyFor(hdr.from)) {
-              x25519_keys::sendKeyExchange(hdr.from, false, false, "msg_no_key");
+              // Fast self-heal: message arrived encrypted, but pairwise key is missing locally.
+              // Force response path to bypass long throttle/debounce of primary hello exchange.
+              x25519_keys::sendKeyExchange(hdr.from, true, false, "msg_no_key");
             }
             break;
           }
@@ -1135,7 +1137,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             off += 2;
             if (encLen == 0 || off + encLen > payloadLen) break;
             size_t decLen = 0;
-            if (!crypto::decryptFrom(hdr.from, payload + off, encLen, decBuf, &decLen) || decLen >= 256) break;
+            if (!crypto::decryptFrom(hdr.from, payload + off, encLen, decBuf, &decLen) || decLen >= 256) {
+              if (!x25519_keys::hasKeyFor(hdr.from)) {
+                x25519_keys::sendKeyExchange(hdr.from, true, false, "msg_batch_no_key");
+              }
+              break;
+            }
             off += encLen;
             size_t d = compress::decompress(decBuf, decLen, tmpBuf, sizeof(tmpBuf));
             if (d > 0 && d < 256) {
@@ -1486,19 +1493,14 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             if (ackLen > 0) {
               uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(hdr.from));
               const int neighCount = neighbors::getCount();
-              const bool weakRssi = (rssi <= -90);
-              const bool highSf = (sf >= 10);
-              const bool crowded = (neighCount > 1);
-              const bool useDualAck = weakRssi || highSf || crowded;
-              // После burst отправителя отложенный ACK слышится лучше; в риск-условиях шлем 2 копии.
-              uint32_t ackDelay1 = 340 + (esp_random() % 180);
+              // 2-node case: ACK надо отправлять раньше, иначе он попадает в окно наших же deferred broadcast copies.
+              // Для диагностики шумового эффекта шлём ровно одну ACK-копию всегда.
+              uint32_t ackDelay1 = (neighCount <= 1)
+                  ? (120 + (esp_random() % 90))
+                  : (340 + (esp_random() % 180));
               queueDeferredAck(ackPkt, ackLen, txSf, ackDelay1);
-              if (useDualAck) {
-                uint32_t ackDelay2 = ackDelay1 + 220 + (esp_random() % 120);
-                queueDeferredAck(ackPkt, ackLen, txSf, ackDelay2);
-              }
-              RIFTLINK_DIAG("ACK", "event=ACK_PLAN type=group_msg mode=%s from=%02X%02X rssi=%d sf=%u neigh=%d delay1=%lu",
-                  useDualAck ? "dual" : "single", hdr.from[0], hdr.from[1], rssi, (unsigned)sf, neighCount,
+              RIFTLINK_DIAG("ACK", "event=ACK_PLAN type=group_msg mode=single from=%02X%02X rssi=%d sf=%u neigh=%d delay1=%lu",
+                  hdr.from[0], hdr.from[1], rssi, (unsigned)sf, neighCount,
                   (unsigned long)ackDelay1);
             }
           } else {

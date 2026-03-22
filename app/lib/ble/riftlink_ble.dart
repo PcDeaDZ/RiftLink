@@ -619,7 +619,13 @@ class RiftLinkBle {
       groupId <= 0 ? false : _sendCmd({'cmd': 'removeGroup', 'group': groupId});
 
   /// Установить/обновить приватный ключ группы (base64, 32 байта).
-  Future<bool> setGroupKey(int groupId, String keyB64, {int? keyVersion}) async =>
+  Future<bool> setGroupKey(
+    int groupId,
+    String keyB64, {
+    int? keyVersion,
+    String? ownerId,
+    String? adminCap,
+  }) async =>
       groupId <= 0 || keyB64.trim().isEmpty
           ? false
           : _sendCmd({
@@ -627,11 +633,29 @@ class RiftLinkBle {
               'group': groupId,
               'key': keyB64.trim(),
               if (keyVersion != null && keyVersion > 0) 'keyVersion': keyVersion,
+              if (ownerId != null && ownerId.trim().isNotEmpty) 'owner': ownerId.trim(),
+              if (adminCap != null && adminCap.trim().isNotEmpty) 'adminCap': adminCap.trim(),
             });
 
   /// Удалить приватный ключ группы (группа станет public).
-  Future<bool> clearGroupKey(int groupId) async =>
-      groupId <= 0 ? false : _sendCmd({'cmd': 'clearGroupKey', 'group': groupId});
+  Future<bool> clearGroupKey(int groupId, {String? adminCap}) async =>
+      groupId <= 0
+          ? false
+          : _sendCmd({
+              'cmd': 'clearGroupKey',
+              'group': groupId,
+              if (adminCap != null && adminCap.trim().isNotEmpty) 'adminCap': adminCap.trim(),
+            });
+
+  /// Сохранить admin capability (16 hex) для owner-only rotate.
+  Future<bool> setGroupAdminCap(int groupId, String adminCap) async =>
+      groupId <= 0 || adminCap.trim().isEmpty
+          ? false
+          : _sendCmd({'cmd': 'setGroupAdminCap', 'group': groupId, 'adminCap': adminCap.trim()});
+
+  /// Удалить локальную admin capability.
+  Future<bool> clearGroupAdminCap(int groupId) async =>
+      groupId <= 0 ? false : _sendCmd({'cmd': 'clearGroupAdminCap', 'group': groupId});
 
   /// Запросить приватный ключ группы (ответ evt:groupKey).
   Future<bool> getGroupKey(int groupId) async =>
@@ -1099,6 +1123,16 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
         : <bool>[];
     final grpVerList = json['groupsKeyVersion'];
     final groupsKeyVersion = grpVerList is List ? (grpVerList as List).map(_jsonInt).toList() : <int>[];
+    final grpOwnerList = json['groupsOwner'];
+    final groupsOwner = grpOwnerList is List
+        ? (grpOwnerList as List)
+            .map((e) => (e == null || e.toString().trim().isEmpty) ? null : e.toString())
+            .toList()
+        : <String?>[];
+    final grpCanRotateList = json['groupsCanRotate'];
+    final groupsCanRotate = grpCanRotateList is List
+        ? (grpCanRotateList as List).map((e) => e == true || e == 1).toList()
+        : <bool>[];
     final routesList = json['routes'];
     final routes = <Map<String, dynamic>>[];
     if (routesList is List) {
@@ -1134,6 +1168,8 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       groups: groups,
       groupsPrivate: groupsPrivate,
       groupsKeyVersion: groupsKeyVersion,
+      groupsOwner: groupsOwner,
+      groupsCanRotate: groupsCanRotate,
       routes: routes,
       sf: _jsonIntNullable(json['sf']),
       bw: _jsonDoubleNullable(json['bw']),
@@ -1172,12 +1208,22 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     final grpList = json['groups'];
     final grpPrivList = json['groupsPrivate'];
     final grpVerList = json['groupsKeyVersion'];
+    final grpOwnerList = json['groupsOwner'];
+    final grpCanRotateList = json['groupsCanRotate'];
     return RiftLinkGroupsEvent(
       groups: grpList is List ? (grpList as List).map(_jsonInt).toList() : <int>[],
       groupsPrivate: grpPrivList is List
           ? (grpPrivList as List).map((e) => e == true || e == 1).toList()
           : <bool>[],
       groupsKeyVersion: grpVerList is List ? (grpVerList as List).map(_jsonInt).toList() : <int>[],
+      groupsOwner: grpOwnerList is List
+          ? (grpOwnerList as List)
+              .map((e) => (e == null || e.toString().trim().isEmpty) ? null : e.toString())
+              .toList()
+          : <String?>[],
+      groupsCanRotate: grpCanRotateList is List
+          ? (grpCanRotateList as List).map((e) => e == true || e == 1).toList()
+          : <bool>[],
     );
   }
   if (evt == 'groupKey') {
@@ -1409,6 +1455,8 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
   final List<int> groups;
   final List<bool> groupsPrivate;
   final List<int> groupsKeyVersion;
+  final List<String?> groupsOwner;
+  final List<bool> groupsCanRotate;
   final List<Map<String, dynamic>> routes;
   final int? sf;
   final double? bw;
@@ -1453,6 +1501,8 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
     this.groups = const [],
     this.groupsPrivate = const [],
     this.groupsKeyVersion = const [],
+    this.groupsOwner = const [],
+    this.groupsCanRotate = const [],
     this.routes = const [],
     this.sf,
     this.bw,
@@ -1572,7 +1622,15 @@ class RiftLinkGroupsEvent extends RiftLinkEvent {
   final List<int> groups;
   final List<bool> groupsPrivate;
   final List<int> groupsKeyVersion;
-  RiftLinkGroupsEvent({required this.groups, this.groupsPrivate = const [], this.groupsKeyVersion = const []});
+  final List<String?> groupsOwner;
+  final List<bool> groupsCanRotate;
+  RiftLinkGroupsEvent({
+    required this.groups,
+    this.groupsPrivate = const [],
+    this.groupsKeyVersion = const [],
+    this.groupsOwner = const [],
+    this.groupsCanRotate = const [],
+  });
 }
 
 class RiftLinkGroupKeyEvent extends RiftLinkEvent {

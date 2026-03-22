@@ -100,4 +100,26 @@ class ContactsService {
     final c = list.where((x) => _normalizeId(x.id) == normalized).firstOrNull;
     return c?.nickname.isNotEmpty == true ? c!.nickname : null;
   }
+
+  static Map<String, String> buildNicknameMap(Iterable<Contact> contacts) {
+    final map = <String, String>{};
+    for (final c in contacts) {
+      final nick = c.nickname.trim();
+      if (nick.isEmpty) continue;
+      final id = _normalizeId(c.id);
+      if (id.isEmpty) continue;
+      map[id] = nick;
+      if (id.length >= 8) {
+        map[id.substring(0, 8)] = nick;
+      }
+    }
+    return map;
+  }
+
+  static String displayNodeLabel(String nodeId, Map<String, String> nickById) {
+    final id = _normalizeId(nodeId);
+    if (id.isEmpty) return nodeId.toUpperCase();
+    final nick = nickById[id] ?? (id.length >= 8 ? nickById[id.substring(0, 8)] : null);
+    return (nick != null && nick.isNotEmpty) ? nick : id;
+  }
 }

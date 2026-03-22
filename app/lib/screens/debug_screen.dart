@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import '../ble/riftlink_ble.dart';
 import '../ble/riftlink_ble_scope.dart';
+import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
 import '../prefs/mesh_prefs.dart';
 import '../theme/app_theme.dart';
@@ -34,11 +35,13 @@ class _DebugScreenState extends State<DebugScreen> {
   final Map<String, _VoiceRxDebugStats> _voiceStatsByFrom = <String, _VoiceRxDebugStats>{};
   final Map<String, _VoiceRxAssembly> _voiceAssemblies = <String, _VoiceRxAssembly>{};
   Timer? _voiceCleanupTimer;
+  Map<String, String> _nickById = const {};
 
   @override
   void initState() {
     super.initState();
     _loadVoiceAcceptancePrefs();
+    _loadContactNicknames();
     _voiceCleanupTimer = Timer.periodic(
       const Duration(seconds: 5),
       (_) => _cleanupStaleVoiceAssemblies(),
@@ -72,6 +75,12 @@ class _DebugScreenState extends State<DebugScreen> {
     });
   }
 
+  Future<void> _loadContactNicknames() async {
+    final contacts = await ContactsService.load();
+    if (!mounted) return;
+    setState(() => _nickById = ContactsService.buildNicknameMap(contacts));
+  }
+
   @override
   void dispose() {
     _voiceCleanupTimer?.cancel();
@@ -80,25 +89,31 @@ class _DebugScreenState extends State<DebugScreen> {
   }
 
   String _formatEvent(RiftLinkEvent evt) {
-    if (evt is RiftLinkMsgEvent) return 'msg from=${evt.from} lane=${evt.lane} type=${evt.type} text=${evt.text}';
-    if (evt is RiftLinkSentEvent) return 'sent to=${evt.to} msgId=${evt.msgId}';
-    if (evt is RiftLinkReadEvent) return 'read from=${evt.from} msgId=${evt.msgId}';
-    if (evt is RiftLinkDeliveredEvent) return 'delivered from=${evt.from} msgId=${evt.msgId}';
-    if (evt is RiftLinkUndeliveredEvent) return 'undelivered to=${evt.to} msgId=${evt.msgId}';
-    if (evt is RiftLinkInfoEvent) return 'info id=${evt.id} neighbors=${evt.neighbors.length} mode=${evt.radioMode}';
-    if (evt is RiftLinkPongEvent) return 'pong from=${evt.from} rssi=${evt.rssi ?? 0}';
+    if (evt is RiftLinkMsgEvent) return 'msg from=${_displayNodeLabel(evt.from)} lane=${evt.lane} type=${evt.type} text=${evt.text}';
+    if (evt is RiftLinkSentEvent) return 'sent to=${_displayNodeLabel(evt.to)} msgId=${evt.msgId}';
+    if (evt is RiftLinkReadEvent) return 'read from=${_displayNodeLabel(evt.from)} msgId=${evt.msgId}';
+    if (evt is RiftLinkDeliveredEvent) return 'delivered from=${_displayNodeLabel(evt.from)} msgId=${evt.msgId}';
+    if (evt is RiftLinkUndeliveredEvent) return 'undelivered to=${_displayNodeLabel(evt.to)} msgId=${evt.msgId}';
+    if (evt is RiftLinkInfoEvent) return 'info id=${_displayNodeLabel(evt.id)} neighbors=${evt.neighbors.length} mode=${evt.radioMode}';
+    if (evt is RiftLinkPongEvent) return 'pong from=${_displayNodeLabel(evt.from)} rssi=${evt.rssi ?? 0}';
     if (evt is RiftLinkRoutesEvent) return 'routes count=${evt.routes.length}';
-    if (evt is RiftLinkRelayProofEvent) return 'relayProof by=${evt.relayedBy} from=${evt.from} to=${evt.to} pkt=${evt.pktId} op=${evt.opcode}';
-    if (evt is RiftLinkTimeCapsuleQueuedEvent) return 'timeCapsuleQueued to=${evt.to ?? "-"} trigger=${evt.trigger} at=${evt.triggerAtMs ?? 0}';
-    if (evt is RiftLinkTimeCapsuleReleasedEvent) return 'timeCapsuleReleased to=${evt.to} msgId=${evt.msgId} trigger=${evt.trigger}';
+    if (evt is RiftLinkRelayProofEvent) return 'relayProof by=${_displayNodeLabel(evt.relayedBy)} from=${_displayNodeLabel(evt.from)} to=${_displayNodeLabel(evt.to)} pkt=${evt.pktId} op=${evt.opcode}';
+    if (evt is RiftLinkTimeCapsuleQueuedEvent) return 'timeCapsuleQueued to=${evt.to == null ? "-" : _displayNodeLabel(evt.to!)} trigger=${evt.trigger} at=${evt.triggerAtMs ?? 0}';
+    if (evt is RiftLinkTimeCapsuleReleasedEvent) return 'timeCapsuleReleased to=${_displayNodeLabel(evt.to)} msgId=${evt.msgId} trigger=${evt.trigger}';
     if (evt is RiftLinkErrorEvent) return 'error code=${evt.code} msg=${evt.msg}';
     return evt.runtimeType.toString();
   }
 
-  static String _shortId(String raw) {
+  String _shortLabel(String raw) {
+    final label = _displayNodeLabel(raw);
+    if (label != raw.toUpperCase()) return label;
     final s = raw.toUpperCase();
     if (s.length <= 4) return s;
     return s.substring(0, 4);
+  }
+
+  String _displayNodeLabel(String raw) {
+    return ContactsService.displayNodeLabel(raw, _nickById);
   }
 
   static bool _sameNodeId(String a, String b) {
@@ -160,7 +175,7 @@ class _DebugScreenState extends State<DebugScreen> {
       _traceByMsgId.forEach((msgId, row) {
         if ((msgId & 0xFFFF) != evt.pktId) return;
         if (row.to != null && row.to!.isNotEmpty && !_sameNodeId(row.to!, evt.to)) return;
-        final relay = _shortId(evt.relayedBy);
+        final relay = _shortLabel(evt.relayedBy);
         if (!row.relays.contains(relay) && row.relays.length < 8) {
           row.relays.add(relay);
         }
@@ -285,7 +300,7 @@ class _DebugScreenState extends State<DebugScreen> {
     buf.writeln('Proof-of-Relay table (msgId)');
     for (final row in traceRows) {
       final relays = row.relays.isEmpty ? '-' : row.relays.join(' -> ');
-      final toShort = row.to == null || row.to!.isEmpty ? '-' : _shortId(row.to!);
+      final toShort = row.to == null || row.to!.isEmpty ? '-' : _shortLabel(row.to!);
       buf.writeln('msgId=${row.msgId} to=$toShort relays=$relays outcome=${row.outcome}');
     }
     buf.writeln('');
@@ -299,7 +314,7 @@ class _DebugScreenState extends State<DebugScreen> {
     for (final row in voiceRows) {
       final hardLossPercent = row.sessions <= 0 ? 0 : ((row.loss * 100) / row.sessions).round();
       buf.writeln(
-        'from=${_shortId(row.from)} complete=${row.complete} partial=${row.partial} loss=${row.loss} chunks=${row.chunksSeen} avgLoss=${row.avgLossPercent}% hardLoss=$hardLossPercent% verdict=${_voiceQualityVerdict(row)}',
+        'from=${_shortLabel(row.from)} complete=${row.complete} partial=${row.partial} loss=${row.loss} chunks=${row.chunksSeen} avgLoss=${row.avgLossPercent}% hardLoss=$hardLossPercent% verdict=${_voiceQualityVerdict(row)}',
       );
     }
     buf.writeln('');
@@ -445,7 +460,7 @@ class _DebugScreenState extends State<DebugScreen> {
 
   Widget _buildTraceRow(BuildContext context, _RelayTraceRow row) {
     final relays = row.relays.isEmpty ? '-' : row.relays.join(' -> ');
-    final toShort = row.to == null || row.to!.isEmpty ? '-' : _shortId(row.to!);
+    final toShort = row.to == null || row.to!.isEmpty ? '-' : _shortLabel(row.to!);
     return _monoLineCard(
       context,
       'msgId=${row.msgId} to=$toShort relays=$relays outcome=${row.outcome}',
@@ -457,7 +472,7 @@ class _DebugScreenState extends State<DebugScreen> {
     final verdict = _voiceQualityVerdict(row);
     return _monoLineCard(
       context,
-      'from=${_shortId(row.from)} complete=${row.complete} partial=${row.partial} loss=${row.loss} chunks=${row.chunksSeen} avgLoss=${row.avgLossPercent}% hardLoss=$hardLossPercent% verdict=$verdict',
+      'from=${_shortLabel(row.from)} complete=${row.complete} partial=${row.partial} loss=${row.loss} chunks=${row.chunksSeen} avgLoss=${row.avgLossPercent}% hardLoss=$hardLossPercent% verdict=$verdict',
     );
   }
 

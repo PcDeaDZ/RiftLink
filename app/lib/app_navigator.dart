@@ -37,3 +37,17 @@ Future<T?> showAppModalBottomSheet<T>({
     builder: builder,
   );
 }
+
+Route<T> appPageRoute<T>(Widget page) => MaterialPageRoute<T>(builder: (_) => page);
+
+Future<T?> appPush<T>(BuildContext context, Widget page) {
+  return Navigator.of(context).push<T>(appPageRoute(page));
+}
+
+Future<T?> appPushReplacement<T, TO>(BuildContext context, Widget page, {TO? result}) {
+  return Navigator.of(context).pushReplacement<T, TO>(appPageRoute(page), result: result);
+}
+
+Future<T?> appResetTo<T>(BuildContext context, Widget page) {
+  return Navigator.of(context).pushAndRemoveUntil<T>(appPageRoute(page), (r) => false);
+}

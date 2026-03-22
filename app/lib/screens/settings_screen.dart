@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../ble/riftlink_ble.dart';
+import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
 import '../prefs/mesh_prefs.dart';
 import '../theme/app_theme.dart';
@@ -670,6 +671,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
   String? _invitePendingPeerId;
   Timer? _inviteExpiryTimer;
   bool _voiceAcceptanceSaving = false;
+  Map<String, String> _nickById = const {};
 
   /// Актуальный ID (обновляется по evt info, пока открыты настройки).
   late String _nodeIdLive;
@@ -781,6 +783,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     _voiceAcceptHardLossController = TextEditingController();
     _voiceAcceptMinSessionsController = TextEditingController();
     _loadVoiceAcceptancePrefs();
+    _loadContactNicknames();
 
     _bleSub?.cancel();
     _bleSub = widget.ble.events.listen((evt) {
@@ -875,6 +878,12 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     _voiceAcceptHardLossController.dispose();
     _voiceAcceptMinSessionsController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadContactNicknames() async {
+    final contacts = await ContactsService.load();
+    if (!mounted) return;
+    setState(() => _nickById = ContactsService.buildNicknameMap(contacts));
   }
 
   void _snack(String t) => showAppSnackBar(context, t);
@@ -1058,6 +1067,10 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     final usingWifiTransport = widget.ble.isWifiMode;
     final idPlain = _nodeIdForClipboard(_nodeIdLive);
     final idShown = _formatNodeIdDisplay(_nodeIdLive);
+    final nodeLabel = _nickController.text.trim().isNotEmpty
+        ? _nickController.text.trim()
+        : ContactsService.displayNodeLabel(_nodeIdLive, _nickById);
+    final isNicknameLabel = nodeLabel != _nodeIdForClipboard(_nodeIdLive);
 
     return Scaffold(
       backgroundColor: context.palette.surface,
@@ -1090,12 +1103,12 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                     ),
                     const SizedBox(height: AppSpacing.sm),
                     SelectableText(
-                      idShown,
+                      nodeLabel.isNotEmpty ? nodeLabel : idShown,
                       style: TextStyle(
                         color: context.palette.onSurface,
                         fontSize: 15,
                         height: 1.35,
-                        fontFamily: 'monospace',
+                        fontFamily: isNicknameLabel ? null : 'monospace',
                         letterSpacing: 0.5,
                       ),
                     ),

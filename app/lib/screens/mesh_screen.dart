@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../ble/riftlink_ble.dart';
+import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
 import '../theme/design_tokens.dart';
@@ -39,6 +40,7 @@ class MeshScreen extends StatefulWidget {
 class _MeshScreenState extends State<MeshScreen> {
   List<Map<String, dynamic>> _routes = [];
   StreamSubscription<RiftLinkEvent>? _sub;
+  Map<String, String> _nickById = const {};
   bool _signalTestRunning = false;
   final Map<String, int> _signalRssiByNode = <String, int>{};
   Timer? _signalTimer;
@@ -63,6 +65,7 @@ class _MeshScreenState extends State<MeshScreen> {
   void initState() {
     super.initState();
     _routes = List.from(widget.routes);
+    _loadNicknames();
     debugPrint('[BLE_CHAIN] stage=app_listener action=mesh_subscribe');
     _sub = widget.ble.events.listen((evt) {
       if (!mounted) return;
@@ -91,6 +94,26 @@ class _MeshScreenState extends State<MeshScreen> {
     _sub?.cancel();
     _signalTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _loadNicknames() async {
+    final contacts = await ContactsService.load();
+    if (!mounted) return;
+    setState(() {
+      _nickById = ContactsService.buildNicknameMap(contacts);
+    });
+  }
+
+  String _labelForNode(String id) {
+    return ContactsService.displayNodeLabel(id, _nickById);
+  }
+
+  String _shortLabel(String id) {
+    final label = _labelForNode(id);
+    if (label == id.toUpperCase() && label.length > 12) {
+      return '${label.substring(0, 4)}…${label.substring(label.length - 4)}';
+    }
+    return label;
   }
 
   Future<void> _runSignalTest() async {
@@ -260,7 +283,7 @@ class _MeshScreenState extends State<MeshScreen> {
                                   border: Border.all(color: c.withOpacity(0.5)),
                                 ),
                                 child: Text(
-                                  '${_shortId(e.key)} ${e.value} dBm',
+                                  '${_shortLabel(e.key)} ${e.value} dBm',
                                   style: AppTypography.chipBase().copyWith(
                                     color: context.palette.onSurface,
                                     fontWeight: FontWeight.w500,
@@ -286,7 +309,7 @@ class _MeshScreenState extends State<MeshScreen> {
                               .map(
                                 (id) => DropdownMenuItem<String>(
                                   value: id,
-                                  child: Text(_shortId(id)),
+                                  child: Text(_shortLabel(id)),
                                 ),
                               )
                               .toList(),
@@ -316,12 +339,17 @@ class _MeshScreenState extends State<MeshScreen> {
             Expanded(
               child: TabBarView(
                 children: [
-                  _GraphTab(graph: graph, nodeId: widget.nodeId),
+                  _GraphTab(
+                    graph: graph,
+                    nodeId: widget.nodeId,
+                    nodeLabel: _labelForNode,
+                  ),
                   _ListTab(
                     neighbors: widget.neighbors,
                     neighborsRssi: widget.neighborsRssi,
                     routes: _routes,
                     hasData: hasListData,
+                    nodeLabel: _labelForNode,
                   ),
                 ],
               ),
@@ -384,7 +412,8 @@ class _MeshScreenState extends State<MeshScreen> {
         continue;
       }
       final rssi = i > 0 && (i - 1) < hopRssi.length ? hopRssi[i - 1] : 0;
-      rendered.add(rssi != 0 ? '${_shortId(node)} ($rssi dBm)' : _shortId(node));
+      final label = _shortLabel(node);
+      rendered.add(rssi != 0 ? '$label ($rssi dBm)' : label);
     }
     final next = (route['nextHop'] as String?) ?? '';
     final rssi = (route['rssi'] as num?)?.toInt() ?? 0;
@@ -401,7 +430,7 @@ class _MeshScreenState extends State<MeshScreen> {
     }
     final base = '${l.tr('mesh_trace_hops')}: ${rendered.join(' -> ')}';
     final details = <String>[
-      if (next.isNotEmpty) '${l.tr('mesh_col_next')}: ${_shortId(next)}',
+      if (next.isNotEmpty) '${l.tr('mesh_col_next')}: ${_shortLabel(next)}',
       '$hops ${l.tr('mesh_route_hops')}',
       if (rssi != 0) 'RSSI $rssi dBm',
       if (modem != null) '${l.tr('mesh_modem')}: $modem',
@@ -420,9 +449,6 @@ class _MeshScreenState extends State<MeshScreen> {
     };
   }
 
-  String _shortId(String id) {
-    return id.toUpperCase();
-  }
 }
 
 class _GraphData {
@@ -434,8 +460,13 @@ class _GraphData {
 class _GraphTab extends StatelessWidget {
   final _GraphData graph;
   final String nodeId;
+  final String Function(String) nodeLabel;
 
-  const _GraphTab({required this.graph, required this.nodeId});
+  const _GraphTab({
+    required this.graph,
+    required this.nodeId,
+    required this.nodeLabel,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -477,7 +508,7 @@ class _GraphTab extends StatelessWidget {
                     label: l.tr('mesh_rssi_weak'),
                   ),
                   Text(
-                    '${l.tr('settings_node_id')}: ${_shortId(nodeId)}',
+                    '${l.tr('settings_node_id')}: ${nodeLabel(nodeId)}',
                     style: AppTypography.chipBase().copyWith(
                       color: context.palette.onSurfaceVariant.withOpacity(0.95),
                       fontWeight: FontWeight.w400,
@@ -499,6 +530,7 @@ class _GraphTab extends StatelessWidget {
                     edges: graph.edges,
                     center: c,
                     palette: context.palette,
+                    nodeLabel: nodeLabel,
                   ),
                 );
               },
@@ -509,9 +541,6 @@ class _GraphTab extends StatelessWidget {
     );
   }
 
-  String _shortId(String id) {
-    return id.toUpperCase();
-  }
 }
 
 class _LegendItem extends StatelessWidget {
@@ -551,15 +580,15 @@ class _ListTab extends StatelessWidget {
   final List<int> neighborsRssi;
   final List<Map<String, dynamic>> routes;
   final bool hasData;
+  final String Function(String) nodeLabel;
 
   const _ListTab({
     required this.neighbors,
     required this.neighborsRssi,
     required this.routes,
     required this.hasData,
+    required this.nodeLabel,
   });
-
-  String _idLabel(String id) => id.toUpperCase();
 
   String _modemPresetLabel(AppLocalizations l, int preset) {
     return switch (preset) {
@@ -623,9 +652,8 @@ class _ListTab extends StatelessWidget {
                                 child: Icon(Icons.router_outlined, color: context.palette.primary, size: 22),
                               ),
                               title: Text(
-                                _idLabel(neighbors[i]),
+                                nodeLabel(neighbors[i]),
                                 style: TextStyle(
-                                  fontFamily: 'monospace',
                                   fontSize: 14,
                                   fontWeight: FontWeight.w600,
                                   color: context.palette.onSurface,
@@ -678,16 +706,15 @@ class _ListTab extends StatelessWidget {
                                     child: Icon(Icons.alt_route, color: context.palette.success, size: 22),
                                   ),
                                   title: Text(
-                                    _idLabel(dest),
+                                    nodeLabel(dest),
                                     style: TextStyle(
-                                      fontFamily: 'monospace',
                                       fontSize: 14,
                                       fontWeight: FontWeight.w600,
                                       color: context.palette.onSurface,
                                     ),
                                   ),
                                   subtitle: Text(
-                                    '${l.tr('mesh_col_next')}: ${next.isNotEmpty ? _idLabel(next) : '—'} · $hops ${l.tr('mesh_route_hops')}${rssi != 0 ? ' · RSSI $rssi' : ''}${modem != null ? ' · ${l.tr('mesh_modem')}: $modem' : ''}${trust != null ? ' · trust $trust' : ''}',
+                                    '${l.tr('mesh_col_next')}: ${next.isNotEmpty ? nodeLabel(next) : '—'} · $hops ${l.tr('mesh_route_hops')}${rssi != 0 ? ' · RSSI $rssi' : ''}${modem != null ? ' · ${l.tr('mesh_modem')}: $modem' : ''}${trust != null ? ' · trust $trust' : ''}',
                                     style: AppTypography.chipBase().copyWith(
                                       color: context.palette.onSurfaceVariant.withOpacity(0.95),
                                       fontWeight: FontWeight.w400,
@@ -759,8 +786,15 @@ class _MeshPainter extends CustomPainter {
   final List<_Edge> edges;
   final Offset center;
   final AppPalette palette;
+  final String Function(String) nodeLabel;
 
-  _MeshPainter({required this.nodes, required this.edges, required this.center, required this.palette});
+  _MeshPainter({
+    required this.nodes,
+    required this.edges,
+    required this.center,
+    required this.palette,
+    required this.nodeLabel,
+  });
 
   Offset _pos(String id) {
     final n = nodes[id];
@@ -821,8 +855,9 @@ class _MeshPainter extends CustomPainter {
           ..strokeWidth = 2,
       );
 
-      final short = id.length >= 16 ? '${id.substring(0, 4)}…${id.substring(id.length - 4)}' : id;
-      _drawText(canvas, short, Offset(pos.dx, pos.dy + r + 10), 11, palette.onSurface);
+      final label = nodeLabel(id);
+      final compact = label.length > 14 ? '${label.substring(0, 13)}…' : label;
+      _drawText(canvas, compact, Offset(pos.dx, pos.dy + r + 10), 11, palette.onSurface);
       if (n.rssi != 0) {
         _drawText(canvas, '${n.rssi} dBm', Offset(pos.dx, pos.dy + r + 24), 10, palette.onSurfaceVariant);
       }

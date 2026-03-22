@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../ble/riftlink_ble.dart';
+import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
 import '../locale_notifier.dart';
 import '../prefs/mesh_prefs.dart';
@@ -139,6 +140,7 @@ class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
   bool _espAdapt = false;
   StreamSubscription<RiftLinkEvent>? _sub;
   Timer? _infoPollTimer;
+  Map<String, String> _nickById = const {};
 
   void _apply(RiftLinkInfoEvent e) {
     if (!mounted) return;
@@ -189,6 +191,7 @@ class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
     _wifiConn = li?.wifiConnected ?? false; _wifiSsid = li?.wifiSsid; _wifiIp = li?.wifiIp;
     _espCh = (li?.espNowChannel != null && li!.espNowChannel! >= 1 && li.espNowChannel! <= 13) ? li.espNowChannel! : 1;
     _espAdapt = li?.espNowAdaptive ?? false;
+    _loadContactNicknames();
     _sub = widget.ble.events.listen((evt) {
       if (!mounted) return;
       if (evt is RiftLinkInfoEvent) _apply(evt);
@@ -230,6 +233,12 @@ class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
     super.dispose();
   }
 
+  Future<void> _loadContactNicknames() async {
+    final contacts = await ContactsService.load();
+    if (!mounted) return;
+    setState(() => _nickById = ContactsService.buildNicknameMap(contacts));
+  }
+
   String _presetTag(AppLocalizations l) => switch (_modemPreset) {
     0 => l.tr('modem_preset_speed'), 1 => l.tr('modem_preset_normal'),
     2 => l.tr('modem_preset_range'), 3 => l.tr('modem_preset_maxrange'),
@@ -241,8 +250,10 @@ class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
     final l = context.l10n;
     final pal = context.palette;
 
-    final devSub = _nickname != null && _nickname!.isNotEmpty
-        ? '$_nickname · ${_fmtId(_nodeId)}' : 'ID: ${_fmtId(_nodeId)}';
+    final selfLabel = (_nickname != null && _nickname!.isNotEmpty)
+        ? _nickname!
+        : ContactsService.displayNodeLabel(_nodeId, _nickById);
+    final devSub = selfLabel;
     final netSub = '$_region · ${_presetTag(l)}';
     final connSub = _radioMode == 'wifi'
         ? 'Wi-Fi STA${_wifiConn ? ' · ${_wifiSsid ?? ""}' : ""}'
@@ -539,12 +550,22 @@ class _DevicePageState extends State<_DevicePage> {
     final connected = widget.ble.isConnected;
     final plain = _nodeIdForClipboard(_nodeId);
     final shown = _fmtId(_nodeId);
+    final displayLabel = _nickCtrl.text.trim().isNotEmpty ? _nickCtrl.text.trim() : shown;
 
     return _SubpageScaffold(title: l.tr('settings_device'), children: [
       _PageCard(title: l.tr('settings_node_id'), subtitle: l.tr('settings_node_id_hint'), child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          SelectableText(shown, style: TextStyle(color: pal.onSurface, fontSize: 15, height: 1.35, fontFamily: 'monospace', letterSpacing: 0.5)),
+          SelectableText(
+            displayLabel,
+            style: TextStyle(
+              color: pal.onSurface,
+              fontSize: 15,
+              height: 1.35,
+              fontFamily: displayLabel == shown ? 'monospace' : null,
+              letterSpacing: 0.5,
+            ),
+          ),
           const SizedBox(height: AppSpacing.md),
           AppSecondaryButton(fullWidth: true, onPressed: plain.isEmpty ? null : () async {
             await Clipboard.setData(ClipboardData(text: plain));

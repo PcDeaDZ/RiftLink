@@ -37,6 +37,8 @@ class _GroupsScreenState extends State<GroupsScreen> {
   List<int> _groups = [];
   final Map<int, bool> _groupPrivate = <int, bool>{};
   final Map<int, int> _groupKeyVersion = <int, int>{};
+  final Map<int, String?> _groupOwner = <int, String?>{};
+  final Map<int, bool> _groupCanRotate = <int, bool>{};
   bool _loading = false;
   StreamSubscription<RiftLinkEvent>? _sub;
 
@@ -46,18 +48,32 @@ class _GroupsScreenState extends State<GroupsScreen> {
     return out;
   }
 
-  void _applyGroups(Iterable<int> groups, [List<bool>? privateFlags, List<int>? keyVersions]) {
+  void _applyGroups(
+    Iterable<int> groups, [
+    List<bool>? privateFlags,
+    List<int>? keyVersions,
+    List<String?>? owners,
+    List<bool>? canRotate,
+  ]) {
     final normalized = _normalizeGroups(groups);
     final nextPriv = <int, bool>{};
     final nextVer = <int, int>{};
+    final nextOwner = <int, String?>{};
+    final nextCanRotate = <int, bool>{};
     for (var i = 0; i < normalized.length; i++) {
       final gid = normalized[i];
       bool isPriv = _groupPrivate[gid] ?? false;
       int ver = _groupKeyVersion[gid] ?? 0;
+      String? owner = _groupOwner[gid];
+      bool rotateAllowed = _groupCanRotate[gid] ?? false;
       if (privateFlags != null && i < privateFlags.length) isPriv = privateFlags[i];
       if (keyVersions != null && i < keyVersions.length) ver = keyVersions[i];
+      if (owners != null && i < owners.length) owner = owners[i];
+      if (canRotate != null && i < canRotate.length) rotateAllowed = canRotate[i];
       nextPriv[gid] = isPriv;
       nextVer[gid] = ver;
+      nextOwner[gid] = owner;
+      nextCanRotate[gid] = rotateAllowed;
     }
     _groups = normalized;
     _groupPrivate
@@ -66,6 +82,12 @@ class _GroupsScreenState extends State<GroupsScreen> {
     _groupKeyVersion
       ..clear()
       ..addAll(nextVer);
+    _groupOwner
+      ..clear()
+      ..addAll(nextOwner);
+    _groupCanRotate
+      ..clear()
+      ..addAll(nextCanRotate);
   }
 
   @override
@@ -76,9 +98,21 @@ class _GroupsScreenState extends State<GroupsScreen> {
       if (!mounted) return;
       // Ответ на getGroups — и поле groups в evt:info (как в чате), иначе список не обновлялся без отдельного notify.
       if (evt is RiftLinkGroupsEvent) {
-        setState(() => _applyGroups(evt.groups, evt.groupsPrivate, evt.groupsKeyVersion));
+        setState(() => _applyGroups(
+              evt.groups,
+              evt.groupsPrivate,
+              evt.groupsKeyVersion,
+              evt.groupsOwner,
+              evt.groupsCanRotate,
+            ));
       } else if (evt is RiftLinkInfoEvent) {
-        setState(() => _applyGroups(evt.groups, evt.groupsPrivate, evt.groupsKeyVersion));
+        setState(() => _applyGroups(
+              evt.groups,
+              evt.groupsPrivate,
+              evt.groupsKeyVersion,
+              evt.groupsOwner,
+              evt.groupsCanRotate,
+            ));
       }
     });
     _refresh();
@@ -113,6 +147,56 @@ class _GroupsScreenState extends State<GroupsScreen> {
     return sb.toString().toUpperCase();
   }
 
+  String _encodeInviteBase64({
+    required int groupId,
+    required String groupKeyB64,
+    required int keyVersion,
+    required String inviteToken,
+    required int expiryEpochSec,
+    required String ownerId,
+  }) {
+    final payload = '$groupId|$keyVersion|$groupKeyB64|$inviteToken|$expiryEpochSec|${ownerId.toUpperCase()}';
+    return base64Encode(utf8.encode(payload));
+  }
+
+  ({
+    int groupId,
+    String groupKeyB64,
+    int keyVersion,
+    String inviteToken,
+    int expiryEpochSec,
+    String? ownerId,
+  })?
+  _decodeInviteBase64(String inviteCode) {
+    try {
+      final normalized = inviteCode.replaceAll(RegExp(r'\s+'), '');
+      final raw = utf8.decode(base64Decode(normalized));
+      final parts = raw.split('|');
+      if (parts.length != 5 && parts.length != 6) return null;
+      final groupId = int.tryParse(parts[0]) ?? 0;
+      final keyVersion = int.tryParse(parts[1]) ?? 0;
+      final groupKeyB64 = parts[2].trim();
+      final inviteToken = parts[3].trim();
+      final expiryEpochSec = int.tryParse(parts[4]) ?? 0;
+      final ownerId = parts.length == 6 ? parts[5].trim().toUpperCase() : null;
+      if (groupId <= 1 || groupKeyB64.isEmpty || keyVersion < 0 || expiryEpochSec <= 0) return null;
+      if (inviteToken.length != 16 || !RegExp(r'^[0-9A-Fa-f]{16}$').hasMatch(inviteToken)) return null;
+      if (ownerId != null && ownerId.isNotEmpty && !RegExp(r'^[0-9A-Fa-f]{16}$').hasMatch(ownerId)) return null;
+      // Валидируем, что ключ действительно корректный BASE64.
+      base64Decode(groupKeyB64);
+      return (
+        groupId: groupId,
+        groupKeyB64: groupKeyB64,
+        keyVersion: keyVersion,
+        inviteToken: inviteToken,
+        expiryEpochSec: expiryEpochSec,
+        ownerId: ownerId,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _setGroupPrivate(int gid, bool privateMode) async {
     final l = context.l10n;
     if (!widget.ble.isConnected) return;
@@ -138,6 +222,10 @@ class _GroupsScreenState extends State<GroupsScreen> {
 
   Future<void> _rotatePrivateKey(int gid) async {
     final l = context.l10n;
+    if (!(_groupCanRotate[gid] ?? false)) {
+      _snack(l.tr('group_rekey_required'), backgroundColor: context.palette.error);
+      return;
+    }
     final currentVer = _groupKeyVersion[gid] ?? 0;
     final nextVer = currentVer > 0 ? currentVer + 1 : 1;
     final keyB64 = _generateGroupKeyB64();
@@ -166,50 +254,139 @@ class _GroupsScreenState extends State<GroupsScreen> {
           .timeout(const Duration(seconds: 3));
       final expiryEpochSec = DateTime.now().millisecondsSinceEpoch ~/ 1000 + 10 * 60;
       final token = _generateInviteTokenHex();
-      await Clipboard.setData(ClipboardData(text: jsonEncode({
-        'group': gid,
-        'groupKey': evt.key,
-        'keyVersion': evt.keyVersion > 0 ? evt.keyVersion : (_groupKeyVersion[gid] ?? 0),
-        'inviteToken': token,
-        'inviteExpiryEpochSec': expiryEpochSec,
-      })));
+      final ownerId = (_groupOwner[gid] ?? widget.ble.lastInfo?.id ?? '').toUpperCase();
+      if (!RegExp(r'^[0-9A-F]{16}$').hasMatch(ownerId)) {
+        if (mounted) _snack(l.tr('error'), backgroundColor: context.palette.error);
+        return;
+      }
+      final inviteCode = _encodeInviteBase64(
+        groupId: gid,
+        groupKeyB64: evt.key,
+        keyVersion: evt.keyVersion > 0 ? evt.keyVersion : (_groupKeyVersion[gid] ?? 0),
+        inviteToken: token,
+        expiryEpochSec: expiryEpochSec,
+        ownerId: ownerId,
+      );
+      await Clipboard.setData(ClipboardData(text: inviteCode));
       if (mounted) _snack(l.tr('group_invite_copied', {'id': '$gid'}));
     } catch (_) {
       if (mounted) _snack(l.tr('error'), backgroundColor: context.palette.error);
     }
   }
 
-  Future<void> _pasteInviteAndJoin() async {
+  Future<void> _joinByInviteCode(String inviteCodeRaw) async {
     final l = context.l10n;
-    final data = await Clipboard.getData(Clipboard.kTextPlain);
-    final text = data?.text?.trim();
-    if (text == null || text.isEmpty) {
+    final inviteCode = inviteCodeRaw.trim();
+    if (inviteCode.isEmpty) {
       _snack(l.tr('group_invite_bad'), backgroundColor: context.palette.error);
       return;
     }
+    final invite = _decodeInviteBase64(inviteCode);
+    if (invite == null) {
+      _snack(l.tr('group_invite_bad'), backgroundColor: context.palette.error);
+      return;
+    }
+    if ((DateTime.now().millisecondsSinceEpoch ~/ 1000) > invite.expiryEpochSec) {
+      _snack(l.tr('group_invite_expired'), backgroundColor: context.palette.error);
+      return;
+    }
+
     try {
-      final m = jsonDecode(text);
-      if (m is! Map) throw Exception('bad');
-      final group = int.tryParse('${m['group'] ?? ''}') ?? 0;
-      final key = (m['groupKey'] as String?)?.trim();
-      final keyVersion = int.tryParse('${m['keyVersion'] ?? ''}') ?? 0;
-      final token = (m['inviteToken'] as String?)?.trim() ?? '';
-      final expiryEpochSec = int.tryParse('${m['inviteExpiryEpochSec'] ?? ''}') ?? 0;
-      if (group <= 1) throw Exception('bad');
-      if (token.length != 16 || !RegExp(r'^[0-9A-Fa-f]{16}$').hasMatch(token)) throw Exception('bad');
-      if (expiryEpochSec <= 0 || (DateTime.now().millisecondsSinceEpoch ~/ 1000) > expiryEpochSec) {
-        _snack(l.tr('group_invite_expired'), backgroundColor: context.palette.error);
-        return;
-      }
-      await widget.ble.addGroup(group);
-      if (key != null && key.isNotEmpty) {
-        await widget.ble.setGroupKey(group, key, keyVersion: keyVersion > 0 ? keyVersion : null);
-      }
+      await widget.ble.addGroup(invite.groupId);
+      await widget.ble.setGroupKey(
+        invite.groupId,
+        invite.groupKeyB64,
+        keyVersion: invite.keyVersion > 0 ? invite.keyVersion : null,
+        ownerId: invite.ownerId,
+      );
       await _refresh();
-      if (mounted) _snack(l.tr('group_invite_joined', {'id': '$group'}));
+      if (mounted) _snack(l.tr('group_invite_joined', {'id': '${invite.groupId}'}));
     } catch (_) {
       _snack(l.tr('group_invite_bad'), backgroundColor: context.palette.error);
     }
+  }
+
+  Future<void> _pasteInviteAndJoin() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text?.trim() ?? '';
+    await _joinByInviteCode(text);
+  }
+
+  void _showJoinByCodeDialog() {
+    if (!widget.ble.isConnected) return;
+    final c = TextEditingController();
+    final l = context.l10n;
+    final p = context.palette;
+    showAppDialog(
+      context: context,
+      builder: (ctx) => RiftDialogFrame(
+        maxWidth: 380,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              l.tr('group_join_by_code'),
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: p.onSurface,
+                  ),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Text(
+              l.tr('group_invite_code_hint'),
+              style: AppTypography.labelBase().copyWith(
+                color: p.onSurfaceVariant.withOpacity(0.92),
+                height: 1.3,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.md),
+            TextField(
+              controller: c,
+              maxLines: 2,
+              minLines: 1,
+              autofocus: true,
+              textInputAction: TextInputAction.done,
+              style: TextStyle(color: p.onSurface, fontSize: 15),
+              decoration: InputDecoration(
+                labelText: l.tr('group_join_by_code'),
+                hintText: 'BASE64...',
+              ),
+              onSubmitted: (_) async {
+                Navigator.pop(ctx);
+                await _joinByInviteCode(c.text);
+              },
+            ),
+            const SizedBox(height: AppSpacing.md),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: () async {
+                    final data = await Clipboard.getData(Clipboard.kTextPlain);
+                    c.text = data?.text?.trim() ?? '';
+                  },
+                  child: Text(l.tr('paste')),
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: Text(l.tr('cancel')),
+                ),
+                const SizedBox(width: AppSpacing.xs),
+                FilledButton(
+                  onPressed: () async {
+                    Navigator.pop(ctx);
+                    await _joinByInviteCode(c.text);
+                  },
+                  child: Text(l.tr('ok')),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void _snack(String msg, {Color? backgroundColor}) {
@@ -422,6 +599,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
   Widget _buildGroupCard(int gid, AppLocalizations l, AppPalette p) {
     final isPrivate = _groupPrivate[gid] == true;
     final ver = _groupKeyVersion[gid] ?? 0;
+    final canRotate = _groupCanRotate[gid] ?? false;
     return Dismissible(
       key: ValueKey<int>(gid),
       direction: DismissDirection.endToStart,
@@ -536,6 +714,17 @@ class _GroupsScreenState extends State<GroupsScreen> {
                                   kind: AppStateKind.neutral,
                                 ),
                         ),
+                        if (isPrivate) ...[
+                          const SizedBox(height: AppSpacing.xs),
+                          Text(
+                            canRotate ? l.tr('group_owner_rotate_allowed') : l.tr('group_rekey_required'),
+                            style: AppTypography.labelBase().copyWith(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                              color: canRotate ? p.onSurfaceVariant : p.error,
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -554,8 +743,8 @@ class _GroupsScreenState extends State<GroupsScreen> {
                         PopupMenuItem(value: 'invite', child: Text(l.tr('group_copy_invite')))
                       else
                         PopupMenuItem(value: 'private', child: Text(l.tr('group_make_private'))),
-                      if (isPrivate) PopupMenuItem(value: 'rotate', child: Text(l.tr('group_rotate_key'))),
-                      if (isPrivate) PopupMenuItem(value: 'public', child: Text(l.tr('group_make_public'))),
+                      if (isPrivate && canRotate) PopupMenuItem(value: 'rotate', child: Text(l.tr('group_rotate_key'))),
+                      if (isPrivate && canRotate) PopupMenuItem(value: 'public', child: Text(l.tr('group_make_public'))),
                     ],
                   ),
                 ],
@@ -621,6 +810,36 @@ class _GroupsScreenState extends State<GroupsScreen> {
     );
   }
 
+  Widget _buildTopActions(AppLocalizations l, AppPalette p) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        widget.embedded ? AppSpacing.sm + AppSpacing.xs : AppSpacing.lg,
+        AppSpacing.xs,
+        widget.embedded ? AppSpacing.sm + AppSpacing.xs : AppSpacing.lg,
+        AppSpacing.sm,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: FilledButton.icon(
+              onPressed: widget.ble.isConnected ? _showAddSheet : null,
+              icon: const Icon(Icons.group_add_rounded, size: 18),
+              label: Text(l.tr('group_create')),
+            ),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: widget.ble.isConnected ? _showJoinByCodeDialog : null,
+              icon: const Icon(Icons.vpn_key_outlined, size: 18),
+              label: Text(l.tr('group_join_by_code')),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final l = context.l10n;
@@ -632,6 +851,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _buildHintBanner(l, p),
+          _buildTopActions(l, p),
           Expanded(
             child: _groups.isEmpty
                 ? _buildEmptyState(l, p)
@@ -651,20 +871,10 @@ class _GroupsScreenState extends State<GroupsScreen> {
     );
     final body = widget.embedded ? inner : MeshBackgroundWrapper(child: inner);
 
-    final fab = FloatingActionButton(
-      heroTag: widget.embedded ? 'groups_embedded_fab' : 'groups_screen_fab',
-      backgroundColor: p.primary,
-      foregroundColor: Colors.white,
-      onPressed: widget.ble.isConnected ? _showAddSheet : null,
-      tooltip: l.tr('add_group'),
-      child: const Icon(Icons.add_rounded),
-    );
-
     if (widget.embedded) {
       return Scaffold(
         backgroundColor: Colors.transparent,
         body: body,
-        floatingActionButton: fab,
       );
     }
 
@@ -689,7 +899,6 @@ class _GroupsScreenState extends State<GroupsScreen> {
         ],
       ),
       body: body,
-      floatingActionButton: fab,
     );
   }
 }

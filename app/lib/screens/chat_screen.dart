@@ -20,6 +20,7 @@ import '../notifications/local_notifications_service.dart';
 import 'contacts_groups_hub_screen.dart';
 import 'settings_hub_screen.dart';
 import 'scan_screen.dart';
+import 'chats_list_screen.dart';
 import '../locale_notifier.dart';
 
 import '../theme/app_theme.dart';
@@ -29,21 +30,37 @@ import '../widgets/mesh_background.dart';
 import '../widgets/app_primitives.dart';
 import '../widgets/app_snackbar.dart';
 import '../widgets/rift_dialogs.dart';
+import '../chat/chat_models.dart';
+import '../chat/chat_repository.dart';
 
 List<int> _filterUserGroups(List<int> raw) =>
     raw.where((g) => g != kMeshBroadcastGroupId).toList();
 
 class ChatScreen extends StatefulWidget {
   final RiftLinkBle ble;
-  const ChatScreen({super.key, required this.ble});
+  final String? conversationId;
+  final String? initialPeerId;
+  final int? initialGroupId;
+  final bool initialBroadcast;
+
+  const ChatScreen({
+    super.key,
+    required this.ble,
+    this.conversationId,
+    this.initialPeerId,
+    this.initialGroupId,
+    this.initialBroadcast = false,
+  });
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
 class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, WidgetsBindingObserver {
+  final ChatRepository _chatRepo = ChatRepository.instance;
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
   final _messages = <_Msg>[];
+  String? _conversationId;
   StreamSubscription<RiftLinkEvent>? _sub;
   String _nodeId = '';
   String? _nickname;
@@ -101,8 +118,119 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   List<RecentDevice> _recentDevices = [];
   AppLifecycleState _appLifecycle = AppLifecycleState.resumed;
 
-  List<_Msg> get _visibleMessages =>
-      _messages.where((m) => m.deleteAt == null || DateTime.now().isBefore(m.deleteAt!)).toList();
+  List<_Msg> get _visibleMessages {
+    final now = DateTime.now();
+    return _messages.where((m) {
+      if (m.deleteAt != null && now.isAfter(m.deleteAt!)) return false;
+      if (_conversationId == null) return true;
+      if (_conversationId == ChatRepository.broadcastConversationId()) {
+        return m.to == null || m.to == _broadcastTo;
+      }
+      if (_conversationId!.startsWith('direct:')) {
+        final peer = _conversationId!.substring('direct:'.length).toUpperCase();
+        final from = m.from.toUpperCase();
+        final to = (m.to ?? '').toUpperCase();
+        return from == peer || to == peer;
+      }
+      return true;
+    }).toList();
+  }
+
+  String _normalizeId(String raw) =>
+      raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+
+  Future<void> _initConversationContext() async {
+    if (widget.conversationId != null && widget.conversationId!.isNotEmpty) {
+      _conversationId = widget.conversationId;
+      if (_conversationId!.startsWith('direct:')) {
+        _unicastTo = _conversationId!.substring('direct:'.length);
+        _group = 0;
+      } else if (_conversationId!.startsWith('group:')) {
+        _group = int.tryParse(_conversationId!.substring('group:'.length)) ?? 0;
+        _unicastTo = null;
+      } else {
+        _group = 0;
+        _unicastTo = null;
+      }
+    } else if (widget.initialPeerId != null && widget.initialPeerId!.isNotEmpty) {
+      _unicastTo = _normalizeId(widget.initialPeerId!);
+      _group = 0;
+      _conversationId = ChatRepository.directConversationId(_unicastTo!);
+    } else if (widget.initialGroupId != null && widget.initialGroupId! > 0) {
+      _group = widget.initialGroupId!;
+      _unicastTo = null;
+      _conversationId = ChatRepository.groupConversationId(_group);
+    } else if (widget.initialBroadcast) {
+      _group = 0;
+      _unicastTo = null;
+      _conversationId = ChatRepository.broadcastConversationId();
+    }
+
+    if (_conversationId == null) return;
+    await _chatRepo.ensureConversation(
+      id: _conversationId!,
+      kind: _conversationId!.startsWith('direct:')
+          ? ConversationKind.direct
+          : _conversationId!.startsWith('group:')
+              ? ConversationKind.group
+              : ConversationKind.broadcast,
+      peerRef: _conversationId!.split(':').last,
+      title: _conversationId!.startsWith('direct:')
+          ? _conversationId!.substring('direct:'.length)
+          : _conversationId!.startsWith('group:')
+              ? 'Group ${_conversationId!.substring('group:'.length)}'
+              : 'Broadcast',
+    );
+    final draft = await _chatRepo.getDraft(_conversationId!);
+    if (draft.isNotEmpty) _controller.text = draft;
+    final history = await _chatRepo.listMessages(_conversationId!);
+    await _chatRepo.markConversationRead(_conversationId!);
+    if (history.isEmpty || !mounted) return;
+    setState(() {
+      _messages
+        ..clear()
+        ..addAll(history.map(_msgFromStored));
+    });
+  }
+
+  _Msg _msgFromStored(ChatMessage m) {
+    return _Msg(
+      from: m.from,
+      text: m.text,
+      isIncoming: m.direction == MessageDirection.incoming,
+      at: m.createdAtMs > 0
+          ? DateTime.fromMillisecondsSinceEpoch(m.createdAtMs)
+          : DateTime.now(),
+      msgId: m.msgId,
+      to: m.to,
+      rssi: m.rssi,
+      status: switch (m.status) {
+        MessageStatus.pending => _St.sent,
+        MessageStatus.sent => _St.sent,
+        MessageStatus.delivered => _St.delivered,
+        MessageStatus.read => _St.read,
+        MessageStatus.undelivered => _St.undelivered,
+      },
+      lane: m.lane,
+      type: m.type,
+      delivered: m.delivered,
+      total: m.total,
+      relayCount: m.relayCount,
+      relayPeers: m.relayPeers,
+      deleteAt: m.deleteAtMs != null ? DateTime.fromMillisecondsSinceEpoch(m.deleteAtMs!) : null,
+      isLocation: m.type == 'location',
+      isVoice: m.type == 'voice',
+    );
+  }
+
+  String _activeConversationId() {
+    if (_conversationId != null && _conversationId!.isNotEmpty) return _conversationId!;
+    if (_group > 0) return ChatRepository.groupConversationId(_group);
+    if (_unicastTo != null && _unicastTo!.isNotEmpty) {
+      return ChatRepository.directConversationId(_normalizeId(_unicastTo!));
+    }
+    return ChatRepository.broadcastConversationId();
+  }
 
   // ── Lifecycle ──
 
@@ -111,6 +239,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _controller.addListener(_onTextChanged);
+    _initConversationContext();
     _listenEvents();
     _loadContactNicknames();
     _loadMeshPrefs();
@@ -154,6 +283,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   void _onTextChanged() {
     final hasText = _controller.text.trim().isNotEmpty;
     if (hasText != _hasText && mounted) setState(() => _hasText = hasText);
+    final convId = _conversationId;
+    if (convId != null) {
+      _chatRepo.setDraft(convId, _controller.text);
+    }
   }
 
   Future<void> _loadMeshPrefs() async {
@@ -188,6 +321,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   @override
   void dispose() {
+    final convId = _conversationId;
+    if (convId != null) {
+      _chatRepo.setDraft(convId, _controller.text);
+    }
     WidgetsBinding.instance.removeObserver(this);
     _connStateSub?.cancel();
     _controller.removeListener(_onTextChanged);
@@ -257,10 +394,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     setState(() => _reconnecting = false);
     await widget.ble.disconnect();
     if (!mounted) return;
-    Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => ScanScreen(initialMessage: l.tr('reconnect_failed'))),
-      (r) => false,
-    );
+    await _goToScan(l.tr('reconnect_failed'));
+  }
+
+  Future<void> _goToScan([String? message]) async {
+    await appResetTo(context, ScanScreen(initialMessage: message));
+  }
+
+  Future<void> _goToChatsList() async {
+    await appResetTo(context, ChatsListScreen(ble: widget.ble));
   }
 
   Future<void> _showConnectMenu() async {
@@ -308,13 +450,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   Widget _buildSwitchItem(BuildContext ctx, RecentDevice d) {
     final l = context.l10n;
+    final idNorm = _normNodeId(d.nodeId);
+    final nick = idNorm.isNotEmpty ? _nicknameForId(idNorm) : null;
+    final title = nick ??
+        (d.displayName.isNotEmpty ? d.displayName : (idNorm.isNotEmpty ? idNorm : d.remoteId));
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         ListTile(
           leading: Icon(Icons.bluetooth, color: context.palette.primary),
-          title: Text(d.displayName, style: TextStyle(color: context.palette.onSurface, fontWeight: FontWeight.w500)),
-          subtitle: d.displayName != d.nodeId
+          title: Text(title, style: TextStyle(color: context.palette.onSurface, fontWeight: FontWeight.w500)),
+          subtitle: nick == null && d.displayName != d.nodeId
               ? Text(
                   d.nodeId,
                   style: AppTypography.labelBase().copyWith(
@@ -364,10 +510,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _intentionalDisconnect = true;
       await widget.ble.disconnect();
       if (!mounted) return;
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const ScanScreen()),
-        (r) => false,
-      );
+      await _goToScan();
     } else if (value.startsWith('switch:')) {
       final remoteId = value.substring(7);
       _intentionalDisconnect = true;
@@ -422,20 +565,16 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       final ok = await widget.ble.connect(found);
       if (mounted && ok) {
         _intentionalDisconnect = false;
-        _currentBleRemoteId = found.remoteId.toString();
-        _listenConnectionState();
-          _listenEvents(); // переподписка после reconnect (await cancel + новый listen)
-        setState(_resetStateUntilInfo);
-        _applyNodeIdFromDeviceName();
-        widget.ble.getInfo();
-        _showSnack(l.tr('reconnect_ok'), backgroundColor: context.palette.success);
+        await ChatRepository.instance.clearAll();
+        if (!mounted) return;
+        await _goToChatsList();
       } else {
         _intentionalDisconnect = false;
-        _showSnack(l.tr('ble_no_service'), backgroundColor: context.palette.error);
+        await _goToScan(l.tr('ble_no_service'));
       }
     } else {
       _intentionalDisconnect = false;
-      _showSnack(l.tr('ble_timeout'), backgroundColor: context.palette.error);
+      await _goToScan(l.tr('ble_timeout'));
     }
   }
 
@@ -585,16 +724,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
               if (!rowMatch(idNorm, nick, [if (rssi != 0) '$rssi'])) continue;
               final sel = _normNodeId(_unicastTo ?? '') == idNorm && _group == 0;
               final title = nick ?? idNorm;
-              final sub = nick != null
-                  ? Text(
-                      idNorm,
-                      style: AppTypography.labelBase().copyWith(
-                        fontSize: 12,
-                        fontFamily: 'monospace',
-                        color: context.palette.onSurfaceVariant,
-                      ),
-                    )
-                  : null;
               neighTiles.add(
                 ListTile(
                   leading: Icon(Icons.person_outline, color: hasKey ? (sel ? context.palette.primary : context.palette.onSurfaceVariant) : context.palette.onSurfaceVariant.withOpacity(0.45)),
@@ -602,7 +731,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                     hasKey ? title : '$title — ${l.tr('waiting_key')}',
                     style: TextStyle(fontWeight: sel ? FontWeight.w600 : FontWeight.normal, color: context.palette.onSurface),
                   ),
-                  subtitle: sub,
+                  subtitle: null,
                   trailing: sel
                       ? Icon(Icons.check, color: context.palette.primary, size: 20)
                       : (rssi != 0
@@ -641,16 +770,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                 ListTile(
                   leading: Icon(Icons.bookmark_outline, color: sel ? context.palette.primary : context.palette.onSurfaceVariant),
                   title: Text(nick ?? id, style: TextStyle(fontWeight: sel ? FontWeight.w600 : FontWeight.normal, color: context.palette.onSurface)),
-                  subtitle: nick != null
-                      ? Text(
-                          id,
-                          style: AppTypography.labelBase().copyWith(
-                            fontSize: 12,
-                            fontFamily: 'monospace',
-                            color: context.palette.onSurfaceVariant,
-                          ),
-                        )
-                      : null,
+                  subtitle: null,
                   trailing: sel ? Icon(Icons.check, color: context.palette.primary, size: 20) : null,
                   onTap: () {
                     Navigator.pop(ctx);
@@ -1047,6 +1167,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             lane: evt.lane, type: evt.type,
             deleteAt: ttl > 0 ? DateTime.now().add(Duration(minutes: ttl)) : null));
       });
+      final active = _conversationId;
+      if (active != null) {
+        final incomingConv = ChatRepository.directConversationId(_normalizeId(evt.from));
+        if (active == incomingConv) {
+          _chatRepo.markConversationRead(active);
+        }
+      }
       if (_appLifecycle != AppLifecycleState.resumed) {
         LocalNotificationsService.showIncomingMessage(from: evt.from, text: evt.text);
       }
@@ -1143,6 +1270,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       });
     } else if (evt is RiftLinkLocationEvent) {
       setState(() { _messages.add(_Msg(from: evt.from, text: '📍 ${evt.lat.toStringAsFixed(5)}, ${evt.lon.toStringAsFixed(5)}', isIncoming: true, isLocation: true)); });
+      final active = _conversationId;
+      if (active != null && active == ChatRepository.directConversationId(_normalizeId(evt.from))) {
+        _chatRepo.markConversationRead(active);
+      }
       _scrollToBottom();
     } else if (evt is RiftLinkRegionEvent) { setState(() { _region = evt.region; _channel = evt.channel; }); }
     else if (evt is RiftLinkNeighborsEvent) { setState(() { _neighbors = evt.neighbors; _neighborsRssi = evt.rssi; _neighborsHasKey = evt.hasKey; }); }
@@ -1268,6 +1399,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
               voiceProfileCode: decoded.voiceProfileCode,
             ));
           });
+          final active = _conversationId;
+          if (active != null && active == ChatRepository.directConversationId(_normalizeId(evt.from))) {
+            _chatRepo.markConversationRead(active);
+          }
           _scrollToBottom();
         } catch (_) {
           _voiceChunks.remove(evt.from);
@@ -1300,6 +1435,31 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     final text = _controller.text.trim();
     if (text.isEmpty) return;
     _controller.clear();
+    final conversationId = _activeConversationId();
+    _conversationId = conversationId;
+    final toNorm = _unicastTo != null ? _normalizeId(_unicastTo!) : null;
+    if (conversationId.startsWith('direct:') && toNorm != null) {
+      await _chatRepo.ensureConversation(
+        id: conversationId,
+        kind: ConversationKind.direct,
+        peerRef: toNorm,
+        title: _contactNicknames[toNorm] ?? toNorm,
+      );
+    } else if (conversationId.startsWith('group:')) {
+      await _chatRepo.ensureConversation(
+        id: conversationId,
+        kind: ConversationKind.group,
+        peerRef: '$_group',
+        title: 'Group $_group',
+      );
+    } else {
+      await _chatRepo.ensureConversation(
+        id: conversationId,
+        kind: ConversationKind.broadcast,
+        peerRef: 'broadcast',
+        title: 'Broadcast',
+      );
+    }
     // Broadcast: to = FFFF... чтобы RiftLinkSentEvent нашёл сообщение; group = null
     final toForMsg = _group > 0 ? null : (_unicastTo ?? _broadcastTo);
     setState(() {
@@ -1313,6 +1473,21 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       ));
     });
     _scrollToBottom();
+    await _chatRepo.setDraft(conversationId, '');
+    await _chatRepo.appendMessage(
+      ChatMessage(
+        conversationId: conversationId,
+        from: _nodeId,
+        to: toForMsg,
+        groupId: _group > 0 ? _group : null,
+        text: text,
+        type: trigger == null ? 'text' : 'timeCapsule',
+        lane: lane,
+        direction: MessageDirection.outgoing,
+        status: MessageStatus.pending,
+        createdAtMs: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
     await widget.ble.send(
       text: text,
       to: _unicastTo,
@@ -1541,16 +1716,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                 final nick = _nicknameForId(id);
                 return ListTile(
                   title: Text(nick ?? id, style: AppTypography.bodyBase().copyWith(color: context.palette.onSurface)),
-                  subtitle: nick != null
-                      ? Text(
-                          id,
-                          style: AppTypography.labelBase().copyWith(
-                            fontFamily: 'monospace',
-                            fontSize: 12,
-                            color: context.palette.onSurfaceVariant,
-                          ),
-                        )
-                      : null,
+                  subtitle: null,
                   onTap: () => Navigator.pop(ctx, id),
                 );
               }),
@@ -1954,20 +2120,18 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     FocusScope.of(context).unfocus();
     switch (value) {
       case 'map':
-        Navigator.push(context, MaterialPageRoute(builder: (_) => MapScreen(ble: widget.ble)));
+        appPush(context, MapScreen(ble: widget.ble));
         break;
       case 'mesh':
-        Navigator.push(context, MaterialPageRoute(builder: (_) => MeshScreen(ble: widget.ble, nodeId: _nodeId, neighbors: _neighbors, neighborsRssi: _neighborsRssi, routes: _routes)));
+        appPush(context, MeshScreen(ble: widget.ble, nodeId: _nodeId, neighbors: _neighbors, neighborsRssi: _neighborsRssi, routes: _routes));
         break;
       case 'contacts_hub':
-        Navigator.push(
+        appPush(
           context,
-          MaterialPageRoute(
-            builder: (_) => ContactsGroupsHubScreen(
-              ble: widget.ble,
-              neighbors: _neighbors,
-              initialGroups: _groups,
-            ),
+          ContactsGroupsHubScreen(
+            ble: widget.ble,
+            neighbors: _neighbors,
+            initialGroups: _groups,
           ),
         ).then((_) {
           _loadContactNicknames();
@@ -2010,7 +2174,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         break;
       case 'settings':
         if (widget.ble.isConnected) {
-          Navigator.push(context, MaterialPageRoute(builder: (_) => SettingsHubScreen(
+          appPush(context, SettingsHubScreen(
             ble: widget.ble, nodeId: _nodeId, nickname: _nickname, region: _region, channel: _channel,
             sf: _sf,
             gpsPresent: _gpsPresent, gpsEnabled: _gpsEnabled, gpsFix: _gpsFix, powersave: _powersave,
@@ -2022,7 +2186,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             onGpsChanged: (v) => setState(() => _gpsEnabled = v),
             meshAnimationEnabled: _meshAnimationEnabled,
             onMeshAnimationChanged: _onMeshAnimationChanged,
-          ))).then((_) {
+          )).then((_) {
             if (mounted) setState(() {});
           });
         } else {
@@ -2087,10 +2251,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             );
             if (!widget.ble.isConnected) {
               return GestureDetector(
-                onTap: () => Navigator.of(context).pushAndRemoveUntil(
-                  MaterialPageRoute(builder: (_) => const ScanScreen()),
-                  (r) => false,
-                ),
+                onTap: () => _goToScan(),
                 child: row,
               );
             }
@@ -2457,6 +2618,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   Widget _buildMessageBubble(_Msg m) {
     final mine = !m.isIncoming;
+    final l = context.l10n;
     return Align(
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
@@ -2543,9 +2705,25 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
               tooltip: context.l10n.tr('play'), padding: EdgeInsets.zero, constraints: const BoxConstraints(),
             ),
           ]),
+          const SizedBox(height: AppSpacing.xs / 2),
+          Text(
+            m.isIncoming
+                ? l.tr('chat_received_at', {'time': _hhmm(m.at)})
+                : l.tr('chat_sent_at', {'time': _hhmm(m.at)}),
+            style: AppTypography.chipBase().copyWith(
+              fontSize: 9.5,
+              color: context.palette.onSurfaceVariant,
+            ),
+          ),
         ]),
       ),
     );
+  }
+
+  String _hhmm(DateTime value) {
+    final h = value.hour.toString().padLeft(2, '0');
+    final m = value.minute.toString().padLeft(2, '0');
+    return '$h:$m';
   }
 
   // ── Компактные иконки в строке ввода (как в мессенджерах) ──
@@ -3030,6 +3208,7 @@ class _Msg {
   final String from;
   final String text;
   final bool isIncoming;
+  final DateTime at;
   final bool isLocation;
   final bool isVoice;
   final List<int>? voiceData;
@@ -3051,6 +3230,7 @@ class _Msg {
     required this.from,
     required this.text,
     required this.isIncoming,
+    DateTime? at,
     this.isLocation = false,
     this.isVoice = false,
     this.voiceData,
@@ -3067,10 +3247,10 @@ class _Msg {
     this.relaySummarySent = false,
     this.lane = 'normal',
     this.type = 'text',
-  });
+  }) : at = at ?? DateTime.now();
 
   _Msg copyWith({int? msgId, String? to, _St? status, int? delivered, int? total, int? relayCount, List<String>? relayPeers, bool? relaySummarySent, String? lane, String? type, int? voiceProfileCode}) => _Msg(
-    from: from, text: text, isIncoming: isIncoming, isLocation: isLocation, isVoice: isVoice, voiceData: voiceData, voiceProfileCode: voiceProfileCode ?? this.voiceProfileCode,
+    from: from, text: text, isIncoming: isIncoming, at: at, isLocation: isLocation, isVoice: isVoice, voiceData: voiceData, voiceProfileCode: voiceProfileCode ?? this.voiceProfileCode,
     msgId: msgId ?? this.msgId, to: to ?? this.to, rssi: rssi, deleteAt: deleteAt, status: status ?? this.status,
     delivered: delivered ?? this.delivered, total: total ?? this.total,
     relayCount: relayCount ?? this.relayCount,

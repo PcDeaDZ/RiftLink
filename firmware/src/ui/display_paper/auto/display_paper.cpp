@@ -119,6 +119,15 @@ static SPIClass hspi(HSPI);
 
 /** Определение панели как Meshtastic (einkDetect.h): RST LOW, read BUSY. LOW→FC1(V1.1), HIGH→E0213A367(V1.2) */
 enum EInkModel { EINK_FC1, EINK_E0213A367 };
+static EInkModel s_einkModelDetected = EINK_FC1;
+
+static void applyBusyPinMode() {
+  // BUSY active-low panels idle HIGH, active-high panels idle LOW.
+  // Keep line pulled to idle to avoid floating BUSY and long wait loops.
+  if (s_einkModelDetected == EINK_E0213A367) pinMode(EINK_BUSY, INPUT_PULLDOWN);
+  else pinMode(EINK_BUSY, INPUT_PULLUP);
+}
+
 static EInkModel detectEInk() {
   pinMode(EINK_RST, OUTPUT);
   digitalWrite(EINK_RST, LOW);
@@ -295,7 +304,15 @@ static bool selectDisplaySPI() {
   s_einkDisplaySpiSessionActive = false;
 #if defined(USE_EINK)
   // Сначала пауза радио в планировщике (standby), затем один takeMutex на время SPI E-Ink.
-  if (asyncRequestDisplaySpiSession(pdMS_TO_TICKS(5000))) {
+  bool granted = asyncRequestDisplaySpiSession(pdMS_TO_TICKS(5000));
+  // Recovery path: if arbiter hold is already active but grant timed out,
+  // nudge done once and retry shortly to clear stale DISPLAY_HOLD session.
+  if (!granted && radio::isArbiterHold()) {
+    asyncSignalDisplaySpiSessionDone();
+    delay(5);
+    granted = asyncRequestDisplaySpiSession(pdMS_TO_TICKS(150));
+  }
+  if (granted) {
     // RADIO_FSM_V2: арбитр уже перевёл радио в безопасное DISPLAY_HOLD окно.
     // Здесь не удерживаем radio mutex на весь refresh (секунды), чтобы не блокировать RX/TX path.
     radio::setArbiterHold(true);
@@ -314,6 +331,7 @@ static bool selectDisplaySPI() {
   SPI.end();  // иначе begin() не переконфигурирует пины (ESP32 Arduino)
   delay(5);
   SPI.begin(EINK_SCLK, -1, EINK_MOSI, EINK_CS);  // -1 = MISO не используется (3-wire E-Ink)
+  applyBusyPinMode();  // re-assert BUSY pull each session; other drivers/tasks may alter pin mode.
   return true;
 }
 static void releaseDisplaySPI() {
@@ -352,15 +370,18 @@ void displayInit() {
 
   // Meshtastic: detect display BEFORE starting SPI (einkDetect.h)
   EInkModel model = detectEInk();
+  s_einkModelDetected = model;
 #if defined(USE_EINK_FORCE_BN)
   model = EINK_FC1;
+  s_einkModelDetected = model;
 #elif defined(USE_EINK_FORCE_B73)
   model = EINK_E0213A367;
+  s_einkModelDetected = model;
 #endif
 
   pinMode(EINK_CS, OUTPUT);   // иначе __digitalWrite: IO 4 is not set as GPIO (Arduino 3.x)
   pinMode(EINK_DC, OUTPUT);
-  pinMode(EINK_BUSY, INPUT);
+  applyBusyPinMode();
   pinMode(EINK_RST, OUTPUT);
 
 #if defined(ESP32)
@@ -425,8 +446,8 @@ void displayInit() {
     dispB73->setTextColor(GxEPD_BLACK);
     dispB73->setTextSize(1);
     dispB73->cp437(true);
-    // E0213A367: BUSY=HIGH когда занят; pull-down при idle — иначе плавающий пин даёт зависание
-    pinMode(EINK_BUSY, INPUT_PULLDOWN);
+    // Keep BUSY pull enforced for active-high panel.
+    applyBusyPinMode();
     Serial.println("[RiftLink] E-Ink display refresh (~3-5s)...");
     dispB73->display(false);
     Serial.println("[RiftLink] E-Ink display ok");

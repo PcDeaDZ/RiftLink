@@ -1,0 +1,213 @@
+import 'dart:async';
+
+import '../ble/riftlink_ble.dart';
+import '../contacts/contacts_service.dart';
+import 'chat_models.dart';
+import 'chat_repository.dart';
+
+class ChatEventIngestor {
+  final RiftLinkBle ble;
+  final ChatRepository repo;
+  StreamSubscription<RiftLinkEvent>? _sub;
+  final Set<String> _dedup = <String>{};
+
+  ChatEventIngestor({
+    required this.ble,
+    required this.repo,
+  });
+
+  Future<void> start() async {
+    await repo.init();
+    _sub?.cancel();
+    _sub = ble.events.listen(_handle);
+  }
+
+  Future<void> stop() async {
+    await _sub?.cancel();
+    _sub = null;
+  }
+
+  String _normalizeId(String raw) => raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+
+  Future<String> _titleFromId(String id) async {
+    final n = _normalizeId(id);
+    if (n.isEmpty) return id;
+    final nick = await ContactsService.getNickname(n);
+    if (nick != null && nick.isNotEmpty) return nick;
+    return n.length > 8 ? n.substring(0, 8) : n;
+  }
+
+  Future<void> _ensureConversationForDirect(String peerId) async {
+    final n = _normalizeId(peerId);
+    final id = ChatRepository.directConversationId(n);
+    final title = await _titleFromId(n);
+    await repo.ensureConversation(
+      id: id,
+      kind: ConversationKind.direct,
+      peerRef: n,
+      title: title,
+    );
+  }
+
+  Future<void> _ensureConversationForGroup(int groupId) async {
+    final id = ChatRepository.groupConversationId(groupId);
+    await repo.ensureConversation(
+      id: id,
+      kind: ConversationKind.group,
+      peerRef: '$groupId',
+      title: 'Group $groupId',
+    );
+  }
+
+  Future<void> _ensureBroadcastConversation() async {
+    final id = ChatRepository.broadcastConversationId();
+    await repo.ensureConversation(
+      id: id,
+      kind: ConversationKind.broadcast,
+      peerRef: 'broadcast',
+      title: 'Broadcast',
+    );
+  }
+
+  Future<void> _handle(RiftLinkEvent event) async {
+    if (event is RiftLinkMsgEvent) {
+      final from = _normalizeId(event.from);
+      final dedupKey = 'msg:$from:${event.msgId ?? -1}:${event.text.hashCode}';
+      if (!_dedup.add(dedupKey)) return;
+
+      final conversationId = ChatRepository.directConversationId(from);
+      await _ensureConversationForDirect(from);
+      await repo.appendMessage(
+        ChatMessage(
+          conversationId: conversationId,
+          from: from,
+          text: event.text,
+          type: event.type,
+          lane: event.lane,
+          direction: MessageDirection.incoming,
+          status: MessageStatus.delivered,
+          createdAtMs: DateTime.now().millisecondsSinceEpoch,
+          msgId: event.msgId,
+          rssi: event.rssi,
+          deleteAtMs: event.ttlMinutes != null && event.ttlMinutes! > 0
+              ? DateTime.now().add(Duration(minutes: event.ttlMinutes!)).millisecondsSinceEpoch
+              : null,
+        ),
+        incrementUnread: true,
+      );
+      return;
+    }
+
+    if (event is RiftLinkSentEvent) {
+      final to = _normalizeId(event.to);
+      final conversationId = to == 'FFFFFFFFFFFFFFFF'
+          ? ChatRepository.broadcastConversationId()
+          : ChatRepository.directConversationId(to);
+      if (to == 'FFFFFFFFFFFFFFFF') {
+        await _ensureBroadcastConversation();
+      } else {
+        await _ensureConversationForDirect(to);
+      }
+      await repo.updateByMsgId(
+        msgId: event.msgId,
+        conversationId: conversationId,
+        status: MessageStatus.sent,
+      );
+      return;
+    }
+
+    if (event is RiftLinkDeliveredEvent) {
+      final from = _normalizeId(event.from);
+      final conversationId = ChatRepository.directConversationId(from);
+      await _ensureConversationForDirect(from);
+      await repo.updateByMsgId(
+        msgId: event.msgId,
+        conversationId: conversationId,
+        status: MessageStatus.delivered,
+      );
+      return;
+    }
+
+    if (event is RiftLinkReadEvent) {
+      final from = _normalizeId(event.from);
+      final conversationId = ChatRepository.directConversationId(from);
+      await _ensureConversationForDirect(from);
+      await repo.updateByMsgId(
+        msgId: event.msgId,
+        conversationId: conversationId,
+        status: MessageStatus.read,
+      );
+      return;
+    }
+
+    if (event is RiftLinkUndeliveredEvent) {
+      final to = _normalizeId(event.to);
+      final conversationId = to == 'FFFFFFFFFFFFFFFF'
+          ? ChatRepository.broadcastConversationId()
+          : ChatRepository.directConversationId(to);
+      await repo.updateByMsgId(
+        msgId: event.msgId,
+        conversationId: conversationId,
+        status: MessageStatus.undelivered,
+        delivered: event.delivered,
+        total: event.total,
+      );
+      return;
+    }
+
+    if (event is RiftLinkBroadcastDeliveryEvent) {
+      final conversationId = ChatRepository.broadcastConversationId();
+      await _ensureBroadcastConversation();
+      await repo.updateByMsgId(
+        msgId: event.msgId,
+        conversationId: conversationId,
+        status: event.delivered > 0 ? MessageStatus.delivered : MessageStatus.undelivered,
+        delivered: event.delivered,
+        total: event.total,
+      );
+      return;
+    }
+
+    if (event is RiftLinkVoiceEvent) {
+      final from = _normalizeId(event.from);
+      final conversationId = ChatRepository.directConversationId(from);
+      await _ensureConversationForDirect(from);
+      await repo.appendMessage(
+        ChatMessage(
+          conversationId: conversationId,
+          from: from,
+          text: 'Voice message',
+          type: 'voice',
+          direction: MessageDirection.incoming,
+          status: MessageStatus.delivered,
+          createdAtMs: DateTime.now().millisecondsSinceEpoch,
+        ),
+        incrementUnread: true,
+      );
+      return;
+    }
+
+    if (event is RiftLinkLocationEvent) {
+      final from = _normalizeId(event.from);
+      final conversationId = ChatRepository.directConversationId(from);
+      await _ensureConversationForDirect(from);
+      await repo.appendMessage(
+        ChatMessage(
+          conversationId: conversationId,
+          from: from,
+          text: '${event.lat.toStringAsFixed(5)}, ${event.lon.toStringAsFixed(5)}',
+          type: 'location',
+          direction: MessageDirection.incoming,
+          status: MessageStatus.delivered,
+          createdAtMs: DateTime.now().millisecondsSinceEpoch,
+        ),
+        incrementUnread: true,
+      );
+      return;
+    }
+
+    // Do not auto-create chats from node info/groups snapshots.
+    // We only create conversations by explicit user action or real messages.
+  }
+}
+

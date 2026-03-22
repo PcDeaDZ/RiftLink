@@ -306,6 +306,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           .where((id) => id.length == 16)
           .map((id) {
         final existing = _contacts.where((c) => c.id == id).firstOrNull;
+        final hasNick = existing != null && existing.nickname.isNotEmpty;
         return Material(
           color: p.surfaceVariant.withOpacity(0.85),
           borderRadius: BorderRadius.circular(AppRadius.md),
@@ -315,9 +316,9 @@ class _ContactsScreenState extends State<ContactsScreen> {
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
               child: Text(
-                existing != null && existing.nickname.isNotEmpty ? '${existing.nickname} · $id' : id,
+                hasNick ? existing!.nickname : id,
                 style: AppTypography.chipBase().copyWith(
-                  fontFamily: 'monospace',
+                  fontFamily: hasNick ? null : 'monospace',
                   fontWeight: FontWeight.w500,
                   fontSize: 12.5,
                   color: p.onSurface,

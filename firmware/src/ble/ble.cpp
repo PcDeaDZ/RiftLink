@@ -193,6 +193,11 @@ static bool parseFullNodeIdHex(const char* hexId, uint8_t out[protocol::NODE_ID_
   return true;
 }
 
+static void nodeIdToHex(const uint8_t in[protocol::NODE_ID_LEN], char out[17]) {
+  for (int i = 0; i < protocol::NODE_ID_LEN; i++) snprintf(out + i * 2, 3, "%02X", in[i]);
+  out[16] = '\0';
+}
+
 static inline void scheduleInfoNotify(uint32_t delayMs = 0) {
   s_pendingInfo = true;
   s_pendingInfoNotBeforeMs = millis() + delayMs;
@@ -895,9 +900,29 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       uint32_t gid = doc["group"] | 0;
       const char* keyB64 = doc["key"];
       uint16_t keyVersion = (uint16_t)(doc["keyVersion"] | 0);
+      const char* ownerHex = doc["owner"];
+      const char* adminCapHex = doc["adminCap"];
+      uint8_t ownerId[protocol::NODE_ID_LEN];
+      const uint8_t* ownerPtr = nullptr;
+      uint8_t adminCap[8];
+      const uint8_t* adminCapPtr = nullptr;
       if (gid == 0 || !keyB64 || !keyB64[0]) {
         ble::notifyError("group_key_bad", "Missing group/key");
         return;
+      }
+      if (ownerHex && ownerHex[0]) {
+        if (!parseFullNodeIdHex(ownerHex, ownerId)) {
+          ble::notifyError("group_owner_bad", "owner must be full 16 hex node id");
+          return;
+        }
+        ownerPtr = ownerId;
+      }
+      if (adminCapHex && adminCapHex[0]) {
+        if (!parseFullNodeIdHex(adminCapHex, adminCap)) {
+          ble::notifyError("group_admin_cap_bad", "adminCap must be 16 hex chars");
+          return;
+        }
+        adminCapPtr = adminCap;
       }
       size_t decLen = 0;
       uint8_t key[32];
@@ -905,8 +930,8 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         ble::notifyError("group_key_bad", "Bad group key");
         return;
       }
-      if (!groups::setGroupKey(gid, key, keyVersion)) {
-        ble::notifyError("group_key_set_failed", "Failed to set group key");
+      if (!groups::setGroupKey(gid, key, keyVersion, ownerPtr, adminCapPtr)) {
+        ble::notifyError("group_key_set_denied", "Failed to set group key (owner/admin required)");
         return;
       }
       s_pendingGroups = true;
@@ -915,8 +940,48 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     }
     if (strcmp(cmd, "clearGroupKey") == 0) {
       uint32_t gid = doc["group"] | 0;
-      if (gid == 0 || !groups::clearGroupKey(gid)) {
+      const char* adminCapHex = doc["adminCap"];
+      uint8_t adminCap[8];
+      const uint8_t* adminCapPtr = nullptr;
+      if (adminCapHex && adminCapHex[0]) {
+        if (!parseFullNodeIdHex(adminCapHex, adminCap)) {
+          ble::notifyError("group_admin_cap_bad", "adminCap must be 16 hex chars");
+          return;
+        }
+        adminCapPtr = adminCap;
+      }
+      if (gid == 0 || !groups::clearGroupKey(gid, adminCapPtr)) {
         ble::notifyError("group_key_clear_failed", "Failed to clear group key");
+        return;
+      }
+      s_pendingGroups = true;
+      scheduleInfoNotify();
+      return;
+    }
+    if (strcmp(cmd, "setGroupAdminCap") == 0) {
+      uint32_t gid = doc["group"] | 0;
+      const char* adminCapHex = doc["adminCap"];
+      uint8_t adminCap[8];
+      if (gid == 0 || !adminCapHex || !adminCapHex[0]) {
+        ble::notifyError("group_admin_cap_bad", "Missing group/adminCap");
+        return;
+      }
+      if (!parseFullNodeIdHex(adminCapHex, adminCap)) {
+        ble::notifyError("group_admin_cap_bad", "adminCap must be 16 hex chars");
+        return;
+      }
+      if (!groups::setGroupAdminCapability(gid, adminCap)) {
+        ble::notifyError("group_admin_cap_set_failed", "Failed to set group admin capability");
+        return;
+      }
+      s_pendingGroups = true;
+      scheduleInfoNotify();
+      return;
+    }
+    if (strcmp(cmd, "clearGroupAdminCap") == 0) {
+      uint32_t gid = doc["group"] | 0;
+      if (gid == 0 || !groups::clearGroupAdminCapability(gid)) {
+        ble::notifyError("group_admin_cap_clear_failed", "Failed to clear group admin capability");
         return;
       }
       s_pendingGroups = true;
@@ -1465,11 +1530,23 @@ void notifyInfo() {
   JsonArray grpArr = doc["groups"].to<JsonArray>();
   JsonArray grpPrivArr = doc["groupsPrivate"].to<JsonArray>();
   JsonArray grpVerArr = doc["groupsKeyVersion"].to<JsonArray>();
+  JsonArray grpOwnerArr = doc["groupsOwner"].to<JsonArray>();
+  JsonArray grpCanRotateArr = doc["groupsCanRotate"].to<JsonArray>();
   int ng = groups::getCount();
+  uint8_t ownerId[protocol::NODE_ID_LEN];
+  char ownerHex[17] = {0};
   for (int i = 0; i < ng; i++) {
-    grpArr.add((uint32_t)groups::getId(i));
+    const uint32_t gid = groups::getId(i);
+    grpArr.add(gid);
     grpPrivArr.add(groups::isPrivateAt(i));
     grpVerArr.add((uint32_t)groups::keyVersionAt(i));
+    if (groups::getGroupOwner(gid, ownerId)) {
+      nodeIdToHex(ownerId, ownerHex);
+      grpOwnerArr.add(ownerHex);
+    } else {
+      grpOwnerArr.add((const char*)nullptr);
+    }
+    grpCanRotateArr.add(groups::canRotateAt(i));
   }
 
   JsonArray arr = doc["neighbors"].to<JsonArray>();
@@ -1597,14 +1674,26 @@ void notifyGroups() {
   JsonArray arr = doc["groups"].to<JsonArray>();
   JsonArray arrPriv = doc["groupsPrivate"].to<JsonArray>();
   JsonArray arrVer = doc["groupsKeyVersion"].to<JsonArray>();
+  JsonArray arrOwner = doc["groupsOwner"].to<JsonArray>();
+  JsonArray arrCanRotate = doc["groupsCanRotate"].to<JsonArray>();
   int n = groups::getCount();
+  uint8_t ownerId[protocol::NODE_ID_LEN];
+  char ownerHex[17] = {0};
   for (int i = 0; i < n; i++) {
-    arr.add((uint32_t)groups::getId(i));
+    const uint32_t gid = groups::getId(i);
+    arr.add(gid);
     arrPriv.add(groups::isPrivateAt(i));
     arrVer.add((uint32_t)groups::keyVersionAt(i));
+    if (groups::getGroupOwner(gid, ownerId)) {
+      nodeIdToHex(ownerId, ownerHex);
+      arrOwner.add(ownerHex);
+    } else {
+      arrOwner.add((const char*)nullptr);
+    }
+    arrCanRotate.add(groups::canRotateAt(i));
   }
 
-  char buf[120];
+  char buf[260];
   size_t len = serializeJson(doc, buf);
   notifyJsonToApp(buf, len);
 }

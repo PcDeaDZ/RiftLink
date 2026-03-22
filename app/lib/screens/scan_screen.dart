@@ -20,7 +20,9 @@ import '../theme/theme_notifier.dart';
 import '../recent_devices/recent_devices_service.dart';
 import '../wifi/mdns_discovery.dart';
 import '../widgets/rift_dialogs.dart';
-import 'chat_screen.dart';
+import '../chat/chat_repository.dart';
+import '../contacts/contacts_service.dart';
+import 'chats_list_screen.dart';
 import 'debug_screen.dart';
 
 class ScanScreen extends StatefulWidget {
@@ -93,6 +95,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
   Timer? _wifiActionFlashTimer;
   bool _wifiIpTouched = false;
   Map<String, WifiDeviceMeta> _wifiMeta = {};
+  Map<String, String> _nickById = const {};
 
   @override
   void initState() {
@@ -101,6 +104,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
     _wifiIpController.addListener(_onWifiIpChanged);
     _bindConnectivity();
     _loadRecent();
+    _loadContactNicknames();
     _loadRecentWifiIps();
     _loadMeshPrefs();
     if (widget.initialMessage != null) {
@@ -184,6 +188,16 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
   Future<void> _loadRecent() async {
     final list = await RecentDevicesService.load();
     if (mounted) setState(() => _recent = list);
+  }
+
+  Future<void> _loadContactNicknames() async {
+    final contacts = await ContactsService.load();
+    if (!mounted) return;
+    setState(() => _nickById = ContactsService.buildNicknameMap(contacts));
+  }
+
+  String _displayNodeLabel(String nodeId) {
+    return ContactsService.displayNodeLabel(nodeId, _nickById);
   }
 
   Future<void> _loadRecentWifiIps() async {
@@ -377,7 +391,8 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
         final rid = device.remoteId.toString();
         final nodeKey = RiftLinkBle.nodeIdHintFromDevice(device) ?? rid;
         unawaited(RecentDevicesService.addOrUpdate(remoteId: rid, nodeId: nodeKey, nickname: null));
-        Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => ChatScreen(ble: bleClient)));
+        await ChatRepository.instance.clearAll();
+        await appPushReplacement(context, ChatsListScreen(ble: bleClient));
       } else {
         setState(() { _error = context.l10n.tr('ble_no_service'); _connectingToRemoteId = null; _connectingToDeviceName = null; });
       }
@@ -419,7 +434,8 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
           final updated = await RecentDevicesService.loadRecentWifiIps();
           if (mounted) setState(() => _recentWifiIps = updated);
         }
-        Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => ChatScreen(ble: bleClient)));
+        await ChatRepository.instance.clearAll();
+        await appPushReplacement(context, ChatsListScreen(ble: bleClient));
       } else {
         setState(() => _error = context.l10n.tr('wifi_connect_failed'));
       }
@@ -434,7 +450,11 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
   void _connectToRecent(RecentDevice dev, {String? displayLabel}) {
     final name = (displayLabel != null && displayLabel.isNotEmpty)
         ? displayLabel
-        : (dev.displayName.isNotEmpty ? dev.displayName : dev.nodeId.isNotEmpty ? dev.nodeId : dev.remoteId);
+        : (dev.displayName.isNotEmpty
+            ? dev.displayName
+            : dev.nodeId.isNotEmpty
+                ? _displayNodeLabel(dev.nodeId)
+                : dev.remoteId);
     final connectName = name.isNotEmpty ? name : dev.remoteId;
     _startScan(connectToRemoteId: dev.remoteId, connectToDeviceName: connectName);
   }
@@ -546,7 +566,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
             _titleTapCount++;
             if (_titleTapCount >= 5) {
               _titleTapCount = 0;
-              Navigator.push(context, MaterialPageRoute(builder: (_) => const DebugScreen()));
+              appPush(context, const DebugScreen());
             }
           },
           child: Text(l10n.tr('app_title')),
@@ -708,7 +728,13 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                                     if (name.isEmpty) {
                                       final norm = (String s) => s.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
                                       final d = _recent.where((x) => norm(x.remoteId) == norm(rid)).firstOrNull;
-                                      name = d != null ? (d.displayName.isNotEmpty ? d.displayName : d.nodeId.isNotEmpty ? d.nodeId : d.remoteId) : '';
+                                      name = d != null
+                                          ? (d.displayName.isNotEmpty
+                                              ? d.displayName
+                                              : d.nodeId.isNotEmpty
+                                                  ? _displayNodeLabel(d.nodeId)
+                                                  : d.remoteId)
+                                          : '';
                                     }
                                     if (name.isEmpty) name = rid.length > 16 ? rid.substring(rid.length - 16) : rid;
                                     if (name.isEmpty) name = l10n.tr('device');
@@ -999,7 +1025,10 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                           final i = e.key;
                           final d = e.value;
                           final isConnecting = _connectingToRemoteId == d.remoteId;
-                          final label = d.displayName.isNotEmpty ? d.displayName : (d.nodeId.isNotEmpty ? d.nodeId : d.remoteId);
+                          final hasNick = d.nodeId.isNotEmpty && _displayNodeLabel(d.nodeId) != d.nodeId.toUpperCase();
+                          final label = d.displayName.isNotEmpty
+                              ? d.displayName
+                              : (d.nodeId.isNotEmpty ? _displayNodeLabel(d.nodeId) : d.remoteId);
                           return Padding(
                             padding: EdgeInsets.only(bottom: i < _recent.length - 1 ? AppSpacing.sm : 0),
                             child: Dismissible(
@@ -1034,7 +1063,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                               child: _DeviceCard(
                                 icon: Icons.bluetooth,
                                 title: label,
-                                subtitle: d.displayName != d.nodeId ? d.nodeId : null,
+                                subtitle: hasNick ? null : (d.displayName != d.nodeId ? d.nodeId : null),
                                 isLoading: isConnecting,
                                 showDelete: false,
                                 onTap: _scanning ? null : () {

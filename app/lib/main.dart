@@ -8,6 +8,8 @@ import 'l10n/app_localizations.dart';
 import 'locale_notifier.dart';
 import 'notifications/local_notifications_service.dart';
 import 'screens/scan_screen.dart';
+import 'chat/chat_event_ingestor.dart';
+import 'chat/chat_repository.dart';
 import 'theme/app_theme.dart';
 import 'theme/theme_notifier.dart';
 
@@ -30,10 +32,14 @@ class RiftLinkApp extends StatefulWidget {
 
 class _RiftLinkAppState extends State<RiftLinkApp> {
   final RiftLinkBle _ble = RiftLinkBle();
+  ChatEventIngestor? _ingestor;
 
   @override
   void initState() {
     super.initState();
+    ChatRepository.instance.init();
+    _ingestor = ChatEventIngestor(ble: _ble, repo: ChatRepository.instance);
+    _ingestor!.start();
     themeModeNotifier.addListener(_onSettingsChanged);
     localeNotifier.addListener(_onSettingsChanged);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -65,6 +71,7 @@ class _RiftLinkAppState extends State<RiftLinkApp> {
 
   @override
   void dispose() {
+    _ingestor?.stop();
     themeModeNotifier.removeListener(_onSettingsChanged);
     localeNotifier.removeListener(_onSettingsChanged);
     super.dispose();

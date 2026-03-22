@@ -665,9 +665,11 @@ static SemaphoreHandle_t s_displaySpiDone = nullptr;
 static std::atomic<bool> s_displaySpiRequested{false};
 static std::atomic<bool> s_displaySpiSessionActive{false};
 static std::atomic<uint32_t> s_displaySpiRetryNotBeforeMs{0};
+static std::atomic<uint32_t> s_displaySpiSessionStartMs{0};
 static std::atomic<uint32_t> s_displayGrantCount{0};
 static std::atomic<uint32_t> s_displayDoneCount{0};
 static std::atomic<uint32_t> s_displaySkipBusyCount{0};
+static std::atomic<uint32_t> s_displayForceDoneCount{0};
 
 bool asyncRequestDisplaySpiSession(TickType_t timeoutTicks) {
   if (!s_displaySpiGranted || !s_displaySpiDone) {
@@ -708,6 +710,7 @@ static constexpr uint32_t FSM_TX_PREEMPT_BUDGET_MS = 1800;
 static constexpr uint32_t FSM_RX_DUP_LOG_INTERVAL_MS = 500;
 static constexpr uint8_t FSM_RX_DUP_REARM_THRESHOLD = 6;
 static constexpr uint32_t FSM_RX_IRQ_SILENCE_REARM_MS = 5000;
+static constexpr uint32_t FSM_DISPLAY_HOLD_MAX_MS = 1500;
 
 static const char* fsmStateName(RadioFsmState s) {
   switch (s) {
@@ -854,12 +857,13 @@ static void radioSchedulerTask(void* arg) {
         RIFTLINK_DIAG("FSM", "event=FSM_STATS recovery=%lu tx_wait_to_air_max_ms=%lu rx_event_to_handle_max_ms=%lu",
             (unsigned long)fsmRecoveryCount, (unsigned long)txWaitToAirMaxMs, (unsigned long)rxEventToHandleMaxMs);
 #if defined(USE_EINK)
-        RIFTLINK_DIAG("FSM", "event=FSM_HOLD_STATS requested=%u active=%u grant=%lu done=%lu skip_busy=%lu",
+        RIFTLINK_DIAG("FSM", "event=FSM_HOLD_STATS requested=%u active=%u grant=%lu done=%lu skip_busy=%lu force_done=%lu",
             (unsigned)s_displaySpiRequested.load(std::memory_order_relaxed),
             (unsigned)s_displaySpiSessionActive.load(std::memory_order_relaxed),
             (unsigned long)s_displayGrantCount.load(std::memory_order_relaxed),
             (unsigned long)s_displayDoneCount.load(std::memory_order_relaxed),
-            (unsigned long)s_displaySkipBusyCount.load(std::memory_order_relaxed));
+            (unsigned long)s_displaySkipBusyCount.load(std::memory_order_relaxed),
+            (unsigned long)s_displayForceDoneCount.load(std::memory_order_relaxed));
 #endif
       }
     }
@@ -883,6 +887,7 @@ static void radioSchedulerTask(void* arg) {
             radio::standbyChipUnderMutex();
             radio::releaseMutex();
             s_displaySpiSessionActive.store(true, std::memory_order_release);
+            s_displaySpiSessionStartMs.store(nowDisplay, std::memory_order_relaxed);
             s_displayGrantCount.fetch_add(1, std::memory_order_relaxed);
             if (useFsmV2) fsmTransition(&fsmState, RadioFsmState::DisplayHold, "display_grant");
             xSemaphoreGive(s_displaySpiGranted);
@@ -902,12 +907,31 @@ static void radioSchedulerTask(void* arg) {
       }
       if (displaySessionActive && xSemaphoreTake(s_displaySpiDone, 0) == pdTRUE) {
         s_displaySpiSessionActive.store(false, std::memory_order_release);
+        s_displaySpiSessionStartMs.store(0, std::memory_order_relaxed);
         s_displayDoneCount.fetch_add(1, std::memory_order_relaxed);
         if (useFsmV2) {
           RIFTLINK_DIAG("FSM", "event=FSM_HOLD source=display done=1");
           fsmTransition(&fsmState, RadioFsmState::RXListen, "display_done");
         }
         displaySessionActive = false;
+      }
+      if (displaySessionActive) {
+        uint32_t startedMs = s_displaySpiSessionStartMs.load(std::memory_order_relaxed);
+        uint32_t holdMs = startedMs ? (nowDisplay - startedMs) : 0;
+        if (startedMs != 0 && holdMs > FSM_DISPLAY_HOLD_MAX_MS) {
+          // Hard guard: recover radio scheduler if display path got stuck and never sends done.
+          radio::setArbiterHold(false);
+          s_displaySpiRequested.store(false, std::memory_order_release);
+          s_displaySpiSessionActive.store(false, std::memory_order_release);
+          s_displaySpiSessionStartMs.store(0, std::memory_order_relaxed);
+          s_displayForceDoneCount.fetch_add(1, std::memory_order_relaxed);
+          RIFTLINK_DIAG("FSM", "event=FSM_HOLD_FORCE_RELEASE hold_ms=%lu max_ms=%u",
+              (unsigned long)holdMs, (unsigned)FSM_DISPLAY_HOLD_MAX_MS);
+          if (useFsmV2) {
+            fsmTransition(&fsmState, RadioFsmState::RXListen, "display_force_release");
+          }
+          displaySessionActive = false;
+        }
       }
       if (displaySessionActive) {
         // Do not compete for radio mutex while display session owns SPI path.

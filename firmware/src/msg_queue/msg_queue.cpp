@@ -408,11 +408,14 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
         return false;
       }
       if (s_onBroadcastSent) s_onBroadcastSent(bcMsgId);
-      queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));
-      if (BROADCAST_DEFERRED_COPIES >= 2)
-        queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));
-      if (BROADCAST_DEFERRED_COPIES >= 3)
-        queueDeferredSend(pkt, len, sf, 800 + (esp_random() % 150));
+      const int neighCount = neighbors::getCount();
+      // 2-node case (one neighbor): extra broadcast copies mostly collide with return ACK/ECHO.
+      // Keep only primary TX to maximize delivery-status reliability.
+      int deferredCopies = BROADCAST_DEFERRED_COPIES;
+      if (neighCount <= 1) deferredCopies = 1;
+      if (deferredCopies >= 2) queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));
+      if (deferredCopies >= 3) queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));
+      if (deferredCopies >= 4) queueDeferredSend(pkt, len, sf, 800 + (esp_random() % 150));
       return true;
     }
     return false;
@@ -478,11 +481,12 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
       return false;
     }
     if (s_onBroadcastSent) s_onBroadcastSent(bcMsgId);
-    queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));
-    if (BROADCAST_DEFERRED_COPIES >= 2)
-      queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));
-    if (BROADCAST_DEFERRED_COPIES >= 3)
-      queueDeferredSend(pkt, len, sf, 800 + (esp_random() % 150));
+    const int neighCount = neighbors::getCount();
+    int deferredCopies = BROADCAST_DEFERRED_COPIES;
+    if (neighCount <= 1) deferredCopies = 1;
+    if (deferredCopies >= 2) queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));
+    if (deferredCopies >= 3) queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));
+    if (deferredCopies >= 4) queueDeferredSend(pkt, len, sf, 800 + (esp_random() % 150));
     return true;
   }
   return false;
