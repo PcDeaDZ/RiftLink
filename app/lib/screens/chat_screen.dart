@@ -41,6 +41,7 @@ class ChatScreen extends StatefulWidget {
   final String? conversationId;
   final String? initialPeerId;
   final int? initialGroupId;
+  final String? initialGroupUid;
   final bool initialBroadcast;
 
   const ChatScreen({
@@ -49,6 +50,7 @@ class ChatScreen extends StatefulWidget {
     this.conversationId,
     this.initialPeerId,
     this.initialGroupId,
+    this.initialGroupUid,
     this.initialBroadcast = false,
   });
   @override
@@ -87,6 +89,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   List<int> _groups = [];
   Map<String, String> _contactNicknames = {};
   int _group = 0;
+  String? _groupUid;
   String? _unicastTo;
   bool _locationLoading = false;
   bool _voiceRecording = false;
@@ -139,29 +142,90 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   String _normalizeId(String raw) =>
       raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
 
+  int _resolveGroupIdByUid(String groupUid) {
+    final uid = groupUid.trim().toUpperCase();
+    if (uid.isEmpty) return 0;
+    final info = widget.ble.lastInfo;
+    if (info == null) return 0;
+    for (final g in info.groupsV2) {
+      if (g.groupUid.toUpperCase() == uid) return g.channelId32;
+    }
+    return 0;
+  }
+
+  String? _groupUidByChannel(int channelId32) {
+    final info = widget.ble.lastInfo;
+    if (info == null) return null;
+    for (final g in info.groupsV2) {
+      if (g.channelId32 == channelId32 && g.groupUid.trim().isNotEmpty) {
+        return g.groupUid.toUpperCase();
+      }
+    }
+    return null;
+  }
+
+  RiftLinkGroupV2Info? _activeGroupV2Info() {
+    final info = widget.ble.lastInfo;
+    if (info == null) return null;
+    final uid = _groupUid?.trim().toUpperCase();
+    if (uid != null && uid.isNotEmpty) {
+      for (final g in info.groupsV2) {
+        if (g.groupUid.toUpperCase() == uid) return g;
+      }
+    }
+    if (_group > 1) {
+      for (final g in info.groupsV2) {
+        if (g.channelId32 == _group) return g;
+      }
+    }
+    return null;
+  }
+
   Future<void> _initConversationContext() async {
     if (widget.conversationId != null && widget.conversationId!.isNotEmpty) {
       _conversationId = widget.conversationId;
       if (_conversationId!.startsWith('direct:')) {
         _unicastTo = _conversationId!.substring('direct:'.length);
         _group = 0;
-      } else if (_conversationId!.startsWith('group:')) {
-        _group = int.tryParse(_conversationId!.substring('group:'.length)) ?? 0;
+        _groupUid = null;
+      } else if (_conversationId!.startsWith('groupv2:')) {
+        _groupUid = _conversationId!.substring('groupv2:'.length).toUpperCase();
+        _group = _resolveGroupIdByUid(_groupUid!);
         _unicastTo = null;
       } else {
         _group = 0;
+        _groupUid = null;
         _unicastTo = null;
       }
     } else if (widget.initialPeerId != null && widget.initialPeerId!.isNotEmpty) {
       _unicastTo = _normalizeId(widget.initialPeerId!);
       _group = 0;
+      _groupUid = null;
       _conversationId = ChatRepository.directConversationId(_unicastTo!);
+    } else if (widget.initialGroupUid != null && widget.initialGroupUid!.trim().isNotEmpty) {
+      _groupUid = widget.initialGroupUid!.trim().toUpperCase();
+      _group = _resolveGroupIdByUid(_groupUid!);
+      _unicastTo = null;
+      _conversationId = ChatRepository.groupConversationIdByUid(_groupUid!);
     } else if (widget.initialGroupId != null && widget.initialGroupId! > 0) {
       _group = widget.initialGroupId!;
+      _groupUid = null;
+      final info = widget.ble.lastInfo;
+      if (info != null) {
+        for (final g in info.groupsV2) {
+          if (g.channelId32 == _group && g.groupUid.trim().isNotEmpty) {
+            _groupUid = g.groupUid.toUpperCase();
+            break;
+          }
+        }
+      }
       _unicastTo = null;
-      _conversationId = ChatRepository.groupConversationId(_group);
+      _conversationId = (_groupUid != null && _groupUid!.isNotEmpty)
+          ? ChatRepository.groupConversationIdByUid(_groupUid!)
+          : ChatRepository.groupConversationIdByUid('UNRESOLVED_${_group}');
     } else if (widget.initialBroadcast) {
       _group = 0;
+      _groupUid = null;
       _unicastTo = null;
       _conversationId = ChatRepository.broadcastConversationId();
     }
@@ -171,14 +235,16 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       id: _conversationId!,
       kind: _conversationId!.startsWith('direct:')
           ? ConversationKind.direct
-          : _conversationId!.startsWith('group:')
+          : _conversationId!.startsWith('groupv2:')
               ? ConversationKind.group
               : ConversationKind.broadcast,
-      peerRef: _conversationId!.split(':').last,
+      peerRef: _conversationId!.startsWith('groupv2:')
+          ? ChatRepository.groupPeerRefByUid(_conversationId!.substring('groupv2:'.length))
+          : _conversationId!.split(':').last,
       title: _conversationId!.startsWith('direct:')
           ? _conversationId!.substring('direct:'.length)
-          : _conversationId!.startsWith('group:')
-              ? 'Group ${_conversationId!.substring('group:'.length)}'
+          : _conversationId!.startsWith('groupv2:')
+              ? 'Group ${_group > 0 ? _group : (_groupUid ?? '')}'
               : 'Broadcast',
     );
     final draft = await _chatRepo.getDraft(_conversationId!);
@@ -225,7 +291,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   String _activeConversationId() {
     if (_conversationId != null && _conversationId!.isNotEmpty) return _conversationId!;
-    if (_group > 0) return ChatRepository.groupConversationId(_group);
+    if (_groupUid != null && _groupUid!.isNotEmpty) {
+      return ChatRepository.groupConversationIdByUid(_groupUid!);
+    }
+    if (_group > 0) return ChatRepository.groupConversationIdByUid('UNRESOLVED_$_group');
     if (_unicastTo != null && _unicastTo!.isNotEmpty) {
       return ChatRepository.directConversationId(_normalizeId(_unicastTo!));
     }
@@ -707,6 +776,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                     setState(() {
                       _unicastTo = null;
                       _group = gid;
+                      _groupUid = _groupUidByChannel(gid);
                     });
                   },
                 ),
@@ -752,6 +822,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                     setState(() {
                       _unicastTo = _normNodeId(_unicastTo ?? '') == idNorm ? null : idNorm;
                       _group = 0;
+                      _groupUid = null;
                     });
                   },
                   onLongPress: hasKey ? () => _showAddContactDialog(idNorm) : null,
@@ -777,6 +848,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                     setState(() {
                       _unicastTo = id;
                       _group = 0;
+                      _groupUid = null;
                     });
                   },
                   onLongPress: () => _showAddContactDialog(id),
@@ -845,6 +917,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                               setState(() {
                                 _unicastTo = null;
                                 _group = 0;
+                                _groupUid = null;
                               });
                             },
                           ),
@@ -926,6 +999,34 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     final bn = _normNodeId(b);
     if (an.isEmpty || bn.isEmpty) return false;
     return an == bn;
+  }
+
+  bool _isGroupOrBroadcastMsg(_Msg m) {
+    return m.to == null || _sameNodeId(m.to, _broadcastTo);
+  }
+
+  String _outgoingStatusBadge(_Msg m) {
+    final isGroupOrBroadcast = _isGroupOrBroadcastMsg(m);
+    if (isGroupOrBroadcast) {
+      // Requested UX model:
+      // X = delivered to nobody, cloud = in progress, check = delivered to at least one.
+      if (m.status == _St.undelivered) return '✗';
+      if (m.status == _St.delivered || m.status == _St.read) return '✓';
+      return '☁';
+    }
+    if (m.status == _St.undelivered) return '✗';
+    if (m.status == _St.read) return '✓✓';
+    if (m.status == _St.delivered) return '✓✓';
+    return '✓';
+  }
+
+  Color _outgoingStatusColor(_Msg m) {
+    if (m.status == _St.undelivered) return context.palette.error;
+    final isGroupOrBroadcast = _isGroupOrBroadcastMsg(m);
+    if (isGroupOrBroadcast && (m.status != _St.delivered && m.status != _St.read)) {
+      return context.palette.onSurfaceVariant;
+    }
+    return (m.status == _St.read) ? context.palette.primary : context.palette.onSurfaceVariant;
   }
 
   void _cleanupStaleVoiceAssemblies() {
@@ -1109,7 +1210,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       if (_batteryPercent != null && _batteryPercent! <= 15) {
         LocalNotificationsService.showLowBattery(percent: _batteryPercent!);
       }
-      _groups = _filterUserGroups(evt.groups);
+      final groupsFromV2 = evt.groupsV2
+          .map((g) => g.channelId32)
+          .where((g) => g > 1 && g != kMeshBroadcastGroupId);
+      _groups = _filterUserGroups(<int>[...evt.groups, ...groupsFromV2]);
+      if ((_groupUid == null || _group == 0) && _groupUid != null && _groupUid!.isNotEmpty) {
+        _group = _resolveGroupIdByUid(_groupUid!);
+      }
       if (_group > 0 && !_groups.contains(_group)) _group = 0;
     });
     if (bleDev != null && resolvedId.isNotEmpty) {
@@ -1260,7 +1367,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     } else if (evt is RiftLinkRoutesEvent) { setState(() => _routes = evt.routes); }
     else if (evt is RiftLinkGroupsEvent) {
       setState(() {
-        _groups = _filterUserGroups(evt.groups);
+        final groupsFromV2 = evt.groupsV2
+            .map((g) => g.channelId32)
+            .where((g) => g > 1 && g != kMeshBroadcastGroupId);
+        _groups = _filterUserGroups(<int>[...evt.groups, ...groupsFromV2]);
+        if ((_groupUid == null || _group == 0) && _groupUid != null && _groupUid!.isNotEmpty) {
+          _group = _resolveGroupIdByUid(_groupUid!);
+        }
         if (_group > 0 && !_groups.contains(_group)) _group = 0;
       });
     }
@@ -1289,6 +1402,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       } else if (evt.code == 'invite_token_bad_length' || evt.code == 'invite_token_bad_format') {
         msg = context.l10n.tr('invite_status_token_bad');
       }
+      _showSnack('${context.l10n.tr('error')}: $msg', backgroundColor: context.palette.error);
+    }
+    else if (evt is RiftLinkGroupSecurityErrorEvent) {
+      final msg = evt.msg.trim().isEmpty ? evt.code : evt.msg;
       _showSnack('${context.l10n.tr('error')}: $msg', backgroundColor: context.palette.error);
     }
     else if (evt is RiftLinkWaitingKeyEvent) {
@@ -1445,11 +1562,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         peerRef: toNorm,
         title: _contactNicknames[toNorm] ?? toNorm,
       );
-    } else if (conversationId.startsWith('group:')) {
+    } else if (conversationId.startsWith('groupv2:')) {
       await _chatRepo.ensureConversation(
         id: conversationId,
         kind: ConversationKind.group,
-        peerRef: '$_group',
+        peerRef: _groupUid != null && _groupUid!.isNotEmpty
+            ? ChatRepository.groupPeerRefByUid(_groupUid!)
+            : '$_group',
         title: 'Group $_group',
       );
     } else {
@@ -1480,6 +1599,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         from: _nodeId,
         to: toForMsg,
         groupId: _group > 0 ? _group : null,
+        groupUid: _groupUid,
         text: text,
         type: trigger == null ? 'text' : 'timeCapsule',
         lane: lane,
@@ -2386,6 +2506,25 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   Widget _buildStatusPanel(AppLocalizations l) {
     final chips = <Widget>[];
+    final gv2 = _activeGroupV2Info();
+    if (gv2 != null) {
+      final roleText = switch (gv2.myRole) {
+        'owner' => l.tr('group_role_owner'),
+        'admin' => l.tr('group_role_admin'),
+        'member' => l.tr('group_role_member'),
+        _ => '—',
+      };
+      chips.add(_statusChip(
+        '${l.tr('group')} ${gv2.channelId32} · $roleText',
+        icon: Icons.group_outlined,
+        color: context.palette.primary,
+      ));
+      chips.add(_statusChip(
+        gv2.ackApplied ? l.tr('group_key_actual') : l.tr('group_key_rekey_required_short'),
+        icon: gv2.ackApplied ? Icons.verified_rounded : Icons.warning_amber_rounded,
+        color: gv2.ackApplied ? context.palette.success : context.palette.error,
+      ));
+    }
     chips.add(_statusChip(
       l.tr('pairwise_key_required'),
       icon: Icons.lock_outline_rounded,
@@ -2453,6 +2592,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   // ── Input bar: одна панель. При записи — кнопка растёт на месте, слева таймер и свайп. ──
 
+  IconData _activeRecipientIcon() {
+    if (_group > 0) return Icons.group_outlined;
+    if (_unicastTo != null) return Icons.person_outline;
+    return Icons.public;
+  }
+
   Widget _buildInputBar(AppLocalizations l) {
     final elapsed = _voiceRecordStartTime != null
         ? DateTime.now().difference(_voiceRecordStartTime!)
@@ -2489,7 +2634,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                   Padding(
                     padding: const EdgeInsets.only(left: AppSpacing.xs),
                     child: _inputIcon(
-                      _group > 0 ? Icons.group_outlined : (_unicastTo != null ? Icons.person_outline : Icons.public),
+                      _activeRecipientIcon(),
                       widget.ble.isConnected ? _showRecipientPickerSheet : null,
                       tooltip: '${l.tr('to')} ${_recipientPillLabel(l)}',
                       iconColor: (_group > 0 || _unicastTo != null) ? context.palette.primary : null,
@@ -2672,19 +2817,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
               Padding(
                 padding: const EdgeInsets.only(left: AppSpacing.sm),
                 child: Text(
-                  (m.status == _St.undelivered
-                          ? (m.total != null && m.total! > 0 ? '✗ 0/${m.total}' : '✗')
-                          : m.status == _St.read
-                              ? '✓✓'
-                              : m.status == _St.delivered
-                                  ? (m.delivered != null && m.total != null && m.total! > 0 ? '✓ ${m.delivered}/${m.total}' : '✓✓')
-                                  : '✓') +
-                      ((m.relayCount ?? 0) > 0 ? '  ↻${m.relayCount}' : ''),
+                  _outgoingStatusBadge(m) + ((m.relayCount ?? 0) > 0 ? '  ↻${m.relayCount}' : ''),
                   style: AppTypography.chipBase().copyWith(
                     fontSize: 10,
-                    color: m.status == _St.undelivered
-                        ? context.palette.error
-                        : (m.status == _St.read ? context.palette.primary : context.palette.onSurfaceVariant),
+                    color: _outgoingStatusColor(m),
                   ),
                 ),
               ),

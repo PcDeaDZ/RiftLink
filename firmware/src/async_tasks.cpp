@@ -112,13 +112,13 @@ static bool decodeTxAsymMeta(const uint8_t* buf, size_t len, TxAsymMeta* out) {
     return false;
   }
   uint8_t ver = buf[1];
-  bool isV2 = (ver & 0xF0) == 0x20 || (ver & 0xF0) == 0x30;
-  if (!isV2) {
+  bool isStrict = (ver & 0xF0) == protocol::VERSION_STRICT || (ver & 0xF0) == protocol::VERSION_V2_PKTID;
+  if (!isStrict) {
     out->slot = (uint8_t)(out->selfHash & 0x01);
     out->klass = TxRequestClass::data;
     return false;
   }
-  bool hasPktId = (ver & 0xF0) == 0x30;
+  bool hasPktId = (ver & 0xF0) == protocol::VERSION_V2_PKTID;
   bool isBroadcast = (ver & 0x01) != 0;
   out->broadcast = isBroadcast;
   out->opcode = buf[2];
@@ -245,6 +245,16 @@ bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf, bool priority,
 
 bool queueTxRequest(const TxRequest& req, char* reasonBuf, size_t reasonLen) {
   return queueTxRequestInternal(req, reasonBuf, reasonLen);
+}
+
+uint8_t asyncTxQueueFree() {
+  if (!s_txRequestQueue) return 0;
+  return (uint8_t)uxQueueSpacesAvailable(s_txRequestQueue);
+}
+
+uint8_t asyncTxQueueWaiting() {
+  if (!s_txRequestQueue) return 0;
+  return (uint8_t)uxQueueMessagesWaiting(s_txRequestQueue);
 }
 
 bool queueTxPacket(const uint8_t* buf, size_t len, uint8_t txSf, bool priority, TxRequestClass klass,
@@ -711,6 +721,15 @@ static constexpr uint32_t FSM_RX_DUP_LOG_INTERVAL_MS = 500;
 static constexpr uint8_t FSM_RX_DUP_REARM_THRESHOLD = 6;
 static constexpr uint32_t FSM_RX_IRQ_SILENCE_REARM_MS = 5000;
 static constexpr uint32_t FSM_DISPLAY_HOLD_MAX_MS = 1500;
+static constexpr bool FSM_STATE_HEARTBEAT_LOG_ENABLED = false;
+
+static inline bool shouldLogRxDone(uint8_t op) {
+  // Reduce high-frequency service noise while keeping data/control visibility.
+  return !(op == protocol::OP_ECHO ||
+           op == protocol::OP_HELLO ||
+           op == protocol::OP_POLL ||
+           op == protocol::OP_SF_BEACON);
+}
 
 static const char* fsmStateName(RadioFsmState s) {
   switch (s) {
@@ -834,7 +853,8 @@ static void radioSchedulerTask(void* arg) {
     bool useFsmV2 = asyncIsRadioFsmV2Enabled();
     if (useFsmV2) {
       uint32_t now = millis();
-      if (fsmState != lastFsmStateLogged || (now - lastFsmStateLogMs) >= FSM_STATE_LOG_INTERVAL_MS) {
+      if (fsmState != lastFsmStateLogged ||
+          (FSM_STATE_HEARTBEAT_LOG_ENABLED && (now - lastFsmStateLogMs) >= FSM_STATE_LOG_INTERVAL_MS)) {
         RIFTLINK_DIAG("FSM", "event=FSM_STATE state=%s", fsmStateName(fsmState));
         lastFsmStateLogged = fsmState;
         lastFsmStateLogMs = now;
@@ -962,8 +982,10 @@ static void radioSchedulerTask(void* arg) {
             uint8_t op = (n > 2 && rxBuf[0] == protocol::SYNC_BYTE) ? rxBuf[2] : 0xFF;
             RIFTLINK_DIAG("RADIO", "event=RX_RESULT mode=powersave result=ok len=%u rssi=%d sf=%u op=0x%02X",
                 (unsigned)n, rssi, (unsigned)dsf, (unsigned)op);
-            RIFTLINK_DIAG("RADIO", "event=RX_DONE len=%u rssi=%d sf=%u op=0x%02X",
-                (unsigned)n, rssi, (unsigned)dsf, (unsigned)op);
+            if (shouldLogRxDone(op)) {
+              RIFTLINK_DIAG("RADIO", "event=RX_DONE len=%u rssi=%d sf=%u op=0x%02X",
+                  (unsigned)n, rssi, (unsigned)dsf, (unsigned)op);
+            }
             deliverRxToPacketQueue(rxBuf, n, rssi, dsf);
           } else if (n == 0) {
             rxTimeoutCount++;
@@ -1156,9 +1178,9 @@ static void radioSchedulerTask(void* arg) {
         lastRxFingerprint = fp;
         lastRxFingerprintMs = nowRx;
         bool selfFrame = false;
-        if (n >= 11 && rxBuf[0] == protocol::SYNC_BYTE) {
+        if (n >= (int)protocol::HEADER_LEN_BROADCAST && rxBuf[0] == protocol::SYNC_BYTE) {
           uint8_t ver = rxBuf[1];
-          bool hasPktId = ((ver & 0xF0) == 0x30);
+          bool hasPktId = ((ver & 0xF0) == protocol::VERSION_V2_PKTID);
           bool isBroadcast = (ver & 0x01) != 0;
           size_t fromOff = hasPktId ? 5u : 3u;
           if (isBroadcast && (size_t)n >= fromOff + protocol::NODE_ID_LEN) {
@@ -1184,8 +1206,10 @@ static void radioSchedulerTask(void* arg) {
         } else {
           rxDupBurstCount = 0;
           rxOkCount++;
-          RIFTLINK_DIAG("RADIO", "event=RX_DONE len=%u rssi=%d sf=%u op=0x%02X",
-              (unsigned)n, rssi, (unsigned)sfNow, (unsigned)op);
+          if (shouldLogRxDone(op)) {
+            RIFTLINK_DIAG("RADIO", "event=RX_DONE len=%u rssi=%d sf=%u op=0x%02X",
+                (unsigned)n, rssi, (unsigned)sfNow, (unsigned)op);
+          }
           deliverRxToPacketQueue(rxBuf, n, rssi, sfNow);
         }
       } else if (n < 0) {
@@ -1369,8 +1393,10 @@ static void radioSchedulerTask(void* arg) {
       uint8_t op = (n > 2 && rxBuf[0] == protocol::SYNC_BYTE) ? rxBuf[2] : 0xFF;
       RIFTLINK_DIAG("RADIO", "event=RX_RESULT mode=normal result=ok len=%u rssi=%d sf=%u op=0x%02X",
           (unsigned)n, rssi, (unsigned)sf, (unsigned)op);
-      RIFTLINK_DIAG("RADIO", "event=RX_DONE len=%u rssi=%d sf=%u op=0x%02X",
-          (unsigned)n, rssi, (unsigned)sf, (unsigned)op);
+      if (shouldLogRxDone(op)) {
+        RIFTLINK_DIAG("RADIO", "event=RX_DONE len=%u rssi=%d sf=%u op=0x%02X",
+            (unsigned)n, rssi, (unsigned)sf, (unsigned)op);
+      }
       deliverRxToPacketQueue(rxBuf, n, rssi, sf);
       uint32_t rxLatency = millis() - rxHandleStart;
       if (rxLatency > rxEventToHandleMaxMs) rxEventToHandleMaxMs = rxLatency;

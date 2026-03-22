@@ -4,7 +4,8 @@ import 'package:riftlink_app/chat/chat_repository.dart';
 void main() {
   test('conversation id builders are stable', () {
     expect(ChatRepository.directConversationId('ABCDEF'), 'direct:ABCDEF');
-    expect(ChatRepository.groupConversationId(42), 'group:42');
+    expect(ChatRepository.groupConversationIdByUid('abc42'), 'groupv2:ABC42');
+    expect(ChatRepository.groupPeerRefByUid('abc42'), 'uid:ABC42');
     expect(ChatRepository.broadcastConversationId(), 'broadcast:all');
   });
 }

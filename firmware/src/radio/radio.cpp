@@ -271,6 +271,10 @@ void notifyCongestion() {
   s_lastCongestionTime.store((uint32_t)millis(), std::memory_order_relaxed);
 }
 
+uint8_t getCongestionLevel() {
+  return s_cadBusyCount.load(std::memory_order_relaxed);
+}
+
 void setAsyncMode(bool on) { s_asyncMode = on; }
 
 bool sendDirectInternal(const uint8_t* data, size_t len, char* reasonBuf, size_t reasonLen) {

@@ -62,6 +62,47 @@
 Critical lane используется для SOS/приоритетных сообщений и обрабатывается отдельной политикой ретрансляции.
 Для SOS используется адаптивный TTL (по плотности соседей) и лимит relay как глобально, так и per-source.
 
+### 1.6 Groups V2 (thin-device, no-legacy)
+
+Groups V2 использует `groupUID` как основной идентификатор группы. Транспортный `group_id` допускается только как короткий radio-routing идентификатор (`channelId32`) и не является правом доступа.
+
+Минимальная модель V2:
+
+- `groupUID` — неизменяемый ID группы (не секрет).
+- `channelId32` — короткий transport ID для эфира.
+- `groupTag` — дополнительный контекстный маркер группы.
+- `groupSecret` (32B) + `groupKeyVersion`.
+- Роли: `owner`, `admin`, `member`.
+
+Право доступа определяется не ID группы, а валидным role-grant и актуальной версией ключа.
+
+#### 1.6.1 Root of trust
+
+- Единственный корень доверия: публичный ключ owner.
+- Роли `admin/member` подтверждаются signed grant от owner.
+- Для admin-операций требуется:
+  - валидный owner-signed grant;
+  - actor proof отправителя (кто инициировал команду);
+  - отсутствие replay и устаревшей revocation-версии.
+
+#### 1.6.2 Thin-device storage
+
+Для экономии NVS устройство хранит только runtime security state:
+
+- `groupUID/channelId32/groupTag`;
+- текущий `groupSecret` и `groupKeyVersion`;
+- локальная роль узла (`myRole`);
+- `revocationEpoch` (watermark отзывов);
+- компактный anti-replay state.
+
+Полная история `grants/revokes/rekey per-member` хранится на телефоне и синхронизируется на устройство snapshot-пакетами.
+
+#### 1.6.3 Rekey and kick policy
+
+- `kick` всегда: `revoke` + mandatory `rekey`.
+- Новый ключ считается примененным участником только после `ACK_KEY_APPLIED`.
+- Fail-closed: если контекст группы/роль/версия/replay-проверка не проходит, пакет отклоняется.
+
 ---
 
 ## 2. 📋 Opcodes

@@ -216,8 +216,6 @@ static PendingMsg* findByMsgId(uint32_t msgId) {
 // Макс. plaintext для одного пакета (encrypted output <= MAX_PAYLOAD)
 constexpr size_t MAX_SINGLE_PLAIN = protocol::MAX_PAYLOAD - crypto::OVERHEAD;
 
-constexpr size_t MSG_TTL_LEN = 1;
-
 bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
     bool critical, TriggerType triggerType, uint32_t triggerValueMs) {
   setLastSendFail(SEND_FAIL_NONE);
@@ -234,9 +232,10 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
   size_t textLen = strlen(text);
   if (textLen == 0) { xSemaphoreGive(s_mutex); setLastSendFail(SEND_FAIL_EMPTY); return false; }  // пустые — не отправлять
 
+  // Legacy TTL prefix for OP_MSG is removed. Keep parameter for API compatibility.
+  (void)ttlMinutes;
   // Длинные сообщения — фрагментация (без ACK для MVP)
-  size_t ttlOverhead = (ttlMinutes > 0) ? MSG_TTL_LEN : 0;
-  size_t maxSingle = MAX_SINGLE_PLAIN - ttlOverhead
+  size_t maxSingle = MAX_SINGLE_PLAIN
       - (isUnicast ? MSG_ID_LEN : 0)
       - (isUnicast ? 0 : GROUP_ID_LEN + MSG_ID_LEN);  // broadcast: groupId + msgId
   if (textLen > maxSingle) {
@@ -250,14 +249,9 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
 
   if (isUnicast) {
     uint32_t msgId = ++s_msgIdCounter;
-    size_t off = 0;
-    if (ttlMinutes > 0) {
-      plainBuf[0] = ttlMinutes;
-      off = MSG_TTL_LEN;
-    }
-    memcpy(plainBuf + off, &msgId, MSG_ID_LEN);
-    memcpy(plainBuf + off + MSG_ID_LEN, text, textLen);
-    plainLen = off + MSG_ID_LEN + textLen;
+    memcpy(plainBuf, &msgId, MSG_ID_LEN);
+    memcpy(plainBuf + MSG_ID_LEN, text, textLen);
+    plainLen = MSG_ID_LEN + textLen;
 
     uint8_t compBuf[protocol::MAX_PAYLOAD];
     size_t compLen = compress::compress(plainBuf, plainLen, compBuf, sizeof(compBuf));
@@ -456,10 +450,11 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
   size_t encLen = sizeof(encBuf);
   bool encOk = false;
   uint8_t groupKey[32];
-  if (groups::getGroupKey(groupId, groupKey)) {
+  if (groups::getGroupKeyV2ByChannel(groupId, groupKey, nullptr)) {
     encOk = crypto::encryptWithGroupKey(groupKey, toEncrypt, toEncryptLen, encBuf, &encLen);
   } else {
-    encOk = crypto::encrypt(toEncrypt, toEncryptLen, encBuf, &encLen);
+    // V2-only: group message without active V2 group key is invalid.
+    encOk = false;
   }
   if (!encOk) {
     xSemaphoreGive(s_mutex);

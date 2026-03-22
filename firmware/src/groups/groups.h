@@ -1,10 +1,10 @@
 /**
- * RiftLink Groups — подписка на групповые каналы
- * GROUP_MSG (0x09): payload = [group_id 4B][text]
+ * RiftLink Groups V2 — thin-device runtime state.
  */
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #define GROUP_ID_LEN 4
@@ -12,53 +12,69 @@
 
 namespace groups {
 
+enum class GroupRole : uint8_t {
+  None = 0,
+  Member = 1,
+  Admin = 2,
+  Owner = 3,
+};
+
 void init();
-/** Проверить, подписан ли узел на группу */
-bool isInGroup(uint32_t groupId);
-/** Добавить группу (до MAX_GROUPS) */
-bool addGroup(uint32_t groupId);
-/** Удалить группу */
-void removeGroup(uint32_t groupId);
-/** Установить/обновить приватный ключ группы (32 байта). */
-bool setGroupKey(
-    uint32_t groupId,
-    const uint8_t* key32,
-    uint16_t keyVersion = 0,
-    const uint8_t* ownerId = nullptr,
-    const uint8_t* adminCapability8 = nullptr);
-/** Удалить приватный ключ группы (группа становится public). */
-bool clearGroupKey(uint32_t groupId, const uint8_t* adminCapability8 = nullptr);
-/** Есть ли приватный ключ у группы. */
-bool hasGroupKey(uint32_t groupId);
-/** Получить приватный ключ группы. */
-bool getGroupKey(uint32_t groupId, uint8_t* out32);
-/** Текущая версия ключа группы (0 если ключ не задан). */
-uint16_t getGroupKeyVersion(uint32_t groupId);
-/** Получить owner группы (8 байт NodeID). */
-bool getGroupOwner(uint32_t groupId, uint8_t* outOwner8);
-/** Текущий узел является owner группы. */
-bool isGroupOwner(uint32_t groupId, const uint8_t* nodeId);
-/** Есть ли локально сохранённая admin-capability (8 байт) для группы. */
-bool hasGroupAdminCapability(uint32_t groupId);
-/** Сохранить admin-capability для группы (полученную отдельным admin-кодом). */
-bool setGroupAdminCapability(uint32_t groupId, const uint8_t* adminCapability8);
-/** Удалить локальную admin-capability группы. */
-bool clearGroupAdminCapability(uint32_t groupId);
-/** Разрешена ли ротация ключа для requester (owner либо корректная admin-capability). */
-bool canRotateGroupKey(uint32_t groupId, const uint8_t* requesterId, const uint8_t* presentedAdminCapability8 = nullptr);
-/** Количество групп */
-int getCount();
-/** ID группы по индексу (0..getCount()-1) */
-uint32_t getId(int index);
-/** Наличие приватного ключа у группы по индексу. */
-bool isPrivateAt(int index);
-/** Версия ключа группы по индексу. */
-uint16_t keyVersionAt(int index);
-/** Есть ли owner у группы по индексу. */
-bool hasOwnerAt(int index);
-/** Может ли текущий узел ротировать ключ группы по индексу (owner/admin-capability). */
-bool canRotateAt(int index);
 /** Служебный id широковещательных OP_GROUP_MSG в mesh; не хранится в списке подписок пользователя */
 constexpr uint32_t GROUP_ALL = 1;
+
+// --- Groups V2 thin-device runtime state ---
+// V2 хранит только минимальный security-runtime state (без полной истории участников/grants).
+constexpr int MAX_GROUPS_V2 = MAX_GROUPS;
+constexpr int GROUP_UID_MAX_LEN = 64;
+constexpr int GROUP_TAG_MAX_LEN = 32;
+
+/** Upsert минимального V2-состояния группы на устройстве. */
+bool upsertGroupV2(
+    const char* groupUid,
+    uint32_t channelId32,
+    const char* groupTag,
+    const uint8_t* groupKey32,
+    uint16_t keyVersion,
+    GroupRole myRole,
+    uint32_t revocationEpoch);
+/** Установить локальную роль узла в группе V2. */
+bool setGroupRoleV2(const char* groupUid, GroupRole role);
+/** Обновить ключ/версию ключа в группе V2 (rekey). */
+bool updateGroupKeyV2(const char* groupUid, const uint8_t* groupKey32, uint16_t keyVersion);
+/** Подтвердить применение ключа на устройстве (ACK_KEY_APPLIED локально). */
+bool ackKeyAppliedV2(const char* groupUid, uint16_t keyVersion);
+/** Обновить watermark отзыва прав. */
+bool setRevocationEpochV2(const char* groupUid, uint32_t revocationEpoch);
+/** Получить V2-состояние по groupUid. */
+bool getGroupV2(
+    const char* groupUid,
+    uint32_t* outChannelId32,
+    char* outGroupTag,
+    size_t outGroupTagLen,
+    uint16_t* outKeyVersion,
+    GroupRole* outRole,
+    uint32_t* outRevocationEpoch,
+    bool* outAckApplied);
+/** Получить ключ и версию ключа V2-группы. */
+bool getGroupKeyV2(const char* groupUid, uint8_t* outKey32, uint16_t* outKeyVersion);
+/** Получить ключ V2-группы по transport channelId32. */
+bool getGroupKeyV2ByChannel(uint32_t channelId32, uint8_t* outKey32, uint16_t* outKeyVersion);
+/** Найти groupUid по transport channelId32. */
+bool findGroupUidByChannelV2(uint32_t channelId32, char* outGroupUid, size_t outGroupUidLen);
+/** Количество V2-групп в runtime state. */
+int getV2Count();
+/** Получить V2-запись по индексу. */
+bool getV2At(
+    int index,
+    char* outGroupUid,
+    size_t outGroupUidLen,
+    uint32_t* outChannelId32,
+    char* outGroupTag,
+    size_t outGroupTagLen,
+    uint16_t* outKeyVersion,
+    GroupRole* outRole,
+    uint32_t* outRevocationEpoch,
+    bool* outAckApplied);
 
 }  // namespace groups

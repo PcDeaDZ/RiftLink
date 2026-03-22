@@ -35,10 +35,8 @@ class GroupsScreen extends StatefulWidget {
 
 class _GroupsScreenState extends State<GroupsScreen> {
   List<int> _groups = [];
-  final Map<int, bool> _groupPrivate = <int, bool>{};
   final Map<int, int> _groupKeyVersion = <int, int>{};
-  final Map<int, String?> _groupOwner = <int, String?>{};
-  final Map<int, bool> _groupCanRotate = <int, bool>{};
+  final Map<int, RiftLinkGroupV2Info> _groupV2ByChannel = <int, RiftLinkGroupV2Info>{};
   bool _loading = false;
   StreamSubscription<RiftLinkEvent>? _sub;
 
@@ -50,69 +48,102 @@ class _GroupsScreenState extends State<GroupsScreen> {
 
   void _applyGroups(
     Iterable<int> groups, [
-    List<bool>? privateFlags,
-    List<int>? keyVersions,
-    List<String?>? owners,
-    List<bool>? canRotate,
+    List<RiftLinkGroupV2Info>? groupsV2,
   ]) {
-    final normalized = _normalizeGroups(groups);
-    final nextPriv = <int, bool>{};
+    final fromV2 = (groupsV2 ?? const <RiftLinkGroupV2Info>[])
+        .map((e) => e.channelId32)
+        .where((e) => e > 1 && e != kMeshBroadcastGroupId);
+    final normalized = _normalizeGroups([...groups, ...fromV2]);
     final nextVer = <int, int>{};
-    final nextOwner = <int, String?>{};
-    final nextCanRotate = <int, bool>{};
+    final nextV2 = <int, RiftLinkGroupV2Info>{};
+    for (final g in groupsV2 ?? const <RiftLinkGroupV2Info>[]) {
+      if (g.channelId32 > 1 && g.channelId32 != kMeshBroadcastGroupId) {
+        nextV2[g.channelId32] = g;
+      }
+    }
     for (var i = 0; i < normalized.length; i++) {
       final gid = normalized[i];
-      bool isPriv = _groupPrivate[gid] ?? false;
       int ver = _groupKeyVersion[gid] ?? 0;
-      String? owner = _groupOwner[gid];
-      bool rotateAllowed = _groupCanRotate[gid] ?? false;
-      if (privateFlags != null && i < privateFlags.length) isPriv = privateFlags[i];
-      if (keyVersions != null && i < keyVersions.length) ver = keyVersions[i];
-      if (owners != null && i < owners.length) owner = owners[i];
-      if (canRotate != null && i < canRotate.length) rotateAllowed = canRotate[i];
-      nextPriv[gid] = isPriv;
+      final v2 = nextV2[gid] ?? _groupV2ByChannel[gid];
+      if (v2 != null) {
+        ver = v2.keyVersion > 0 ? v2.keyVersion : ver;
+      }
       nextVer[gid] = ver;
-      nextOwner[gid] = owner;
-      nextCanRotate[gid] = rotateAllowed;
     }
     _groups = normalized;
-    _groupPrivate
-      ..clear()
-      ..addAll(nextPriv);
     _groupKeyVersion
       ..clear()
       ..addAll(nextVer);
-    _groupOwner
+    _groupV2ByChannel
       ..clear()
-      ..addAll(nextOwner);
-    _groupCanRotate
-      ..clear()
-      ..addAll(nextCanRotate);
+      ..addAll(nextV2);
+  }
+
+  int? _channelByUid(String groupUid) {
+    final uid = groupUid.trim().toUpperCase();
+    if (uid.isEmpty) return null;
+    for (final entry in _groupV2ByChannel.entries) {
+      if (entry.value.groupUid.toUpperCase() == uid) return entry.key;
+    }
+    return null;
+  }
+
+  String? _uidByChannel(int gid) {
+    final uid = _groupV2ByChannel[gid]?.groupUid.trim().toUpperCase();
+    return (uid == null || uid.isEmpty) ? null : uid;
   }
 
   @override
   void initState() {
     super.initState();
-    _applyGroups(widget.initialGroups);
+    _applyGroups(const <int>[], widget.ble.lastInfo?.groupsV2 ?? const <RiftLinkGroupV2Info>[]);
     _sub = widget.ble.events.listen((evt) {
       if (!mounted) return;
       // Ответ на getGroups — и поле groups в evt:info (как в чате), иначе список не обновлялся без отдельного notify.
       if (evt is RiftLinkGroupsEvent) {
         setState(() => _applyGroups(
-              evt.groups,
-              evt.groupsPrivate,
-              evt.groupsKeyVersion,
-              evt.groupsOwner,
-              evt.groupsCanRotate,
+              const <int>[],
+              evt.groupsV2,
             ));
       } else if (evt is RiftLinkInfoEvent) {
         setState(() => _applyGroups(
-              evt.groups,
-              evt.groupsPrivate,
-              evt.groupsKeyVersion,
-              evt.groupsOwner,
-              evt.groupsCanRotate,
+              const <int>[],
+              evt.groupsV2,
             ));
+      } else if (evt is RiftLinkGroupStatusEvent) {
+        final gid = evt.channelId32 ?? _channelByUid(evt.groupUid);
+        if (gid == null || gid <= 1) return;
+        final prev = _groupV2ByChannel[gid];
+        final next = RiftLinkGroupV2Info(
+          groupUid: evt.groupUid,
+          groupTag: prev?.groupTag ?? '',
+          channelId32: gid,
+          keyVersion: evt.keyVersion,
+          myRole: evt.myRole,
+          revocationEpoch: prev?.revocationEpoch ?? 0,
+          ackApplied: !evt.rekeyRequired,
+        );
+        setState(() {
+          _groupV2ByChannel[gid] = next;
+          _groupKeyVersion[gid] = evt.keyVersion;
+          if (!_groups.contains(gid)) {
+            _applyGroups([..._groups, gid], _groupV2ByChannel.values.toList());
+          }
+        });
+      } else if (evt is RiftLinkGroupRekeyProgressEvent) {
+        final gid = _channelByUid(evt.groupUid);
+        if (gid != null && mounted) {
+          _snack(
+            '${context.l10n.tr('group_rotate_key')}: v${evt.keyVersion} (${evt.applied}/${evt.applied + evt.pending + evt.failed})',
+          );
+        }
+      } else if (evt is RiftLinkGroupMemberKeyStateEvent) {
+        final gid = _channelByUid(evt.groupUid);
+        if (gid != null && mounted) {
+          _snack('${context.l10n.tr('group')} $gid: ${evt.memberId} -> ${evt.status}');
+        }
+      } else if (evt is RiftLinkGroupSecurityErrorEvent) {
+        _snack('${evt.code}: ${evt.msg}', backgroundColor: context.palette.error);
       }
     });
     _refresh();
@@ -131,147 +162,201 @@ class _GroupsScreenState extends State<GroupsScreen> {
     if (mounted) setState(() => _loading = false);
   }
 
-  String _generateGroupKeyB64() {
+  String _generateBase64Token(int sizeBytes) {
     final rnd = Random.secure();
-    final bytes = List<int>.generate(32, (_) => rnd.nextInt(256));
+    final bytes = List<int>.generate(sizeBytes, (_) => rnd.nextInt(256));
     return base64Encode(bytes);
   }
 
-  String _generateInviteTokenHex() {
-    final rnd = Random.secure();
-    final bytes = List<int>.generate(8, (_) => rnd.nextInt(256));
-    final sb = StringBuffer();
-    for (final b in bytes) {
-      sb.write(b.toRadixString(16).padLeft(2, '0'));
-    }
-    return sb.toString().toUpperCase();
-  }
-
-  String _encodeInviteBase64({
-    required int groupId,
-    required String groupKeyB64,
-    required int keyVersion,
-    required String inviteToken,
-    required int expiryEpochSec,
-    required String ownerId,
-  }) {
-    final payload = '$groupId|$keyVersion|$groupKeyB64|$inviteToken|$expiryEpochSec|${ownerId.toUpperCase()}';
-    return base64Encode(utf8.encode(payload));
-  }
-
-  ({
-    int groupId,
-    String groupKeyB64,
-    int keyVersion,
-    String inviteToken,
-    int expiryEpochSec,
-    String? ownerId,
-  })?
-  _decodeInviteBase64(String inviteCode) {
-    try {
-      final normalized = inviteCode.replaceAll(RegExp(r'\s+'), '');
-      final raw = utf8.decode(base64Decode(normalized));
-      final parts = raw.split('|');
-      if (parts.length != 5 && parts.length != 6) return null;
-      final groupId = int.tryParse(parts[0]) ?? 0;
-      final keyVersion = int.tryParse(parts[1]) ?? 0;
-      final groupKeyB64 = parts[2].trim();
-      final inviteToken = parts[3].trim();
-      final expiryEpochSec = int.tryParse(parts[4]) ?? 0;
-      final ownerId = parts.length == 6 ? parts[5].trim().toUpperCase() : null;
-      if (groupId <= 1 || groupKeyB64.isEmpty || keyVersion < 0 || expiryEpochSec <= 0) return null;
-      if (inviteToken.length != 16 || !RegExp(r'^[0-9A-Fa-f]{16}$').hasMatch(inviteToken)) return null;
-      if (ownerId != null && ownerId.isNotEmpty && !RegExp(r'^[0-9A-Fa-f]{16}$').hasMatch(ownerId)) return null;
-      // Валидируем, что ключ действительно корректный BASE64.
-      base64Decode(groupKeyB64);
-      return (
-        groupId: groupId,
-        groupKeyB64: groupKeyB64,
-        keyVersion: keyVersion,
-        inviteToken: inviteToken,
-        expiryEpochSec: expiryEpochSec,
-        ownerId: ownerId,
-      );
-    } catch (_) {
-      return null;
-    }
-  }
-
-  Future<void> _setGroupPrivate(int gid, bool privateMode) async {
+  Future<void> _requestGroupStatus(int gid) async {
     final l = context.l10n;
-    if (!widget.ble.isConnected) return;
-    if (privateMode) {
-      final keyB64 = _generateGroupKeyB64();
-      final ok = await widget.ble.setGroupKey(gid, keyB64);
-      if (ok && mounted) {
-        _snack(l.tr('group_set_private', {'id': '$gid'}));
-        await _copyInvite(gid);
-      } else if (mounted) {
-        _snack(l.tr('error'), backgroundColor: context.palette.error);
-      }
-    } else {
-      final ok = await widget.ble.clearGroupKey(gid);
-      if (ok && mounted) {
-        _snack(l.tr('group_set_public', {'id': '$gid'}));
-      } else if (mounted) {
-        _snack(l.tr('error'), backgroundColor: context.palette.error);
-      }
-    }
-    await _refresh();
-  }
-
-  Future<void> _rotatePrivateKey(int gid) async {
-    final l = context.l10n;
-    if (!(_groupCanRotate[gid] ?? false)) {
-      _snack(l.tr('group_rekey_required'), backgroundColor: context.palette.error);
+    final uid = _uidByChannel(gid);
+    if (uid == null) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
       return;
     }
-    final currentVer = _groupKeyVersion[gid] ?? 0;
-    final nextVer = currentVer > 0 ? currentVer + 1 : 1;
-    final keyB64 = _generateGroupKeyB64();
-    final ok = await widget.ble.setGroupKey(gid, keyB64, keyVersion: nextVer);
-    if (ok && mounted) {
-      _snack(l.tr('group_key_rotated', {'id': '$gid'}));
-      await _copyInvite(gid);
-      await _refresh();
-    } else if (mounted) {
+    final ok = await widget.ble.groupStatus(uid);
+    if (!ok) {
       _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
     }
+    _snack('${l.tr('refresh')}: ${l.tr('group')} $gid');
+  }
+
+  Future<void> _ackCurrentGroupKey(int gid) async {
+    final l = context.l10n;
+    final v2 = _groupV2ByChannel[gid];
+    if (v2 == null || v2.groupUid.trim().isEmpty || v2.keyVersion <= 0) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
+    }
+    final ok = await widget.ble.groupAckKeyApplied(
+      groupUid: v2.groupUid,
+      keyVersion: v2.keyVersion,
+    );
+    if (!ok) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
+    }
+    setState(() {
+      _groupV2ByChannel[gid] = RiftLinkGroupV2Info(
+        groupUid: v2.groupUid,
+        groupTag: v2.groupTag,
+        channelId32: v2.channelId32,
+        keyVersion: v2.keyVersion,
+        myRole: v2.myRole,
+        revocationEpoch: v2.revocationEpoch,
+        ackApplied: true,
+      );
+    });
+    _snack(l.tr('group_key_actual'));
+  }
+
+  Future<void> _rekeyGroupV2(int gid) async {
+    final l = context.l10n;
+    final uid = _uidByChannel(gid);
+    if (uid == null) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
+    }
+    final ok = await widget.ble.groupRekey(groupUid: uid, reason: 'ui_manual_rekey');
+    if (!ok) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
+    }
+    _snack('${l.tr('group_rotate_key')} · ${l.tr('group')} $gid');
+  }
+
+  Future<void> _showGrantDialog(int gid) async {
+    final l = context.l10n;
+    final uid = _uidByChannel(gid);
+    if (uid == null) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
+    }
+    String role = 'member';
+    final idCtrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocalState) => AlertDialog(
+          title: Text('${l.tr('group')} $gid · ${l.tr('group_role_admin')} / ${l.tr('group_role_member')}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: idCtrl,
+                autofocus: true,
+                textCapitalization: TextCapitalization.characters,
+                decoration: const InputDecoration(hintText: 'Node ID (16 HEX)'),
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              SegmentedButton<String>(
+                segments: [
+                  ButtonSegment<String>(value: 'member', label: Text(l.tr('group_role_member'))),
+                  ButtonSegment<String>(value: 'admin', label: Text(l.tr('group_role_admin'))),
+                ],
+                selected: {role},
+                onSelectionChanged: (v) => setLocalState(() => role = v.first),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(l.tr('cancel'))),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(l.tr('ok'))),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    final subject = idCtrl.text.trim().toUpperCase();
+    if (!RiftLinkBle.isValidFullNodeId(subject)) {
+      _snack(l.tr('invalid_hex'), backgroundColor: context.palette.error);
+      return;
+    }
+    final issued = await widget.ble.groupGrantIssue(
+      groupUid: uid,
+      subjectId: subject,
+      role: role,
+    );
+    if (!issued) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
+    }
+    _snack('Grant: $subject -> $role');
+  }
+
+  Future<void> _showRevokeDialog(int gid) async {
+    final l = context.l10n;
+    final uid = _uidByChannel(gid);
+    if (uid == null) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
+    }
+    final idCtrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('${l.tr('group')} $gid · revoke'),
+        content: TextField(
+          controller: idCtrl,
+          autofocus: true,
+          textCapitalization: TextCapitalization.characters,
+          decoration: const InputDecoration(hintText: 'Node ID (16 HEX)'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(l.tr('cancel'))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(l.tr('delete'))),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final subject = idCtrl.text.trim().toUpperCase();
+    if (!RiftLinkBle.isValidFullNodeId(subject)) {
+      _snack(l.tr('invalid_hex'), backgroundColor: context.palette.error);
+      return;
+    }
+    final revoked = await widget.ble.groupRevoke(
+      groupUid: uid,
+      subjectId: subject,
+      reason: 'ui_revoke',
+    );
+    if (!revoked) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
+    }
+    await widget.ble.groupRekey(groupUid: uid, reason: 'revoke_followup_rekey');
+    _snack('Revoke + rekey: $subject');
   }
 
   Future<void> _copyInvite(int gid) async {
     final l = context.l10n;
     if (!widget.ble.isConnected) return;
-    if (!await widget.ble.getGroupKey(gid)) {
-      _snack(l.tr('error'), backgroundColor: context.palette.error);
-      return;
-    }
-    try {
-      final evt = await widget.ble.events
-          .where((e) => e is RiftLinkGroupKeyEvent && (e as RiftLinkGroupKeyEvent).group == gid)
-          .cast<RiftLinkGroupKeyEvent>()
-          .first
-          .timeout(const Duration(seconds: 3));
-      final expiryEpochSec = DateTime.now().millisecondsSinceEpoch ~/ 1000 + 10 * 60;
-      final token = _generateInviteTokenHex();
-      final ownerId = (_groupOwner[gid] ?? widget.ble.lastInfo?.id ?? '').toUpperCase();
-      if (!RegExp(r'^[0-9A-F]{16}$').hasMatch(ownerId)) {
-        if (mounted) _snack(l.tr('error'), backgroundColor: context.palette.error);
+    final v2 = _groupV2ByChannel[gid];
+    if (v2 != null && v2.groupUid.trim().isNotEmpty) {
+      final ok = await widget.ble.groupInviteCreate(
+        groupUid: v2.groupUid,
+        role: 'member',
+      );
+      if (!ok) {
+        _snack(l.tr('error'), backgroundColor: context.palette.error);
         return;
       }
-      final inviteCode = _encodeInviteBase64(
-        groupId: gid,
-        groupKeyB64: evt.key,
-        keyVersion: evt.keyVersion > 0 ? evt.keyVersion : (_groupKeyVersion[gid] ?? 0),
-        inviteToken: token,
-        expiryEpochSec: expiryEpochSec,
-        ownerId: ownerId,
-      );
-      await Clipboard.setData(ClipboardData(text: inviteCode));
-      if (mounted) _snack(l.tr('group_invite_copied', {'id': '$gid'}));
-    } catch (_) {
-      if (mounted) _snack(l.tr('error'), backgroundColor: context.palette.error);
+      try {
+        final evt = await widget.ble.events
+            .where((e) => e is RiftLinkGroupInviteEvent && (e as RiftLinkGroupInviteEvent).groupUid == v2.groupUid)
+            .cast<RiftLinkGroupInviteEvent>()
+            .first
+            .timeout(const Duration(seconds: 3));
+        await Clipboard.setData(ClipboardData(text: evt.invite));
+        if (mounted) _snack(l.tr('group_invite_copied', {'id': '$gid'}));
+        return;
+      } catch (_) {
+        _snack(l.tr('error'), backgroundColor: context.palette.error);
+        return;
+      }
     }
+    _snack(l.tr('error'), backgroundColor: context.palette.error);
   }
 
   Future<void> _joinByInviteCode(String inviteCodeRaw) async {
@@ -281,29 +366,13 @@ class _GroupsScreenState extends State<GroupsScreen> {
       _snack(l.tr('group_invite_bad'), backgroundColor: context.palette.error);
       return;
     }
-    final invite = _decodeInviteBase64(inviteCode);
-    if (invite == null) {
-      _snack(l.tr('group_invite_bad'), backgroundColor: context.palette.error);
-      return;
-    }
-    if ((DateTime.now().millisecondsSinceEpoch ~/ 1000) > invite.expiryEpochSec) {
-      _snack(l.tr('group_invite_expired'), backgroundColor: context.palette.error);
-      return;
-    }
-
-    try {
-      await widget.ble.addGroup(invite.groupId);
-      await widget.ble.setGroupKey(
-        invite.groupId,
-        invite.groupKeyB64,
-        keyVersion: invite.keyVersion > 0 ? invite.keyVersion : null,
-        ownerId: invite.ownerId,
-      );
+    final acceptedV2 = await widget.ble.groupInviteAccept(inviteCode);
+    if (acceptedV2) {
       await _refresh();
-      if (mounted) _snack(l.tr('group_invite_joined', {'id': '${invite.groupId}'}));
-    } catch (_) {
-      _snack(l.tr('group_invite_bad'), backgroundColor: context.palette.error);
+      if (mounted) _snack(l.tr('group_invite_joined_v2'));
+      return;
     }
+    _snack(l.tr('group_invite_bad'), backgroundColor: context.palette.error);
   }
 
   Future<void> _pasteInviteAndJoin() async {
@@ -522,7 +591,12 @@ class _GroupsScreenState extends State<GroupsScreen> {
                             return;
                           }
                           Navigator.pop(ctx);
-                          final ok = await widget.ble.addGroup(val);
+                          final ok = await widget.ble.groupCreate(
+                            groupUid: _generateBase64Token(16),
+                            displayName: '${l.tr('group')} $val',
+                            channelId32: val,
+                            groupTag: _generateBase64Token(8),
+                          );
                           if (ok && mounted) {
                             setState(() {
                               _applyGroups([..._groups, val]);
@@ -597,160 +671,96 @@ class _GroupsScreenState extends State<GroupsScreen> {
   }
 
   Widget _buildGroupCard(int gid, AppLocalizations l, AppPalette p) {
-    final isPrivate = _groupPrivate[gid] == true;
+    final v2 = _groupV2ByChannel[gid];
     final ver = _groupKeyVersion[gid] ?? 0;
-    final canRotate = _groupCanRotate[gid] ?? false;
-    return Dismissible(
-      key: ValueKey<int>(gid),
-      direction: DismissDirection.endToStart,
-      background: Container(
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm + 2),
-        decoration: BoxDecoration(
-          color: p.error.withOpacity(0.12),
-          borderRadius: BorderRadius.circular(AppRadius.sm),
-          border: Border.all(color: p.error.withOpacity(0.45)),
+    final canRotate = v2 != null && (v2.myRole == 'owner' || v2.myRole == 'admin');
+    final roleLabel = switch (v2?.myRole) {
+      'owner' => l.tr('group_role_owner'),
+      'admin' => l.tr('group_role_admin'),
+      'member' => l.tr('group_role_member'),
+      _ => null,
+    };
+    final keyStateLabel = v2 == null
+        ? null
+        : (v2.ackApplied ? l.tr('group_key_actual') : l.tr('group_key_rekey_required_short'));
+
+    return AppSectionCard(
+      margin: const EdgeInsets.only(bottom: AppSpacing.sm),
+      padding: EdgeInsets.zero,
+      child: ListTile(
+        onTap: () => HapticFeedback.lightImpact(),
+        contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: 4),
+        leading: CircleAvatar(
+          radius: 20,
+          backgroundColor: p.primary.withOpacity(0.13),
+          child: Text(
+            '$gid',
+            style: TextStyle(color: p.primary, fontWeight: FontWeight.w700, fontSize: 10),
+          ),
         ),
-        child: Icon(Icons.delete_outline_rounded, color: p.error),
-      ),
-      confirmDismiss: (direction) async {
-        final ok = await showRiftConfirmDialog(
-          context: context,
-          title: l.tr('delete'),
-          message: '${l.tr('group')} $gid',
-          cancelText: l.tr('cancel'),
-          confirmText: l.tr('delete'),
-          danger: true,
-        );
-        if (ok != true) return false;
-        final removed = await widget.ble.removeGroup(gid);
-        if (!mounted) return false;
-        if (!removed) {
-          _snack(l.tr('error'), backgroundColor: context.palette.error);
-          return false;
-        }
-        return true;
-      },
-      onDismissed: (_) {
-        setState(() {
-          _applyGroups(_groups.where((g) => g != gid));
-        });
-      },
-      child: AppSectionCard(
-        margin: const EdgeInsets.only(bottom: AppSpacing.sm),
-        padding: EdgeInsets.zero,
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(AppRadius.card),
-            onTap: () => HapticFeedback.lightImpact(),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.xs + 2),
-              child: Row(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.only(left: AppSpacing.xs),
-                    child: CircleAvatar(
-                      radius: 20,
-                      backgroundColor: p.primary.withOpacity(0.13),
-                      child: Text(
-                        '$gid',
-                        style: TextStyle(color: p.primary, fontWeight: FontWeight.w700, fontSize: 10),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: AppSpacing.sm + 2),
-                    Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Flexible(
-                              child: Text(
-                                '${l.tr('group')} $gid',
-                                style: AppTypography.bodyBase().copyWith(
-                                  fontWeight: FontWeight.w600,
-                                  color: p.onSurface,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: AppSpacing.sm),
-                            AnimatedSwitcher(
-                              duration: const Duration(milliseconds: 300),
-                              switchInCurve: Curves.easeOutBack,
-                              switchOutCurve: Curves.easeIn,
-                              transitionBuilder: (child, anim) => ScaleTransition(
-                                scale: anim,
-                                child: FadeTransition(opacity: anim, child: child),
-                              ),
-                              child: isPrivate
-                                  ? Icon(Icons.lock_rounded, key: const ValueKey('locked'), size: 16, color: p.primary)
-                                  : const SizedBox.shrink(key: ValueKey('unlocked')),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: AppSpacing.xs),
-                        AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 280),
-                          switchInCurve: Curves.easeOut,
-                          switchOutCurve: Curves.easeIn,
-                          transitionBuilder: (child, anim) {
-                            final scale = Tween<double>(begin: 0.85, end: 1.0).animate(anim);
-                            return ScaleTransition(
-                              scale: scale,
-                              child: FadeTransition(opacity: anim, child: child),
-                            );
-                          },
-                          child: isPrivate
-                              ? AppStateChip(
-                                  key: ValueKey('priv-$gid-$ver'),
-                                  label: '${l.tr('group_private')}  v$ver',
-                                  kind: AppStateKind.info,
-                                )
-                              : AppStateChip(
-                                  key: ValueKey('pub-$gid'),
-                                  label: l.tr('group_public'),
-                                  kind: AppStateKind.neutral,
-                                ),
-                        ),
-                        if (isPrivate) ...[
-                          const SizedBox(height: AppSpacing.xs),
-                          Text(
-                            canRotate ? l.tr('group_owner_rotate_allowed') : l.tr('group_rekey_required'),
-                            style: AppTypography.labelBase().copyWith(
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w600,
-                              color: canRotate ? p.onSurfaceVariant : p.error,
-                            ),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                  PopupMenuButton<String>(
-                    tooltip: l.tr('settings'),
-                    position: PopupMenuPosition.under,
-                    icon: Icon(Icons.more_vert_rounded, color: p.onSurfaceVariant),
-                    onSelected: (v) async {
-                      if (v == 'private') await _setGroupPrivate(gid, true);
-                      if (v == 'public') await _setGroupPrivate(gid, false);
-                      if (v == 'rotate') await _rotatePrivateKey(gid);
-                      if (v == 'invite') await _copyInvite(gid);
-                    },
-                    itemBuilder: (ctx) => [
-                      if (isPrivate)
-                        PopupMenuItem(value: 'invite', child: Text(l.tr('group_copy_invite')))
-                      else
-                        PopupMenuItem(value: 'private', child: Text(l.tr('group_make_private'))),
-                      if (isPrivate && canRotate) PopupMenuItem(value: 'rotate', child: Text(l.tr('group_rotate_key'))),
-                      if (isPrivate && canRotate) PopupMenuItem(value: 'public', child: Text(l.tr('group_make_public'))),
-                    ],
-                  ),
-                ],
+        title: Row(
+          children: [
+            Expanded(
+              child: Text(
+                '${l.tr('group')} $gid',
+                style: AppTypography.bodyBase().copyWith(
+                  fontWeight: FontWeight.w600,
+                  color: p.onSurface,
+                ),
               ),
             ),
-          ),
+            if (v2 != null) Icon(Icons.lock_rounded, size: 16, color: p.primary),
+          ],
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AppStateChip(
+              label: v2 != null ? 'V2 · v$ver' : 'V2: unresolved',
+              kind: v2 != null ? AppStateKind.info : AppStateKind.neutral,
+            ),
+            if (v2 != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  [
+                    if (roleLabel != null) roleLabel,
+                    if (keyStateLabel != null) keyStateLabel,
+                  ].join(' · '),
+                  style: AppTypography.labelBase().copyWith(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: v2.ackApplied ? p.onSurfaceVariant : p.error,
+                  ),
+                ),
+              ),
+          ],
+        ),
+        trailing: PopupMenuButton<String>(
+          tooltip: l.tr('settings'),
+          position: PopupMenuPosition.under,
+          icon: Icon(Icons.more_vert_rounded, color: p.onSurfaceVariant),
+          onSelected: (v) async {
+            if (v == 'invite') await _copyInvite(gid);
+            if (v == 'status') await _requestGroupStatus(gid);
+            if (v == 'ack') await _ackCurrentGroupKey(gid);
+            if (v == 'rekey_v2') await _rekeyGroupV2(gid);
+            if (v == 'grant') await _showGrantDialog(gid);
+            if (v == 'revoke') await _showRevokeDialog(gid);
+          },
+          itemBuilder: (ctx) => [
+            PopupMenuItem(value: 'status', child: Text('${l.tr('refresh')} status')),
+            if (v2 != null) PopupMenuItem(value: 'invite', child: Text(l.tr('group_copy_invite'))),
+            if (v2 != null && !(v2.ackApplied))
+              PopupMenuItem(value: 'ack', child: Text('${l.tr('group_key_actual')} ACK')),
+            if (v2 != null && canRotate)
+              PopupMenuItem(value: 'rekey_v2', child: Text('V2 ${l.tr('group_rotate_key')}')),
+            if (v2 != null && v2.myRole == 'owner')
+              const PopupMenuItem(value: 'grant', child: Text('Grant role')),
+            if (v2 != null && (v2.myRole == 'owner' || v2.myRole == 'admin'))
+              const PopupMenuItem(value: 'revoke', child: Text('Revoke member')),
+          ],
         ),
       ),
     );

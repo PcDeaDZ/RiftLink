@@ -36,14 +36,17 @@ constexpr uint8_t OP_PING = 0xFF;
 
 // Размеры
 constexpr size_t NODE_ID_LEN = 8;
-constexpr uint8_t SYNC_BYTE = 0x5A;  // маркер начала пакета — искать при сдвиге (SX1262 corruption)
-constexpr size_t HEADER_LEN = 1 + NODE_ID_LEN * 2 + 1 + 1 + 1;  // version + From + To + TTL + Opcode + Channel (unicast)
-constexpr size_t HEADER_LEN_BROADCAST = 1 + 1 + 1 + NODE_ID_LEN + 1 + 1;  // v2: sync+ver+opcode+from+ttl+channel (13 B)
-// v2.1: version 0x30 = заголовок с pktId для NACK
-constexpr uint8_t VERSION_V2_PKTID = 0x30;
+constexpr uint8_t SYNC_BYTE = 0x5A;
+// Strict-only format (v2.2): header carries explicit payload_len.
+// Unicast (no pktId): sync + ver + opcode + from + to + ttl + channel + payload_len.
+constexpr size_t HEADER_LEN = 1 + NODE_ID_LEN * 2 + 1 + 1 + 1 + 1;  // version + From + To + TTL + Opcode + Channel + payload_len
+constexpr size_t HEADER_LEN_BROADCAST = 1 + 1 + 1 + NODE_ID_LEN + 1 + 1 + 1;  // sync+ver+opcode+from+ttl+channel+payload_len
+// v2.2 with pktId (strict-only network, no legacy parse).
+constexpr uint8_t VERSION_STRICT = 0x40;
+constexpr uint8_t VERSION_V2_PKTID = 0x50;
 constexpr size_t PKTID_LEN = 2;
-constexpr size_t HEADER_LEN_BROADCAST_PKTID = 1 + 1 + 1 + PKTID_LEN + NODE_ID_LEN + 1 + 1;  // 15 B
-constexpr size_t HEADER_LEN_PKTID = 1 + 1 + 1 + PKTID_LEN + NODE_ID_LEN * 2 + 1 + 1;  // 23 B
+constexpr size_t HEADER_LEN_BROADCAST_PKTID = 1 + 1 + 1 + PKTID_LEN + NODE_ID_LEN + 1 + 1 + 1;
+constexpr size_t HEADER_LEN_PKTID = 1 + 1 + 1 + PKTID_LEN + NODE_ID_LEN * 2 + 1 + 1 + 1;
 constexpr size_t SYNC_LEN = 1;
 constexpr size_t PAYLOAD_OFFSET = SYNC_LEN + HEADER_LEN;  // смещение payload в пакете с sync
 constexpr uint8_t CHANNEL_DEFAULT = 0;  // Публичный канал
@@ -53,12 +56,13 @@ constexpr size_t MAX_PAYLOAD = 200;
 
 struct PacketHeader {
   uint8_t version_flags;
-  uint16_t pktId;   // 0 = без pktId (v2), ненулевой = v2.1 с NACK
+  uint16_t pktId;   // 0 = без pktId, ненулевой = v2.2 с pktId
   uint8_t from[NODE_ID_LEN];
   uint8_t to[NODE_ID_LEN];
   uint8_t ttl;
   uint8_t opcode;
   uint8_t channel;  // Логический канал (0 = публичный)
+  uint8_t payloadLen;
 };
 
 enum class ParseStatus : uint8_t {
@@ -104,7 +108,7 @@ const char* parseStatusToString(ParseStatus status);
 /** Ожидаемая длина пакета (pLen) для opcode. 0 = неизвестно/переменная. */
 size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadcast, bool hasPktId = false);
 
-/** Полный размер KEY_EXCHANGE в эфире (как в buildPacket): v2.1 unicast = HEADER_LEN_PKTID+32 (55 B). */
+/** Полный размер KEY_EXCHANGE в эфире (как в buildPacket): strict v2.2 unicast = HEADER_LEN_PKTID+32. */
 constexpr inline size_t keyExchangeTotalLen(bool hasPktId, bool isBroadcast) {
   if (hasPktId) {
     return isBroadcast ? (HEADER_LEN_BROADCAST_PKTID + 32) : (HEADER_LEN_PKTID + 32);

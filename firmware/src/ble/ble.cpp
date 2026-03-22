@@ -198,6 +198,29 @@ static void nodeIdToHex(const uint8_t in[protocol::NODE_ID_LEN], char out[17]) {
   out[16] = '\0';
 }
 
+static groups::GroupRole parseGroupRole(const char* role) {
+  if (!role || !role[0]) return groups::GroupRole::None;
+  if (strcmp(role, "owner") == 0) return groups::GroupRole::Owner;
+  if (strcmp(role, "admin") == 0) return groups::GroupRole::Admin;
+  if (strcmp(role, "member") == 0) return groups::GroupRole::Member;
+  return groups::GroupRole::None;
+}
+
+static const char* groupRoleToStr(groups::GroupRole role) {
+  switch (role) {
+    case groups::GroupRole::Owner: return "owner";
+    case groups::GroupRole::Admin: return "admin";
+    case groups::GroupRole::Member: return "member";
+    default: return "none";
+  }
+}
+
+static bool isSelfNodeHex(const char* hexId) {
+  uint8_t id[protocol::NODE_ID_LEN];
+  if (!parseFullNodeIdHex(hexId, id)) return false;
+  return memcmp(id, node::getId(), protocol::NODE_ID_LEN) == 0;
+}
+
 static inline void scheduleInfoNotify(uint32_t delayMs = 0) {
   s_pendingInfo = true;
   s_pendingInfoNotBeforeMs = millis() + delayMs;
@@ -461,6 +484,77 @@ class RiftTxCharacteristic : public NimBLECharacteristic {
 /** Большой evt info — раньше String::reserve(1200); теперь BSS, без heap. */
 static constexpr size_t NOTIFY_INFO_JSON_CAP = 1280;
 static char s_notifyInfoPayload[NOTIFY_INFO_JSON_CAP];
+
+static void notifyGroupStatusV2(const char* groupUid) {
+  if (!groupUid || !groupUid[0]) return;
+  if (!pRxChar || !s_connected) return;
+  uint32_t channelId32 = 0;
+  char groupTag[groups::GROUP_TAG_MAX_LEN + 1] = {0};
+  uint16_t keyVersion = 0;
+  groups::GroupRole role = groups::GroupRole::None;
+  uint32_t revocationEpoch = 0;
+  bool ackApplied = false;
+  if (!groups::getGroupV2(groupUid, &channelId32, groupTag, sizeof(groupTag), &keyVersion, &role, &revocationEpoch, &ackApplied)) {
+    return;
+  }
+  JsonDocument ev(&s_bleJsonAllocator);
+  ev["evt"] = "groupStatus";
+  ev["groupUid"] = groupUid;
+  ev["channelId32"] = channelId32;
+  ev["groupTag"] = groupTag;
+  ev["myRole"] = groupRoleToStr(role);
+  ev["keyVersion"] = keyVersion;
+  ev["revocationEpoch"] = revocationEpoch;
+  ev["ackApplied"] = ackApplied;
+  ev["status"] = "ok";
+  ev["rekeyRequired"] = !ackApplied;
+  char buf[240];
+  size_t n = serializeJson(ev, buf);
+  notifyJsonToApp(buf, n);
+}
+
+static void notifyGroupRekeyProgressV2(const char* groupUid, const char* rekeyOpId, uint16_t keyVersion) {
+  if (!groupUid || !groupUid[0]) return;
+  if (!pRxChar || !s_connected) return;
+  JsonDocument ev(&s_bleJsonAllocator);
+  ev["evt"] = "groupRekeyProgress";
+  ev["groupUid"] = groupUid;
+  ev["rekeyOpId"] = (rekeyOpId && rekeyOpId[0]) ? rekeyOpId : "local";
+  ev["keyVersion"] = keyVersion;
+  ev["pending"] = 0;
+  ev["delivered"] = 0;
+  ev["applied"] = 1;
+  ev["failed"] = 0;
+  char buf[220];
+  size_t n = serializeJson(ev, buf);
+  notifyJsonToApp(buf, n);
+}
+
+static void notifyGroupMemberKeyStateV2(const char* groupUid, const char* memberId, const char* state, uint32_t ackAt) {
+  if (!groupUid || !groupUid[0] || !memberId || !memberId[0] || !state || !state[0]) return;
+  if (!pRxChar || !s_connected) return;
+  JsonDocument ev(&s_bleJsonAllocator);
+  ev["evt"] = "groupMemberKeyState";
+  ev["groupUid"] = groupUid;
+  ev["memberId"] = memberId;
+  ev["status"] = state;
+  if (ackAt > 0) ev["ackAt"] = ackAt;
+  char buf[220];
+  size_t n = serializeJson(ev, buf);
+  notifyJsonToApp(buf, n);
+}
+
+static void notifyGroupSecurityErrorV2(const char* groupUid, const char* code, const char* msg) {
+  if (!pRxChar || !s_connected) return;
+  JsonDocument ev(&s_bleJsonAllocator);
+  ev["evt"] = "groupSecurityError";
+  if (groupUid && groupUid[0]) ev["groupUid"] = groupUid;
+  ev["code"] = code ? code : "group_v2_unknown";
+  ev["msg"] = msg ? msg : "";
+  char buf[240];
+  size_t n = serializeJson(ev, buf);
+  notifyJsonToApp(buf, n);
+}
 
 static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
   if (len == 0) return;
@@ -866,6 +960,290 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       s_pendingGroups = true;
       return;
     }
+    if (strcmp(cmd, "groupCreate") == 0) {
+      const char* groupUid = doc["groupUid"];
+      const char* groupTag = doc["groupTag"];
+      uint32_t channelId32 = doc["channelId32"] | 0;
+      const char* keyB64 = doc["groupKey"];
+      uint16_t keyVersion = (uint16_t)(doc["keyVersion"] | 1);
+      const char* roleStr = doc["myRole"];
+      uint32_t revEpoch = doc["revocationEpoch"] | 0;
+      if (!groupUid || !groupUid[0] || !groupTag || !groupTag[0] || channelId32 == 0) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_bad", "Missing groupUid/groupTag/channelId32");
+        return;
+      }
+      uint8_t key[32];
+      if (keyB64 && keyB64[0]) {
+        size_t decLen = 0;
+        if (mbedtls_base64_decode(key, sizeof(key), &decLen, (const unsigned char*)keyB64, strlen(keyB64)) != 0 || decLen != 32) {
+          notifyGroupSecurityErrorV2(groupUid, "group_v2_key_bad", "Bad groupKey");
+          return;
+        }
+      } else {
+        for (size_t i = 0; i < sizeof(key); i += 4) {
+          uint32_t r = esp_random();
+          memcpy(&key[i], &r, (sizeof(key) - i >= 4) ? 4 : (sizeof(key) - i));
+        }
+      }
+      groups::GroupRole role = parseGroupRole(roleStr);
+      if (role == groups::GroupRole::None) role = groups::GroupRole::Owner;
+      if (!groups::upsertGroupV2(groupUid, channelId32, groupTag, key, keyVersion, role, revEpoch)) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_store_failed", "Failed to store V2 group");
+        return;
+      }
+      notifyGroupStatusV2(groupUid);
+      s_pendingGroups = true;
+      scheduleInfoNotify();
+      return;
+    }
+    if (strcmp(cmd, "groupStatus") == 0) {
+      const char* groupUid = doc["groupUid"];
+      if (!groupUid || !groupUid[0]) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_bad", "Missing groupUid");
+        return;
+      }
+      notifyGroupStatusV2(groupUid);
+      return;
+    }
+    if (strcmp(cmd, "groupInviteCreate") == 0) {
+      const char* groupUid = doc["groupUid"];
+      const char* roleStr = doc["role"];
+      uint32_t ttlSec = doc["ttlSec"] | 600;
+      if (!groupUid || !groupUid[0]) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Missing groupUid");
+        return;
+      }
+      uint32_t channelId32 = 0;
+      char groupTag[groups::GROUP_TAG_MAX_LEN + 1] = {0};
+      uint16_t keyVersion = 0;
+      groups::GroupRole myRole = groups::GroupRole::None;
+      uint8_t key[32];
+      if (!groups::getGroupV2(groupUid, &channelId32, groupTag, sizeof(groupTag), &keyVersion, &myRole, nullptr, nullptr) ||
+          !groups::getGroupKeyV2(groupUid, key, &keyVersion)) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Unknown groupUid");
+        return;
+      }
+      size_t keyB64Len = 0;
+      mbedtls_base64_encode(nullptr, 0, &keyB64Len, key, sizeof(key));
+      char keyB64[80] = {0};
+      if (mbedtls_base64_encode((unsigned char*)keyB64, sizeof(keyB64), &keyB64Len, key, sizeof(key)) != 0) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Key encode failed");
+        return;
+      }
+      keyB64[keyB64Len] = '\0';
+      if (!roleStr || !roleStr[0]) roleStr = "member";
+      const uint32_t expiresAt = (uint32_t)(millis() / 1000) + ttlSec;
+      char raw[320] = {0};
+      int rawLen = snprintf(
+          raw, sizeof(raw),
+          "v2|%s|%lu|%s|%u|%s|%s|%lu",
+          groupUid,
+          (unsigned long)channelId32,
+          groupTag,
+          (unsigned)keyVersion,
+          keyB64,
+          roleStr,
+          (unsigned long)expiresAt);
+      if (rawLen <= 0 || (size_t)rawLen >= sizeof(raw)) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Invite payload too large");
+        return;
+      }
+      size_t inviteB64Len = 0;
+      mbedtls_base64_encode(nullptr, 0, &inviteB64Len, (const unsigned char*)raw, (size_t)rawLen);
+      char inviteB64[460] = {0};
+      if (mbedtls_base64_encode((unsigned char*)inviteB64, sizeof(inviteB64), &inviteB64Len, (const unsigned char*)raw, (size_t)rawLen) != 0) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Invite encode failed");
+        return;
+      }
+      inviteB64[inviteB64Len] = '\0';
+      JsonDocument ev(&s_bleJsonAllocator);
+      ev["evt"] = "groupInvite";
+      ev["groupUid"] = groupUid;
+      ev["role"] = roleStr;
+      ev["invite"] = inviteB64;
+      ev["expiresAt"] = expiresAt;
+      ev["channelId32"] = channelId32;
+      char out[560];
+      size_t outLen = serializeJson(ev, out);
+      notifyJsonToApp(out, outLen);
+      return;
+    }
+    if (strcmp(cmd, "groupInviteAccept") == 0) {
+      const char* inviteB64 = doc["invite"];
+      if (!inviteB64 || !inviteB64[0]) {
+        notifyGroupSecurityErrorV2(nullptr, "group_v2_invite_bad", "Missing invite");
+        return;
+      }
+      uint8_t raw[360] = {0};
+      size_t rawLen = 0;
+      if (mbedtls_base64_decode(raw, sizeof(raw) - 1, &rawLen, (const unsigned char*)inviteB64, strlen(inviteB64)) != 0 || rawLen == 0) {
+        notifyGroupSecurityErrorV2(nullptr, "group_v2_invite_bad", "Bad invite base64");
+        return;
+      }
+      raw[rawLen] = 0;
+      char* savePtr = nullptr;
+      char* version = strtok_r((char*)raw, "|", &savePtr);
+      char* groupUid = strtok_r(nullptr, "|", &savePtr);
+      char* channelStr = strtok_r(nullptr, "|", &savePtr);
+      char* groupTag = strtok_r(nullptr, "|", &savePtr);
+      char* keyVersionStr = strtok_r(nullptr, "|", &savePtr);
+      char* keyB64 = strtok_r(nullptr, "|", &savePtr);
+      char* roleStr = strtok_r(nullptr, "|", &savePtr);
+      char* expiresStr = strtok_r(nullptr, "|", &savePtr);
+      if (!version || strcmp(version, "v2") != 0 || !groupUid || !channelStr || !groupTag || !keyVersionStr || !keyB64 || !roleStr || !expiresStr) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Malformed invite");
+        return;
+      }
+      const uint32_t nowSec = (uint32_t)(millis() / 1000);
+      const uint32_t expiresAt = (uint32_t)strtoul(expiresStr, nullptr, 10);
+      if (expiresAt == 0 || nowSec > expiresAt) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_expired", "Invite expired");
+        return;
+      }
+      const uint32_t channelId32 = (uint32_t)strtoul(channelStr, nullptr, 10);
+      const uint16_t keyVersion = (uint16_t)strtoul(keyVersionStr, nullptr, 10);
+      uint8_t key[32];
+      size_t keyLen = 0;
+      if (channelId32 == 0 ||
+          mbedtls_base64_decode(key, sizeof(key), &keyLen, (const unsigned char*)keyB64, strlen(keyB64)) != 0 ||
+          keyLen != 32) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Invalid key/channel");
+        return;
+      }
+      groups::GroupRole role = parseGroupRole(roleStr);
+      if (role == groups::GroupRole::None) role = groups::GroupRole::Member;
+      if (!groups::upsertGroupV2(groupUid, channelId32, groupTag, key, keyVersion > 0 ? keyVersion : 1, role, 0)) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_store_failed", "Cannot store accepted invite");
+        return;
+      }
+      s_pendingGroups = true;
+      scheduleInfoNotify();
+      notifyGroupStatusV2(groupUid);
+      return;
+    }
+    if (strcmp(cmd, "groupGrantIssue") == 0) {
+      const char* groupUid = doc["groupUid"];
+      const char* subjectId = doc["subjectId"];
+      const char* roleStr = doc["role"];
+      if (!groupUid || !groupUid[0] || !subjectId || !subjectId[0] || !roleStr || !roleStr[0]) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_grant_bad", "Missing groupUid/subjectId/role");
+        return;
+      }
+      if (isSelfNodeHex(subjectId)) {
+        groups::GroupRole role = parseGroupRole(roleStr);
+        if (role == groups::GroupRole::None || !groups::setGroupRoleV2(groupUid, role)) {
+          notifyGroupSecurityErrorV2(groupUid, "group_v2_grant_bad", "Invalid role or unknown group");
+          return;
+        }
+      }
+      notifyGroupStatusV2(groupUid);
+      return;
+    }
+    if (strcmp(cmd, "groupRevoke") == 0) {
+      const char* groupUid = doc["groupUid"];
+      const char* subjectId = doc["subjectId"];
+      uint32_t revEpoch = doc["revocationEpoch"] | 0;
+      if (!groupUid || !groupUid[0] || !subjectId || !subjectId[0]) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_revoke_bad", "Missing groupUid/subjectId");
+        return;
+      }
+      if (isSelfNodeHex(subjectId)) {
+        groups::setGroupRoleV2(groupUid, groups::GroupRole::None);
+        uint32_t curEpoch = 0;
+        groups::GroupRole curRole = groups::GroupRole::None;
+        if (groups::getGroupV2(groupUid, nullptr, nullptr, 0, nullptr, &curRole, &curEpoch, nullptr)) {
+          if (revEpoch <= curEpoch) revEpoch = curEpoch + 1;
+        }
+        groups::setRevocationEpochV2(groupUid, revEpoch);
+      }
+      notifyGroupStatusV2(groupUid);
+      return;
+    }
+    if (strcmp(cmd, "groupRekey") == 0) {
+      const char* groupUid = doc["groupUid"];
+      const char* keyB64 = doc["groupKey"];
+      const char* rekeyOpId = doc["rekeyOpId"];
+      uint16_t keyVersion = (uint16_t)(doc["keyVersion"] | 0);
+      if (!groupUid || !groupUid[0]) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_rekey_bad", "Missing groupUid");
+        return;
+      }
+      uint8_t key[32];
+      if (keyB64 && keyB64[0]) {
+        size_t decLen = 0;
+        if (mbedtls_base64_decode(key, sizeof(key), &decLen, (const unsigned char*)keyB64, strlen(keyB64)) != 0 || decLen != 32) {
+          notifyGroupSecurityErrorV2(groupUid, "group_v2_key_bad", "Bad groupKey");
+          return;
+        }
+      } else {
+        for (size_t i = 0; i < sizeof(key); i += 4) {
+          uint32_t r = esp_random();
+          memcpy(&key[i], &r, (sizeof(key) - i >= 4) ? 4 : (sizeof(key) - i));
+        }
+      }
+      if (!groups::updateGroupKeyV2(groupUid, key, keyVersion)) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_rekey_bad", "Unknown group");
+        return;
+      }
+      groups::GroupRole role = groups::GroupRole::None;
+      uint16_t appliedVersion = 0;
+      if (groups::getGroupV2(groupUid, nullptr, nullptr, 0, &appliedVersion, &role, nullptr, nullptr) &&
+          role != groups::GroupRole::None) {
+        groups::ackKeyAppliedV2(groupUid, appliedVersion);
+      }
+      notifyGroupRekeyProgressV2(groupUid, rekeyOpId, appliedVersion);
+      notifyGroupStatusV2(groupUid);
+      return;
+    }
+    if (strcmp(cmd, "groupAckKeyApplied") == 0) {
+      const char* groupUid = doc["groupUid"];
+      uint16_t keyVersion = (uint16_t)(doc["keyVersion"] | 0);
+      if (!groupUid || !groupUid[0] || keyVersion == 0) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_ack_bad", "Missing groupUid/keyVersion");
+        return;
+      }
+      if (!groups::ackKeyAppliedV2(groupUid, keyVersion)) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_ack_bad", "Ack failed");
+        return;
+      }
+      char selfHex[17] = {0};
+      nodeIdToHex(node::getId(), selfHex);
+      notifyGroupMemberKeyStateV2(groupUid, selfHex, "applied", (uint32_t)(millis() / 1000));
+      notifyGroupStatusV2(groupUid);
+      return;
+    }
+    if (strcmp(cmd, "groupSyncSnapshot") == 0) {
+      JsonVariant groupsVar = doc["groups"];
+      if (!groupsVar.is<JsonArray>()) {
+        notifyGroupSecurityErrorV2(nullptr, "group_v2_snapshot_bad", "groups must be array");
+        return;
+      }
+      JsonArray arr = groupsVar.as<JsonArray>();
+      for (JsonVariant v : arr) {
+        if (!v.is<JsonObject>()) continue;
+        JsonObject g = v.as<JsonObject>();
+        const char* groupUid = g["groupUid"];
+        const char* groupTag = g["groupTag"];
+        const char* keyB64 = g["groupKey"];
+        const char* roleStr = g["myRole"];
+        uint32_t channelId32 = g["channelId32"] | 0;
+        uint16_t keyVersion = (uint16_t)(g["keyVersion"] | 1);
+        uint32_t revEpoch = g["revocationEpoch"] | 0;
+        if (!groupUid || !groupUid[0] || !groupTag || !groupTag[0] || channelId32 == 0 || !keyB64 || !keyB64[0]) continue;
+        uint8_t key[32];
+        size_t decLen = 0;
+        if (mbedtls_base64_decode(key, sizeof(key), &decLen, (const unsigned char*)keyB64, strlen(keyB64)) != 0 || decLen != 32) {
+          continue;
+        }
+        groups::GroupRole role = parseGroupRole(roleStr);
+        if (role == groups::GroupRole::None) role = groups::GroupRole::Member;
+        if (!groups::upsertGroupV2(groupUid, channelId32, groupTag, key, keyVersion, role, revEpoch)) continue;
+        if (g["ackApplied"] == true) groups::ackKeyAppliedV2(groupUid, keyVersion);
+      }
+      s_pendingGroups = true;
+      scheduleInfoNotify();
+      return;
+    }
     if (strcmp(cmd, "routes") == 0 || strcmp(cmd, "mesh") == 0) {
       s_pendingRoutes = true;
       return;
@@ -881,136 +1259,12 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       scheduleInfoNotify();
       return;
     }
-    if (strcmp(cmd, "addGroup") == 0) {
-      uint32_t gid = doc["group"] | 0;
-      if (gid > 0 && groups::addGroup(gid)) {
-        s_pendingGroups = true;
-      }
-      return;
-    }
-    if (strcmp(cmd, "removeGroup") == 0) {
-      uint32_t gid = doc["group"] | 0;
-      if (gid > 0) {
-        groups::removeGroup(gid);
-        s_pendingGroups = true;
-      }
-      return;
-    }
-    if (strcmp(cmd, "setGroupKey") == 0) {
-      uint32_t gid = doc["group"] | 0;
-      const char* keyB64 = doc["key"];
-      uint16_t keyVersion = (uint16_t)(doc["keyVersion"] | 0);
-      const char* ownerHex = doc["owner"];
-      const char* adminCapHex = doc["adminCap"];
-      uint8_t ownerId[protocol::NODE_ID_LEN];
-      const uint8_t* ownerPtr = nullptr;
-      uint8_t adminCap[8];
-      const uint8_t* adminCapPtr = nullptr;
-      if (gid == 0 || !keyB64 || !keyB64[0]) {
-        ble::notifyError("group_key_bad", "Missing group/key");
-        return;
-      }
-      if (ownerHex && ownerHex[0]) {
-        if (!parseFullNodeIdHex(ownerHex, ownerId)) {
-          ble::notifyError("group_owner_bad", "owner must be full 16 hex node id");
-          return;
-        }
-        ownerPtr = ownerId;
-      }
-      if (adminCapHex && adminCapHex[0]) {
-        if (!parseFullNodeIdHex(adminCapHex, adminCap)) {
-          ble::notifyError("group_admin_cap_bad", "adminCap must be 16 hex chars");
-          return;
-        }
-        adminCapPtr = adminCap;
-      }
-      size_t decLen = 0;
-      uint8_t key[32];
-      if (mbedtls_base64_decode(key, sizeof(key), &decLen, (const unsigned char*)keyB64, strlen(keyB64)) != 0 || decLen != 32) {
-        ble::notifyError("group_key_bad", "Bad group key");
-        return;
-      }
-      if (!groups::setGroupKey(gid, key, keyVersion, ownerPtr, adminCapPtr)) {
-        ble::notifyError("group_key_set_denied", "Failed to set group key (owner/admin required)");
-        return;
-      }
-      s_pendingGroups = true;
-      scheduleInfoNotify();
-      return;
-    }
-    if (strcmp(cmd, "clearGroupKey") == 0) {
-      uint32_t gid = doc["group"] | 0;
-      const char* adminCapHex = doc["adminCap"];
-      uint8_t adminCap[8];
-      const uint8_t* adminCapPtr = nullptr;
-      if (adminCapHex && adminCapHex[0]) {
-        if (!parseFullNodeIdHex(adminCapHex, adminCap)) {
-          ble::notifyError("group_admin_cap_bad", "adminCap must be 16 hex chars");
-          return;
-        }
-        adminCapPtr = adminCap;
-      }
-      if (gid == 0 || !groups::clearGroupKey(gid, adminCapPtr)) {
-        ble::notifyError("group_key_clear_failed", "Failed to clear group key");
-        return;
-      }
-      s_pendingGroups = true;
-      scheduleInfoNotify();
-      return;
-    }
-    if (strcmp(cmd, "setGroupAdminCap") == 0) {
-      uint32_t gid = doc["group"] | 0;
-      const char* adminCapHex = doc["adminCap"];
-      uint8_t adminCap[8];
-      if (gid == 0 || !adminCapHex || !adminCapHex[0]) {
-        ble::notifyError("group_admin_cap_bad", "Missing group/adminCap");
-        return;
-      }
-      if (!parseFullNodeIdHex(adminCapHex, adminCap)) {
-        ble::notifyError("group_admin_cap_bad", "adminCap must be 16 hex chars");
-        return;
-      }
-      if (!groups::setGroupAdminCapability(gid, adminCap)) {
-        ble::notifyError("group_admin_cap_set_failed", "Failed to set group admin capability");
-        return;
-      }
-      s_pendingGroups = true;
-      scheduleInfoNotify();
-      return;
-    }
-    if (strcmp(cmd, "clearGroupAdminCap") == 0) {
-      uint32_t gid = doc["group"] | 0;
-      if (gid == 0 || !groups::clearGroupAdminCapability(gid)) {
-        ble::notifyError("group_admin_cap_clear_failed", "Failed to clear group admin capability");
-        return;
-      }
-      s_pendingGroups = true;
-      scheduleInfoNotify();
-      return;
-    }
-    if (strcmp(cmd, "getGroupKey") == 0) {
-      uint32_t gid = doc["group"] | 0;
-      uint8_t key[32];
-      if (gid == 0 || !groups::getGroupKey(gid, key)) {
-        ble::notifyError("group_key_not_found", "Group key not found");
-        return;
-      }
-      size_t b64Len = 0;
-      mbedtls_base64_encode(nullptr, 0, &b64Len, key, sizeof(key));
-      char keyB64[64] = {0};
-      if (mbedtls_base64_encode((unsigned char*)keyB64, sizeof(keyB64), &b64Len, key, sizeof(key)) != 0) {
-        ble::notifyError("group_key_encode_failed", "Group key encode failed");
-        return;
-      }
-      keyB64[b64Len] = '\0';
-      JsonDocument ev(&s_bleJsonAllocator);
-      ev["evt"] = "groupKey";
-      ev["group"] = gid;
-      ev["key"] = keyB64;
-      ev["keyVersion"] = groups::getGroupKeyVersion(gid);
-      char buf[140];
-      size_t len = serializeJson(ev, buf);
-      notifyJsonToApp(buf, len);
+    if (strcmp(cmd, "addGroup") == 0 || strcmp(cmd, "removeGroup") == 0 ||
+        strcmp(cmd, "setGroupKey") == 0 || strcmp(cmd, "clearGroupKey") == 0 ||
+        strcmp(cmd, "setGroupAdminCap") == 0 || strcmp(cmd, "clearGroupAdminCap") == 0 ||
+        strcmp(cmd, "getGroupKey") == 0) {
+      // V2-only firmware: legacy V1 group commands are intentionally disabled.
+      ble::notifyError("group_legacy_cmd_unsupported", "Legacy V1 group command is not supported");
       return;
     }
 
@@ -1528,25 +1782,34 @@ void notifyInfo() {
   doc["blePin"] = s_passkey;
 
   JsonArray grpArr = doc["groups"].to<JsonArray>();
-  JsonArray grpPrivArr = doc["groupsPrivate"].to<JsonArray>();
-  JsonArray grpVerArr = doc["groupsKeyVersion"].to<JsonArray>();
-  JsonArray grpOwnerArr = doc["groupsOwner"].to<JsonArray>();
-  JsonArray grpCanRotateArr = doc["groupsCanRotate"].to<JsonArray>();
-  int ng = groups::getCount();
-  uint8_t ownerId[protocol::NODE_ID_LEN];
-  char ownerHex[17] = {0};
+  const int ng = groups::getV2Count();
   for (int i = 0; i < ng; i++) {
-    const uint32_t gid = groups::getId(i);
-    grpArr.add(gid);
-    grpPrivArr.add(groups::isPrivateAt(i));
-    grpVerArr.add((uint32_t)groups::keyVersionAt(i));
-    if (groups::getGroupOwner(gid, ownerId)) {
-      nodeIdToHex(ownerId, ownerHex);
-      grpOwnerArr.add(ownerHex);
-    } else {
-      grpOwnerArr.add((const char*)nullptr);
-    }
-    grpCanRotateArr.add(groups::canRotateAt(i));
+    char uid[groups::GROUP_UID_MAX_LEN + 1] = {0};
+    char tag[groups::GROUP_TAG_MAX_LEN + 1] = {0};
+    uint32_t channelId32 = 0;
+    if (!groups::getV2At(i, uid, sizeof(uid), &channelId32, tag, sizeof(tag), nullptr, nullptr, nullptr, nullptr)) continue;
+    if (channelId32 == 0) continue;
+    grpArr.add(channelId32);
+  }
+  JsonArray grpV2Arr = doc["groupsV2"].to<JsonArray>();
+  const int nv2 = groups::getV2Count();
+  for (int i = 0; i < nv2; i++) {
+    char uid[groups::GROUP_UID_MAX_LEN + 1] = {0};
+    char tag[groups::GROUP_TAG_MAX_LEN + 1] = {0};
+    uint32_t channelId32 = 0;
+    uint16_t keyVersion = 0;
+    groups::GroupRole role = groups::GroupRole::None;
+    uint32_t revEpoch = 0;
+    bool ackApplied = false;
+    if (!groups::getV2At(i, uid, sizeof(uid), &channelId32, tag, sizeof(tag), &keyVersion, &role, &revEpoch, &ackApplied)) continue;
+    JsonObject gv2 = grpV2Arr.add<JsonObject>();
+    gv2["groupUid"] = uid;
+    gv2["groupTag"] = tag;
+    gv2["channelId32"] = channelId32;
+    gv2["keyVersion"] = keyVersion;
+    gv2["myRole"] = groupRoleToStr(role);
+    gv2["revocationEpoch"] = revEpoch;
+    gv2["ackApplied"] = ackApplied;
   }
 
   JsonArray arr = doc["neighbors"].to<JsonArray>();
@@ -1672,25 +1935,34 @@ void notifyGroups() {
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "groups";
   JsonArray arr = doc["groups"].to<JsonArray>();
-  JsonArray arrPriv = doc["groupsPrivate"].to<JsonArray>();
-  JsonArray arrVer = doc["groupsKeyVersion"].to<JsonArray>();
-  JsonArray arrOwner = doc["groupsOwner"].to<JsonArray>();
-  JsonArray arrCanRotate = doc["groupsCanRotate"].to<JsonArray>();
-  int n = groups::getCount();
-  uint8_t ownerId[protocol::NODE_ID_LEN];
-  char ownerHex[17] = {0};
+  const int n = groups::getV2Count();
   for (int i = 0; i < n; i++) {
-    const uint32_t gid = groups::getId(i);
-    arr.add(gid);
-    arrPriv.add(groups::isPrivateAt(i));
-    arrVer.add((uint32_t)groups::keyVersionAt(i));
-    if (groups::getGroupOwner(gid, ownerId)) {
-      nodeIdToHex(ownerId, ownerHex);
-      arrOwner.add(ownerHex);
-    } else {
-      arrOwner.add((const char*)nullptr);
-    }
-    arrCanRotate.add(groups::canRotateAt(i));
+    char uid[groups::GROUP_UID_MAX_LEN + 1] = {0};
+    char tag[groups::GROUP_TAG_MAX_LEN + 1] = {0};
+    uint32_t channelId32 = 0;
+    if (!groups::getV2At(i, uid, sizeof(uid), &channelId32, tag, sizeof(tag), nullptr, nullptr, nullptr, nullptr)) continue;
+    if (channelId32 == 0) continue;
+    arr.add(channelId32);
+  }
+  JsonArray arrV2 = doc["groupsV2"].to<JsonArray>();
+  const int nv2 = groups::getV2Count();
+  for (int i = 0; i < nv2; i++) {
+    char uid[groups::GROUP_UID_MAX_LEN + 1] = {0};
+    char tag[groups::GROUP_TAG_MAX_LEN + 1] = {0};
+    uint32_t channelId32 = 0;
+    uint16_t keyVersion = 0;
+    groups::GroupRole role = groups::GroupRole::None;
+    uint32_t revEpoch = 0;
+    bool ackApplied = false;
+    if (!groups::getV2At(i, uid, sizeof(uid), &channelId32, tag, sizeof(tag), &keyVersion, &role, &revEpoch, &ackApplied)) continue;
+    JsonObject gv2 = arrV2.add<JsonObject>();
+    gv2["groupUid"] = uid;
+    gv2["groupTag"] = tag;
+    gv2["channelId32"] = channelId32;
+    gv2["keyVersion"] = keyVersion;
+    gv2["myRole"] = groupRoleToStr(role);
+    gv2["revocationEpoch"] = revEpoch;
+    gv2["ackApplied"] = ackApplied;
   }
 
   char buf[260];

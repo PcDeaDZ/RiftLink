@@ -84,6 +84,10 @@ void queueDisplayWake();
 /** Поставить CMD_BLINK_LED — мигание без блокировки loop */
 void queueDisplayLedBlink();
 
+/** Текущее состояние основной TX-очереди (s_txRequestQueue). */
+uint8_t asyncTxQueueFree();
+uint8_t asyncTxQueueWaiting();
+
 /** Feature flag Radio FSM v2 (continuous RX + arbiter). */
 bool asyncIsRadioFsmV2Enabled();
 void asyncSetRadioFsmV2Enabled(bool enabled);

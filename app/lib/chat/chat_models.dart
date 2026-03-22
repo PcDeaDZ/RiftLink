@@ -69,6 +69,7 @@ class ChatMessage {
   final String from;
   final String? to;
   final int? groupId;
+  final String? groupUid;
   final String text;
   final String type;
   final String lane;
@@ -89,6 +90,7 @@ class ChatMessage {
     required this.from,
     this.to,
     this.groupId,
+    this.groupUid,
     required this.text,
     this.type = 'text',
     this.lane = 'normal',
@@ -110,6 +112,7 @@ class ChatMessage {
     String? from,
     String? to,
     int? groupId,
+    String? groupUid,
     String? text,
     String? type,
     String? lane,
@@ -130,6 +133,7 @@ class ChatMessage {
       from: from ?? this.from,
       to: to ?? this.to,
       groupId: groupId ?? this.groupId,
+      groupUid: groupUid ?? this.groupUid,
       text: text ?? this.text,
       type: type ?? this.type,
       lane: lane ?? this.lane,

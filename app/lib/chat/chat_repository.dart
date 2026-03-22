@@ -15,13 +15,15 @@ class ChatRepository {
 
   Stream<void> get conversationsChanged => _conversationsController.stream;
 
+  static const int _dbVersion = 2;
+
   Future<void> init() async {
     if (_db != null) return;
     final dir = await getApplicationDocumentsDirectory();
     final dbPath = p.join(dir.path, 'riftlink_chat.db');
     _db = await openDatabase(
       dbPath,
-      version: 1,
+      version: _dbVersion,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE conversations (
@@ -46,6 +48,7 @@ class ChatRepository {
             from_id TEXT NOT NULL,
             to_id TEXT,
             group_id INTEGER,
+            group_uid TEXT,
             text TEXT NOT NULL,
             type TEXT NOT NULL,
             lane TEXT NOT NULL,
@@ -81,9 +84,63 @@ class ChatRepository {
 
         await db.execute('CREATE INDEX idx_messages_conv_time ON messages(conversation_id, created_at_ms)');
         await db.execute('CREATE INDEX idx_messages_msgid ON messages(msg_id)');
+        await db.execute('CREATE INDEX idx_messages_group_uid ON messages(group_uid)');
         await db.execute('CREATE INDEX idx_conversations_unread ON conversations(unread_count)');
         await db.execute('CREATE INDEX idx_conversations_sort ON conversations(pinned, last_at_ms)');
+        await _createGroupSecurityTables(db);
       },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await db.execute('ALTER TABLE messages ADD COLUMN group_uid TEXT');
+          await db.execute('CREATE INDEX IF NOT EXISTS idx_messages_group_uid ON messages(group_uid)');
+          await _createGroupSecurityTables(db);
+        }
+      },
+    );
+  }
+
+  Future<void> _createGroupSecurityTables(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS group_rekey_sessions (
+        group_uid TEXT NOT NULL,
+        rekey_op_id TEXT NOT NULL,
+        key_version INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        deadline INTEGER,
+        status TEXT NOT NULL,
+        PRIMARY KEY (group_uid, rekey_op_id)
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS group_member_key_state (
+        group_uid TEXT NOT NULL,
+        member_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        last_try_at INTEGER,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        ack_at INTEGER,
+        PRIMARY KEY (group_uid, member_id)
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS group_grants (
+        group_uid TEXT NOT NULL,
+        subject_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        expires_at INTEGER,
+        grant_version INTEGER NOT NULL,
+        revoked INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (group_uid, subject_id)
+      )
+    ''');
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_group_rekey_status ON group_rekey_sessions(group_uid, status)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_group_member_state_status ON group_member_key_state(group_uid, status)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_group_grants_role ON group_grants(group_uid, role, revoked)',
     );
   }
 
@@ -99,8 +156,15 @@ class ChatRepository {
   }
 
   static String directConversationId(String peerId) => 'direct:$peerId';
-  static String groupConversationId(int groupId) => 'group:$groupId';
+  static String groupConversationIdByUid(String groupUid) => 'groupv2:${groupUid.toUpperCase()}';
   static String broadcastConversationId() => 'broadcast:all';
+  static String groupPeerRefByUid(String groupUid) => 'uid:${groupUid.toUpperCase()}';
+  static bool isGroupUidPeerRef(String peerRef) => peerRef.toLowerCase().startsWith('uid:');
+  static String? groupUidFromPeerRef(String peerRef) {
+    if (!isGroupUidPeerRef(peerRef)) return null;
+    final raw = peerRef.substring(4).trim();
+    return raw.isEmpty ? null : raw.toUpperCase();
+  }
 
   Future<void> ensureConversation({
     required String id,
@@ -161,6 +225,7 @@ class ChatRepository {
         'from_id': message.from,
         'to_id': message.to,
         'group_id': message.groupId,
+        'group_uid': message.groupUid,
         'text': message.text,
         'type': message.type,
         'lane': message.lane,
@@ -358,6 +423,159 @@ class ChatRepository {
     );
   }
 
+  Future<void> upsertGroupRekeySession({
+    required String groupUid,
+    required String rekeyOpId,
+    required int keyVersion,
+    required int createdAt,
+    int? deadline,
+    required String status,
+  }) async {
+    final db = await _database;
+    await db.insert(
+      'group_rekey_sessions',
+      {
+        'group_uid': groupUid.toUpperCase(),
+        'rekey_op_id': rekeyOpId,
+        'key_version': keyVersion,
+        'created_at': createdAt,
+        'deadline': deadline,
+        'status': status,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<void> upsertGroupMemberKeyState({
+    required String groupUid,
+    required String memberId,
+    required String status,
+    int? lastTryAt,
+    int? retryCount,
+    int? ackAt,
+  }) async {
+    final db = await _database;
+    await db.insert(
+      'group_member_key_state',
+      {
+        'group_uid': groupUid.toUpperCase(),
+        'member_id': memberId.toUpperCase(),
+        'status': status,
+        'last_try_at': lastTryAt,
+        'retry_count': retryCount ?? 0,
+        'ack_at': ackAt,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<void> upsertGroupGrant({
+    required String groupUid,
+    required String subjectId,
+    required String role,
+    int? expiresAt,
+    required int grantVersion,
+    required bool revoked,
+  }) async {
+    final db = await _database;
+    await db.insert(
+      'group_grants',
+      {
+        'group_uid': groupUid.toUpperCase(),
+        'subject_id': subjectId.toUpperCase(),
+        'role': role,
+        'expires_at': expiresAt,
+        'grant_version': grantVersion,
+        'revoked': revoked ? 1 : 0,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<void> migrateLegacyGroupConversationsToUid(Map<int, String> groupIdToUid) async {
+    if (groupIdToUid.isEmpty) return;
+    final db = await _database;
+    await db.transaction((txn) async {
+      for (final entry in groupIdToUid.entries) {
+        final gid = entry.key;
+        final uid = entry.value.trim().toUpperCase();
+        if (gid <= 1 || uid.isEmpty) continue;
+        final legacyId = 'group:$gid';
+        final v2Id = groupConversationIdByUid(uid);
+        final v2PeerRef = groupPeerRefByUid(uid);
+
+        final legacyRows = await txn.query(
+          'conversations',
+          columns: ['id', 'title', 'subtitle', 'last_preview', 'last_at_ms', 'unread_count', 'archived', 'pinned', 'muted', 'folder_id'],
+          where: 'id = ?',
+          whereArgs: [legacyId],
+          limit: 1,
+        );
+        if (legacyRows.isEmpty) continue;
+
+        final existingV2Rows = await txn.query(
+          'conversations',
+          columns: ['id'],
+          where: 'id = ?',
+          whereArgs: [v2Id],
+          limit: 1,
+        );
+
+        if (existingV2Rows.isEmpty) {
+          final legacy = legacyRows.first;
+          await txn.insert(
+            'conversations',
+            {
+              'id': v2Id,
+              'kind': 'group',
+              'peer_ref': v2PeerRef,
+              'title': (legacy['title'] as String?) ?? 'Group $gid',
+              'subtitle': legacy['subtitle'],
+              'last_preview': legacy['last_preview'],
+              'last_at_ms': legacy['last_at_ms'],
+              'unread_count': legacy['unread_count'] ?? 0,
+              'archived': legacy['archived'] ?? 0,
+              'pinned': legacy['pinned'] ?? 0,
+              'muted': legacy['muted'] ?? 0,
+              'folder_id': legacy['folder_id'] ?? 'all',
+            },
+            conflictAlgorithm: ConflictAlgorithm.ignore,
+          );
+        }
+
+        await txn.update(
+          'messages',
+          {
+            'conversation_id': v2Id,
+            'group_uid': uid,
+          },
+          where: 'conversation_id = ?',
+          whereArgs: [legacyId],
+        );
+        final legacyDraft = await txn.query(
+          'drafts',
+          columns: ['text'],
+          where: 'conversation_id = ?',
+          whereArgs: [legacyId],
+          limit: 1,
+        );
+        if (legacyDraft.isNotEmpty) {
+          await txn.insert(
+            'drafts',
+            {
+              'conversation_id': v2Id,
+              'text': (legacyDraft.first['text'] as String?) ?? '',
+            },
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+          await txn.delete('drafts', where: 'conversation_id = ?', whereArgs: [legacyId]);
+        }
+        await txn.delete('conversations', where: 'id = ?', whereArgs: [legacyId]);
+      }
+    });
+    _conversationsController.add(null);
+  }
+
   ChatConversation _conversationFromRow(Map<String, Object?> row) {
     return ChatConversation(
       id: row['id'] as String,
@@ -385,6 +603,7 @@ class ChatRepository {
       from: row['from_id'] as String? ?? '',
       to: row['to_id'] as String?,
       groupId: row['group_id'] as int?,
+      groupUid: row['group_uid'] as String?,
       text: row['text'] as String? ?? '',
       type: row['type'] as String? ?? 'text',
       lane: row['lane'] as String? ?? 'normal',

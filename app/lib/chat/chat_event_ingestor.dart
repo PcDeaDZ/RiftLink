@@ -49,13 +49,16 @@ class ChatEventIngestor {
     );
   }
 
-  Future<void> _ensureConversationForGroup(int groupId) async {
-    final id = ChatRepository.groupConversationId(groupId);
+  Future<void> _ensureConversationForGroupUid(String groupUid, {int? channelId32}) async {
+    final uid = groupUid.trim().toUpperCase();
+    if (uid.isEmpty) return;
+    final id = ChatRepository.groupConversationIdByUid(uid);
+    final title = (channelId32 != null && channelId32 > 1) ? 'Group $channelId32' : 'Group ${uid.substring(0, uid.length > 8 ? 8 : uid.length)}';
     await repo.ensureConversation(
       id: id,
       kind: ConversationKind.group,
-      peerRef: '$groupId',
-      title: 'Group $groupId',
+      peerRef: ChatRepository.groupPeerRefByUid(uid),
+      title: title,
     );
   }
 
@@ -202,6 +205,46 @@ class ChatEventIngestor {
           createdAtMs: DateTime.now().millisecondsSinceEpoch,
         ),
         incrementUnread: true,
+      );
+      return;
+    }
+
+    if (event is RiftLinkGroupRekeyProgressEvent) {
+      await _ensureConversationForGroupUid(event.groupUid);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await repo.upsertGroupRekeySession(
+        groupUid: event.groupUid,
+        rekeyOpId: event.rekeyOpId,
+        keyVersion: event.keyVersion,
+        createdAt: now,
+        status: event.failed > 0
+            ? 'failed'
+            : (event.pending > 0 ? 'pending' : 'applied'),
+      );
+      return;
+    }
+
+    if (event is RiftLinkGroupMemberKeyStateEvent) {
+      await _ensureConversationForGroupUid(event.groupUid);
+      await repo.upsertGroupMemberKeyState(
+        groupUid: event.groupUid,
+        memberId: event.memberId,
+        status: event.status,
+        ackAt: event.ackAt,
+        lastTryAt: DateTime.now().millisecondsSinceEpoch,
+      );
+      return;
+    }
+
+    if (event is RiftLinkGroupStatusEvent) {
+      await _ensureConversationForGroupUid(event.groupUid, channelId32: event.channelId32);
+      // Snapshot local role in grants table for thin-device projection in app.
+      await repo.upsertGroupGrant(
+        groupUid: event.groupUid,
+        subjectId: 'SELF',
+        role: event.myRole,
+        grantVersion: event.keyVersion > 0 ? event.keyVersion : 1,
+        revoked: event.myRole == 'none',
       );
       return;
     }

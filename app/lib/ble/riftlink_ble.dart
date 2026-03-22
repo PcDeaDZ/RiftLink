@@ -610,56 +610,110 @@ class RiftLinkBle {
   /// Запросить список групп
   Future<bool> getGroups() async => _sendCmd({'cmd': 'groups'});
 
-  /// Добавить группу (ID 1–0xFFFFFFFF)
-  Future<bool> addGroup(int groupId) async =>
-      groupId <= 0 ? false : _sendCmd({'cmd': 'addGroup', 'group': groupId});
+  // --- Groups V2 (thin-device, no-legacy) ---
 
-  /// Удалить группу
-  Future<bool> removeGroup(int groupId) async =>
-      groupId <= 0 ? false : _sendCmd({'cmd': 'removeGroup', 'group': groupId});
+  bool _isValidGroupUid(String groupUid) => groupUid.trim().isNotEmpty;
 
-  /// Установить/обновить приватный ключ группы (base64, 32 байта).
-  Future<bool> setGroupKey(
-    int groupId,
-    String keyB64, {
-    int? keyVersion,
-    String? ownerId,
-    String? adminCap,
-  }) async =>
-      groupId <= 0 || keyB64.trim().isEmpty
-          ? false
-          : _sendCmd({
-              'cmd': 'setGroupKey',
-              'group': groupId,
-              'key': keyB64.trim(),
-              if (keyVersion != null && keyVersion > 0) 'keyVersion': keyVersion,
-              if (ownerId != null && ownerId.trim().isNotEmpty) 'owner': ownerId.trim(),
-              if (adminCap != null && adminCap.trim().isNotEmpty) 'adminCap': adminCap.trim(),
-            });
+  Future<bool> groupCreate({
+    required String groupUid,
+    required String displayName,
+    required int channelId32,
+    required String groupTag,
+  }) async {
+    if (!_isValidGroupUid(groupUid) || displayName.trim().isEmpty || channelId32 <= 0 || groupTag.trim().isEmpty) {
+      return false;
+    }
+    return _sendCmd({
+      'cmd': 'groupCreate',
+      'groupUid': groupUid.trim(),
+      'displayName': displayName.trim(),
+      'channelId32': channelId32,
+      'groupTag': groupTag.trim(),
+    });
+  }
 
-  /// Удалить приватный ключ группы (группа станет public).
-  Future<bool> clearGroupKey(int groupId, {String? adminCap}) async =>
-      groupId <= 0
-          ? false
-          : _sendCmd({
-              'cmd': 'clearGroupKey',
-              'group': groupId,
-              if (adminCap != null && adminCap.trim().isNotEmpty) 'adminCap': adminCap.trim(),
-            });
+  Future<bool> groupInviteCreate({
+    required String groupUid,
+    required String role,
+    int ttlSec = 600,
+  }) async {
+    if (!_isValidGroupUid(groupUid) || role.trim().isEmpty || ttlSec <= 0) return false;
+    return _sendCmd({
+      'cmd': 'groupInviteCreate',
+      'groupUid': groupUid.trim(),
+      'role': role.trim(),
+      'ttlSec': ttlSec,
+    });
+  }
 
-  /// Сохранить admin capability (16 hex) для owner-only rotate.
-  Future<bool> setGroupAdminCap(int groupId, String adminCap) async =>
-      groupId <= 0 || adminCap.trim().isEmpty
-          ? false
-          : _sendCmd({'cmd': 'setGroupAdminCap', 'group': groupId, 'adminCap': adminCap.trim()});
+  Future<bool> groupInviteAccept(String invitePayload) async {
+    if (invitePayload.trim().isEmpty) return false;
+    return _sendCmd({'cmd': 'groupInviteAccept', 'invite': invitePayload.trim()});
+  }
 
-  /// Удалить локальную admin capability.
-  Future<bool> clearGroupAdminCap(int groupId) async =>
-      groupId <= 0 ? false : _sendCmd({'cmd': 'clearGroupAdminCap', 'group': groupId});
+  Future<bool> groupGrantIssue({
+    required String groupUid,
+    required String subjectId,
+    required String role,
+    int? expiresAt,
+  }) async {
+    if (!_isValidGroupUid(groupUid) || !isValidFullNodeId(subjectId) || role.trim().isEmpty) return false;
+    return _sendCmd({
+      'cmd': 'groupGrantIssue',
+      'groupUid': groupUid.trim(),
+      'subjectId': subjectId.toUpperCase(),
+      'role': role.trim(),
+      if (expiresAt != null && expiresAt > 0) 'expiresAt': expiresAt,
+    });
+  }
 
-  /// Запросить приватный ключ группы (ответ evt:groupKey).
-  Future<bool> getGroupKey(int groupId) async =>
-      groupId <= 0 ? false : _sendCmd({'cmd': 'getGroupKey', 'group': groupId});
+  Future<bool> groupRevoke({
+    required String groupUid,
+    required String subjectId,
+    String? reason,
+  }) async {
+    if (!_isValidGroupUid(groupUid) || !isValidFullNodeId(subjectId)) return false;
+    return _sendCmd({
+      'cmd': 'groupRevoke',
+      'groupUid': groupUid.trim(),
+      'subjectId': subjectId.toUpperCase(),
+      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+    });
+  }
+
+  Future<bool> groupRekey({
+    required String groupUid,
+    String? reason,
+  }) async {
+    if (!_isValidGroupUid(groupUid)) return false;
+    return _sendCmd({
+      'cmd': 'groupRekey',
+      'groupUid': groupUid.trim(),
+      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+    });
+  }
+
+  Future<bool> groupAckKeyApplied({
+    required String groupUid,
+    required int keyVersion,
+  }) async {
+    if (!_isValidGroupUid(groupUid) || keyVersion <= 0) return false;
+    return _sendCmd({
+      'cmd': 'groupAckKeyApplied',
+      'groupUid': groupUid.trim(),
+      'keyVersion': keyVersion,
+    });
+  }
+
+  Future<bool> groupStatus(String groupUid) async {
+    if (!_isValidGroupUid(groupUid)) return false;
+    return _sendCmd({'cmd': 'groupStatus', 'groupUid': groupUid.trim()});
+  }
+
+  Future<bool> groupSyncSnapshot(List<Map<String, dynamic>> groups) async {
+    if (groups.isEmpty) return false;
+    return _sendCmd({'cmd': 'groupSyncSnapshot', 'groups': groups});
+  }
 
   /// Отправить PING на узел (проверка связи)
   Future<bool> sendPing(String to) async =>
@@ -1058,6 +1112,29 @@ Map<String, dynamic> _normalizeRouteMap(Map<dynamic, dynamic> raw) {
   return out;
 }
 
+List<RiftLinkGroupV2Info> _parseGroupsV2(dynamic raw) {
+  if (raw is! List) return const <RiftLinkGroupV2Info>[];
+  final out = <RiftLinkGroupV2Info>[];
+  for (final item in raw) {
+    if (item is! Map) continue;
+    final m = Map<String, dynamic>.from(item as Map);
+    final uid = (m['groupUid'] ?? '').toString();
+    if (uid.trim().isEmpty) continue;
+    out.add(
+      RiftLinkGroupV2Info(
+        groupUid: uid,
+        groupTag: (m['groupTag'] ?? '').toString(),
+        channelId32: _jsonIntDefault(m['channelId32'], 0),
+        keyVersion: _jsonIntDefault(m['keyVersion'], 0),
+        myRole: (m['myRole'] ?? 'none').toString(),
+        revocationEpoch: _jsonIntDefault(m['revocationEpoch'], 0),
+        ackApplied: m['ackApplied'] == true || m['ackApplied'] == 1,
+      ),
+    );
+  }
+  return out;
+}
+
 /// Парсинг одного JSON-уведомления с RX (вынесено из потока для единого диспетчера).
 RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
   final evtRaw = json['evt'];
@@ -1117,22 +1194,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
         : <bool>[];
     final grpList = json['groups'];
     final groups = grpList is List ? (grpList as List).map(_jsonInt).toList() : <int>[];
-    final grpPrivList = json['groupsPrivate'];
-    final groupsPrivate = grpPrivList is List
-        ? (grpPrivList as List).map((e) => e == true || e == 1).toList()
-        : <bool>[];
-    final grpVerList = json['groupsKeyVersion'];
-    final groupsKeyVersion = grpVerList is List ? (grpVerList as List).map(_jsonInt).toList() : <int>[];
-    final grpOwnerList = json['groupsOwner'];
-    final groupsOwner = grpOwnerList is List
-        ? (grpOwnerList as List)
-            .map((e) => (e == null || e.toString().trim().isEmpty) ? null : e.toString())
-            .toList()
-        : <String?>[];
-    final grpCanRotateList = json['groupsCanRotate'];
-    final groupsCanRotate = grpCanRotateList is List
-        ? (grpCanRotateList as List).map((e) => e == true || e == 1).toList()
-        : <bool>[];
+    final groupsV2 = _parseGroupsV2(json['groupsV2']);
     final routesList = json['routes'];
     final routes = <Map<String, dynamic>>[];
     if (routesList is List) {
@@ -1166,10 +1228,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       neighborsRssi: neighborsRssi,
       neighborsHasKey: neighborsHasKey,
       groups: groups,
-      groupsPrivate: groupsPrivate,
-      groupsKeyVersion: groupsKeyVersion,
-      groupsOwner: groupsOwner,
-      groupsCanRotate: groupsCanRotate,
+      groupsV2: groupsV2,
       routes: routes,
       sf: _jsonIntNullable(json['sf']),
       bw: _jsonDoubleNullable(json['bw']),
@@ -1206,31 +1265,55 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
   }
   if (evt == 'groups') {
     final grpList = json['groups'];
-    final grpPrivList = json['groupsPrivate'];
-    final grpVerList = json['groupsKeyVersion'];
-    final grpOwnerList = json['groupsOwner'];
-    final grpCanRotateList = json['groupsCanRotate'];
+    final groupsV2 = _parseGroupsV2(json['groupsV2']);
     return RiftLinkGroupsEvent(
       groups: grpList is List ? (grpList as List).map(_jsonInt).toList() : <int>[],
-      groupsPrivate: grpPrivList is List
-          ? (grpPrivList as List).map((e) => e == true || e == 1).toList()
-          : <bool>[],
-      groupsKeyVersion: grpVerList is List ? (grpVerList as List).map(_jsonInt).toList() : <int>[],
-      groupsOwner: grpOwnerList is List
-          ? (grpOwnerList as List)
-              .map((e) => (e == null || e.toString().trim().isEmpty) ? null : e.toString())
-              .toList()
-          : <String?>[],
-      groupsCanRotate: grpCanRotateList is List
-          ? (grpCanRotateList as List).map((e) => e == true || e == 1).toList()
-          : <bool>[],
+      groupsV2: groupsV2,
     );
   }
-  if (evt == 'groupKey') {
-    return RiftLinkGroupKeyEvent(
-      group: _jsonIntDefault(json['group'], 0),
-      key: json['key']?.toString() ?? '',
+  if (evt == 'groupStatus') {
+    return RiftLinkGroupStatusEvent(
+      groupUid: json['groupUid']?.toString() ?? '',
+      channelId32: _jsonIntNullable(json['channelId32']),
+      myRole: json['myRole']?.toString() ?? 'none',
       keyVersion: _jsonIntDefault(json['keyVersion'], 0),
+      status: json['status']?.toString() ?? 'unknown',
+      rekeyRequired: json['rekeyRequired'] == true,
+    );
+  }
+  if (evt == 'groupRekeyProgress') {
+    return RiftLinkGroupRekeyProgressEvent(
+      groupUid: json['groupUid']?.toString() ?? '',
+      rekeyOpId: json['rekeyOpId']?.toString() ?? '',
+      keyVersion: _jsonIntDefault(json['keyVersion'], 0),
+      pending: _jsonIntDefault(json['pending'], 0),
+      delivered: _jsonIntDefault(json['delivered'], 0),
+      applied: _jsonIntDefault(json['applied'], 0),
+      failed: _jsonIntDefault(json['failed'], 0),
+    );
+  }
+  if (evt == 'groupMemberKeyState') {
+    return RiftLinkGroupMemberKeyStateEvent(
+      groupUid: json['groupUid']?.toString() ?? '',
+      memberId: json['memberId']?.toString() ?? '',
+      status: json['status']?.toString() ?? 'pending',
+      ackAt: _jsonIntNullable(json['ackAt']),
+    );
+  }
+  if (evt == 'groupSecurityError') {
+    return RiftLinkGroupSecurityErrorEvent(
+      groupUid: json['groupUid']?.toString() ?? '',
+      code: json['code']?.toString() ?? 'unknown',
+      msg: json['msg']?.toString() ?? '',
+    );
+  }
+  if (evt == 'groupInvite') {
+    return RiftLinkGroupInviteEvent(
+      groupUid: json['groupUid']?.toString() ?? '',
+      role: json['role']?.toString() ?? 'member',
+      invite: json['invite']?.toString() ?? '',
+      expiresAt: _jsonIntNullable(json['expiresAt']),
+      channelId32: _jsonIntNullable(json['channelId32']),
     );
   }
   if (evt == 'telemetry') {
@@ -1280,10 +1363,16 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     );
   }
   if (evt == 'error') {
-    return RiftLinkErrorEvent(
-      code: json['code'] as String? ?? 'unknown',
-      msg: json['msg'] as String? ?? '',
-    );
+    final code = json['code'] as String? ?? 'unknown';
+    final msg = json['msg'] as String? ?? '';
+    if (code.startsWith('group_') || code.startsWith('group_v2_')) {
+      return RiftLinkGroupSecurityErrorEvent(
+        groupUid: json['groupUid']?.toString() ?? '',
+        code: code,
+        msg: msg,
+      );
+    }
+    return RiftLinkErrorEvent(code: code, msg: msg);
   }
   if (evt == 'waiting_key') {
     return RiftLinkWaitingKeyEvent(
@@ -1377,6 +1466,25 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
 
 sealed class RiftLinkEvent {}
 
+class RiftLinkGroupV2Info {
+  final String groupUid;
+  final String groupTag;
+  final int channelId32;
+  final int keyVersion;
+  final String myRole;
+  final int revocationEpoch;
+  final bool ackApplied;
+  const RiftLinkGroupV2Info({
+    required this.groupUid,
+    required this.groupTag,
+    required this.channelId32,
+    required this.keyVersion,
+    required this.myRole,
+    required this.revocationEpoch,
+    this.ackApplied = false,
+  });
+}
+
 class RiftLinkMsgEvent extends RiftLinkEvent {
   final String from;
   final String text;
@@ -1453,10 +1561,7 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
   final List<int> neighborsRssi;
   final List<bool> neighborsHasKey;
   final List<int> groups;
-  final List<bool> groupsPrivate;
-  final List<int> groupsKeyVersion;
-  final List<String?> groupsOwner;
-  final List<bool> groupsCanRotate;
+  final List<RiftLinkGroupV2Info> groupsV2;
   final List<Map<String, dynamic>> routes;
   final int? sf;
   final double? bw;
@@ -1499,10 +1604,7 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
     this.neighborsRssi = const [],
     this.neighborsHasKey = const [],
     this.groups = const [],
-    this.groupsPrivate = const [],
-    this.groupsKeyVersion = const [],
-    this.groupsOwner = const [],
-    this.groupsCanRotate = const [],
+    this.groupsV2 = const [],
     this.routes = const [],
     this.sf,
     this.bw,
@@ -1620,24 +1722,86 @@ class RiftLinkRoutesEvent extends RiftLinkEvent {
 
 class RiftLinkGroupsEvent extends RiftLinkEvent {
   final List<int> groups;
-  final List<bool> groupsPrivate;
-  final List<int> groupsKeyVersion;
-  final List<String?> groupsOwner;
-  final List<bool> groupsCanRotate;
+  final List<RiftLinkGroupV2Info> groupsV2;
   RiftLinkGroupsEvent({
     required this.groups,
-    this.groupsPrivate = const [],
-    this.groupsKeyVersion = const [],
-    this.groupsOwner = const [],
-    this.groupsCanRotate = const [],
+    this.groupsV2 = const [],
   });
 }
 
-class RiftLinkGroupKeyEvent extends RiftLinkEvent {
-  final int group;
-  final String key;
+class RiftLinkGroupStatusEvent extends RiftLinkEvent {
+  final String groupUid;
+  final int? channelId32;
+  final String myRole;
   final int keyVersion;
-  RiftLinkGroupKeyEvent({required this.group, required this.key, this.keyVersion = 0});
+  final String status;
+  final bool rekeyRequired;
+  RiftLinkGroupStatusEvent({
+    required this.groupUid,
+    this.channelId32,
+    required this.myRole,
+    required this.keyVersion,
+    required this.status,
+    this.rekeyRequired = false,
+  });
+}
+
+class RiftLinkGroupRekeyProgressEvent extends RiftLinkEvent {
+  final String groupUid;
+  final String rekeyOpId;
+  final int keyVersion;
+  final int pending;
+  final int delivered;
+  final int applied;
+  final int failed;
+  RiftLinkGroupRekeyProgressEvent({
+    required this.groupUid,
+    required this.rekeyOpId,
+    required this.keyVersion,
+    required this.pending,
+    required this.delivered,
+    required this.applied,
+    required this.failed,
+  });
+}
+
+class RiftLinkGroupMemberKeyStateEvent extends RiftLinkEvent {
+  final String groupUid;
+  final String memberId;
+  final String status;
+  final int? ackAt;
+  RiftLinkGroupMemberKeyStateEvent({
+    required this.groupUid,
+    required this.memberId,
+    required this.status,
+    this.ackAt,
+  });
+}
+
+class RiftLinkGroupSecurityErrorEvent extends RiftLinkEvent {
+  final String groupUid;
+  final String code;
+  final String msg;
+  RiftLinkGroupSecurityErrorEvent({
+    required this.groupUid,
+    required this.code,
+    required this.msg,
+  });
+}
+
+class RiftLinkGroupInviteEvent extends RiftLinkEvent {
+  final String groupUid;
+  final String role;
+  final String invite;
+  final int? expiresAt;
+  final int? channelId32;
+  RiftLinkGroupInviteEvent({
+    required this.groupUid,
+    required this.role,
+    required this.invite,
+    this.expiresAt,
+    this.channelId32,
+  });
 }
 
 class RiftLinkNeighborsEvent extends RiftLinkEvent {

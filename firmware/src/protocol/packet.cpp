@@ -16,7 +16,6 @@ constexpr uint8_t FLAG_ENCRYPTED = 0x08;
 constexpr uint8_t FLAG_COMPRESSED = 0x04;
 constexpr uint8_t FLAG_ACK_REQ = 0x02;
 constexpr uint8_t FLAG_BROADCAST = 0x01;
-constexpr uint8_t VERSION_V2 = 0x20;  // opcode first, compact broadcast
 
 static bool isBroadcastTo(const uint8_t* to) {
   for (size_t i = 0; i < NODE_ID_LEN; i++) {
@@ -30,6 +29,7 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
                   uint8_t ttl, uint8_t opcode,
                   const uint8_t* payload, size_t payloadLen,
                   bool encrypted, bool ackReq, bool compressed, uint8_t channel, uint16_t pktId) {
+  if (payloadLen > MAX_PAYLOAD || payloadLen > 255) return 0;
   bool broadcast = isBroadcastTo(to);
   bool usePktId = (pktId != 0);
   size_t hdrLen = usePktId
@@ -39,7 +39,7 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
 
   uint8_t* p = buf;
   *p++ = SYNC_BYTE;
-  *p++ = (usePktId ? VERSION_V2_PKTID : VERSION_V2) | (broadcast ? FLAG_BROADCAST : 0) |
+  *p++ = (usePktId ? VERSION_V2_PKTID : VERSION_STRICT) | (broadcast ? FLAG_BROADCAST : 0) |
          (encrypted ? FLAG_ENCRYPTED : 0) | (ackReq ? FLAG_ACK_REQ : 0) | (compressed ? FLAG_COMPRESSED : 0);
   *p++ = opcode;
   if (usePktId) {
@@ -54,6 +54,7 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
   }
   *p++ = ttl;
   *p++ = channel;
+  *p++ = (uint8_t)payloadLen;
   if (payloadLen > 0) {
     memcpy(p, payload, payloadLen);
   }
@@ -76,7 +77,7 @@ static ParseStatus decodeHeaderCandidate(const uint8_t* p, size_t pLen, PacketHe
 
   uint8_t v0 = p[1];
   uint8_t version = v0 & VERSION_MASK;
-  if (version != VERSION_V2 && version != VERSION_V2_PKTID) return ParseStatus::bad_version;
+  if (version != VERSION_STRICT && version != VERSION_V2_PKTID) return ParseStatus::bad_version;
 
   uint8_t opcode = p[2];
   if (!isValidOpcode(opcode)) return ParseStatus::invalid_opcode;
@@ -98,10 +99,12 @@ static ParseStatus decodeHeaderCandidate(const uint8_t* p, size_t pLen, PacketHe
       memcpy(hdr->to, BROADCAST_ID, NODE_ID_LEN);
       hdr->ttl = p[13];
       hdr->channel = p[14];
+      hdr->payloadLen = p[15];
     } else {
       memcpy(hdr->to, p + 13, NODE_ID_LEN);
       hdr->ttl = p[21];
       hdr->channel = p[22];
+      hdr->payloadLen = p[23];
     }
   } else {
     hdr->pktId = 0;
@@ -110,10 +113,12 @@ static ParseStatus decodeHeaderCandidate(const uint8_t* p, size_t pLen, PacketHe
       memcpy(hdr->to, BROADCAST_ID, NODE_ID_LEN);
       hdr->ttl = p[11];
       hdr->channel = p[12];
+      hdr->payloadLen = p[13];
     } else {
       memcpy(hdr->to, p + 11, NODE_ID_LEN);
       hdr->ttl = p[19];
       hdr->channel = p[20];
+      hdr->payloadLen = p[21];
     }
   }
 
@@ -142,9 +147,9 @@ bool parsePacketEx(const uint8_t* buf, size_t len, PacketHeader* hdr,
                    const uint8_t** payload, size_t* payloadLen, ParseResult* result) {
   if (result) *result = ParseResult{};
   if (!buf || !hdr || len < HEADER_LEN_BROADCAST) return false;
-  if (len > SYNC_LEN + HEADER_LEN + MAX_PAYLOAD + 64) return false;
+  if (len > HEADER_LEN_PKTID + MAX_PAYLOAD) return false;
 
-  constexpr size_t MAX_START_SCAN = 32;
+  constexpr size_t MAX_START_SCAN = 0;  // strict mode: no sliding sync scan
   bool sawSync = false;
   ParseResult best;
   best.status = ParseStatus::no_sync;
@@ -170,7 +175,14 @@ bool parsePacketEx(const uint8_t* buf, size_t len, PacketHeader* hdr,
     candidateResult.isBroadcast = (candidateHdr.version_flags & FLAG_BROADCAST) != 0;
 
     if (st == ParseStatus::ok) {
-      size_t pl = packetLen - hdrLen;
+      // strict v2.2: trust payload_len from header and allow trailing radio garbage.
+      // Packet is valid if frame contains at least hdr + payload_len bytes.
+      size_t expectedPacketLen = hdrLen + (size_t)candidateHdr.payloadLen;
+      size_t pl = (size_t)candidateHdr.payloadLen;
+      candidateResult.expectedLen = expectedPacketLen;
+      if (packetLen < expectedPacketLen) {
+        st = ParseStatus::len_mismatch;
+      }
       if (pl > MAX_PAYLOAD) {
         st = ParseStatus::payload_range;
       } else {
@@ -191,7 +203,6 @@ bool parsePacketEx(const uint8_t* buf, size_t len, PacketHeader* hdr,
         }
         if (!directionOk) {
           st = ParseStatus::len_mismatch;
-          candidateResult.expectedLen = hdrLen + pl;
         }
       }
 
@@ -204,8 +215,7 @@ bool parsePacketEx(const uint8_t* buf, size_t len, PacketHeader* hdr,
         } else {
           size_t expected = getExpectedPacketLength(candidateHdr.opcode, pl,
               candidateResult.isBroadcast, candidateResult.hasPktId);
-          candidateResult.expectedLen = expected;
-          if (expected != 0 && packetLen != expected) {
+          if (expected != 0 && expectedPacketLen != expected) {
             st = ParseStatus::len_mismatch;
           }
         }
@@ -216,7 +226,7 @@ bool parsePacketEx(const uint8_t* buf, size_t len, PacketHeader* hdr,
     if (st == ParseStatus::ok) {
       *hdr = candidateHdr;
       if (payload) *payload = buf + off + hdrLen;
-      if (payloadLen) *payloadLen = packetLen - hdrLen;
+      if (payloadLen) *payloadLen = (size_t)candidateHdr.payloadLen;
       if (result) *result = candidateResult;
       return true;
     }

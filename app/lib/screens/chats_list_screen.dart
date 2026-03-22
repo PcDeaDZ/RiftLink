@@ -60,6 +60,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   bool _rightToolsExpanded = false;
   _ChatsTab _activeTab = _ChatsTab.all;
   String? _activeConversationId;
+  bool _groupConversationMigrationDone = false;
 
   @override
   void initState() {
@@ -83,6 +84,9 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         });
       } else if (evt is RiftLinkRoutesEvent || evt is RiftLinkNeighborsEvent) {
         setState(() {});
+      } else if (evt is RiftLinkGroupSecurityErrorEvent) {
+        final msg = evt.msg.trim().isEmpty ? evt.code : evt.msg;
+        _snack('${context.l10n.tr('error')}: $msg');
       }
     });
     _load();
@@ -98,6 +102,22 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   }
 
   Future<void> _load() async {
+    if (!_groupConversationMigrationDone) {
+      final groupsV2 = widget.ble.lastInfo?.groupsV2 ?? const <RiftLinkGroupV2Info>[];
+      if (groupsV2.isNotEmpty) {
+        final idToUid = <int, String>{};
+        for (final g in groupsV2) {
+          final uid = g.groupUid.trim().toUpperCase();
+          if (g.channelId32 > 1 && uid.isNotEmpty) {
+            idToUid[g.channelId32] = uid;
+          }
+        }
+        if (idToUid.isNotEmpty) {
+          await _repo.migrateLegacyGroupConversationsToUid(idToUid);
+          _groupConversationMigrationDone = true;
+        }
+      }
+    }
     final list = _sortConversations(await _repo.listConversations(query: _query));
     final archived = _sortConversations(await _repo.listArchivedConversations());
     final contacts = await ContactsService.load();
@@ -155,56 +175,108 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     return _visible.where((c) => _matchesTab(c, _activeTab)).toList();
   }
 
-  bool _groupPrivateById(int groupId) {
+  RiftLinkGroupV2Info? _groupV2ById(int groupId) {
     final li = widget.ble.lastInfo;
-    if (li == null) return false;
-    for (var i = 0; i < li.groups.length; i++) {
-      if (li.groups[i] != groupId) continue;
-      return i < li.groupsPrivate.length ? li.groupsPrivate[i] : false;
+    if (li == null) return null;
+    for (final g in li.groupsV2) {
+      if (g.channelId32 == groupId) return g;
     }
-    return false;
+    return null;
   }
 
-  bool _groupAdminById(int groupId) {
+  List<int> _knownGroupIds() {
+    final out = <int>{};
     final li = widget.ble.lastInfo;
-    if (li == null) return false;
-    for (var i = 0; i < li.groups.length; i++) {
-      if (li.groups[i] != groupId) continue;
-      return i < li.groupsCanRotate.length ? li.groupsCanRotate[i] : false;
+    if (li != null) {
+      out.addAll(
+        li.groupsV2
+            .map((g) => g.channelId32)
+            .where((g) => g > 1 && g != kMeshBroadcastGroupId),
+      );
     }
-    return false;
+    for (final c in _visible) {
+      if (c.kind != ConversationKind.group) continue;
+      final gid = _groupIdFromPeerRef(c.peerRef);
+      if (gid != null && gid > 1) out.add(gid);
+    }
+    final sorted = out.toList()..sort();
+    return sorted;
   }
+
+  String? _groupUidById(int groupId) => _groupV2ById(groupId)?.groupUid;
+
+  int? _groupIdFromPeerRef(String peerRef) {
+    final direct = int.tryParse(peerRef);
+    if (direct != null && direct > 1) return direct;
+    final uid = ChatRepository.groupUidFromPeerRef(peerRef);
+    if (uid == null) return null;
+    final li = widget.ble.lastInfo;
+    if (li == null) return null;
+    for (final g in li.groupsV2) {
+      if (g.groupUid.toUpperCase() == uid.toUpperCase()) return g.channelId32;
+    }
+    return null;
+  }
+
+  String? _groupUidFromPeerRef(String peerRef) {
+    final uidFromRef = ChatRepository.groupUidFromPeerRef(peerRef);
+    if (uidFromRef != null) return uidFromRef;
+    final gid = int.tryParse(peerRef);
+    if (gid == null) return null;
+    return _groupUidById(gid);
+  }
+
+  String? _groupRoleById(int groupId) => _groupV2ById(groupId)?.myRole;
+
+  bool? _groupKeyActualById(int groupId) => _groupV2ById(groupId)?.ackApplied;
 
   List<ChatConversation> _groupTabItemsFull() {
     final byGroupId = <int, ChatConversation>{};
+    final unresolvedByUid = <String, ChatConversation>{};
     for (final c in _visible) {
       if (c.archived || c.kind != ConversationKind.group) continue;
-      final gid = int.tryParse(c.peerRef);
-      if (gid == null || gid <= 1) continue;
-      byGroupId[gid] = c;
+      final gid = _groupIdFromPeerRef(c.peerRef);
+      if (gid != null && gid > 1) {
+        byGroupId[gid] = c;
+        continue;
+      }
+      final uid = _groupUidFromPeerRef(c.peerRef);
+      if (uid != null && uid.isNotEmpty) {
+        unresolvedByUid[uid] = c;
+      }
     }
-    final groupsFromInfo = (widget.ble.lastInfo?.groups ?? const <int>[])
+    final groupsFromV2 = (widget.ble.lastInfo?.groupsV2 ?? const <RiftLinkGroupV2Info>[])
+        .map((e) => e.channelId32)
         .where((g) => g > 1 && g != kMeshBroadcastGroupId);
-    for (final gid in groupsFromInfo) {
+    for (final gid in groupsFromV2) {
+      final uid = _groupUidById(gid);
       byGroupId.putIfAbsent(
         gid,
         () => ChatConversation(
-          id: ChatRepository.groupConversationId(gid),
+          id: uid != null && uid.isNotEmpty
+              ? ChatRepository.groupConversationIdByUid(uid)
+              : ChatRepository.groupConversationIdByUid('UNRESOLVED_$gid'),
           kind: ConversationKind.group,
-          peerRef: '$gid',
+          peerRef: uid != null && uid.isNotEmpty
+              ? ChatRepository.groupPeerRefByUid(uid)
+              : '$gid',
           title: 'Group $gid',
         ),
       );
     }
-    final out = byGroupId.values.toList();
+    final out = <ChatConversation>[
+      ...byGroupId.values,
+      ...unresolvedByUid.values,
+    ];
     out.sort((a, b) {
       if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
       final aAt = a.lastMessageAtMs ?? 0;
       final bAt = b.lastMessageAtMs ?? 0;
       if (aAt != bAt) return bAt.compareTo(aAt);
-      final ag = int.tryParse(a.peerRef) ?? 0;
-      final bg = int.tryParse(b.peerRef) ?? 0;
-      return ag.compareTo(bg);
+      final ag = _groupIdFromPeerRef(a.peerRef) ?? 0;
+      final bg = _groupIdFromPeerRef(b.peerRef) ?? 0;
+      if (ag != bg) return ag.compareTo(bg);
+      return a.title.compareTo(b.title);
     });
     return out;
   }
@@ -214,17 +286,6 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     if (_nickById.containsKey(key)) return _nickById[key];
     final short = key.length >= 8 ? key.substring(0, 8) : key;
     return _nickById[short];
-  }
-
-  String? _ownerForGroupId(int groupId) {
-    final info = widget.ble.lastInfo;
-    if (info == null) return null;
-    for (var i = 0; i < info.groups.length; i++) {
-      if (info.groups[i] != groupId) continue;
-      if (i < info.groupsOwner.length) return info.groupsOwner[i];
-      break;
-    }
-    return null;
   }
 
   List<_ReachableNodeItem> _reachableNeighbors() {
@@ -352,7 +413,8 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         ble: widget.ble,
         conversationId: c.id,
         initialPeerId: c.kind == ConversationKind.direct ? c.peerRef : null,
-        initialGroupId: c.kind == ConversationKind.group ? int.tryParse(c.peerRef) : null,
+        initialGroupId: c.kind == ConversationKind.group ? _groupIdFromPeerRef(c.peerRef) : null,
+        initialGroupUid: c.kind == ConversationKind.group ? _groupUidFromPeerRef(c.peerRef) : null,
         initialBroadcast: c.kind == ConversationKind.broadcast,
       ),
     );
@@ -378,12 +440,17 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     );
   }
 
-  Future<void> _openGroup(int groupId) async {
-    final id = ChatRepository.groupConversationId(groupId);
+  Future<void> _openGroup(int groupId, {String? groupUid}) async {
+    final uid = ((groupUid ?? _groupUidById(groupId))?.toUpperCase() ?? 'UNRESOLVED_$groupId');
+    if (uid.isEmpty) {
+      _snack(context.l10n.tr('error'));
+      return;
+    }
+    final id = ChatRepository.groupConversationIdByUid(uid);
     await _repo.ensureConversation(
       id: id,
       kind: ConversationKind.group,
-      peerRef: '$groupId',
+      peerRef: ChatRepository.groupPeerRefByUid(uid),
       title: 'Group $groupId',
     );
     if (mounted) setState(() => _activeConversationId = id);
@@ -394,6 +461,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         ble: widget.ble,
         conversationId: id,
         initialGroupId: groupId,
+        initialGroupUid: uid,
       ),
     );
   }
@@ -643,103 +711,42 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     _snack(ok ? l.tr('menu_time_capsule') : l.tr('error'));
   }
 
-  String _generateInviteTokenHex() {
+  String _generateBase64Token(int sizeBytes) {
     final rnd = Random.secure();
-    final bytes = List<int>.generate(8, (_) => rnd.nextInt(256));
-    final sb = StringBuffer();
-    for (final b in bytes) {
-      sb.write(b.toRadixString(16).padLeft(2, '0'));
-    }
-    return sb.toString().toUpperCase();
-  }
-
-  String _encodeGroupInviteBase64({
-    required int groupId,
-    required String groupKeyB64,
-    required int keyVersion,
-    required String inviteToken,
-    required int expiryEpochSec,
-    required String ownerId,
-  }) {
-    final payload = '$groupId|$keyVersion|$groupKeyB64|$inviteToken|$expiryEpochSec|${ownerId.toUpperCase()}';
-    return base64Encode(utf8.encode(payload));
-  }
-
-  ({
-    int groupId,
-    String groupKeyB64,
-    int keyVersion,
-    String inviteToken,
-    int expiryEpochSec,
-    String? ownerId,
-  })?
-  _decodeGroupInviteBase64(String inviteCode) {
-    try {
-      final normalized = inviteCode.replaceAll(RegExp(r'\s+'), '');
-      final raw = utf8.decode(base64Decode(normalized));
-      final parts = raw.split('|');
-      if (parts.length != 5 && parts.length != 6) return null;
-      final groupId = int.tryParse(parts[0]) ?? 0;
-      final keyVersion = int.tryParse(parts[1]) ?? 0;
-      final groupKeyB64 = parts[2].trim();
-      final inviteToken = parts[3].trim();
-      final expiryEpochSec = int.tryParse(parts[4]) ?? 0;
-      final ownerId = parts.length == 6 ? parts[5].trim().toUpperCase() : null;
-      if (groupId <= 1 || groupKeyB64.isEmpty || keyVersion < 0 || expiryEpochSec <= 0) return null;
-      if (inviteToken.length != 16 || !RegExp(r'^[0-9A-Fa-f]{16}$').hasMatch(inviteToken)) return null;
-      if (ownerId != null && ownerId.isNotEmpty && !RegExp(r'^[0-9A-Fa-f]{16}$').hasMatch(ownerId)) return null;
-      base64Decode(groupKeyB64);
-      return (
-        groupId: groupId,
-        groupKeyB64: groupKeyB64,
-        keyVersion: keyVersion,
-        inviteToken: inviteToken,
-        expiryEpochSec: expiryEpochSec,
-        ownerId: ownerId,
-      );
-    } catch (_) {
-      return null;
-    }
+    final bytes = List<int>.generate(sizeBytes, (_) => rnd.nextInt(256));
+    return base64Encode(bytes);
   }
 
   Future<void> _copyGroupInvite(int groupId) async {
     final l = context.l10n;
     if (!widget.ble.isConnected) return;
-    if (!await widget.ble.getGroupKey(groupId)) {
-      _snack(l.tr('error'));
-      return;
-    }
-    try {
-      final evt = await widget.ble.events
-          .where((e) => e is RiftLinkGroupKeyEvent && (e as RiftLinkGroupKeyEvent).group == groupId)
-          .cast<RiftLinkGroupKeyEvent>()
-          .first
-          .timeout(const Duration(seconds: 3));
-      final token = _generateInviteTokenHex();
-      final expiryEpochSec = DateTime.now().millisecondsSinceEpoch ~/ 1000 + 10 * 60;
-      final ownerId = (_ownerForGroupId(groupId) ?? widget.ble.lastInfo?.id ?? '').toUpperCase();
-      if (!RegExp(r'^[0-9A-F]{16}$').hasMatch(ownerId)) {
+    final v2 = _groupV2ById(groupId);
+    if (v2 != null && v2.groupUid.trim().isNotEmpty) {
+      final ok = await widget.ble.groupInviteCreate(groupUid: v2.groupUid, role: 'member');
+      if (!ok) {
         _snack(l.tr('error'));
         return;
       }
-      final inviteCode = _encodeGroupInviteBase64(
-        groupId: groupId,
-        groupKeyB64: evt.key,
-        keyVersion: evt.keyVersion,
-        inviteToken: token,
-        expiryEpochSec: expiryEpochSec,
-        ownerId: ownerId,
-      );
-      await Clipboard.setData(ClipboardData(text: inviteCode));
-      if (!mounted) return;
-      _snack(l.tr('group_invite_copied', {'id': '$groupId'}));
-    } catch (_) {
-      _snack(l.tr('error'));
+      try {
+        final evt = await widget.ble.events
+            .where((e) => e is RiftLinkGroupInviteEvent && (e as RiftLinkGroupInviteEvent).groupUid == v2.groupUid)
+            .cast<RiftLinkGroupInviteEvent>()
+            .first
+            .timeout(const Duration(seconds: 3));
+        await Clipboard.setData(ClipboardData(text: evt.invite));
+        if (!mounted) return;
+        _snack(l.tr('group_invite_copied', {'id': '$groupId'}));
+        return;
+      } catch (_) {
+        _snack(l.tr('error'));
+        return;
+      }
     }
+    _snack(l.tr('error'));
   }
 
   Future<void> _copyGroupInviteForConversation(ChatConversation c) async {
-    final groupId = int.tryParse(c.peerRef);
+    final groupId = _groupIdFromPeerRef(c.peerRef);
     if (groupId == null || groupId <= 1) {
       _snack(context.l10n.tr('error'));
       return;
@@ -776,41 +783,29 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       _snack(l.tr('group_id_reserved'));
       return;
     }
-    final added = await widget.ble.addGroup(groupId);
-    if (!added) {
+    final groupUid = _generateBase64Token(16);
+    final created = await widget.ble.groupCreate(
+      groupUid: groupUid,
+      displayName: '${l.tr('group')} $groupId',
+      channelId32: groupId,
+      groupTag: _generateBase64Token(8),
+    );
+    if (!created) {
       _snack(l.tr('error'));
       return;
     }
-    await _openGroup(groupId);
+    await _openGroup(groupId, groupUid: groupUid);
   }
 
   Future<void> _joinGroupByInviteCode(String inviteCodeRaw) async {
     final l = context.l10n;
-    final invite = _decodeGroupInviteBase64(inviteCodeRaw.trim());
-    if (invite == null) {
-      _snack(l.tr('group_invite_bad'));
+    final acceptedV2 = await widget.ble.groupInviteAccept(inviteCodeRaw.trim());
+    if (acceptedV2) {
+      await _load();
+      _snack(l.tr('group_invite_joined_v2'));
       return;
     }
-    if ((DateTime.now().millisecondsSinceEpoch ~/ 1000) > invite.expiryEpochSec) {
-      _snack(l.tr('group_invite_expired'));
-      return;
-    }
-    final added = await widget.ble.addGroup(invite.groupId);
-    if (!added) {
-      _snack(l.tr('error'));
-      return;
-    }
-    final keyOk = await widget.ble.setGroupKey(
-      invite.groupId,
-      invite.groupKeyB64,
-      keyVersion: invite.keyVersion > 0 ? invite.keyVersion : null,
-      ownerId: invite.ownerId,
-    );
-    if (!keyOk) {
-      _snack(l.tr('error'));
-      return;
-    }
-    await _openGroup(invite.groupId);
+    _snack(l.tr('group_invite_bad'));
   }
 
   Future<void> _joinGroupByCodeDialog() async {
@@ -919,6 +914,25 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                     await _joinGroupByCodeDialog();
                   },
                 ),
+                ListTile(
+                  dense: true,
+                  minTileHeight: _kMenuItemMinHeight,
+                  visualDensity: _kMenuItemDensity,
+                  contentPadding: _kMenuItemPadding,
+                  leading: const Icon(Icons.admin_panel_settings_outlined),
+                  title: Text(
+                    l.tr('contacts_groups_title'),
+                    style: const TextStyle(
+                      fontSize: _kMenuItemTitleSize,
+                      fontWeight: _kMenuItemTitleWeight,
+                      height: _kMenuItemLineHeight,
+                    ),
+                  ),
+                  onTap: () async {
+                    Navigator.pop(ctx);
+                    await _onRightMenuAction('contacts_hub');
+                  },
+                ),
               ],
             ),
           ),
@@ -930,8 +944,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   Future<void> _showNewChatSheet() async {
     final l = context.l10n;
     final contacts = await ContactsService.load();
-    final li = widget.ble.lastInfo;
-    final groups = (li?.groups ?? const <int>[]).where((g) => g != 1).toList();
+    final groups = _knownGroupIds();
 
     if (!mounted) return;
     final selected = await showModalBottomSheet<String>(
@@ -967,7 +980,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                       context: ctx,
                       icon: Icons.group_outlined,
                       title: '${l.tr('group')} $g',
-                      onTap: () => Navigator.pop(ctx, 'group:$g'),
+                      onTap: () => Navigator.pop(ctx, 'groupv2id:$g'),
                     )),
                 const SizedBox(height: AppSpacing.sm),
                 _sheetSectionTitle(ctx, l.tr('new_chat_broadcast')),
@@ -976,6 +989,14 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                   icon: Icons.campaign_outlined,
                   title: l.tr('broadcast'),
                   onTap: () => Navigator.pop(ctx, 'broadcast'),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                _sheetSectionTitle(ctx, l.tr('menu_title')),
+                _sheetActionTile(
+                  context: ctx,
+                  icon: Icons.admin_panel_settings_outlined,
+                  title: l.tr('contacts_groups_title'),
+                  onTap: () => Navigator.pop(ctx, 'groups_hub'),
                 ),
               ],
             ),
@@ -988,9 +1009,13 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       await _openBroadcast();
       return;
     }
-    if (selected.startsWith('group:')) {
-      final g = int.tryParse(selected.substring('group:'.length));
-      if (g != null) await _openGroup(g);
+    if (selected == 'groups_hub') {
+      await _onRightMenuAction('contacts_hub');
+      return;
+    }
+    if (selected.startsWith('groupv2id:')) {
+      final g = int.tryParse(selected.substring('groupv2id:'.length));
+      if (g != null) await _openGroup(g, groupUid: _groupUidById(g));
       return;
     }
     if (selected.startsWith('direct:')) {
@@ -1066,6 +1091,56 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
               ),
             ),
       onTap: onTap,
+    );
+  }
+
+  Widget _buildGroupsEmptyState(AppLocalizations l, AppPalette p) {
+    return SizedBox(
+      height: MediaQuery.of(context).size.height * 0.56,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.group_outlined, size: 56, color: p.onSurfaceVariant.withOpacity(0.38)),
+              const SizedBox(height: AppSpacing.sm),
+              Text(
+                l.tr('no_groups'),
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: p.onSurfaceVariant.withOpacity(0.95),
+                  fontSize: 15,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(height: AppSpacing.md),
+              Wrap(
+                spacing: AppSpacing.sm,
+                runSpacing: AppSpacing.sm,
+                alignment: WrapAlignment.center,
+                children: [
+                  FilledButton.icon(
+                    onPressed: widget.ble.isConnected ? _createGroupFromFab : null,
+                    icon: const Icon(Icons.group_add_rounded, size: 16),
+                    label: Text(l.tr('group_create')),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: widget.ble.isConnected ? _joinGroupByCodeDialog : null,
+                    icon: const Icon(Icons.vpn_key_outlined, size: 16),
+                    label: Text(l.tr('group_join_by_code')),
+                  ),
+                  TextButton.icon(
+                    onPressed: () => _onRightMenuAction('contacts_hub'),
+                    icon: const Icon(Icons.admin_panel_settings_outlined, size: 16),
+                    label: Text(l.tr('contacts_groups_title')),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -1516,7 +1591,9 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                             ),
                           ),
                         ),
-                      if (_activeTab != _ChatsTab.neighbors && tabChats.isEmpty)
+                      if (_activeTab == _ChatsTab.groups && tabChats.isEmpty)
+                        _buildGroupsEmptyState(l, p),
+                      if (_activeTab != _ChatsTab.neighbors && _activeTab != _ChatsTab.groups && tabChats.isEmpty)
                         SizedBox(
                           height: MediaQuery.of(context).size.height * 0.56,
                           child: Center(
@@ -1570,11 +1647,17 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                             conversation: c,
                             titleOverride: _titleForConversation(c),
                             timeText: _formatTime(c.lastMessageAtMs),
-                            groupPrivate: c.kind == ConversationKind.group
-                                ? _groupPrivateById(int.tryParse(c.peerRef) ?? -1)
+                            groupRole: c.kind == ConversationKind.group
+                                ? (() {
+                                    final gid = _groupIdFromPeerRef(c.peerRef);
+                                    return gid == null ? null : _groupRoleById(gid);
+                                  })()
                                 : null,
-                            groupAdmin: c.kind == ConversationKind.group
-                                ? _groupAdminById(int.tryParse(c.peerRef) ?? -1)
+                            groupKeyActual: c.kind == ConversationKind.group
+                                ? (() {
+                                    final gid = _groupIdFromPeerRef(c.peerRef);
+                                    return gid == null ? null : _groupKeyActualById(gid);
+                                  })()
                                 : null,
                             onTap: () => _openConversation(c),
                             onPin: () => _togglePin(c),
@@ -1583,7 +1666,8 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                             onFolder: (folderId) => _setFolder(c, folderId),
                             onDelete: () => _deleteConversation(c),
                             onCopyInvite: () => _copyGroupInviteForConversation(c),
-                            canCopyInvite: c.kind == ConversationKind.group,
+                            canCopyInvite: c.kind == ConversationKind.group &&
+                                (_groupIdFromPeerRef(c.peerRef) != null),
                             canDelete: c.kind != ConversationKind.broadcast,
                           )),
                     ],
@@ -1615,8 +1699,8 @@ class _ConversationTile extends StatelessWidget {
   final ChatConversation conversation;
   final String? titleOverride;
   final String timeText;
-  final bool? groupPrivate;
-  final bool? groupAdmin;
+  final String? groupRole;
+  final bool? groupKeyActual;
   final VoidCallback onTap;
   final VoidCallback onPin;
   final VoidCallback onArchive;
@@ -1631,8 +1715,8 @@ class _ConversationTile extends StatelessWidget {
     required this.conversation,
     this.titleOverride,
     required this.timeText,
-    this.groupPrivate,
-    this.groupAdmin,
+    this.groupRole,
+    this.groupKeyActual,
     required this.onTap,
     required this.onPin,
     required this.onArchive,
@@ -1648,12 +1732,19 @@ class _ConversationTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final l = context.l10n;
     final p = context.palette;
-    final isGroupStatusKnown = conversation.kind == ConversationKind.group &&
-        groupPrivate != null &&
-        groupAdmin != null;
-    final statusText = isGroupStatusKnown
-        ? '${groupPrivate! ? l.tr('group_private') : l.tr('group_public')} · ${groupAdmin! ? l.tr('group_role_admin') : l.tr('group_role_member')}'
-        : '';
+    final v2RoleText = switch (groupRole) {
+      'owner' => l.tr('group_role_owner'),
+      'admin' => l.tr('group_role_admin'),
+      'member' => l.tr('group_role_member'),
+      _ => null,
+    };
+    final v2KeyText = groupKeyActual == null
+        ? null
+        : (groupKeyActual! ? l.tr('group_key_actual') : l.tr('group_key_rekey_required_short'));
+    final statusText = [
+      if (v2RoleText != null) v2RoleText,
+      if (v2KeyText != null) v2KeyText,
+    ].join(' · ');
     final subtitleText = (conversation.lastMessagePreview ?? '').trim().isNotEmpty
         ? (conversation.lastMessagePreview ?? '')
         : statusText;
@@ -1686,17 +1777,13 @@ class _ConversationTile extends StatelessWidget {
                 style: TextStyle(color: p.onSurface, fontWeight: FontWeight.w600),
               ),
             ),
-            if (isGroupStatusKnown) ...[
+            if (groupRole != null) ...[
               Icon(
-                groupPrivate! ? Icons.lock_rounded : Icons.lock_open_rounded,
+                groupRole == 'owner'
+                    ? Icons.workspace_premium_rounded
+                    : (groupRole == 'admin' ? Icons.admin_panel_settings_rounded : Icons.shield_outlined),
                 size: 14,
-                color: groupPrivate! ? p.primary : p.onSurfaceVariant,
-              ),
-              const SizedBox(width: 4),
-              Icon(
-                groupAdmin! ? Icons.admin_panel_settings_rounded : Icons.shield_outlined,
-                size: 14,
-                color: groupAdmin! ? p.primary : p.onSurfaceVariant,
+                color: (groupRole == 'owner' || groupRole == 'admin') ? p.primary : p.onSurfaceVariant,
               ),
               const SizedBox(width: 6),
             ],

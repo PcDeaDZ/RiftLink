@@ -92,5 +92,7 @@ uint32_t getTimeOnAir(size_t len);       // мкс, для duty cycle
 bool isChannelFree();
 /** Сигнал перегрузки (NACK, undelivered) — увеличивает BEB CW для следующих TX */
 void notifyCongestion();
+/** Текущий уровень congestion/BEB (0..255), растёт на CAD_BUSY и notifyCongestion(). */
+uint8_t getCongestionLevel();
 
 }  // namespace radio

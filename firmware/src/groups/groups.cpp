@@ -1,15 +1,16 @@
 /**
- * RiftLink Groups — подписка на группы
+ * RiftLink Groups V2 runtime state (legacy V1 removed).
  */
 
 #include "groups.h"
-#include "node/node.h"
-#include "protocol/packet.h"
 #include <nvs.h>
 #include <nvs_flash.h>
 #include <string.h>
 
 #define NVS_NAMESPACE "riftlink"
+#define NVS_KEY_GROUPS_V2 "gr2s"
+#define NVS_KEY_GROUPS_V2_CNT "gr2c"
+// Legacy V1 NVS keys wiped on V2-only init.
 #define NVS_KEY_GROUPS "grps"
 #define NVS_KEY_GROUP_KEYS "grpk"
 #define NVS_KEY_GROUP_KEY_MASK "grpm"
@@ -19,371 +20,226 @@
 #define NVS_KEY_GROUP_CAPS "grpc"
 #define NVS_KEY_GROUP_CAP_MASK "grpcm"
 
-static uint32_t s_groups[MAX_GROUPS];
-static uint8_t s_groupKeys[MAX_GROUPS][32];
-static uint16_t s_groupKeyVersion[MAX_GROUPS];
-static uint8_t s_groupOwners[MAX_GROUPS][protocol::NODE_ID_LEN];
-static uint8_t s_groupAdminCaps[MAX_GROUPS][8];
-static uint8_t s_groupKeyMask = 0;
-static uint8_t s_groupOwnerMask = 0;
-static uint8_t s_groupAdminCapMask = 0;
-static int s_count = 0;
-static bool s_inited = false;
-
 namespace groups {
 
-static int findIndex(uint32_t groupId) {
-  for (int i = 0; i < s_count; i++) {
-    if (s_groups[i] == groupId) return i;
+struct GroupV2Slot {
+  char groupUid[GROUP_UID_MAX_LEN + 1];
+  uint32_t channelId32;
+  char groupTag[GROUP_TAG_MAX_LEN + 1];
+  uint8_t groupKey[32];
+  uint16_t keyVersion;
+  uint8_t role;
+  uint32_t revocationEpoch;
+  uint8_t ackApplied;
+  uint8_t reserved[1];
+};
+
+static GroupV2Slot s_groupsV2[MAX_GROUPS_V2];
+static int s_countV2 = 0;
+static bool s_inited = false;
+
+static void copySafe(char* dst, size_t dstLen, const char* src) {
+  if (!dst || dstLen == 0) return;
+  if (!src) {
+    dst[0] = '\0';
+    return;
+  }
+  const size_t n = strnlen(src, dstLen - 1);
+  memcpy(dst, src, n);
+  dst[n] = '\0';
+}
+
+static uint8_t roleToByte(GroupRole role) {
+  if (role == GroupRole::Owner) return 3;
+  if (role == GroupRole::Admin) return 2;
+  if (role == GroupRole::Member) return 1;
+  return 0;
+}
+
+static GroupRole byteToRole(uint8_t value) {
+  if (value == 3) return GroupRole::Owner;
+  if (value == 2) return GroupRole::Admin;
+  if (value == 1) return GroupRole::Member;
+  return GroupRole::None;
+}
+
+static int findV2Index(const char* groupUid) {
+  if (!groupUid || !groupUid[0]) return -1;
+  for (int i = 0; i < s_countV2; i++) {
+    if (strncmp(s_groupsV2[i].groupUid, groupUid, GROUP_UID_MAX_LEN) == 0) return i;
   }
   return -1;
 }
 
-static bool hasPrivateKeyAt(int index) {
-  if (index < 0 || index >= MAX_GROUPS) return false;
-  return (s_groupKeyMask & (1u << index)) != 0;
+static int findV2IndexByChannel(uint32_t channelId32) {
+  if (channelId32 == 0) return -1;
+  for (int i = 0; i < s_countV2; i++) {
+    if (s_groupsV2[i].channelId32 == channelId32) return i;
+  }
+  return -1;
 }
 
-static void setKeyAt(int index, const uint8_t* key32) {
-  if (index < 0 || index >= MAX_GROUPS || !key32) return;
-  memcpy(s_groupKeys[index], key32, 32);
-  s_groupKeyMask = (uint8_t)(s_groupKeyMask | (1u << index));
-}
-
-static void clearKeyAt(int index) {
-  if (index < 0 || index >= MAX_GROUPS) return;
-  memset(s_groupKeys[index], 0, 32);
-  s_groupKeyMask = (uint8_t)(s_groupKeyMask & (uint8_t)~(1u << index));
-  s_groupKeyVersion[index] = 0;
-}
-
-static bool hasOwnerAtInternal(int index) {
-  if (index < 0 || index >= MAX_GROUPS) return false;
-  return (s_groupOwnerMask & (1u << index)) != 0;
-}
-
-static void setOwnerAt(int index, const uint8_t* owner8) {
-  if (index < 0 || index >= MAX_GROUPS || !owner8) return;
-  memcpy(s_groupOwners[index], owner8, protocol::NODE_ID_LEN);
-  s_groupOwnerMask = (uint8_t)(s_groupOwnerMask | (1u << index));
-}
-
-static void clearOwnerAt(int index) {
-  if (index < 0 || index >= MAX_GROUPS) return;
-  memset(s_groupOwners[index], 0, sizeof(s_groupOwners[index]));
-  s_groupOwnerMask = (uint8_t)(s_groupOwnerMask & (uint8_t)~(1u << index));
-}
-
-static bool hasAdminCapAtInternal(int index) {
-  if (index < 0 || index >= MAX_GROUPS) return false;
-  return (s_groupAdminCapMask & (1u << index)) != 0;
-}
-
-static void setAdminCapAt(int index, const uint8_t* cap8) {
-  if (index < 0 || index >= MAX_GROUPS || !cap8) return;
-  memcpy(s_groupAdminCaps[index], cap8, 8);
-  s_groupAdminCapMask = (uint8_t)(s_groupAdminCapMask | (1u << index));
-}
-
-static void clearAdminCapAt(int index) {
-  if (index < 0 || index >= MAX_GROUPS) return;
-  memset(s_groupAdminCaps[index], 0, sizeof(s_groupAdminCaps[index]));
-  s_groupAdminCapMask = (uint8_t)(s_groupAdminCapMask & (uint8_t)~(1u << index));
-}
-
-static void persist() {
+static void persistV2() {
   nvs_handle_t h;
   if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
-  if (s_count > 0) nvs_set_blob(h, NVS_KEY_GROUPS, s_groups, s_count * sizeof(uint32_t));
-  else nvs_erase_key(h, NVS_KEY_GROUPS);
-  nvs_set_blob(h, NVS_KEY_GROUP_KEYS, s_groupKeys, sizeof(s_groupKeys));
-  nvs_set_blob(h, NVS_KEY_GROUP_KEY_VER, s_groupKeyVersion, sizeof(s_groupKeyVersion));
-  nvs_set_u8(h, NVS_KEY_GROUP_KEY_MASK, s_groupKeyMask);
-  nvs_set_blob(h, NVS_KEY_GROUP_OWNERS, s_groupOwners, sizeof(s_groupOwners));
-  nvs_set_u8(h, NVS_KEY_GROUP_OWNER_MASK, s_groupOwnerMask);
-  nvs_set_blob(h, NVS_KEY_GROUP_CAPS, s_groupAdminCaps, sizeof(s_groupAdminCaps));
-  nvs_set_u8(h, NVS_KEY_GROUP_CAP_MASK, s_groupAdminCapMask);
+  nvs_set_blob(h, NVS_KEY_GROUPS_V2, s_groupsV2, sizeof(s_groupsV2));
+  nvs_set_u8(h, NVS_KEY_GROUPS_V2_CNT, (uint8_t)s_countV2);
   nvs_commit(h);
   nvs_close(h);
 }
 
 void init() {
   if (s_inited) return;
-  memset(s_groups, 0, sizeof(s_groups));
-  memset(s_groupKeys, 0, sizeof(s_groupKeys));
-  memset(s_groupKeyVersion, 0, sizeof(s_groupKeyVersion));
-  memset(s_groupOwners, 0, sizeof(s_groupOwners));
-  memset(s_groupAdminCaps, 0, sizeof(s_groupAdminCaps));
-  s_groupKeyMask = 0;
-  s_groupOwnerMask = 0;
-  s_groupAdminCapMask = 0;
-  s_count = 0;
+  memset(s_groupsV2, 0, sizeof(s_groupsV2));
+  s_countV2 = 0;
 
   nvs_handle_t h;
-  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
-    size_t len = sizeof(s_groups);
-    if (nvs_get_blob(h, NVS_KEY_GROUPS, s_groups, &len) == ESP_OK) {
-      s_count = len / sizeof(uint32_t);
-      if (s_count > MAX_GROUPS) s_count = MAX_GROUPS;
+  if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+    size_t groupsV2Len = sizeof(s_groupsV2);
+    if (nvs_get_blob(h, NVS_KEY_GROUPS_V2, s_groupsV2, &groupsV2Len) != ESP_OK || groupsV2Len != sizeof(s_groupsV2)) {
+      memset(s_groupsV2, 0, sizeof(s_groupsV2));
     }
-    size_t keysLen = sizeof(s_groupKeys);
-    if (nvs_get_blob(h, NVS_KEY_GROUP_KEYS, s_groupKeys, &keysLen) != ESP_OK || keysLen != sizeof(s_groupKeys)) {
-      memset(s_groupKeys, 0, sizeof(s_groupKeys));
+    uint8_t groupsV2Cnt = 0;
+    if (nvs_get_u8(h, NVS_KEY_GROUPS_V2_CNT, &groupsV2Cnt) == ESP_OK) {
+      s_countV2 = (groupsV2Cnt > MAX_GROUPS_V2) ? MAX_GROUPS_V2 : (int)groupsV2Cnt;
     }
-    size_t verLen = sizeof(s_groupKeyVersion);
-    if (nvs_get_blob(h, NVS_KEY_GROUP_KEY_VER, s_groupKeyVersion, &verLen) != ESP_OK || verLen != sizeof(s_groupKeyVersion)) {
-      memset(s_groupKeyVersion, 0, sizeof(s_groupKeyVersion));
-    }
-    uint8_t mask = 0;
-    if (nvs_get_u8(h, NVS_KEY_GROUP_KEY_MASK, &mask) == ESP_OK) s_groupKeyMask = mask;
-    size_t ownerLen = sizeof(s_groupOwners);
-    if (nvs_get_blob(h, NVS_KEY_GROUP_OWNERS, s_groupOwners, &ownerLen) != ESP_OK || ownerLen != sizeof(s_groupOwners)) {
-      memset(s_groupOwners, 0, sizeof(s_groupOwners));
-    }
-    uint8_t ownerMask = 0;
-    if (nvs_get_u8(h, NVS_KEY_GROUP_OWNER_MASK, &ownerMask) == ESP_OK) s_groupOwnerMask = ownerMask;
-    size_t capLen = sizeof(s_groupAdminCaps);
-    if (nvs_get_blob(h, NVS_KEY_GROUP_CAPS, s_groupAdminCaps, &capLen) != ESP_OK || capLen != sizeof(s_groupAdminCaps)) {
-      memset(s_groupAdminCaps, 0, sizeof(s_groupAdminCaps));
-    }
-    uint8_t capMask = 0;
-    if (nvs_get_u8(h, NVS_KEY_GROUP_CAP_MASK, &capMask) == ESP_OK) s_groupAdminCapMask = capMask;
+
+    // Hard purge of persisted V1 group state.
+    nvs_erase_key(h, NVS_KEY_GROUPS);
+    nvs_erase_key(h, NVS_KEY_GROUP_KEYS);
+    nvs_erase_key(h, NVS_KEY_GROUP_KEY_MASK);
+    nvs_erase_key(h, NVS_KEY_GROUP_KEY_VER);
+    nvs_erase_key(h, NVS_KEY_GROUP_OWNERS);
+    nvs_erase_key(h, NVS_KEY_GROUP_OWNER_MASK);
+    nvs_erase_key(h, NVS_KEY_GROUP_CAPS);
+    nvs_erase_key(h, NVS_KEY_GROUP_CAP_MASK);
+    nvs_commit(h);
     nvs_close(h);
   }
-  // Раньше при пустом NVS подмешивали GROUP_ALL (1) — в UI это выглядело как «лишняя» группа.
-  // Приём broadcast (groupId==GROUP_ALL) не требует записи в NVS (см. main.cpp OP_GROUP_MSG).
-  uint32_t newGroups[MAX_GROUPS] = {0};
-  uint8_t newKeys[MAX_GROUPS][32] = {{0}};
-  uint16_t newVer[MAX_GROUPS] = {0};
-  uint8_t newMask = 0;
-  uint8_t newOwners[MAX_GROUPS][protocol::NODE_ID_LEN] = {{0}};
-  uint8_t newOwnerMask = 0;
-  uint8_t newCaps[MAX_GROUPS][8] = {{0}};
-  uint8_t newCapMask = 0;
-  int newCount = 0;
-  for (int i = 0; i < s_count; i++) {
-    if (s_groups[i] == GROUP_ALL) continue;
-    if (newCount >= MAX_GROUPS) break;
-    newGroups[newCount] = s_groups[i];
-    memcpy(newKeys[newCount], s_groupKeys[i], 32);
-    newVer[newCount] = s_groupKeyVersion[i];
-    if ((s_groupKeyMask & (1u << i)) != 0) newMask = (uint8_t)(newMask | (1u << newCount));
-    memcpy(newOwners[newCount], s_groupOwners[i], protocol::NODE_ID_LEN);
-    if ((s_groupOwnerMask & (1u << i)) != 0) newOwnerMask = (uint8_t)(newOwnerMask | (1u << newCount));
-    memcpy(newCaps[newCount], s_groupAdminCaps[i], 8);
-    if ((s_groupAdminCapMask & (1u << i)) != 0) newCapMask = (uint8_t)(newCapMask | (1u << newCount));
-    newCount++;
-  }
-  if (newCount != s_count) {
-    memcpy(s_groups, newGroups, sizeof(s_groups));
-    memcpy(s_groupKeys, newKeys, sizeof(s_groupKeys));
-    memcpy(s_groupKeyVersion, newVer, sizeof(s_groupKeyVersion));
-    s_groupKeyMask = newMask;
-    memcpy(s_groupOwners, newOwners, sizeof(s_groupOwners));
-    s_groupOwnerMask = newOwnerMask;
-    memcpy(s_groupAdminCaps, newCaps, sizeof(s_groupAdminCaps));
-    s_groupAdminCapMask = newCapMask;
-    s_count = newCount;
-    persist();
-  }
+
   s_inited = true;
 }
 
-bool isInGroup(uint32_t groupId) {
-  if (!s_inited) return false;
-  for (int i = 0; i < s_count; i++) {
-    if (s_groups[i] == groupId) return true;
-  }
-  return false;
-}
-
-bool addGroup(uint32_t groupId) {
-  if (groupId == GROUP_ALL) return false;  // зарезервировано под mesh broadcast
-  if (isInGroup(groupId)) return true;
-  if (s_count >= MAX_GROUPS) return false;
-
-  s_groups[s_count++] = groupId;
-  clearKeyAt(s_count - 1);
-  persist();
-  return true;
-}
-
-int getCount() {
-  return s_count;
-}
-
-uint32_t getId(int index) {
-  if (index < 0 || index >= s_count) return 0;
-  return s_groups[index];
-}
-
-void removeGroup(uint32_t groupId) {
-  for (int i = 0; i < s_count; i++) {
-    if (s_groups[i] == groupId) {
-      const uint8_t oldMask = s_groupKeyMask;
-      for (int j = i; j < s_count - 1; j++) s_groups[j] = s_groups[j + 1];
-      for (int j = i; j < s_count - 1; j++) memcpy(s_groupKeys[j], s_groupKeys[j + 1], 32);
-      for (int j = i; j < s_count - 1; j++) s_groupKeyVersion[j] = s_groupKeyVersion[j + 1];
-      for (int j = i; j < s_count - 1; j++) memcpy(s_groupOwners[j], s_groupOwners[j + 1], protocol::NODE_ID_LEN);
-      for (int j = i; j < s_count - 1; j++) memcpy(s_groupAdminCaps[j], s_groupAdminCaps[j + 1], 8);
-      s_count--;
-      // Пересобрать битовую маску после сдвига.
-      uint8_t newMask = 0;
-      uint8_t newOwnerMask = 0;
-      uint8_t newCapMask = 0;
-      for (int j = 0; j < s_count; j++) {
-        int oldIdx = (j < i) ? j : (j + 1);
-        if ((oldMask & (1u << oldIdx)) != 0) newMask = (uint8_t)(newMask | (1u << j));
-        if ((s_groupOwnerMask & (1u << oldIdx)) != 0) newOwnerMask = (uint8_t)(newOwnerMask | (1u << j));
-        if ((s_groupAdminCapMask & (1u << oldIdx)) != 0) newCapMask = (uint8_t)(newCapMask | (1u << j));
-      }
-      s_groupKeyMask = newMask;
-      s_groupOwnerMask = newOwnerMask;
-      s_groupAdminCapMask = newCapMask;
-      clearKeyAt(s_count);
-      clearOwnerAt(s_count);
-      clearAdminCapAt(s_count);
-      persist();
-      return;
-    }
-  }
-}
-
-bool canRotateGroupKey(uint32_t groupId, const uint8_t* requesterId, const uint8_t* presentedAdminCapability8) {
-  int idx = findIndex(groupId);
-  if (idx < 0) return false;
-  if (!hasPrivateKeyAt(idx)) return true;
-  // Legacy migration path: private key existed before owner metadata.
-  if (!hasOwnerAtInternal(idx)) return requesterId != nullptr;
-  if (requesterId && hasOwnerAtInternal(idx) &&
-      memcmp(s_groupOwners[idx], requesterId, protocol::NODE_ID_LEN) == 0) {
-    return true;
-  }
-  if (presentedAdminCapability8 && hasAdminCapAtInternal(idx) &&
-      memcmp(s_groupAdminCaps[idx], presentedAdminCapability8, 8) == 0) {
-    return true;
-  }
-  return false;
-}
-
-bool setGroupKey(uint32_t groupId, const uint8_t* key32, uint16_t keyVersion, const uint8_t* ownerId, const uint8_t* adminCapability8) {
-  if (!key32) return false;
-  int idx = findIndex(groupId);
+bool upsertGroupV2(const char* groupUid, uint32_t channelId32, const char* groupTag, const uint8_t* groupKey32, uint16_t keyVersion, GroupRole myRole, uint32_t revocationEpoch) {
+  if (!groupUid || !groupUid[0] || !groupKey32) return false;
+  int idx = findV2Index(groupUid);
   if (idx < 0) {
-    if (!addGroup(groupId)) return false;
-    idx = findIndex(groupId);
-    if (idx < 0) return false;
+    if (s_countV2 >= MAX_GROUPS_V2) return false;
+    idx = s_countV2++;
+    memset(&s_groupsV2[idx], 0, sizeof(s_groupsV2[idx]));
   }
-  const uint8_t* selfId = node::getId();
-  if (hasPrivateKeyAt(idx) && !canRotateGroupKey(groupId, selfId, adminCapability8)) {
-    return false;
-  }
-  setKeyAt(idx, key32);
-  if (ownerId && !node::isInvalidNodeId(ownerId) && !node::isBroadcast(ownerId)) {
-    setOwnerAt(idx, ownerId);
-  } else if (!hasOwnerAtInternal(idx)) {
-    setOwnerAt(idx, selfId);
-  }
-  if (adminCapability8) setAdminCapAt(idx, adminCapability8);
-  if (keyVersion == 0) {
-    uint16_t prev = s_groupKeyVersion[idx];
-    s_groupKeyVersion[idx] = (uint16_t)(prev == 0xFFFF ? 1 : (prev + 1));
-    if (s_groupKeyVersion[idx] == 0) s_groupKeyVersion[idx] = 1;
-  } else {
-    s_groupKeyVersion[idx] = keyVersion;
-  }
-  persist();
+
+  const uint16_t prevKeyVersion = s_groupsV2[idx].keyVersion;
+  copySafe(s_groupsV2[idx].groupUid, sizeof(s_groupsV2[idx].groupUid), groupUid);
+  copySafe(s_groupsV2[idx].groupTag, sizeof(s_groupsV2[idx].groupTag), groupTag);
+  s_groupsV2[idx].channelId32 = channelId32;
+  memcpy(s_groupsV2[idx].groupKey, groupKey32, 32);
+  s_groupsV2[idx].keyVersion = keyVersion;
+  s_groupsV2[idx].role = roleToByte(myRole);
+  s_groupsV2[idx].revocationEpoch = revocationEpoch;
+  if (prevKeyVersion != keyVersion) s_groupsV2[idx].ackApplied = 0;
+
+  persistV2();
   return true;
 }
 
-bool clearGroupKey(uint32_t groupId, const uint8_t* adminCapability8) {
-  int idx = findIndex(groupId);
+bool setGroupRoleV2(const char* groupUid, GroupRole role) {
+  int idx = findV2Index(groupUid);
   if (idx < 0) return false;
-  if (!canRotateGroupKey(groupId, node::getId(), adminCapability8)) return false;
-  clearKeyAt(idx);
-  clearOwnerAt(idx);
-  clearAdminCapAt(idx);
-  persist();
+  s_groupsV2[idx].role = roleToByte(role);
+  persistV2();
   return true;
 }
 
-bool hasGroupKey(uint32_t groupId) {
-  int idx = findIndex(groupId);
+bool updateGroupKeyV2(const char* groupUid, const uint8_t* groupKey32, uint16_t keyVersion) {
+  if (!groupKey32) return false;
+  int idx = findV2Index(groupUid);
   if (idx < 0) return false;
-  return hasPrivateKeyAt(idx);
-}
-
-bool getGroupKey(uint32_t groupId, uint8_t* out32) {
-  if (!out32) return false;
-  int idx = findIndex(groupId);
-  if (idx < 0 || !hasPrivateKeyAt(idx)) return false;
-  memcpy(out32, s_groupKeys[idx], 32);
+  memcpy(s_groupsV2[idx].groupKey, groupKey32, 32);
+  s_groupsV2[idx].keyVersion = keyVersion;
+  s_groupsV2[idx].ackApplied = 0;
+  persistV2();
   return true;
 }
 
-uint16_t getGroupKeyVersion(uint32_t groupId) {
-  int idx = findIndex(groupId);
-  if (idx < 0 || !hasPrivateKeyAt(idx)) return 0;
-  return s_groupKeyVersion[idx];
-}
-
-bool getGroupOwner(uint32_t groupId, uint8_t* outOwner8) {
-  if (!outOwner8) return false;
-  int idx = findIndex(groupId);
-  if (idx < 0 || !hasOwnerAtInternal(idx)) return false;
-  memcpy(outOwner8, s_groupOwners[idx], protocol::NODE_ID_LEN);
+bool ackKeyAppliedV2(const char* groupUid, uint16_t keyVersion) {
+  int idx = findV2Index(groupUid);
+  if (idx < 0 || s_groupsV2[idx].keyVersion != keyVersion) return false;
+  s_groupsV2[idx].ackApplied = 1;
+  persistV2();
   return true;
 }
 
-bool isGroupOwner(uint32_t groupId, const uint8_t* nodeId) {
-  if (!nodeId) return false;
-  int idx = findIndex(groupId);
-  if (idx < 0 || !hasOwnerAtInternal(idx)) return false;
-  return memcmp(s_groupOwners[idx], nodeId, protocol::NODE_ID_LEN) == 0;
-}
-
-bool hasGroupAdminCapability(uint32_t groupId) {
-  int idx = findIndex(groupId);
+bool setRevocationEpochV2(const char* groupUid, uint32_t revocationEpoch) {
+  int idx = findV2Index(groupUid);
   if (idx < 0) return false;
-  return hasAdminCapAtInternal(idx);
-}
-
-bool setGroupAdminCapability(uint32_t groupId, const uint8_t* adminCapability8) {
-  if (!adminCapability8) return false;
-  int idx = findIndex(groupId);
-  if (idx < 0 || !hasPrivateKeyAt(idx)) return false;
-  setAdminCapAt(idx, adminCapability8);
-  persist();
+  s_groupsV2[idx].revocationEpoch = revocationEpoch;
+  persistV2();
   return true;
 }
 
-bool clearGroupAdminCapability(uint32_t groupId) {
-  int idx = findIndex(groupId);
+bool getGroupV2(const char* groupUid, uint32_t* outChannelId32, char* outGroupTag, size_t outGroupTagLen, uint16_t* outKeyVersion, GroupRole* outRole, uint32_t* outRevocationEpoch, bool* outAckApplied) {
+  int idx = findV2Index(groupUid);
   if (idx < 0) return false;
-  clearAdminCapAt(idx);
-  persist();
+  if (outChannelId32) *outChannelId32 = s_groupsV2[idx].channelId32;
+  if (outGroupTag && outGroupTagLen > 0) copySafe(outGroupTag, outGroupTagLen, s_groupsV2[idx].groupTag);
+  if (outKeyVersion) *outKeyVersion = s_groupsV2[idx].keyVersion;
+  if (outRole) *outRole = byteToRole(s_groupsV2[idx].role);
+  if (outRevocationEpoch) *outRevocationEpoch = s_groupsV2[idx].revocationEpoch;
+  if (outAckApplied) *outAckApplied = (s_groupsV2[idx].ackApplied != 0);
   return true;
 }
 
-bool isPrivateAt(int index) {
-  return hasPrivateKeyAt(index);
+bool getGroupKeyV2(const char* groupUid, uint8_t* outKey32, uint16_t* outKeyVersion) {
+  if (!outKey32) return false;
+  int idx = findV2Index(groupUid);
+  if (idx < 0) return false;
+  memcpy(outKey32, s_groupsV2[idx].groupKey, 32);
+  if (outKeyVersion) *outKeyVersion = s_groupsV2[idx].keyVersion;
+  return true;
 }
 
-uint16_t keyVersionAt(int index) {
-  if (index < 0 || index >= s_count || !hasPrivateKeyAt(index)) return 0;
-  return s_groupKeyVersion[index];
+bool getGroupKeyV2ByChannel(uint32_t channelId32, uint8_t* outKey32, uint16_t* outKeyVersion) {
+  if (!outKey32) return false;
+  int idx = findV2IndexByChannel(channelId32);
+  if (idx < 0) return false;
+  memcpy(outKey32, s_groupsV2[idx].groupKey, 32);
+  if (outKeyVersion) *outKeyVersion = s_groupsV2[idx].keyVersion;
+  return true;
 }
 
-bool hasOwnerAt(int index) {
-  return hasOwnerAtInternal(index);
+bool findGroupUidByChannelV2(uint32_t channelId32, char* outGroupUid, size_t outGroupUidLen) {
+  if (!outGroupUid || outGroupUidLen == 0) return false;
+  int idx = findV2IndexByChannel(channelId32);
+  if (idx < 0) return false;
+  copySafe(outGroupUid, outGroupUidLen, s_groupsV2[idx].groupUid);
+  return true;
 }
 
-bool canRotateAt(int index) {
-  if (index < 0 || index >= s_count) return false;
-  if (!hasPrivateKeyAt(index)) return false;
-  return canRotateGroupKey(s_groups[index], node::getId(), nullptr) ||
-         (hasGroupAdminCapability(s_groups[index]) &&
-          canRotateGroupKey(s_groups[index], node::getId(), s_groupAdminCaps[index]));
+int getV2Count() {
+  return s_countV2;
+}
+
+bool getV2At(
+    int index,
+    char* outGroupUid,
+    size_t outGroupUidLen,
+    uint32_t* outChannelId32,
+    char* outGroupTag,
+    size_t outGroupTagLen,
+    uint16_t* outKeyVersion,
+    GroupRole* outRole,
+    uint32_t* outRevocationEpoch,
+    bool* outAckApplied) {
+  if (index < 0 || index >= s_countV2) return false;
+  if (outGroupUid && outGroupUidLen > 0) copySafe(outGroupUid, outGroupUidLen, s_groupsV2[index].groupUid);
+  if (outChannelId32) *outChannelId32 = s_groupsV2[index].channelId32;
+  if (outGroupTag && outGroupTagLen > 0) copySafe(outGroupTag, outGroupTagLen, s_groupsV2[index].groupTag);
+  if (outKeyVersion) *outKeyVersion = s_groupsV2[index].keyVersion;
+  if (outRole) *outRole = byteToRole(s_groupsV2[index].role);
+  if (outRevocationEpoch) *outRevocationEpoch = s_groupsV2[index].revocationEpoch;
+  if (outAckApplied) *outAckApplied = (s_groupsV2[index].ackApplied != 0);
+  return true;
 }
 
 }  // namespace groups
