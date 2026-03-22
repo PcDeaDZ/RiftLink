@@ -77,7 +77,11 @@ class ContactsGroupsHubScreen extends StatelessWidget {
                   children: [
                     Padding(
                       padding: const EdgeInsets.only(top: _kTabViewTopInset),
-                      child: ContactsScreen(neighbors: neighbors, embedded: true),
+                      child: ContactsScreen(
+                        neighbors: neighbors,
+                        ble: ble,
+                        embedded: true,
+                      ),
                     ),
                     Padding(
                       padding: const EdgeInsets.only(top: _kTabViewTopInset),

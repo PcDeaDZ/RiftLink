@@ -42,9 +42,80 @@ class _MeshScreenState extends State<MeshScreen> {
   StreamSubscription<RiftLinkEvent>? _sub;
   Map<String, String> _nickById = const {};
   bool _signalTestRunning = false;
+  bool _signalTestAttempted = false;
   final Map<String, int> _signalRssiByNode = <String, int>{};
   Timer? _signalTimer;
   String? _traceTarget;
+  String _nodeId = '';
+  List<String> _neighbors = const [];
+  List<int> _neighborsRssi = const [];
+  final Map<String, int> _liveNeighborRssiByNode = <String, int>{};
+  final Map<String, int> _liveNeighborRssiAtMs = <String, int>{};
+  static const int _liveRssiTtlMs = 30000;
+
+  String _normalizeNodeId(String raw) => raw.trim().toUpperCase();
+
+  void _applyLiveRssiOverrides() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (var i = 0; i < _neighbors.length; i++) {
+      final id = _neighbors[i];
+      final ts = _liveNeighborRssiAtMs[id];
+      final live = _liveNeighborRssiByNode[id];
+      if (ts == null || live == null) continue;
+      if (now - ts > _liveRssiTtlMs) continue;
+      if (i < _neighborsRssi.length) {
+        _neighborsRssi[i] = live;
+      }
+    }
+  }
+
+  void _recordLiveRssi(String nodeId, int rssi) {
+    final id = _normalizeNodeId(nodeId);
+    if (!RegExp(r'^[0-9A-F]{16}$').hasMatch(id)) return;
+    if (rssi == 0) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _liveNeighborRssiByNode[id] = rssi;
+    _liveNeighborRssiAtMs[id] = now;
+    final idx = _neighbors.indexWhere((n) => n.toUpperCase() == id);
+    if (idx >= 0 && idx < _neighborsRssi.length) {
+      _neighborsRssi[idx] = rssi;
+    }
+  }
+
+  void _applySnapshot({
+    String? nodeId,
+    List<String>? neighbors,
+    List<int>? neighborsRssi,
+  }) {
+    _nodeId = _normalizeNodeId(nodeId ?? _nodeId);
+    if (neighbors != null) {
+      final nextNeighbors = <String>[];
+      final nextRssi = <int>[];
+      final seen = <String>{};
+      for (var i = 0; i < neighbors.length; i++) {
+        final id = _normalizeNodeId(neighbors[i]);
+        if (!RegExp(r'^[0-9A-F]{16}$').hasMatch(id)) continue;
+        if (!seen.add(id)) continue;
+        nextNeighbors.add(id);
+        final rssi = (neighborsRssi != null && i < neighborsRssi.length) ? neighborsRssi[i] : 0;
+        nextRssi.add(rssi);
+      }
+      _neighbors = nextNeighbors;
+      _neighborsRssi = nextRssi;
+    } else if (neighborsRssi != null) {
+      final next = List<int>.from(_neighborsRssi);
+      final n = neighborsRssi.length < _neighbors.length ? neighborsRssi.length : _neighbors.length;
+      for (var i = 0; i < n; i++) {
+        if (i < next.length) {
+          next[i] = neighborsRssi[i];
+        } else {
+          next.add(neighborsRssi[i]);
+        }
+      }
+      _neighborsRssi = next;
+    }
+    _applyLiveRssiOverrides();
+  }
 
   void _snack(String text) {
     if (!mounted) return;
@@ -64,6 +135,19 @@ class _MeshScreenState extends State<MeshScreen> {
   @override
   void initState() {
     super.initState();
+    _applySnapshot(
+      nodeId: widget.nodeId,
+      neighbors: widget.neighbors,
+      neighborsRssi: widget.neighborsRssi,
+    );
+    final li = widget.ble.lastInfo;
+    if (li != null) {
+      _applySnapshot(
+        nodeId: li.id,
+        neighbors: li.neighbors,
+        neighborsRssi: li.neighborsRssi,
+      );
+    }
     _routes = List.from(widget.routes);
     _loadNicknames();
     debugPrint('[BLE_CHAIN] stage=app_listener action=mesh_subscribe');
@@ -77,16 +161,52 @@ class _MeshScreenState extends State<MeshScreen> {
         });
       } else if (evt is RiftLinkInfoEvent) {
         setState(() {
+          _applySnapshot(
+            nodeId: evt.id,
+            neighbors: evt.neighbors,
+            neighborsRssi: evt.neighborsRssi,
+          );
           _routes = evt.routes;
+          _normalizeTraceTarget();
+        });
+      } else if (evt is RiftLinkNeighborsEvent) {
+        setState(() {
+          _applySnapshot(
+            neighbors: evt.neighbors,
+            neighborsRssi: evt.rssi,
+          );
           _normalizeTraceTarget();
         });
       } else if (evt is RiftLinkPongEvent) {
         final from = evt.from;
         if (from.isEmpty) return;
-        setState(() => _signalRssiByNode[from] = evt.rssi ?? 0);
+        setState(() {
+          final normalized = _normalizeNodeId(from);
+          _signalRssiByNode[normalized] = evt.rssi ?? 0;
+          final rssi = evt.rssi;
+          if (rssi != null) _recordLiveRssi(normalized, rssi);
+        });
       }
     });
+    widget.ble.getInfo();
     widget.ble.getRoutes();
+  }
+
+  @override
+  void didUpdateWidget(covariant MeshScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.nodeId != widget.nodeId ||
+        oldWidget.neighbors != widget.neighbors ||
+        oldWidget.neighborsRssi != widget.neighborsRssi) {
+      setState(() {
+        _applySnapshot(
+          nodeId: widget.nodeId,
+          neighbors: widget.neighbors,
+          neighborsRssi: widget.neighborsRssi,
+        );
+        _normalizeTraceTarget();
+      });
+    }
   }
 
   @override
@@ -125,6 +245,7 @@ class _MeshScreenState extends State<MeshScreen> {
     }
     setState(() {
       _signalTestRunning = true;
+      _signalTestAttempted = true;
       _signalRssiByNode.clear();
     });
     _signalTimer?.cancel();
@@ -139,7 +260,12 @@ class _MeshScreenState extends State<MeshScreen> {
     if (to == null || to.isEmpty) return;
     final ok = await widget.ble.traceroute(to);
     if (ok) {
+      _snack('${context.l10n.tr('mesh_traceroute')}: ${_shortLabel(to)}');
       await widget.ble.getRoutes();
+      Future<void>.delayed(const Duration(milliseconds: 900), () {
+        if (!mounted) return;
+        widget.ble.getRoutes();
+      });
     } else {
       _snack(context.l10n.tr('mesh_traceroute_failed'));
     }
@@ -150,17 +276,17 @@ class _MeshScreenState extends State<MeshScreen> {
     final edges = <_Edge>[];
 
     const center = Offset(0, 0);
-    nodes[widget.nodeId] = _NP(center, isSelf: true);
+    nodes[_nodeId] = _NP(center, isSelf: true);
 
-    final n = widget.neighbors.length;
+    final n = _neighbors.length;
     const r1 = 120.0;
     for (var i = 0; i < n; i++) {
       final angle = 2 * math.pi * i / (n > 0 ? n : 1) - math.pi / 2;
-      nodes[widget.neighbors[i]] = _NP(
+      nodes[_neighbors[i]] = _NP(
         Offset(r1 * math.cos(angle), r1 * math.sin(angle)),
-        rssi: i < widget.neighborsRssi.length ? widget.neighborsRssi[i] : 0,
+        rssi: i < _neighborsRssi.length ? _neighborsRssi[i] : 0,
       );
-      edges.add(_Edge(widget.nodeId, widget.neighbors[i], isDirect: true));
+      edges.add(_Edge(_nodeId, _neighbors[i], isDirect: true));
     }
 
     final routeDests = _routes.map((r) => r['dest'] as String? ?? '').where((s) => s.isNotEmpty).toSet();
@@ -174,7 +300,7 @@ class _MeshScreenState extends State<MeshScreen> {
       final rssi = (route['rssi'] as num?)?.toInt() ?? 0;
       final angle = 2 * math.pi * j / (routeDests.isNotEmpty ? routeDests.length : 1) - math.pi / 2 + 0.5;
       nodes[dest] = _NP(Offset(r2 * math.cos(angle), r2 * math.sin(angle)), hops: hops, rssi: rssi);
-      edges.add(_Edge(nextHop.isNotEmpty ? nextHop : widget.nodeId, dest, isDirect: false, hops: hops));
+      edges.add(_Edge(nextHop.isNotEmpty ? nextHop : _nodeId, dest, isDirect: false, hops: hops));
       j++;
     }
 
@@ -185,7 +311,7 @@ class _MeshScreenState extends State<MeshScreen> {
   Widget build(BuildContext context) {
     final l = context.l10n;
     final graph = _computeGraph();
-    final hasListData = widget.neighbors.isNotEmpty ||
+    final hasListData = _neighbors.isNotEmpty ||
         _routes.any((r) => ((r['dest'] as String?) ?? '').isNotEmpty);
 
     return DefaultTabController(
@@ -196,13 +322,6 @@ class _MeshScreenState extends State<MeshScreen> {
           context,
           title: l.tr('mesh_topology'),
           showBack: true,
-          actions: [
-            IconButton(
-              icon: const Icon(Icons.refresh),
-              onPressed: () => widget.ble.getRoutes(),
-              tooltip: l.tr('refresh'),
-            ),
-          ],
           bottom: TabBar(
             labelColor: context.palette.primary,
             unselectedLabelColor: context.palette.onSurfaceVariant,
@@ -242,7 +361,7 @@ class _MeshScreenState extends State<MeshScreen> {
                       ),
                     ],
                   ),
-                  if (_signalTestRunning || _signalRssiByNode.isNotEmpty) ...[
+                  if (_signalTestRunning || _signalTestAttempted || _signalRssiByNode.isNotEmpty) ...[
                     SizedBox(height: AppSpacing.sm + 2),
                     Text(
                       _signalTestRunning
@@ -341,12 +460,12 @@ class _MeshScreenState extends State<MeshScreen> {
                 children: [
                   _GraphTab(
                     graph: graph,
-                    nodeId: widget.nodeId,
+                    nodeId: _nodeId,
                     nodeLabel: _labelForNode,
                   ),
                   _ListTab(
-                    neighbors: widget.neighbors,
-                    neighborsRssi: widget.neighborsRssi,
+                    neighbors: _neighbors,
+                    neighborsRssi: _neighborsRssi,
                     routes: _routes,
                     hasData: hasListData,
                     nodeLabel: _labelForNode,
@@ -361,12 +480,12 @@ class _MeshScreenState extends State<MeshScreen> {
   }
 
   List<String> _traceCandidates() {
-    final all = <String>{...widget.neighbors};
+    final all = <String>{..._neighbors};
     for (final r in _routes) {
       final d = (r['dest'] as String?) ?? '';
       if (d.isNotEmpty) all.add(d);
     }
-    all.remove(widget.nodeId);
+    all.remove(_nodeId);
     return all.toList()..sort();
   }
 
@@ -379,7 +498,16 @@ class _MeshScreenState extends State<MeshScreen> {
         break;
       }
     }
-    if (route == null) return l.tr('mesh_trace_no_route');
+    if (route == null) {
+      final idx = _neighbors.indexWhere((n) => n.toUpperCase() == target.toUpperCase());
+      if (idx >= 0) {
+        final hopText = '${l.tr('mesh_trace_hops')}: ${_shortLabel(_nodeId)} -> ${_shortLabel(target)}';
+        final rssi = idx < _neighborsRssi.length ? _neighborsRssi[idx] : 0;
+        final rssiText = rssi != 0 ? ' · RSSI $rssi dBm' : '';
+        return '$hopText$rssiText · ${l.tr('mesh_route_hops')}: 1';
+      }
+      return l.tr('mesh_trace_no_route');
+    }
     final hops = (route['hops'] as num?)?.toInt() ?? 0;
     final pathRaw = route['path'];
     final hopRssiRaw = route['hopRssi'];
@@ -388,8 +516,8 @@ class _MeshScreenState extends State<MeshScreen> {
       path.addAll(pathRaw.map((e) => e.toString()));
     } else {
       final next = (route['nextHop'] as String?) ?? '';
-      path.add(widget.nodeId);
-      if (next.isNotEmpty && next.toUpperCase() != widget.nodeId.toUpperCase()) path.add(next);
+      path.add(_nodeId);
+      if (next.isNotEmpty && next.toUpperCase() != _nodeId.toUpperCase()) path.add(next);
       if (hops > 2) path.add('...');
       path.add(target);
     }
@@ -399,8 +527,8 @@ class _MeshScreenState extends State<MeshScreen> {
     } else {
       final firstHop = (route['nextHop'] as String?) ?? '';
       if (firstHop.isNotEmpty) {
-        final idx = widget.neighbors.indexWhere((n) => n.toUpperCase() == firstHop.toUpperCase());
-        hopRssi.add(idx >= 0 && idx < widget.neighborsRssi.length ? widget.neighborsRssi[idx] : 0);
+        final idx = _neighbors.indexWhere((n) => n.toUpperCase() == firstHop.toUpperCase());
+        hopRssi.add(idx >= 0 && idx < _neighborsRssi.length ? _neighborsRssi[idx] : 0);
       }
       hopRssi.add((route['rssi'] as num?)?.toInt() ?? 0);
     }

@@ -12,13 +12,16 @@ import '../app_navigator.dart';
 import '../app_lifecycle_bridge.dart';
 import '../theme/app_theme.dart';
 import '../theme/design_tokens.dart';
+import '../widgets/app_snackbar.dart';
 import '../widgets/app_primitives.dart';
 import '../widgets/mesh_background.dart';
+import '../widgets/rift_dialogs.dart';
 import '../chat/chat_models.dart';
 import '../chat/chat_repository.dart';
 import '../mesh_constants.dart';
-import 'contacts_groups_hub_screen.dart';
+import 'contacts_screen.dart';
 import 'chat_screen.dart';
+import 'groups_screen.dart';
 import 'map_screen.dart';
 import 'mesh_screen.dart';
 import 'scan_screen.dart';
@@ -34,6 +37,8 @@ const double _kMenuItemLineHeight = 1.2;
 const double _kMenuItemMinHeight = 38;
 const EdgeInsets _kMenuItemPadding = EdgeInsets.symmetric(horizontal: 10);
 const VisualDensity _kMenuItemDensity = VisualDensity(horizontal: 0, vertical: -1);
+const IconData _kContactsPageIcon = Icons.contacts_outlined;
+const IconData _kGroupsPageIcon = Icons.groups_outlined;
 
 class ChatsListScreen extends StatefulWidget {
   final RiftLinkBle ble;
@@ -51,16 +56,79 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   StreamSubscription<void>? _sub;
   StreamSubscription<RiftLinkEvent>? _bleSub;
+  Timer? _infoRefreshTimer;
+  final Set<String> _pendingPings = <String>{};
+  final Map<String, Timer> _pingTimeouts = <String, Timer>{};
   List<ChatConversation> _visible = [];
   List<ChatConversation> _archived = [];
   Map<String, String> _nickById = const {};
   Set<String> _neighborIds = const {};
+  Map<String, int> _pinsAll = const {};
+  Map<String, int> _pinsPersonal = const {};
+  Map<String, int> _pinsGroups = const {};
+  Set<String> _pinAnimating = <String>{};
+  Set<String> _archiveAnimating = <String>{};
   String _query = '';
   bool _searchMode = false;
   bool _rightToolsExpanded = false;
   _ChatsTab _activeTab = _ChatsTab.all;
   String? _activeConversationId;
   bool _groupConversationMigrationDone = false;
+
+  String _normNodeId(String raw) =>
+      raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+
+  void _clearPingTimeout(String id) {
+    final norm = _normNodeId(id);
+    _pingTimeouts.remove(norm)?.cancel();
+  }
+
+  void _markPingPending(String id) {
+    final norm = _normNodeId(id);
+    if (norm.length != 16) return;
+    _pendingPings.add(norm);
+    _clearPingTimeout(norm);
+    _pingTimeouts[norm] = Timer(const Duration(seconds: 6), () {
+      _pendingPings.remove(norm);
+      _pingTimeouts.remove(norm);
+      if (!mounted) return;
+      _showPingTimeoutToast(norm);
+    });
+  }
+
+  void _showPingPendingToast(String id) {
+    if (!mounted) return;
+    final l = context.l10n;
+    showAppSnackBar(
+      context,
+      '${l.tr('ping_checking', {'id': id})}\nID: $id',
+      kind: AppSnackKind.neutral,
+      duration: const Duration(seconds: 3),
+    );
+  }
+
+  void _showPingOnlineToast(String id, int? rssi) {
+    if (!mounted) return;
+    final l = context.l10n;
+    final suffix = rssi != null ? '\nRSSI: $rssi dBm' : '';
+    showAppSnackBar(
+      context,
+      '${l.tr('ping_online', {'id': id})}$suffix',
+      kind: AppSnackKind.success,
+      duration: const Duration(seconds: 3),
+    );
+  }
+
+  void _showPingTimeoutToast(String id) {
+    if (!mounted) return;
+    final l = context.l10n;
+    showAppSnackBar(
+      context,
+      l.tr('ping_timeout', {'id': id}),
+      kind: AppSnackKind.error,
+      duration: const Duration(seconds: 4),
+    );
+  }
 
   @override
   void initState() {
@@ -84,10 +152,23 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         });
       } else if (evt is RiftLinkRoutesEvent || evt is RiftLinkNeighborsEvent) {
         setState(() {});
+      } else if (evt is RiftLinkPongEvent) {
+        final from = _normNodeId(evt.from);
+        if (_pendingPings.remove(from)) {
+          _clearPingTimeout(from);
+          _showPingOnlineToast(from, evt.rssi);
+        }
+      } else if (evt is RiftLinkSelftestEvent) {
+        _showSelftestDialog(evt);
       } else if (evt is RiftLinkGroupSecurityErrorEvent) {
         final msg = evt.msg.trim().isEmpty ? evt.code : evt.msg;
         _snack('${context.l10n.tr('error')}: $msg');
       }
+    });
+    widget.ble.getInfo();
+    _infoRefreshTimer = Timer.periodic(const Duration(seconds: 12), (_) {
+      if (!mounted || !widget.ble.isTransportConnected) return;
+      widget.ble.getInfo();
     });
     _load();
   }
@@ -96,6 +177,12 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   void dispose() {
     _sub?.cancel();
     _bleSub?.cancel();
+    _infoRefreshTimer?.cancel();
+    for (final t in _pingTimeouts.values) {
+      t.cancel();
+    }
+    _pingTimeouts.clear();
+    _pendingPings.clear();
     _searchFocusNode.dispose();
     _searchController.dispose();
     super.dispose();
@@ -122,6 +209,9 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     final archived = await _repo.listArchivedConversations();
     final contacts = await ContactsService.load();
     final nickById = ContactsService.buildNicknameMap(contacts);
+    final pinsAll = await _repo.listPinnedByScope('all');
+    final pinsPersonal = await _repo.listPinnedByScope('personal');
+    final pinsGroups = await _repo.listPinnedByScope('groups');
     final neighbors = (widget.ble.lastInfo?.neighbors ?? const <String>[])
         .map((e) => e.toUpperCase())
         .toSet();
@@ -131,16 +221,47 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       _archived = archived;
       _nickById = nickById;
       _neighborIds = neighbors;
+      _pinsAll = pinsAll;
+      _pinsPersonal = pinsPersonal;
+      _pinsGroups = pinsGroups;
     });
   }
 
+  String? _pinScopeForTab(_ChatsTab tab) {
+    return switch (tab) {
+      _ChatsTab.all => 'all',
+      _ChatsTab.personal => 'personal',
+      _ChatsTab.groups => 'groups',
+      _ => null,
+    };
+  }
+
+  Map<String, int> _pinsForTab(_ChatsTab tab) {
+    return switch (tab) {
+      _ChatsTab.all => _pinsAll,
+      _ChatsTab.personal => _pinsPersonal,
+      _ChatsTab.groups => _pinsGroups,
+      _ => const {},
+    };
+  }
+
+  bool _isPinnedInTab(ChatConversation c, _ChatsTab tab) => _pinsForTab(tab).containsKey(c.id);
+
   List<ChatConversation> _sortConversations(List<ChatConversation> chats) {
     final items = [...chats];
+    final pins = _pinsForTab(_ChatsTab.all);
     items.sort((a, b) {
       final aBroadcast = a.kind == ConversationKind.broadcast;
       final bBroadcast = b.kind == ConversationKind.broadcast;
       if (aBroadcast != bBroadcast) return aBroadcast ? -1 : 1;
-      if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
+      final ap = pins.containsKey(a.id);
+      final bp = pins.containsKey(b.id);
+      if (ap != bp) return ap ? -1 : 1;
+      if (ap && bp) {
+        final ao = pins[a.id] ?? (1 << 30);
+        final bo = pins[b.id] ?? (1 << 30);
+        if (ao != bo) return ao.compareTo(bo);
+      }
       return (b.lastMessageAtMs ?? 0).compareTo(a.lastMessageAtMs ?? 0);
     });
     return items;
@@ -148,7 +269,16 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
 
   List<ChatConversation> _sortConversationsForTab(List<ChatConversation> chats, _ChatsTab tab) {
     final items = [...chats];
+    final pins = _pinsForTab(tab);
     items.sort((a, b) {
+      final ap = pins.containsKey(a.id);
+      final bp = pins.containsKey(b.id);
+      if (ap != bp) return ap ? -1 : 1;
+      if (ap && bp) {
+        final ao = pins[a.id] ?? (1 << 30);
+        final bo = pins[b.id] ?? (1 << 30);
+        if (ao != bo) return ao.compareTo(bo);
+      }
       final aAt = a.lastMessageAtMs ?? 0;
       final bAt = b.lastMessageAtMs ?? 0;
       if (tab == _ChatsTab.all) {
@@ -157,7 +287,6 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         if (aBroadcast != bBroadcast) return aBroadcast ? -1 : 1;
         return bAt.compareTo(aAt);
       }
-      if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
       return bAt.compareTo(aAt);
     });
     return items;
@@ -213,6 +342,15 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     );
     final rest = chats.where((c) => c.id != broadcast!.id).toList();
     return [broadcast, ...rest];
+  }
+
+  int _archivedCountForTab(_ChatsTab tab) {
+    return switch (tab) {
+      _ChatsTab.all => _archived.length,
+      _ChatsTab.personal => _archived.where((c) => c.kind == ConversationKind.direct).length,
+      _ChatsTab.groups => _archived.where((c) => c.kind == ConversationKind.group).length,
+      _ => 0,
+    };
   }
 
   RiftLinkGroupV2Info? _groupV2ById(int groupId) {
@@ -279,6 +417,15 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   List<ChatConversation> _groupTabItemsFull() {
     final byGroupId = <int, ChatConversation>{};
     final unresolvedByUid = <String, ChatConversation>{};
+    final archivedGroupIds = <int>{};
+    final archivedGroupUids = <String>{};
+    for (final c in _archived) {
+      if (c.kind != ConversationKind.group) continue;
+      final gid = _groupIdFromPeerRef(c.peerRef);
+      if (gid != null && gid > 1) archivedGroupIds.add(gid);
+      final uid = _groupUidFromPeerRef(c.peerRef);
+      if (uid != null && uid.isNotEmpty) archivedGroupUids.add(uid.toUpperCase());
+    }
     for (final c in _visible) {
       if (c.archived || c.kind != ConversationKind.group) continue;
       final gid = _groupIdFromPeerRef(c.peerRef);
@@ -296,6 +443,8 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         .where((g) => g > 1 && g != kMeshBroadcastGroupId);
     for (final gid in groupsFromV2) {
       final uid = _groupUidById(gid);
+      if (archivedGroupIds.contains(gid)) continue;
+      if (uid != null && archivedGroupUids.contains(uid.toUpperCase())) continue;
       final displayName = _groupDisplayNameById(gid);
       byGroupId.putIfAbsent(
         gid,
@@ -319,8 +468,16 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       ...byGroupId.values,
       ...unresolvedByUid.values,
     ];
+    final pins = _pinsForTab(_ChatsTab.groups);
     out.sort((a, b) {
-      if (a.pinned != b.pinned) return a.pinned ? -1 : 1;
+      final ap = pins.containsKey(a.id);
+      final bp = pins.containsKey(b.id);
+      if (ap != bp) return ap ? -1 : 1;
+      if (ap && bp) {
+        final ao = pins[a.id] ?? (1 << 30);
+        final bo = pins[b.id] ?? (1 << 30);
+        if (ao != bo) return ao.compareTo(bo);
+      }
       final aAt = a.lastMessageAtMs ?? 0;
       final bAt = b.lastMessageAtMs ?? 0;
       if (aAt != bAt) return bAt.compareTo(aAt);
@@ -456,20 +613,12 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
 
   ({String tooltip, IconData icon, VoidCallback onPressed})? _fabConfigForTab(AppLocalizations l) {
     return switch (_activeTab) {
-      _ChatsTab.all => (
-        tooltip: l.tr('compose_message'),
-        icon: Icons.add_comment_rounded,
-        onPressed: _showNewChatSheet,
-      ),
-      _ChatsTab.personal => (
-        tooltip: l.tr('new_chat'),
-        icon: Icons.person_add_alt_1_rounded,
-        onPressed: _showNewChatSheet,
-      ),
+      _ChatsTab.all => null,
+      _ChatsTab.personal => null,
       _ChatsTab.groups => (
-        tooltip: l.tr('groups'),
-        icon: Icons.group_add_rounded,
-        onPressed: _showGroupFabSheet,
+        tooltip: l.tr('group_join_by_code'),
+        icon: Icons.login_rounded,
+        onPressed: _joinGroupByCodeDialog,
       ),
       _ChatsTab.neighbors => null,
       _ChatsTab.archived => null,
@@ -568,13 +717,33 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   }
 
   Future<void> _togglePin(ChatConversation c) async {
-    await _repo.setPinned(c.id, !c.pinned);
+    final scope = _pinScopeForTab(_activeTab);
+    if (scope == null) return;
+    final pinnedNow = _isPinnedInTab(c, _activeTab);
+    setState(() => _pinAnimating.add(c.id));
+    await _repo.setPinnedForScope(
+      conversationId: c.id,
+      scope: scope,
+      value: !pinnedNow,
+    );
     await _load();
+    if (!mounted) return;
+    Future<void>.delayed(const Duration(milliseconds: 260), () {
+      if (!mounted) return;
+      setState(() => _pinAnimating.remove(c.id));
+    });
   }
 
   Future<void> _toggleArchive(ChatConversation c) async {
+    final isArchiving = !c.archived;
+    if (isArchiving && mounted) {
+      setState(() => _archiveAnimating.add(c.id));
+      await Future<void>.delayed(const Duration(milliseconds: 220));
+    }
     await _repo.setArchived(c.id, !c.archived);
     await _load();
+    if (!mounted) return;
+    setState(() => _archiveAnimating.remove(c.id));
   }
 
   Future<void> _toggleMute(ChatConversation c) async {
@@ -759,13 +928,23 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       await appResetTo(context, const ScanScreen());
       return;
     }
-    if (selected == 'contacts_hub') {
+    if (selected == 'contacts_page') {
       final li = widget.ble.lastInfo;
       await appPush(
         context,
-        ContactsGroupsHubScreen(
-          ble: widget.ble,
+        ContactsScreen(
           neighbors: li?.neighbors ?? const <String>[],
+          ble: widget.ble,
+        ),
+      );
+      return;
+    }
+    if (selected == 'groups_page') {
+      final li = widget.ble.lastInfo;
+      await appPush(
+        context,
+        GroupsScreen(
+          ble: widget.ble,
           initialGroups: li?.groups ?? const <int>[],
         ),
       );
@@ -833,6 +1012,11 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     }
   }
 
+  Future<void> _showSelftestDialog(RiftLinkSelftestEvent evt) async {
+    if (!mounted) return;
+    await showRiftSelftestDialog(context, evt, lastInfo: widget.ble.lastInfo);
+  }
+
   Future<void> _showPingDialog() async {
     final l = context.l10n;
     final controller = TextEditingController();
@@ -852,13 +1036,18 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       ),
     );
     if (ok != true) return;
-    final id = controller.text.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+    final id = _normNodeId(controller.text);
     if (id.length != 16) {
       _snack(l.tr('ping_invalid'));
       return;
     }
     final sent = await widget.ble.sendPing(id);
-    _snack(sent ? l.tr('ping_sent', {'id': id}) : l.tr('error'));
+    if (!sent) {
+      _snack(l.tr('error'));
+      return;
+    }
+    _markPingPending(id);
+    _showPingPendingToast(id);
   }
 
   void _snack(String text) {
@@ -966,30 +1155,121 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   Future<void> _joinGroupByCodeDialog() async {
     final l = context.l10n;
     final c = TextEditingController();
-    final ok = await showDialog<bool>(
+    final ok = await showModalBottomSheet<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(l.tr('group_join_by_code')),
-        content: TextField(
-          controller: c,
-          autofocus: true,
-          maxLines: 2,
-          minLines: 1,
-          decoration: const InputDecoration(hintText: 'BASE64...'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () async {
-              final data = await Clipboard.getData(Clipboard.kTextPlain);
-              c.text = data?.text?.trim() ?? '';
-            },
-            child: Text(l.tr('paste')),
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        final p = ctx.palette;
+        return SafeArea(
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: AppSpacing.md,
+              right: AppSpacing.md,
+              bottom: MediaQuery.of(ctx).viewInsets.bottom + AppSpacing.md,
+              top: AppSpacing.md,
+            ),
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.lg),
+              decoration: BoxDecoration(
+                color: p.surface,
+                borderRadius: BorderRadius.circular(AppRadius.lg),
+                border: Border.all(color: p.divider.withOpacity(0.7)),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.22),
+                    blurRadius: 20,
+                    offset: const Offset(0, 10),
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.login_rounded, color: p.primary, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          l.tr('group_join_by_code'),
+                          style: TextStyle(
+                            color: p.onSurface,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 17,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
+                  Text(
+                    l.tr('group_invite_code_hint'),
+                    style: TextStyle(color: p.onSurfaceVariant, fontSize: 13),
+                  ),
+                  const SizedBox(height: AppSpacing.md),
+                  TextField(
+                    controller: c,
+                    autofocus: true,
+                    maxLines: 2,
+                    minLines: 1,
+                    style: TextStyle(color: p.onSurface),
+                    decoration: InputDecoration(
+                      hintText: 'BASE64...',
+                      hintStyle: TextStyle(color: p.onSurfaceVariant.withOpacity(0.8)),
+                      filled: true,
+                      fillColor: p.card.withOpacity(0.55),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppRadius.md),
+                        borderSide: BorderSide(color: p.divider.withOpacity(0.8)),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppRadius.md),
+                        borderSide: BorderSide(color: p.divider.withOpacity(0.8)),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppRadius.md),
+                        borderSide: BorderSide(color: p.primary.withOpacity(0.9), width: 1.2),
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: AppSpacing.md,
+                        vertical: AppSpacing.sm,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: AppSpacing.md),
+                  Row(
+                    children: [
+                      TextButton.icon(
+                        onPressed: () async {
+                          final data = await Clipboard.getData(Clipboard.kTextPlain);
+                          c.text = data?.text?.trim() ?? '';
+                        },
+                        icon: const Icon(Icons.content_paste_rounded, size: 18),
+                        label: Text(l.tr('paste')),
+                      ),
+                      const Spacer(),
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx, false),
+                        child: Text(l.tr('cancel')),
+                      ),
+                      const SizedBox(width: AppSpacing.xs),
+                      FilledButton.icon(
+                        onPressed: () => Navigator.pop(ctx, true),
+                        icon: const Icon(Icons.check_rounded, size: 18),
+                        label: Text(l.tr('ok')),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
           ),
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(l.tr('cancel'))),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text(l.tr('ok'))),
-        ],
-      ),
+        );
+      },
     );
+    c.dispose();
     if (ok != true) return;
     await _joinGroupByInviteCode(c.text);
   }
@@ -1074,9 +1354,9 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                   minTileHeight: _kMenuItemMinHeight,
                   visualDensity: _kMenuItemDensity,
                   contentPadding: _kMenuItemPadding,
-                  leading: const Icon(Icons.admin_panel_settings_outlined),
+                  leading: const Icon(_kGroupsPageIcon),
                   title: Text(
-                    l.tr('contacts_groups_title'),
+                    l.tr('groups'),
                     style: const TextStyle(
                       fontSize: _kMenuItemTitleSize,
                       fontWeight: _kMenuItemTitleWeight,
@@ -1085,7 +1365,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                   ),
                   onTap: () async {
                     Navigator.pop(ctx);
-                    await _onRightMenuAction('contacts_hub');
+                    await _onRightMenuAction('groups_page');
                   },
                 ),
               ],
@@ -1149,9 +1429,15 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 _sheetSectionTitle(ctx, l.tr('menu_title')),
                 _sheetActionTile(
                   context: ctx,
-                  icon: Icons.admin_panel_settings_outlined,
-                  title: l.tr('contacts_groups_title'),
-                  onTap: () => Navigator.pop(ctx, 'groups_hub'),
+                  icon: _kContactsPageIcon,
+                  title: l.tr('contacts'),
+                  onTap: () => Navigator.pop(ctx, 'contacts_page'),
+                ),
+                _sheetActionTile(
+                  context: ctx,
+                  icon: _kGroupsPageIcon,
+                  title: l.tr('groups'),
+                  onTap: () => Navigator.pop(ctx, 'groups_page'),
                 ),
               ],
             ),
@@ -1164,8 +1450,12 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       await _openBroadcast();
       return;
     }
-    if (selected == 'groups_hub') {
-      await _onRightMenuAction('contacts_hub');
+    if (selected == 'contacts_page') {
+      await _onRightMenuAction('contacts_page');
+      return;
+    }
+    if (selected == 'groups_page') {
+      await _onRightMenuAction('groups_page');
       return;
     }
     if (selected.startsWith('groupv2id:')) {
@@ -1286,9 +1576,14 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                     label: Text(l.tr('group_join_by_code')),
                   ),
                   TextButton.icon(
-                    onPressed: () => _onRightMenuAction('contacts_hub'),
-                    icon: const Icon(Icons.admin_panel_settings_outlined, size: 16),
-                    label: Text(l.tr('contacts_groups_title')),
+                    onPressed: () => _onRightMenuAction('contacts_page'),
+                    icon: const Icon(_kContactsPageIcon, size: 16),
+                    label: Text(l.tr('contacts')),
+                  ),
+                  TextButton.icon(
+                    onPressed: () => _onRightMenuAction('groups_page'),
+                    icon: const Icon(_kGroupsPageIcon, size: 16),
+                    label: Text(l.tr('groups')),
                   ),
                 ],
               ),
@@ -1311,6 +1606,25 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     });
   }
 
+  Future<void> _handleBackPressed() async {
+    final scaffold = _scaffoldKey.currentState;
+    if (scaffold != null) {
+      if (scaffold.isEndDrawerOpen) {
+        Navigator.of(context).maybePop();
+        return;
+      }
+      if (scaffold.isDrawerOpen) {
+        Navigator.of(context).maybePop();
+        return;
+      }
+    }
+    if (_searchMode) {
+      _toggleSearch();
+      return;
+    }
+    await AppLifecycleBridge.moveToBackground();
+  }
+
   @override
   Widget build(BuildContext context) {
     final l = context.l10n;
@@ -1320,18 +1634,18 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     final tabChats = _activeTab == _ChatsTab.groups ? _groupTabItemsFull() : _tabItems();
     final reachableNeighbors = _activeTab == _ChatsTab.neighbors ? _reachableNeighbors() : const <_ReachableNodeItem>[];
     final allChatsForDrawer = _sortConversations([..._visible, ..._archived]);
-    final pinnedForDrawer = allChatsForDrawer.where((c) => c.pinned && !c.archived).toList();
-    final regularForDrawer = allChatsForDrawer.where((c) => !(c.pinned && !c.archived)).toList();
+    final pinnedForDrawer = allChatsForDrawer.where((c) => _isPinnedInTab(c, _ChatsTab.all) && !c.archived).toList();
+    final regularForDrawer = allChatsForDrawer.where((c) => !(_isPinnedInTab(c, _ChatsTab.all) && !c.archived)).toList();
+    final archiveCount = _archivedCountForTab(_activeTab);
+    final showArchiveEntry = _activeTab != _ChatsTab.archived &&
+        _activeTab != _ChatsTab.neighbors &&
+        archiveCount > 0;
 
     return PopScope(
-      canPop: true,
+      canPop: false,
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop) return;
-        if (Navigator.of(context).canPop()) {
-          Navigator.of(context).pop();
-          return;
-        }
-        await AppLifecycleBridge.moveToBackground();
+        await _handleBackPressed();
       },
       child: Scaffold(
         key: _scaffoldKey,
@@ -1496,9 +1810,9 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 minTileHeight: _kMenuItemMinHeight,
                 visualDensity: _kMenuItemDensity,
                 contentPadding: _kMenuItemPadding,
-                leading: const Icon(Icons.contact_mail_outlined, size: 18),
+                leading: const Icon(_kContactsPageIcon, size: 18),
                 title: Text(
-                  l.tr('contacts_groups_title'),
+                  l.tr('contacts'),
                   style: const TextStyle(
                     fontSize: _kMenuItemTitleSize,
                     fontWeight: _kMenuItemTitleWeight,
@@ -1507,7 +1821,26 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 ),
                 onTap: () async {
                   Navigator.pop(context);
-                  await _onRightMenuAction('contacts_hub');
+                  await _onRightMenuAction('contacts_page');
+                },
+              ),
+              ListTile(
+                dense: true,
+                minTileHeight: _kMenuItemMinHeight,
+                visualDensity: _kMenuItemDensity,
+                contentPadding: _kMenuItemPadding,
+                leading: const Icon(_kGroupsPageIcon, size: 18),
+                title: Text(
+                  l.tr('groups'),
+                  style: const TextStyle(
+                    fontSize: _kMenuItemTitleSize,
+                    fontWeight: _kMenuItemTitleWeight,
+                    height: _kMenuItemLineHeight,
+                  ),
+                ),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _onRightMenuAction('groups_page');
                 },
               ),
               ListTile(
@@ -1527,25 +1860,6 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 onTap: () async {
                   Navigator.pop(context);
                   await _onRightMenuAction('node_status');
-                },
-              ),
-              ListTile(
-                dense: true,
-                minTileHeight: _kMenuItemMinHeight,
-                visualDensity: _kMenuItemDensity,
-                contentPadding: _kMenuItemPadding,
-                leading: const Icon(Icons.settings_rounded, size: 18),
-                title: Text(
-                  l.tr('settings'),
-                  style: const TextStyle(
-                    fontSize: _kMenuItemTitleSize,
-                    fontWeight: _kMenuItemTitleWeight,
-                    height: _kMenuItemLineHeight,
-                  ),
-                ),
-                onTap: () async {
-                  Navigator.pop(context);
-                  await _onRightMenuAction('settings');
                 },
               ),
               ExpansionTile(
@@ -1596,6 +1910,25 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                     },
                   ),
                 ],
+              ),
+              ListTile(
+                dense: true,
+                minTileHeight: _kMenuItemMinHeight,
+                visualDensity: _kMenuItemDensity,
+                contentPadding: _kMenuItemPadding,
+                leading: const Icon(Icons.settings_rounded, size: 18),
+                title: Text(
+                  l.tr('settings'),
+                  style: const TextStyle(
+                    fontSize: _kMenuItemTitleSize,
+                    fontWeight: _kMenuItemTitleWeight,
+                    height: _kMenuItemLineHeight,
+                  ),
+                ),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _onRightMenuAction('settings');
+                },
               ),
               const SizedBox(height: 4),
               ListTile(
@@ -1718,6 +2051,24 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                   child: ListView(
                     padding: const EdgeInsets.fromLTRB(AppSpacing.sm, AppSpacing.xs, AppSpacing.sm, AppSpacing.xxl),
                     children: [
+                      if (showArchiveEntry)
+                        _ArchiveEntryTile(
+                          archivedCount: archiveCount,
+                          onTap: () => appPush(
+                            context,
+                            _ArchivedChatsScreen(
+                              ble: widget.ble,
+                              chats: _archived,
+                              onOpen: _openConversation,
+                              onPin: _togglePin,
+                              onArchive: _toggleArchive,
+                              onMute: _toggleMute,
+                              onFolder: _setFolder,
+                              onDelete: _deleteConversation,
+                              titleResolver: _titleForConversation,
+                            ),
+                          ),
+                        ),
                       if (_activeTab == _ChatsTab.neighbors && reachableNeighbors.isEmpty)
                         SizedBox(
                           height: MediaQuery.of(context).size.height * 0.56,
@@ -1775,29 +2126,14 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                             ),
                           ),
                         ),
-                      if (_activeTab != _ChatsTab.archived && _activeTab != _ChatsTab.neighbors && _archived.isNotEmpty)
-                        _ArchiveEntryTile(
-                          archivedCount: _archived.length,
-                          onTap: () => appPush(
-                            context,
-                            _ArchivedChatsScreen(
-                              ble: widget.ble,
-                              chats: _archived,
-                              onOpen: _openConversation,
-                              onPin: _togglePin,
-                              onArchive: _toggleArchive,
-                              onMute: _toggleMute,
-                              onFolder: _setFolder,
-                              onDelete: _deleteConversation,
-                              titleResolver: _titleForConversation,
-                            ),
-                          ),
-                        ),
                       if (_activeTab == _ChatsTab.neighbors)
                         ...reachableNeighbors.map(_buildReachableNodeTile),
                       if (_activeTab != _ChatsTab.neighbors)
                         ...tabChats.map((c) => _ConversationTile(
                             conversation: c,
+                            isPinned: _isPinnedInTab(c, _activeTab),
+                            animatePin: _pinAnimating.contains(c.id),
+                            animateArchive: _archiveAnimating.contains(c.id),
                             titleOverride: _titleForConversation(c),
                             timeText: _formatTime(c.lastMessageAtMs),
                             groupRole: c.kind == ConversationKind.group
@@ -1817,6 +2153,13 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                             onArchive: () => _toggleArchive(c),
                             onMute: () => _toggleMute(c),
                             onFolder: (folderId) => _setFolder(c, folderId),
+                            canPin: !(_activeTab == _ChatsTab.all && c.kind == ConversationKind.broadcast),
+                            canArchive: !(_activeTab == _ChatsTab.all && c.kind == ConversationKind.broadcast),
+                            allowMoveToPersonal: _activeTab != _ChatsTab.personal &&
+                                _activeTab != _ChatsTab.archived &&
+                                !(_activeTab == _ChatsTab.all && c.kind == ConversationKind.broadcast),
+                            allowMoveToGroups: _activeTab != _ChatsTab.archived &&
+                                !(_activeTab == _ChatsTab.all && c.kind == ConversationKind.broadcast),
                             onDelete: () => _deleteConversation(c),
                             onCopyInvite: () => _copyGroupInviteForConversation(c),
                             canCopyInvite: c.kind == ConversationKind.group &&
@@ -1851,6 +2194,9 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
 
 class _ConversationTile extends StatelessWidget {
   final ChatConversation conversation;
+  final bool isPinned;
+  final bool animatePin;
+  final bool animateArchive;
   final String? titleOverride;
   final String timeText;
   final String? groupRole;
@@ -1859,7 +2205,11 @@ class _ConversationTile extends StatelessWidget {
   final VoidCallback onPin;
   final VoidCallback onArchive;
   final VoidCallback onMute;
+  final bool canPin;
+  final bool canArchive;
   final ValueChanged<String> onFolder;
+  final bool allowMoveToPersonal;
+  final bool allowMoveToGroups;
   final VoidCallback onDelete;
   final VoidCallback? onCopyInvite;
   final bool canCopyInvite;
@@ -1867,6 +2217,9 @@ class _ConversationTile extends StatelessWidget {
 
   const _ConversationTile({
     required this.conversation,
+    this.isPinned = false,
+    this.animatePin = false,
+    this.animateArchive = false,
     this.titleOverride,
     required this.timeText,
     this.groupRole,
@@ -1875,7 +2228,11 @@ class _ConversationTile extends StatelessWidget {
     required this.onPin,
     required this.onArchive,
     required this.onMute,
+    this.canPin = true,
+    this.canArchive = true,
     required this.onFolder,
+    this.allowMoveToPersonal = true,
+    this.allowMoveToGroups = true,
     required this.onDelete,
     this.onCopyInvite,
     this.canCopyInvite = false,
@@ -1913,7 +2270,19 @@ class _ConversationTile extends StatelessWidget {
     final subtitleText = (conversation.lastMessagePreview ?? '').trim().isNotEmpty
         ? (conversation.lastMessagePreview ?? '')
         : statusText;
-    return AppSectionCard(
+    return AnimatedSlide(
+      offset: animateArchive ? const Offset(0.08, 0) : Offset.zero,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+      child: AnimatedOpacity(
+      opacity: animateArchive ? 0.0 : 1.0,
+      duration: const Duration(milliseconds: 210),
+      curve: Curves.easeOutCubic,
+      child: AnimatedScale(
+      scale: animatePin ? 1.03 : 1.0,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+      child: AppSectionCard(
       margin: const EdgeInsets.only(bottom: AppSpacing.sm),
       padding: EdgeInsets.zero,
       child: ClipRRect(
@@ -2028,9 +2397,9 @@ class _ConversationTile extends StatelessWidget {
                   ),
                 ),
               if (timeText.isNotEmpty &&
-                  (conversation.pinned || conversation.muted || hasUnread))
+                  (isPinned || conversation.muted || hasUnread))
                 const SizedBox(width: 7),
-              if (conversation.pinned)
+              if (isPinned)
                 Icon(Icons.push_pin_rounded, size: 15, color: p.primary.withOpacity(0.9)),
               if (conversation.muted) const SizedBox(width: 4),
               if (conversation.muted)
@@ -2061,6 +2430,7 @@ class _ConversationTile extends StatelessWidget {
           ],
         ),
       ),
+    ))),
     );
   }
 
@@ -2072,28 +2442,31 @@ class _ConversationTile extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              ListTile(
-                leading: Icon(conversation.pinned ? Icons.push_pin_outlined : Icons.push_pin_rounded),
-                title: Text(conversation.pinned ? context.l10n.tr('chats_action_unpin') : context.l10n.tr('chats_action_pin')),
-                onTap: () => Navigator.pop(ctx, 'pin'),
-              ),
+              if (canPin)
+                ListTile(
+                  leading: Icon(isPinned ? Icons.push_pin_outlined : Icons.push_pin_rounded),
+                  title: Text(isPinned ? context.l10n.tr('chats_action_unpin') : context.l10n.tr('chats_action_pin')),
+                  onTap: () => Navigator.pop(ctx, 'pin'),
+                ),
               ListTile(
                 leading: Icon(conversation.muted ? Icons.notifications_active_rounded : Icons.notifications_off_rounded),
                 title: Text(conversation.muted ? context.l10n.tr('chats_action_unmute') : context.l10n.tr('chats_action_mute')),
                 onTap: () => Navigator.pop(ctx, 'mute'),
               ),
-              ListTile(
-                leading: Icon(conversation.archived ? Icons.unarchive_rounded : Icons.archive_rounded),
-                title: Text(conversation.archived ? context.l10n.tr('chats_action_unarchive') : context.l10n.tr('chats_action_archive')),
-                onTap: () => Navigator.pop(ctx, 'archive'),
-              ),
-              if (conversation.kind != ConversationKind.group)
+              if (canArchive)
+                ListTile(
+                  leading: Icon(conversation.archived ? Icons.unarchive_rounded : Icons.archive_rounded),
+                  title: Text(conversation.archived ? context.l10n.tr('chats_action_unarchive') : context.l10n.tr('chats_action_archive')),
+                  onTap: () => Navigator.pop(ctx, 'archive'),
+                ),
+              if (allowMoveToPersonal && conversation.kind != ConversationKind.group)
                 ListTile(
                   leading: const Icon(Icons.folder_rounded),
                   title: Text(context.l10n.tr('chats_action_to_personal')),
                   onTap: () => Navigator.pop(ctx, 'folder_personal'),
                 ),
-              if (conversation.kind != ConversationKind.group &&
+              if (allowMoveToGroups &&
+                  conversation.kind != ConversationKind.group &&
                   conversation.kind != ConversationKind.direct)
                 ListTile(
                   leading: const Icon(Icons.folder_rounded),
@@ -2410,7 +2783,7 @@ class _ReachableNodeItem {
   }
 }
 
-class _ArchivedChatsScreen extends StatelessWidget {
+class _ArchivedChatsScreen extends StatefulWidget {
   final RiftLinkBle ble;
   final List<ChatConversation> chats;
   final Future<void> Function(ChatConversation) onOpen;
@@ -2433,33 +2806,103 @@ class _ArchivedChatsScreen extends StatelessWidget {
     this.titleResolver,
   });
 
+  @override
+  State<_ArchivedChatsScreen> createState() => _ArchivedChatsScreenState();
+}
+
+class _ArchivedChatsScreenState extends State<_ArchivedChatsScreen> {
+  final GlobalKey<AnimatedListState> _listKey = GlobalKey<AnimatedListState>();
+  late List<ChatConversation> _chats;
+
+  @override
+  void initState() {
+    super.initState();
+    _chats = List<ChatConversation>.from(widget.chats);
+  }
+
   String _formatTime(int? ms) {
     if (ms == null) return '';
     final d = DateTime.fromMillisecondsSinceEpoch(ms);
     return '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
   }
 
+  Future<void> _handleArchive(ChatConversation c) async {
+    final index = _chats.indexWhere((x) => x.id == c.id);
+    if (index < 0) {
+      await widget.onArchive(c);
+      return;
+    }
+    final removed = _chats.removeAt(index);
+    _listKey.currentState?.removeItem(
+      index,
+      (context, animation) => _buildAnimatedTile(removed, animation),
+      duration: const Duration(milliseconds: 240),
+    );
+    if (mounted) setState(() {});
+    try {
+      await widget.onArchive(c);
+    } catch (_) {
+      // Rollback local UI if repository update failed.
+      _chats.insert(index, removed);
+      _listKey.currentState?.insertItem(index, duration: const Duration(milliseconds: 220));
+      if (mounted) setState(() {});
+      rethrow;
+    }
+  }
+
+  Widget _buildAnimatedTile(ChatConversation c, Animation<double> animation) {
+    final curved = CurvedAnimation(parent: animation, curve: Curves.easeOutCubic);
+    return FadeTransition(
+      opacity: curved,
+      child: SizeTransition(
+        sizeFactor: curved,
+        axisAlignment: -1,
+        child: _ConversationTile(
+          conversation: c,
+          isPinned: false,
+          titleOverride: widget.titleResolver?.call(c),
+          timeText: _formatTime(c.lastMessageAtMs),
+          onTap: () => widget.onOpen(c),
+          onPin: () => widget.onPin(c),
+          onArchive: () => _handleArchive(c),
+          onMute: () => widget.onMute(c),
+          canPin: false,
+          canArchive: true,
+          onFolder: (folderId) => widget.onFolder(c, folderId),
+          allowMoveToPersonal: false,
+          allowMoveToGroups: false,
+          onDelete: () => widget.onDelete(c),
+          canDelete: c.kind != ConversationKind.broadcast,
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final p = context.palette;
     return Scaffold(
       appBar: riftAppBar(context, showBack: true, title: context.l10n.tr('chats_folder_archived')),
       body: MeshBackgroundWrapper(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(AppSpacing.sm, AppSpacing.sm, AppSpacing.sm, AppSpacing.xxl),
-          children: chats
-              .map((c) => _ConversationTile(
-                    conversation: c,
-                    titleOverride: titleResolver?.call(c),
-                    timeText: _formatTime(c.lastMessageAtMs),
-                    onTap: () => onOpen(c),
-                    onPin: () => onPin(c),
-                    onArchive: () => onArchive(c),
-                    onMute: () => onMute(c),
-                    onFolder: (folderId) => onFolder(c, folderId),
-                    onDelete: () => onDelete(c),
-                    canDelete: c.kind != ConversationKind.broadcast,
-                  ))
-              .toList(),
+        child: AnimatedSwitcher(
+          duration: const Duration(milliseconds: 220),
+          child: _chats.isEmpty
+              ? Center(
+                  key: const ValueKey('archived-empty'),
+                  child: Text(
+                    context.l10n.tr('chat_preview_empty'),
+                    style: TextStyle(color: p.onSurfaceVariant),
+                  ),
+                )
+              : AnimatedList(
+                  key: _listKey,
+                  initialItemCount: _chats.length,
+                  padding: const EdgeInsets.fromLTRB(AppSpacing.sm, AppSpacing.sm, AppSpacing.sm, AppSpacing.xxl),
+                  itemBuilder: (context, index, animation) {
+                    final c = _chats[index];
+                    return _buildAnimatedTile(c, animation);
+                  },
+                ),
         ),
       ),
     );

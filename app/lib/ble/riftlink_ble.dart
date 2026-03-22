@@ -71,6 +71,8 @@ class RiftLinkBle {
 
   BluetoothDevice? get device => _device;
   bool get isConnected => _device?.isConnected ?? false;
+  bool get isTransportConnected =>
+      (_isWifiMode && _wifiTransport?.isConnected == true) || isConnected;
 
   /// Проверка, что устройство — RiftLink (по имени RL-*, RiftLink, Heltec или service UUID)
   static bool isRiftLink(ScanResult r) {
@@ -205,7 +207,7 @@ class RiftLinkBle {
 
   /// Запросить info (evt "info"). Централизованный throttle, чтобы экраны не спамили устройству.
   Future<bool> getInfo({bool force = false}) async {
-    if (!isConnected) return false;
+    if (!isTransportConnected) return false;
     if (force) {
       _queuedInfoTimer?.cancel();
       _queuedInfoTimer = null;
@@ -228,7 +230,7 @@ class RiftLinkBle {
     _queuedInfoTimer?.cancel();
     _queuedInfoTimer = Timer(wait, () async {
       _hasQueuedInfoRequest = false;
-      if (!isConnected) return;
+      if (!isTransportConnected) return;
       _lastInfoRequestAt = DateTime.now();
       await _sendCmd({'cmd': 'info'});
     });

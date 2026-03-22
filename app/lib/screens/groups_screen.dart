@@ -7,6 +7,8 @@ import 'package:flutter/services.dart';
 
 import '../app_navigator.dart';
 import '../ble/riftlink_ble.dart';
+import '../chat/chat_models.dart';
+import '../chat/chat_repository.dart';
 import '../l10n/app_localizations.dart';
 import '../mesh_constants.dart';
 import '../theme/app_theme.dart';
@@ -15,6 +17,7 @@ import '../widgets/app_primitives.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/app_snackbar.dart';
 import '../widgets/rift_dialogs.dart';
+import 'chat_screen.dart';
 
 class GroupsScreen extends StatefulWidget {
   final RiftLinkBle ble;
@@ -34,6 +37,7 @@ class GroupsScreen extends StatefulWidget {
 }
 
 class _GroupsScreenState extends State<GroupsScreen> {
+  final ChatRepository _chatRepo = ChatRepository.instance;
   List<int> _groups = [];
   final Map<int, int> _groupKeyVersion = <int, int>{};
   final Map<int, RiftLinkGroupV2Info> _groupV2ByChannel = <int, RiftLinkGroupV2Info>{};
@@ -741,7 +745,10 @@ class _GroupsScreenState extends State<GroupsScreen> {
       margin: const EdgeInsets.only(bottom: AppSpacing.sm),
       padding: EdgeInsets.zero,
       child: ListTile(
-        onTap: () => HapticFeedback.lightImpact(),
+        onTap: () async {
+          HapticFeedback.lightImpact();
+          await _openGroupChat(gid);
+        },
         contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: 4),
         leading: CircleAvatar(
           radius: 20,
@@ -818,6 +825,27 @@ class _GroupsScreenState extends State<GroupsScreen> {
               const PopupMenuItem(value: 'revoke', child: Text('Revoke member')),
           ],
         ),
+      ),
+    );
+  }
+
+  Future<void> _openGroupChat(int gid) async {
+    final uid = (_uidByChannel(gid) ?? 'UNRESOLVED_$gid').toUpperCase();
+    final conversationId = ChatRepository.groupConversationIdByUid(uid);
+    await _chatRepo.ensureConversation(
+      id: conversationId,
+      kind: ConversationKind.group,
+      peerRef: ChatRepository.groupPeerRefByUid(uid),
+      title: _groupDisplayName(gid),
+    );
+    if (!mounted) return;
+    await appPush(
+      context,
+      ChatScreen(
+        ble: widget.ble,
+        conversationId: conversationId,
+        initialGroupId: gid,
+        initialGroupUid: uid,
       ),
     );
   }

@@ -10,12 +10,14 @@ class ChatAppBarTitle extends StatelessWidget {
     this.chatIconColor,
     required this.label,
     this.subtitle,
+    this.onLongPress,
   });
 
   final IconData chatIcon;
   final Color? chatIconColor;
   final String label;
   final String? subtitle;
+  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -57,6 +59,11 @@ class ChatAppBarTitle extends StatelessWidget {
         ),
       ],
     );
-    return row;
+    if (onLongPress == null) return row;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onLongPress: onLongPress,
+      child: row,
+    );
   }
 }

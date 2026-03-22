@@ -455,7 +455,11 @@ void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, c
   if (forceSend && !hadKeyBefore) {
     // Первый ответ — без длинного троттла, пир ждёт наш ключ
   } else {
-    uint32_t throttleMs = hadKeyBefore ? KEY_RESPONSE_THROTTLE_MS : KEY_EXCHANGE_THROTTLE_MS;
+    // key_rx_dup: peer can lose pairwise state while keeping same pubkey.
+    // Use medium throttle to heal asymmetry faster without enabling KEY storm.
+    bool isDupRecovery = forceSend && hadKeyBefore && reason && strcmp(reason, "key_rx_dup") == 0;
+    uint32_t throttleMs = isDupRecovery ? KEY_EXCHANGE_THROTTLE_MS
+                                        : (hadKeyBefore ? KEY_RESPONSE_THROTTLE_MS : KEY_EXCHANGE_THROTTLE_MS);
     uint32_t lastSend = 0;
     if (throttleLastSendFor(peerId, &lastSend) && (now - lastSend < throttleMs)) {
       xSemaphoreGive(s_mutex);

@@ -1,7 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../app_navigator.dart';
+import '../ble/riftlink_ble.dart';
+import '../ble/riftlink_ble_scope.dart';
+import '../chat/chat_models.dart';
+import '../chat/chat_repository.dart';
 import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
@@ -10,20 +16,32 @@ import '../widgets/app_primitives.dart';
 import '../widgets/app_snackbar.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/rift_dialogs.dart';
+import 'chat_screen.dart';
 
 class ContactsScreen extends StatefulWidget {
   final List<String> neighbors;
+  final RiftLinkBle? ble;
 
   /// Без AppBar и кнопки «назад» — для вкладки в [ContactsGroupsHubScreen].
   final bool embedded;
-  const ContactsScreen({super.key, this.neighbors = const [], this.embedded = false});
+  const ContactsScreen({
+    super.key,
+    this.neighbors = const [],
+    this.ble,
+    this.embedded = false,
+  });
   @override
   State<ContactsScreen> createState() => _ContactsScreenState();
 }
 
 class _ContactsScreenState extends State<ContactsScreen> {
+  final ChatRepository _chatRepo = ChatRepository.instance;
+  final TextEditingController _searchController = TextEditingController();
   List<Contact> _contacts = [];
+  List<String> _neighbors = const [];
+  StreamSubscription<RiftLinkEvent>? _bleSub;
   bool _loading = true;
+  String _searchQuery = '';
 
   static const double _fabClearance = AppSpacing.xxl + 56 + AppSpacing.sm;
 
@@ -33,10 +51,77 @@ class _ContactsScreenState extends State<ContactsScreen> {
   String _normalizeId(String raw) =>
       raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
 
+  List<String> _normalizeNeighborList(Iterable<String> raw) {
+    final out = <String>{};
+    for (final item in raw) {
+      final id = _normalizeId(item);
+      if (id.length == 16) out.add(id);
+    }
+    final list = out.toList()..sort();
+    return list;
+  }
+
+  void _setNeighbors(Iterable<String> raw) {
+    final normalized = _normalizeNeighborList(raw);
+    if (!mounted) {
+      _neighbors = normalized;
+      return;
+    }
+    if (_neighbors.length == normalized.length) {
+      var same = true;
+      for (var i = 0; i < _neighbors.length; i++) {
+        if (_neighbors[i] != normalized[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return;
+    }
+    setState(() => _neighbors = normalized);
+  }
+
+  void _bindBleStream() {
+    _bleSub?.cancel();
+    final ble = widget.ble;
+    if (ble == null) return;
+    final li = ble.lastInfo;
+    if (li != null) _setNeighbors(li.neighbors);
+    ble.getInfo();
+    _bleSub = ble.events.listen((evt) {
+      if (!mounted) return;
+      if (evt is RiftLinkInfoEvent) {
+        _setNeighbors(evt.neighbors);
+      } else if (evt is RiftLinkNeighborsEvent) {
+        _setNeighbors(evt.neighbors);
+      }
+    });
+  }
+
   @override
   void initState() {
     super.initState();
+    _neighbors = _normalizeNeighborList(widget.neighbors);
+    _bindBleStream();
     _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant ContactsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.ble != widget.ble) {
+      _bindBleStream();
+      return;
+    }
+    if (oldWidget.neighbors != widget.neighbors && widget.ble == null) {
+      _setNeighbors(widget.neighbors);
+    }
+  }
+
+  @override
+  void dispose() {
+    _bleSub?.cancel();
+    _searchController.dispose();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -296,17 +381,74 @@ class _ContactsScreenState extends State<ContactsScreen> {
     }
   }
 
-  Widget _buildNeighborChips() {
+  Future<void> _openDirectChat(Contact c) async {
+    final peerId = _normalizeId(c.id);
+    if (peerId.length != 16) return;
+    final conversationId = ChatRepository.directConversationId(peerId);
+    await _chatRepo.ensureConversation(
+      id: conversationId,
+      kind: ConversationKind.direct,
+      peerRef: peerId,
+      title: c.nickname.trim().isNotEmpty ? c.nickname.trim() : peerId,
+    );
+    if (!mounted) return;
+    final ble = RiftLinkBleScope.of(context);
+    await appPush(
+      context,
+      ChatScreen(
+        ble: ble,
+        conversationId: conversationId,
+        initialPeerId: peerId,
+      ),
+    );
+  }
+
+  Future<void> _copyContactNodeId(Contact c) async {
+    final nodeId = _normalizeId(c.id);
+    if (nodeId.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: nodeId));
+    if (!mounted) return;
+    showAppSnackBar(context, context.l10n.tr('copied'));
+  }
+
+  bool _isKnownContactId(String fullId) {
+    for (final c in _contacts) {
+      final known = _normalizeId(c.id);
+      if (known.isEmpty) continue;
+      if (known.length == 16 && known == fullId) return true;
+      if (known.length == 8 && fullId.startsWith(known)) return true;
+    }
+    return false;
+  }
+
+  List<String> _neighborSuggestions() {
+    final out = <String>{};
+    for (final raw in _neighbors) {
+      final id = _normalizeId(raw);
+      if (id.length != 16) continue;
+      if (_isKnownContactId(id)) continue;
+      out.add(id);
+    }
+    final list = out.toList()..sort();
+    return list;
+  }
+
+  List<Contact> _filteredContacts() {
+    final q = _searchQuery.trim().toLowerCase();
+    if (q.isEmpty) return _contacts;
+    return _contacts.where((c) {
+      final nick = c.nickname.trim().toLowerCase();
+      final id = _normalizeId(c.id).toLowerCase();
+      return nick.contains(q) || id.contains(q);
+    }).toList();
+  }
+
+  Widget _buildNeighborChips(List<String> suggestions) {
     final p = context.palette;
     return Wrap(
       spacing: AppSpacing.sm,
       runSpacing: AppSpacing.sm,
-      children: widget.neighbors
-          .map(_normalizeId)
-          .where((id) => id.length == 16)
-          .map((id) {
-        final existing = _contacts.where((c) => c.id == id).firstOrNull;
-        final hasNick = existing != null && existing.nickname.isNotEmpty;
+      children: suggestions.map((id) {
         return Material(
           color: p.surfaceVariant.withOpacity(0.85),
           borderRadius: BorderRadius.circular(AppRadius.md),
@@ -316,9 +458,9 @@ class _ContactsScreenState extends State<ContactsScreen> {
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
               child: Text(
-                hasNick ? existing!.nickname : id,
+                id,
                 style: AppTypography.chipBase().copyWith(
-                  fontFamily: hasNick ? null : 'monospace',
+                  fontFamily: 'monospace',
                   fontWeight: FontWeight.w500,
                   fontSize: 12.5,
                   color: p.onSurface,
@@ -426,7 +568,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
           color: Colors.transparent,
           child: InkWell(
             borderRadius: BorderRadius.circular(AppRadius.card),
-            onTap: () => _showEditDialog(c),
+            onTap: () => _openDirectChat(c),
+            onLongPress: () => _copyContactNodeId(c),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.md + 2),
               child: Row(
@@ -465,10 +608,53 @@ class _ContactsScreenState extends State<ContactsScreen> {
                       ],
                     ),
                   ),
-                  Icon(Icons.chevron_right_rounded, color: p.onSurfaceVariant.withOpacity(0.4)),
+                  IconButton(
+                    tooltip: l.tr('edit_contact'),
+                    icon: Icon(Icons.edit_outlined, color: p.onSurfaceVariant.withOpacity(0.8)),
+                    onPressed: () => _showEditDialog(c),
+                  ),
                 ],
               ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSearchField() {
+    final p = context.palette;
+    final l = context.l10n;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        widget.embedded ? AppSpacing.md : AppSpacing.lg,
+        widget.embedded ? AppSpacing.xs : AppSpacing.sm,
+        widget.embedded ? AppSpacing.md : AppSpacing.lg,
+        AppSpacing.sm + 2,
+      ),
+      child: AppSectionCard(
+        margin: EdgeInsets.zero,
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
+        child: TextField(
+          controller: _searchController,
+          onChanged: (v) => setState(() => _searchQuery = v),
+          textInputAction: TextInputAction.search,
+          style: TextStyle(color: p.onSurface, fontSize: 14.5),
+          decoration: InputDecoration(
+            hintText: l.tr('search_contacts_hint'),
+            prefixIcon: Icon(Icons.search_rounded, color: p.onSurfaceVariant),
+            suffixIcon: _searchQuery.trim().isEmpty
+                ? null
+                : IconButton(
+                    tooltip: l.tr('cancel'),
+                    onPressed: () {
+                      _searchController.clear();
+                      setState(() => _searchQuery = '');
+                    },
+                    icon: Icon(Icons.close_rounded, color: p.onSurfaceVariant),
+                  ),
+            border: InputBorder.none,
+            isDense: true,
           ),
         ),
       ),
@@ -479,6 +665,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
   Widget build(BuildContext context) {
     final l = context.l10n;
     final p = context.palette;
+    final suggestions = _neighborSuggestions();
+    final filteredContacts = _filteredContacts();
 
     final content = Material(
       color: Colors.transparent,
@@ -486,7 +674,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
           ? Center(child: CircularProgressIndicator(color: p.primary))
           : Column(
               children: [
-                if (widget.neighbors.isNotEmpty)
+                if (_contacts.isNotEmpty) _buildSearchField(),
+                if (suggestions.isNotEmpty)
                   Padding(
                     padding: EdgeInsets.fromLTRB(
                       widget.embedded ? AppSpacing.md : AppSpacing.lg,
@@ -501,7 +690,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                         children: [
                           _sectionTitleRow(context, icon: Icons.hub_outlined, title: l.tr('add_from_neighbors')),
                           const SizedBox(height: AppSpacing.md),
-                          _buildNeighborChips(),
+                          _buildNeighborChips(suggestions),
                         ],
                       ),
                     ),
@@ -509,13 +698,27 @@ class _ContactsScreenState extends State<ContactsScreen> {
                 Expanded(
                   child: _contacts.isEmpty
                       ? _buildEmptyState()
-                      : ListView.builder(
+                      : filteredContacts.isEmpty
+                          ? Center(
+                              child: Padding(
+                                padding: _pageHorizontal,
+                                child: Text(
+                                  l.tr('contacts_search_empty'),
+                                  textAlign: TextAlign.center,
+                                  style: AppTypography.labelBase().copyWith(
+                                    color: p.onSurfaceVariant.withOpacity(0.9),
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            )
+                          : ListView.builder(
                           padding: _pageHorizontal.copyWith(
                             top: AppSpacing.xs,
                             bottom: _fabClearance,
                           ),
-                          itemCount: _contacts.length,
-                          itemBuilder: (_, i) => _buildContactTile(_contacts[i]),
+                          itemCount: filteredContacts.length,
+                          itemBuilder: (_, i) => _buildContactTile(filteredContacts[i]),
                         ),
                 ),
               ],

@@ -85,6 +85,7 @@ final Map<String, Map<String, String>> _strings = {
   'chat_menu_recipient': {'en': 'Recipient', 'ru': 'Получатель'},
   'chat_menu_node_status': {'en': 'Node status', 'ru': 'Состояние узла'},
   'chat_menu_ping_peer': {'en': 'Ping this peer', 'ru': 'Пинг этого собеседника'},
+  'chat_menu_remove_contact': {'en': 'Remove from contacts', 'ru': 'Удалить из контактов'},
   'chat_menu_voice_in_input': {'en': 'Use microphone button in input bar', 'ru': 'Используйте кнопку микрофона в строке ввода'},
   'chat_menu_section_context': {'en': 'Actions in this chat', 'ru': 'Действия в этом чате'},
   'chat_menu_section_tools': {'en': 'Tools', 'ru': 'Инструменты'},
@@ -178,8 +179,11 @@ final Map<String, Map<String, String>> _strings = {
   'voice_acceptance_apply': {'en': 'Apply voice thresholds', 'ru': 'Применить пороги voice'},
   'voice_acceptance_bad_values': {'en': 'Invalid voice threshold values', 'ru': 'Некорректные значения порогов voice'},
   'contact_added': {'en': 'Contact added', 'ru': 'Контакт добавлен'},
+  'contact_removed': {'en': 'Contact removed', 'ru': 'Контакт удален'},
   'link_ok': {'en': 'Link with {from} established', 'ru': 'Связь с {from} установлена'},
   'ping_sent': {'en': 'Ping sent to {id}. Waiting for response...', 'ru': 'Пинг отправлен на {id}. Ожидание ответа...'},
+  'ping_checking': {'en': 'Checking link with {id}...', 'ru': 'Проверяем связь с {id}...'},
+  'ping_online': {'en': '{id} is online', 'ru': '{id} в сети'},
   'ping_timeout': {'en': 'Ping to {id} did not reach — no response', 'ru': 'Пинг до {id} не дошёл — ответа нет'},
   'error': {'en': 'Error', 'ru': 'Ошибка'},
   
@@ -187,6 +191,8 @@ final Map<String, Map<String, String>> _strings = {
   
   'contacts_empty': {'en': 'No saved contacts', 'ru': 'Нет сохранённых контактов'},
   'contacts_hint': {'en': 'Add from neighbors or manually', 'ru': 'Добавьте контакт из соседей или вручную'},
+  'search_contacts_hint': {'en': 'Search contacts by name or ID', 'ru': 'Поиск контактов по имени или ID'},
+  'contacts_search_empty': {'en': 'No contacts found', 'ru': 'Контакты не найдены'},
   'delete_contact': {'en': 'Delete contact?', 'ru': 'Удалить контакт?'},
   'delete': {'en': 'Delete', 'ru': 'Удалить'},
   'add_from_neighbors': {'en': 'Add from neighbors', 'ru': 'Добавить из соседей'},

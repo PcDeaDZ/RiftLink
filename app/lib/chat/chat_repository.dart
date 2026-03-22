@@ -17,7 +17,7 @@ class ChatRepository {
 
   Stream<void> get conversationsChanged => _conversationsController.stream;
 
-  static const int _dbVersion = 2;
+  static const int _dbVersion = 3;
   static const String _defaultNodeScope = 'UNBOUND';
   static const String _dbFilePrefix = 'riftlink_chat_';
 
@@ -119,6 +119,14 @@ class ChatRepository {
             title TEXT NOT NULL
           )
         ''');
+        await db.execute('''
+          CREATE TABLE conversation_pins (
+            scope TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            pin_order INTEGER NOT NULL,
+            PRIMARY KEY (scope, conversation_id)
+          )
+        ''');
         await db.insert('folders', {'id': 'all', 'title': 'All'});
         await db.insert('folders', {'id': 'personal', 'title': 'Personal'});
         await db.insert('folders', {'id': 'groups', 'title': 'Groups'});
@@ -129,6 +137,7 @@ class ChatRepository {
         await db.execute('CREATE INDEX idx_messages_group_uid ON messages(group_uid)');
         await db.execute('CREATE INDEX idx_conversations_unread ON conversations(unread_count)');
         await db.execute('CREATE INDEX idx_conversations_sort ON conversations(pinned, last_at_ms)');
+        await db.execute('CREATE INDEX idx_conversation_pins_scope ON conversation_pins(scope, pin_order)');
         await _createGroupSecurityTables(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
@@ -136,6 +145,17 @@ class ChatRepository {
           await db.execute('ALTER TABLE messages ADD COLUMN group_uid TEXT');
           await db.execute('CREATE INDEX IF NOT EXISTS idx_messages_group_uid ON messages(group_uid)');
           await _createGroupSecurityTables(db);
+        }
+        if (oldVersion < 3) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS conversation_pins (
+              scope TEXT NOT NULL,
+              conversation_id TEXT NOT NULL,
+              pin_order INTEGER NOT NULL,
+              PRIMARY KEY (scope, conversation_id)
+            )
+          ''');
+          await db.execute('CREATE INDEX IF NOT EXISTS idx_conversation_pins_scope ON conversation_pins(scope, pin_order)');
         }
       },
     );
@@ -355,7 +375,9 @@ class ChatRepository {
     final rows = await db.query(
       'conversations',
       where: 'archived = 1',
-      orderBy: 'pinned DESC, last_at_ms DESC',
+      // Archived list is timeline-based: newest archived chats on top.
+      // Scope pins are folder-specific and should not affect archive ordering.
+      orderBy: 'last_at_ms DESC',
     );
     return rows.map(_conversationFromRow).toList();
   }
@@ -394,10 +416,73 @@ class ChatRepository {
     await upsertConversationMeta(conversationId, pinned: value);
   }
 
+  Future<Map<String, int>> listPinnedByScope(String scope) async {
+    final db = await _database;
+    final rows = await db.query(
+      'conversation_pins',
+      columns: ['conversation_id', 'pin_order'],
+      where: 'scope = ?',
+      whereArgs: [scope],
+      orderBy: 'pin_order ASC',
+    );
+    final out = <String, int>{};
+    for (final row in rows) {
+      final id = (row['conversation_id'] as String?) ?? '';
+      if (id.isEmpty) continue;
+      out[id] = (row['pin_order'] as int?) ?? 0;
+    }
+    return out;
+  }
+
+  Future<void> setPinnedForScope({
+    required String conversationId,
+    required String scope,
+    required bool value,
+  }) async {
+    final db = await _database;
+    final normScope = scope.trim().toLowerCase();
+    if (normScope.isEmpty) return;
+    await db.transaction((txn) async {
+      if (!value) {
+        await txn.delete(
+          'conversation_pins',
+          where: 'scope = ? AND conversation_id = ?',
+          whereArgs: [normScope, conversationId],
+        );
+        return;
+      }
+      final existing = await txn.query(
+        'conversation_pins',
+        columns: ['pin_order'],
+        where: 'scope = ? AND conversation_id = ?',
+        whereArgs: [normScope, conversationId],
+        limit: 1,
+      );
+      if (existing.isNotEmpty) return;
+      final maxRow = await txn.rawQuery(
+        'SELECT COALESCE(MAX(pin_order), 0) AS max_order FROM conversation_pins WHERE scope = ?',
+        [normScope],
+      );
+      final maxOrder = (maxRow.first['max_order'] as int?) ?? 0;
+      await txn.insert(
+        'conversation_pins',
+        {
+          'scope': normScope,
+          'conversation_id': conversationId,
+          'pin_order': maxOrder + 1,
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    });
+    _conversationsController.add(null);
+  }
+
   Future<void> setArchived(String conversationId, bool value) async {
     await upsertConversationMeta(
       conversationId,
       archived: value,
+      // Keep archived list intuitive: newly archived chats appear on top.
+      lastAtMs: value ? DateTime.now().millisecondsSinceEpoch : null,
       folderId: value ? 'archived' : 'all',
     );
   }
@@ -414,6 +499,7 @@ class ChatRepository {
     final db = await _database;
     await db.delete('messages', where: 'conversation_id = ?', whereArgs: [conversationId]);
     await db.delete('drafts', where: 'conversation_id = ?', whereArgs: [conversationId]);
+    await db.delete('conversation_pins', where: 'conversation_id = ?', whereArgs: [conversationId]);
     await db.delete('conversations', where: 'id = ?', whereArgs: [conversationId]);
     _conversationsController.add(null);
   }
@@ -422,6 +508,7 @@ class ChatRepository {
     final db = await _database;
     await db.delete('messages');
     await db.delete('drafts');
+    await db.delete('conversation_pins');
     await db.delete('conversations');
     _conversationsController.add(null);
   }

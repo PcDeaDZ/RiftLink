@@ -111,6 +111,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   List<Map<String, dynamic>> _routes = [];
   List<int> _groups = [];
   Map<String, String> _contactNicknames = {};
+  Set<String> _contactIds = const {};
   int _group = 0;
   String? _groupUid;
   String? _unicastTo;
@@ -131,11 +132,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   final VoiceAssemblyService _voiceAssemblyService = VoiceAssemblyService();
   final Set<String> _readSent = {};
   final Set<String> _pendingPings = {};
+  final Set<String> _silentPendingPings = {};
   Timer? _ttlTimer;
   Timer? _voiceRxCleanupTimer;
   Timer? _neighborsPollTimer;
   Timer? _gpsSyncTimer;
   Timer? _directOnlineTtlTimer;
+  String? _lastAutoPingKey;
+  DateTime? _lastAutoPingAt;
   bool _directPeerOnline = false;
   bool _meshAnimationEnabled = true;
   AnimationController? _meshAnimController;
@@ -245,11 +249,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   String _chatSubtitle(AppLocalizations l) {
-    if (!widget.ble.isConnected) return l.tr('disconnected');
+    if (!widget.ble.isTransportConnected) return l.tr('disconnected');
     switch (_chatContextType()) {
       case ChatContextType.direct:
         final id = _activeDirectPeerId();
         if (id == null) return l.tr('chat_context_direct_subtitle');
+        final nick = _nicknameForId(id);
+        if (nick == null || nick.trim().isEmpty) {
+          return l.tr('chat_context_direct_subtitle');
+        }
         return id;
       case ChatContextType.group:
         final gv2 = _activeGroupV2Info();
@@ -293,12 +301,35 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     setState(() => _directPeerOnline = value);
   }
 
+  String _pingPeerLabel(String id) {
+    final norm = _normNodeId(id);
+    if (norm.isEmpty) return id;
+    return _nicknameForId(norm) ?? norm;
+  }
+
+  String _pingKey(String id) => _normalizeId(id);
+
+  bool _pingKeyMatches(String a, String b) {
+    if (a.isEmpty || b.isEmpty) return false;
+    if (a == b) return true;
+    // Firmware/events can occasionally report short (8) vs full (16) node IDs.
+    final minLen = a.length < b.length ? a.length : b.length;
+    if (minLen < 8) return false;
+    return a.startsWith(b) || b.startsWith(a);
+  }
+
+  bool _isDirectPeerInContacts(String peerId) {
+    final norm = _normNodeId(peerId);
+    if (norm.isEmpty) return false;
+    return _contactIds.contains(norm) || _contactIds.contains(norm.substring(0, 8));
+  }
+
   Future<void> _pingDirectPeer({
     required String peerId,
     required bool showSuccessSnack,
     required bool showTimeoutSnack,
   }) async {
-    if (!widget.ble.isConnected) {
+    if (!widget.ble.isTransportConnected) {
       if (showSuccessSnack) _showSnack(context.l10n.tr('connect_first'));
       return;
     }
@@ -308,16 +339,22 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       if (showSuccessSnack) _showSnack(context.l10n.tr('error'));
       return;
     }
-    final peerNorm = _normNodeId(peerId);
-    if (peerNorm.isEmpty) return;
-    _pendingPings.add(peerNorm);
+    final peerKey = _pingKey(peerId);
+    if (peerKey.length < 8) return;
+    _pendingPings.add(peerKey);
+    if (!showSuccessSnack && !showTimeoutSnack) {
+      _silentPendingPings.add(peerKey);
+    } else {
+      _silentPendingPings.remove(peerKey);
+    }
     if (showSuccessSnack) {
-      _showSnack(context.l10n.tr('ping_sent', {'id': peerId}));
+      _showSnack(context.l10n.tr('ping_checking', {'id': _pingPeerLabel(peerId)}));
     }
     Future.delayed(const Duration(seconds: 20), () {
       if (!mounted) return;
-      if (_pendingPings.remove(peerNorm)) {
-        if (_sameNodeId(_activeDirectPeerId() ?? '', peerNorm)) {
+      if (_pendingPings.remove(peerKey)) {
+        _silentPendingPings.remove(peerKey);
+        if (_pingKeyMatches(_pingKey(_activeDirectPeerId() ?? ''), peerKey)) {
           _setDirectPeerOnline(false);
         }
         if (showTimeoutSnack) {
@@ -331,17 +368,33 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     });
   }
 
-  void _scheduleDirectPeerAutoPing() {
+  void _scheduleDirectPeerAutoPing({bool force = false}) {
+    if (_chatContextType() != ChatContextType.direct) return;
     final peer = _activeDirectPeerId();
-    if (peer == null || !widget.ble.isConnected) return;
+    if (peer == null || !widget.ble.isTransportConnected) return;
+    if (_directPeerOnline && !force) return;
+    final peerKey = _pingKey(peer);
+    if (peerKey.length < 8) return;
+    final now = DateTime.now();
+    if (!force &&
+        _lastAutoPingKey != null &&
+        _pingKeyMatches(_lastAutoPingKey!, peerKey) &&
+        _lastAutoPingAt != null &&
+        now.difference(_lastAutoPingAt!) < const Duration(seconds: 12)) {
+      return;
+    }
+    if (_pendingPings.any((k) => _pingKeyMatches(k, peerKey))) return;
+    _lastAutoPingKey = peerKey;
+    _lastAutoPingAt = now;
     _setDirectPeerOnline(false);
     Future<void>.delayed(const Duration(milliseconds: 180), () async {
       if (!mounted) return;
-      if (!_sameNodeId(_activeDirectPeerId() ?? '', peer)) return;
+      final current = _activeDirectPeerId();
+      if (current == null || !_pingKeyMatches(_pingKey(current), peerKey)) return;
       await _pingDirectPeer(
-        peerId: peer,
+        peerId: current,
         showSuccessSnack: false,
-        showTimeoutSnack: false,
+        showTimeoutSnack: true,
       );
     });
   }
@@ -419,7 +472,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     final history = await _chatRepo.listMessages(_conversationId!);
     await _chatRepo.markConversationRead(_conversationId!);
     if (_chatContextType() == ChatContextType.direct) {
-      _scheduleDirectPeerAutoPing();
+      _scheduleDirectPeerAutoPing(force: true);
     }
     if (history.isEmpty || !mounted) return;
     setState(() {
@@ -487,16 +540,18 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _sendReadForUnread();
       _sendLangToFirmware();
       VoiceService.requestPermission();
-      if (widget.ble.isConnected) {
+      if (widget.ble.isTransportConnected) {
         _currentBleRemoteId = widget.ble.device?.remoteId.toString();
-        _listenConnectionState();
+        if (widget.ble.isConnected) {
+          _listenConnectionState();
+        }
         _applyNodeIdFromDeviceName();
         final cachedInfo = widget.ble.lastInfo;
         if (cachedInfo != null) _onInfoEvent(cachedInfo);
-        if (mounted && widget.ble.isConnected) widget.ble.getInfo();
+        if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo();
         if (cachedInfo == null) {
           Future.delayed(const Duration(milliseconds: 450), () {
-            if (mounted && widget.ble.isConnected && widget.ble.lastInfo == null) {
+            if (mounted && widget.ble.isTransportConnected && widget.ble.lastInfo == null) {
               widget.ble.getInfo();
             }
           });
@@ -509,7 +564,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _voiceRxCleanupTimer = Timer.periodic(const Duration(seconds: 5), (_) => _cleanupStaleVoiceAssemblies());
     // Периодический getInfo: пустые соседи — discovery; есть без ключа — обновить hasKey после KEY_EXCHANGE
     _neighborsPollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
-      if (!mounted || !widget.ble.isConnected) return;
+      if (!mounted || !widget.ble.isTransportConnected) return;
       final needRefresh = _neighbors.isEmpty ||
           _neighborsHasKey.length != _neighbors.length ||
           _neighborsHasKey.any((k) => !k);
@@ -583,6 +638,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _appLifecycle = state;
+    if (state == AppLifecycleState.resumed) {
+      _scheduleDirectPeerAutoPing();
+    }
   }
 
   void _listenConnectionState() {
@@ -606,7 +664,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   Future<void> _showConnectMenu() async {
-    if (!widget.ble.isConnected) return;
+    if (!widget.ble.isTransportConnected) return;
     _recentDevices = await RecentDevicesService.load();
     final currentRemoteId = widget.ble.device?.remoteId.toString();
     final others = _screenController.filterSwitchTargets(_recentDevices, currentRemoteId);
@@ -738,18 +796,27 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     final hint = RiftLinkBle.nodeIdHintFromDevice(dev);
     if (hint != null && mounted) setState(() => _nodeId = hint);
   }
-  void _sendLangToFirmware() { if (widget.ble.isConnected) widget.ble.setLang(AppLocalizations.currentLocale.languageCode); }
+  void _sendLangToFirmware() { if (widget.ble.isTransportConnected) widget.ble.setLang(AppLocalizations.currentLocale.languageCode); }
 
   Future<void> _loadContactNicknames() async {
     final contacts = await ContactsService.load();
     if (!mounted) return;
     setState(() {
       final m = <String, String>{};
+      final ids = <String>{};
       for (final c in contacts) {
-        final id = _normNodeId(c.id);
+        final rawId = c.id.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+        if (rawId.length == 16) {
+          ids.add(rawId);
+          ids.add(rawId.substring(0, 8));
+        } else if (rawId.length == 8) {
+          ids.add(rawId);
+        }
+        final id = _normNodeId(rawId);
         if (id.isNotEmpty && c.nickname.trim().isNotEmpty) m[id] = c.nickname.trim();
       }
       _contactNicknames = m;
+      _contactIds = ids;
     });
   }
 
@@ -788,7 +855,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   Future<void> _showRecipientPickerSheet() async {
-    if (!widget.ble.isConnected) return;
+    if (!widget.ble.isTransportConnected) return;
     FocusScope.of(context).unfocus();
     final l = context.l10n;
     final contacts = await ContactsService.load();
@@ -1276,6 +1343,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         ContactsService.promoteLegacy(norm);
       }
     }
+    _scheduleDirectPeerAutoPing();
   }
 
   // ── BLE Events ──
@@ -1377,25 +1445,40 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         });
       },
       onPongEvent: (event) {
-        final fromNorm = _normNodeId(event.from);
-        if (fromNorm.isNotEmpty) _pendingPings.remove(fromNorm);
+        final fromKey = _pingKey(event.from);
+        var hadPendingPing = false;
+        var wasSilentPing = false;
+        if (fromKey.length >= 8) {
+          final matchedPending = _pendingPings.where((k) => _pingKeyMatches(k, fromKey)).toList();
+          hadPendingPing = matchedPending.isNotEmpty;
+          for (final k in matchedPending) {
+            _pendingPings.remove(k);
+          }
+          final matchedSilent = _silentPendingPings.where((k) => _pingKeyMatches(k, fromKey)).toList();
+          wasSilentPing = matchedSilent.isNotEmpty;
+          for (final k in matchedSilent) {
+            _silentPendingPings.remove(k);
+          }
+        }
         final activePeer = _activeDirectPeerId();
-        if (activePeer != null && _sameNodeId(activePeer, fromNorm)) {
+        if (activePeer != null && _pingKeyMatches(_pingKey(activePeer), fromKey)) {
           _setDirectPeerOnline(true);
           _directOnlineTtlTimer?.cancel();
           _directOnlineTtlTimer = Timer(const Duration(seconds: 45), () {
             if (!mounted) return;
             final current = _activeDirectPeerId();
-            if (current != null && _sameNodeId(current, fromNorm)) {
+            if (current != null && _pingKeyMatches(_pingKey(current), fromKey)) {
               _setDirectPeerOnline(false);
             }
           });
         }
-        _showSnack(
-          '✓ ${context.l10n.tr('link_ok', {'from': event.from})}',
-          backgroundColor: context.palette.success,
-          duration: const Duration(seconds: 4),
-        );
+        if (hadPendingPing && !wasSilentPing) {
+          _showSnack(
+            context.l10n.tr('ping_online', {'id': _pingPeerLabel(event.from)}),
+            backgroundColor: context.palette.success,
+            duration: const Duration(seconds: 3),
+          );
+        }
       },
       onErrorEvent: (event) {
         var msg = event.msg;
@@ -1561,6 +1644,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         _listenConnectionState();
         _listenEvents();
         widget.ble.getInfo();
+        _scheduleDirectPeerAutoPing(force: true);
       },
       onReconnectFailed: () async {
         await _goToScan(context.l10n.tr('reconnect_failed'));
@@ -1763,7 +1847,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   // Long-press на микрофон: выбор TTL → старт записи
   Future<void> _onVoiceLongPress() async {
-    if (!widget.ble.isConnected || _voiceRecording) return;
+    if (!widget.ble.isTransportConnected || _voiceRecording) return;
     final ttl = await _pickVoiceTtlDialog();
     if (ttl == null || !mounted) return;
     await _startVoiceRecord(ttlMinutes: ttl);
@@ -1786,6 +1870,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       duration: duration,
       margin: kSnackBarMarginChat,
     );
+  }
+
+  Future<void> _copyDirectPeerNodeId() async {
+    final peerId = _activeDirectPeerId();
+    if (peerId == null || peerId.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: peerId));
+    _showSnack(context.l10n.tr('copied'));
   }
 
   Future<void> _showSelftestDialog(RiftLinkSelftestEvent evt) async {
@@ -1865,6 +1956,26 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         ],
       ),
     ));
+  }
+
+  Future<void> _removeDirectPeerFromContacts(String peerId) async {
+    final norm = _normNodeId(peerId);
+    if (norm.isEmpty || !mounted) return;
+    final l = context.l10n;
+    final label = _nicknameForId(norm) ?? norm;
+    final ok = await showRiftConfirmDialog(
+      context: context,
+      title: l.tr('delete_contact'),
+      message: l.tr('delete_contact_confirm', {'name': label}),
+      cancelText: l.tr('cancel'),
+      confirmText: l.tr('delete'),
+      danger: true,
+      icon: Icons.person_remove_outlined,
+    );
+    if (ok != true) return;
+    await ContactsService.remove(norm);
+    await _loadContactNicknames();
+    if (mounted) _showSnack(l.tr('contact_removed'));
   }
 
   void _showInviteDialog(
@@ -1959,7 +2070,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   List<_MenuItemData> _buildMenuItems(AppLocalizations l) {
     final matrix = _featureMatrix();
-    final connected = widget.ble.isConnected;
+    final connected = widget.ble.isTransportConnected;
     final directPeer = _activeDirectPeerId();
     final out = <_MenuItemData>[
       if (matrix.canCritical)
@@ -2002,6 +2113,24 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           subtitle: directPeer,
           section: _MenuSection.context,
           enabled: connected,
+        ),
+      if (matrix.canPingPeer && directPeer != null && !_isDirectPeerInContacts(directPeer))
+        _MenuItemData(
+          id: 'add_direct_contact',
+          icon: Icons.person_add_alt_rounded,
+          title: l.tr('add_contact'),
+          subtitle: directPeer,
+          section: _MenuSection.context,
+          enabled: true,
+        ),
+      if (matrix.canPingPeer && directPeer != null && _isDirectPeerInContacts(directPeer))
+        _MenuItemData(
+          id: 'remove_direct_contact',
+          icon: Icons.person_remove_outlined,
+          title: l.tr('chat_menu_remove_contact'),
+          subtitle: _nicknameForId(directPeer) ?? directPeer,
+          section: _MenuSection.context,
+          enabled: true,
         ),
     ];
     return out;
@@ -2110,7 +2239,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     if (value != null && mounted) _onMenuSelected(value);
   }
 
-  void _onMenuSelected(String? value) {
+  void _onMenuSelected(String? value) async {
     if (value == null || !mounted) return;
     FocusScope.of(context).unfocus();
     switch (value) {
@@ -2126,29 +2255,45 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           _showSnack(context.l10n.tr('error'));
         }
         break;
+      case 'add_direct_contact':
+        final peer = _activeDirectPeerId();
+        if (peer != null) {
+          _showAddContactDialog(peer);
+        } else {
+          _showSnack(context.l10n.tr('error'));
+        }
+        break;
+      case 'remove_direct_contact':
+        final peer = _activeDirectPeerId();
+        if (peer != null) {
+          await _removeDirectPeerFromContacts(peer);
+        } else {
+          _showSnack(context.l10n.tr('error'));
+        }
+        break;
       case 'send_location':
-        if (widget.ble.isConnected) {
+        if (widget.ble.isTransportConnected) {
           _sendLocation();
         } else {
           _showSnack(context.l10n.tr('connect_first'));
         }
         break;
       case 'send_critical':
-        if (widget.ble.isConnected) {
+        if (widget.ble.isTransportConnected) {
           _sendCritical();
         } else {
           _showSnack(context.l10n.tr('connect_first'));
         }
         break;
       case 'send_sos':
-        if (widget.ble.isConnected) {
+        if (widget.ble.isTransportConnected) {
           _sendSosQuick();
         } else {
           _showSnack(context.l10n.tr('connect_first'));
         }
         break;
       case 'time_capsule':
-        if (widget.ble.isConnected) {
+        if (widget.ble.isTransportConnected) {
           _showTimeCapsuleMenu();
         } else {
           _showSnack(context.l10n.tr('connect_first'));
@@ -2182,6 +2327,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
               chatIconColor: _chatContextIconColor(),
               label: _chatTitle(l),
               subtitle: _chatSubtitle(l),
+              onLongPress: _activeDirectPeerId() != null ? _copyDirectPeerNodeId : null,
             );
           },
         ),
@@ -2447,19 +2593,19 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                             )
                           : _hasText
                             ? _TtlTapButton(
-                                onTap: widget.ble.isConnected ? () => _send() : null,
-                                onLongPress: widget.ble.isConnected ? _showTtlSendMenu : null,
+                                onTap: widget.ble.isTransportConnected ? () => _send() : null,
+                                onLongPress: widget.ble.isTransportConnected ? _showTtlSendMenu : null,
                                 icon: Icons.send,
                                 size: 36,
                                 iconSize: 18,
                               )
                             : _TtlTapButton(
-                                onTap: widget.ble.isConnected
+                                onTap: widget.ble.isTransportConnected
                                     ? (matrix.canVoice
                                         ? _toggleVoiceRecord
                                         : _showVoiceRestrictionSnack)
                                     : null,
-                                onLongPress: widget.ble.isConnected && matrix.canVoice
+                                onLongPress: widget.ble.isTransportConnected && matrix.canVoice
                                     ? _onVoiceLongPress
                                     : null,
                                 icon: Icons.mic,

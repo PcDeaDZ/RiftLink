@@ -1085,36 +1085,10 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     } else if (hdr.opcode == protocol::OP_ROUTE_REPLY) {
       routing::onRouteReply(hdr.from, hdr.to, payload, payloadLen);
     } else if (hdr.opcode == protocol::OP_KEY_EXCHANGE && payloadLen == 32) {
-      RIFTLINK_DIAG("KEY", "event=KEY_RX_RAW from=%02X%02X len=%u rssi=%d sf=%u pktId=%u",
-          hdr.from[0], hdr.from[1], (unsigned)payloadLen, rssi, (unsigned)sf, (unsigned)hdr.pktId);
-      if (neighbors::onHello(hdr.from, rssi)) {
-        queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info
-        RIFTLINK_LOG_EVENT("[RiftLink] Neighbor: %02X%02X\n", hdr.from[0], hdr.from[1]);
-      }
-      bool keyMismatch = x25519_keys::isPeerPubKeyMismatch(hdr.from, payload);
-      if (keyMismatch) {
-        RIFTLINK_DIAG("KEY", "event=KEY_STORE_FAIL cause=pubkey_mismatch peer=%02X%02X pktId=%u",
-            hdr.from[0], hdr.from[1], (unsigned)hdr.pktId);
-        RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE mismatch for %02X%02X — possible key substitution\n",
-            hdr.from[0], hdr.from[1]);
-        ble::notifyError("invite_peer_key_mismatch", "Peer public key mismatch");
-        return;
-      }
-      bool hadKey = x25519_keys::hasKeyFor(hdr.from);
-      if (hadKey) {
-        RIFTLINK_DIAG("KEY", "event=KEY_RX_DUP from=%02X%02X pktId=%u action=ignore_rekey",
-            hdr.from[0], hdr.from[1], (unsigned)hdr.pktId);
-        return;
-      }
-      extendHandshakeQuiet("key_rx_parsed");
-      RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSED_OK from=%02X%02X payload=%u pktId=%u hadKey=%u",
-          hdr.from[0], hdr.from[1], (unsigned)payloadLen, (unsigned)hdr.pktId, (unsigned)hadKey);
-      RIFTLINK_LOG_EVENT("[RiftLink] KEY_EXCHANGE rx parsed payload=%u from %02X%02X (→ onKeyExchange)\n",
-          (unsigned)payloadLen, hdr.from[0], hdr.from[1]);
-      x25519_keys::onKeyExchange(hdr.from, payload);
-      if (x25519_keys::hasKeyFor(hdr.from)) {
-        x25519_keys::sendKeyExchange(hdr.from, true, false, "key_rx");
-      }
+      // Strict business logic: ignore KEY_EXCHANGE frames not addressed to this node.
+      // Replying here can create unnecessary key chatter and delivery regressions.
+      RIFTLINK_DIAG("KEY", "event=KEY_RX_SKIP reason=not_for_me from=%02X%02X to=%02X%02X pktId=%u",
+          hdr.from[0], hdr.from[1], hdr.to[0], hdr.to[1], (unsigned)hdr.pktId);
     } else if (hdr.opcode == protocol::OP_KEY_EXCHANGE) {
       RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSE_FAIL cause=payload_len_ne_32 from=%02X%02X payload=%u pktId=%u",
           hdr.from[0], hdr.from[1], (unsigned)payloadLen, (unsigned)hdr.pktId);
@@ -1156,8 +1130,11 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         }
         bool hadKey = x25519_keys::hasKeyFor(hdr.from);
         if (hadKey) {
-          RIFTLINK_DIAG("KEY", "event=KEY_RX_DUP from=%02X%02X pktId=%u action=ignore_rekey",
+          RIFTLINK_DIAG("KEY", "event=KEY_RX_DUP from=%02X%02X pktId=%u action=reply_with_throttle",
               hdr.from[0], hdr.from[1], (unsigned)hdr.pktId);
+          // Peer may have lost pairwise state while keeping the same pubkey.
+          // Reply with throttled KEY_EXCHANGE to heal asymmetry without KEY storm.
+          x25519_keys::sendKeyExchange(hdr.from, true, true, "key_rx_dup");
           break;
         }
         extendHandshakeQuiet("key_rx_parsed");
