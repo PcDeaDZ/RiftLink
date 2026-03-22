@@ -384,6 +384,8 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
       _connectingToDeviceName = resolvedName;
     });
     try {
+      final scope = _resolveBleNodeScope(device);
+      await ChatRepository.instance.setActiveNodeScope(scope);
       final ok = await _ble.connect(device);
       if (!mounted) return;
       if (ok) {
@@ -391,7 +393,6 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
         final rid = device.remoteId.toString();
         final nodeKey = RiftLinkBle.nodeIdHintFromDevice(device) ?? rid;
         unawaited(RecentDevicesService.addOrUpdate(remoteId: rid, nodeId: nodeKey, nickname: null));
-        await ChatRepository.instance.clearAll();
         await appPushReplacement(context, ChatsListScreen(ble: bleClient));
       } else {
         setState(() { _error = context.l10n.tr('ble_no_service'); _connectingToRemoteId = null; _connectingToDeviceName = null; });
@@ -425,6 +426,8 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
       _connectingToDeviceName = null;
     });
     try {
+      final wifiScope = _resolveWifiNodeScope(ip);
+      await ChatRepository.instance.setActiveNodeScope(wifiScope);
       final ok = await _ble.connectWifi(ip);
       if (!mounted) return;
       if (ok) {
@@ -434,7 +437,6 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
           final updated = await RecentDevicesService.loadRecentWifiIps();
           if (mounted) setState(() => _recentWifiIps = updated);
         }
-        await ChatRepository.instance.clearAll();
         await appPushReplacement(context, ChatsListScreen(ble: bleClient));
       } else {
         setState(() => _error = context.l10n.tr('wifi_connect_failed'));
@@ -445,6 +447,24 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
     } finally {
       if (mounted) setState(() => _wifiConnecting = false);
     }
+  }
+
+  String _resolveBleNodeScope(BluetoothDevice device) {
+    final remoteId = device.remoteId.toString();
+    for (final d in _recent) {
+      if (RiftLinkBle.remoteIdsMatch(d.remoteId, remoteId) && d.nodeId.isNotEmpty) {
+        return d.nodeId;
+      }
+    }
+    final hint = RiftLinkBle.nodeIdHintFromDevice(device);
+    if (hint != null && hint.isNotEmpty) return hint;
+    return remoteId;
+  }
+
+  String _resolveWifiNodeScope(String ip) {
+    final meta = _wifiMeta[ip];
+    if (meta != null && meta.nodeId.isNotEmpty) return meta.nodeId;
+    return 'wifi_$ip';
   }
 
   void _connectToRecent(RecentDevice dev, {String? displayLabel}) {

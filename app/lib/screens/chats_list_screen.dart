@@ -4,7 +4,6 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:geolocator/geolocator.dart';
 
 import '../ble/riftlink_ble.dart';
 import '../contacts/contacts_service.dart';
@@ -609,9 +608,130 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     _scaffoldKey.currentState?.openEndDrawer();
   }
 
+  Color _batteryColorForMv(int mv) {
+    final v = mv / 1000.0;
+    if (v >= 3.75) return context.palette.success;
+    if (v >= 3.45) return const Color(0xFFFFB300);
+    return context.palette.error;
+  }
+
+  int? _bestNeighborRssi(RiftLinkInfoEvent? info) {
+    final list = info?.neighborsRssi ?? const <int>[];
+    if (list.isEmpty) return null;
+    final valid = list.where((v) => v != 0).toList();
+    if (valid.isEmpty) return null;
+    valid.sort((a, b) => b.compareTo(a));
+    return valid.first;
+  }
+
+  Future<void> _showNodeStatusSheet() async {
+    final l = context.l10n;
+    final li = widget.ble.lastInfo;
+    final connected = widget.ble.isConnected;
+    final bestRssi = _bestNeighborRssi(li);
+    final batteryMv = li?.batteryMv;
+    final batteryPercent = li?.batteryPercent;
+    final charging = li?.charging ?? false;
+    final batteryText = batteryMv == null || batteryMv <= 0
+        ? '—'
+        : (batteryPercent != null
+            ? '$batteryPercent% (${(batteryMv / 1000.0).toStringAsFixed(2)}V)'
+            : '${(batteryMv / 1000.0).toStringAsFixed(2)}V');
+    final rows = <(IconData, String, String, Color?)>[
+      (
+        connected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
+        l.tr('node_status_ble_link'),
+        connected
+            ? l.tr('node_status_ble_link_connected')
+            : l.tr('node_status_ble_link_disconnected'),
+        connected ? context.palette.success : null,
+      ),
+      (
+        charging ? Icons.battery_charging_full : Icons.battery_std,
+        l.tr('settings_energy_node'),
+        batteryText,
+        batteryMv != null && batteryMv > 0 ? _batteryColorForMv(batteryMv) : null,
+      ),
+      (
+        Icons.radar_rounded,
+        l.tr('node_status_rssi'),
+        bestRssi != null ? '$bestRssi dBm' : '—',
+        null,
+      ),
+      (
+        Icons.memory_rounded,
+        l.tr('settings_firmware_version'),
+        (li?.version?.trim().isNotEmpty ?? false) ? li!.version!.trim() : '—',
+        null,
+      ),
+      (
+        Icons.outbox_rounded,
+        l.tr('offline_pending'),
+        '${li?.offlinePending ?? 0}',
+        null,
+      ),
+      (
+        Icons.gps_fixed_rounded,
+        l.tr('gps_section'),
+        (li?.gpsEnabled ?? false)
+            ? ((li?.gpsFix ?? false) ? l.tr('gps_fix_yes') : l.tr('gps_fix_no'))
+            : l.tr('node_status_gps_disabled'),
+        null,
+      ),
+    ];
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        final p = ctx.palette;
+        return SafeArea(
+          child: Container(
+            decoration: BoxDecoration(
+              color: p.card,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(AppSpacing.lg)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.sm),
+                  child: Text(
+                    l.tr('node_status_title'),
+                    style: AppTypography.screenTitleBase().copyWith(
+                      fontSize: 18,
+                      color: p.onSurface,
+                    ),
+                  ),
+                ),
+                ...rows.map((r) => ListTile(
+                      dense: true,
+                      leading: Icon(r.$1, color: r.$4 ?? p.onSurfaceVariant),
+                      title: Text(r.$2, style: TextStyle(color: p.onSurfaceVariant)),
+                      trailing: Text(
+                        r.$3,
+                        style: TextStyle(
+                          color: p.onSurface,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    )),
+                const SizedBox(height: AppSpacing.sm),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _onRightMenuAction(String selected) async {
     if (!mounted) return;
     final l = context.l10n;
+    if (selected == 'node_status') {
+      await _showNodeStatusSheet();
+      return;
+    }
     if (selected == 'disconnect') {
       await widget.ble.disconnect();
       if (!mounted) return;
@@ -687,19 +807,6 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         await widget.ble.selftest();
         _snack(l.tr('selftest'));
         break;
-      case 'send_location':
-        await _sendLocationQuick();
-        break;
-      case 'send_critical':
-        await _sendCriticalQuick();
-        break;
-      case 'time_capsule':
-        await _sendTimeCapsuleQuick();
-        break;
-      case 'sos':
-        await widget.ble.sendSos(text: 'SOS');
-        _snack(l.tr('menu_send_sos'));
-        break;
       default:
         break;
     }
@@ -736,37 +843,6 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   void _snack(String text) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text), duration: const Duration(seconds: 2)));
-  }
-
-  Future<void> _sendLocationQuick() async {
-    final l = context.l10n;
-    try {
-      final pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-      final ok = await widget.ble.sendLocation(
-        lat: pos.latitude,
-        lon: pos.longitude,
-        alt: pos.altitude.toInt(),
-      );
-      _snack(ok ? l.tr('location') : l.tr('error'));
-    } catch (_) {
-      _snack(l.tr('error'));
-    }
-  }
-
-  Future<void> _sendCriticalQuick() async {
-    final l = context.l10n;
-    final ok = await widget.ble.send(text: 'CRITICAL', lane: 'critical');
-    _snack(ok ? l.tr('menu_send_critical') : l.tr('error'));
-  }
-
-  Future<void> _sendTimeCapsuleQuick() async {
-    final l = context.l10n;
-    final ok = await widget.ble.send(
-      text: 'Time capsule',
-      trigger: 'time',
-      triggerAtMs: DateTime.now().add(const Duration(minutes: 5)).millisecondsSinceEpoch,
-    );
-    _snack(ok ? l.tr('menu_time_capsule') : l.tr('error'));
   }
 
   String _generateBase64Token(int sizeBytes) {
@@ -1418,6 +1494,25 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 minTileHeight: _kMenuItemMinHeight,
                 visualDensity: _kMenuItemDensity,
                 contentPadding: _kMenuItemPadding,
+                leading: const Icon(Icons.developer_board_rounded, size: 18),
+                title: Text(
+                  l.tr('chat_menu_node_status'),
+                  style: const TextStyle(
+                    fontSize: _kMenuItemTitleSize,
+                    fontWeight: _kMenuItemTitleWeight,
+                    height: _kMenuItemLineHeight,
+                  ),
+                ),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _onRightMenuAction('node_status');
+                },
+              ),
+              ListTile(
+                dense: true,
+                minTileHeight: _kMenuItemMinHeight,
+                visualDensity: _kMenuItemDensity,
+                contentPadding: _kMenuItemPadding,
                 leading: const Icon(Icons.settings_rounded, size: 18),
                 title: Text(
                   l.tr('settings'),
@@ -1477,38 +1572,6 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                     onTap: () async {
                       Navigator.pop(context);
                       await _onToolAction('selftest');
-                    },
-                  ),
-                  _RightDrawerActionTile(
-                    icon: Icons.location_on_rounded,
-                    label: l.tr('location'),
-                    onTap: () async {
-                      Navigator.pop(context);
-                      await _onToolAction('send_location');
-                    },
-                  ),
-                  _RightDrawerActionTile(
-                    icon: Icons.priority_high_rounded,
-                    label: l.tr('menu_send_critical'),
-                    onTap: () async {
-                      Navigator.pop(context);
-                      await _onToolAction('send_critical');
-                    },
-                  ),
-                  _RightDrawerActionTile(
-                    icon: Icons.hourglass_bottom_rounded,
-                    label: l.tr('menu_time_capsule'),
-                    onTap: () async {
-                      Navigator.pop(context);
-                      await _onToolAction('time_capsule');
-                    },
-                  ),
-                  _RightDrawerActionTile(
-                    icon: Icons.emergency_rounded,
-                    label: l.tr('menu_send_sos'),
-                    onTap: () async {
-                      Navigator.pop(context);
-                      await _onToolAction('sos');
                     },
                   ),
                 ],
@@ -1918,11 +1981,12 @@ class _ConversationTile extends StatelessWidget {
                 title: Text(conversation.archived ? context.l10n.tr('chats_action_unarchive') : context.l10n.tr('chats_action_archive')),
                 onTap: () => Navigator.pop(ctx, 'archive'),
               ),
-              ListTile(
-                leading: const Icon(Icons.folder_rounded),
-                title: Text(context.l10n.tr('chats_action_to_personal')),
-                onTap: () => Navigator.pop(ctx, 'folder_personal'),
-              ),
+              if (conversation.kind != ConversationKind.group)
+                ListTile(
+                  leading: const Icon(Icons.folder_rounded),
+                  title: Text(context.l10n.tr('chats_action_to_personal')),
+                  onTap: () => Navigator.pop(ctx, 'folder_personal'),
+                ),
               if (conversation.kind != ConversationKind.group &&
                   conversation.kind != ConversationKind.direct)
                 ListTile(

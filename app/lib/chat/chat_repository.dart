@@ -11,16 +11,58 @@ class ChatRepository {
   static final ChatRepository instance = ChatRepository._();
 
   Database? _db;
+  String _activeNodeScope = _defaultNodeScope;
+  String? _openedNodeScope;
   final _conversationsController = StreamController<void>.broadcast();
 
   Stream<void> get conversationsChanged => _conversationsController.stream;
 
   static const int _dbVersion = 2;
+  static const String _defaultNodeScope = 'UNBOUND';
+  static const String _dbFilePrefix = 'riftlink_chat_';
+
+  static String normalizeNodeScope(String? raw) {
+    final trimmed = (raw ?? '').trim();
+    if (trimmed.isEmpty) return _defaultNodeScope;
+    final hexOnly = trimmed.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+    if (RegExp(r'^[0-9A-F]{16}$').hasMatch(hexOnly)) {
+      return hexOnly;
+    }
+    final safe = trimmed
+        .replaceAll(RegExp(r'[^0-9A-Za-z_-]'), '_')
+        .replaceAll(RegExp(r'_+'), '_')
+        .toUpperCase();
+    if (safe.isEmpty) return _defaultNodeScope;
+    return safe.length > 64 ? safe.substring(0, 64) : safe;
+  }
+
+  String get activeNodeScope => _activeNodeScope;
+
+  Future<void> setActiveNodeScope(String? rawScope) async {
+    final next = normalizeNodeScope(rawScope);
+    if (next == _activeNodeScope) return;
+    _activeNodeScope = next;
+    if (_db != null) {
+      await _db!.close();
+      _db = null;
+      _openedNodeScope = null;
+    }
+    _conversationsController.add(null);
+  }
+
+  String _dbFileNameForScope(String scope) {
+    return '$_dbFilePrefix$scope.db';
+  }
 
   Future<void> init() async {
-    if (_db != null) return;
+    if (_db != null && _openedNodeScope == _activeNodeScope) return;
+    if (_db != null) {
+      await _db!.close();
+      _db = null;
+      _openedNodeScope = null;
+    }
     final dir = await getApplicationDocumentsDirectory();
-    final dbPath = p.join(dir.path, 'riftlink_chat.db');
+    final dbPath = p.join(dir.path, _dbFileNameForScope(_activeNodeScope));
     _db = await openDatabase(
       dbPath,
       version: _dbVersion,
@@ -97,6 +139,7 @@ class ChatRepository {
         }
       },
     );
+    _openedNodeScope = _activeNodeScope;
   }
 
   Future<void> _createGroupSecurityTables(Database db) async {

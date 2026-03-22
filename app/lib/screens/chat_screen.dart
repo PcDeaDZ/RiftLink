@@ -1,11 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:ui' show FontFeature;
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../ble/riftlink_ble.dart';
 import '../voice/voice_service.dart';
 import '../voice/voice_assembly_service.dart';
@@ -15,11 +13,7 @@ import '../prefs/mesh_prefs.dart';
 import '../app_navigator.dart';
 import '../app_lifecycle_bridge.dart';
 import '../l10n/app_localizations.dart';
-import 'map_screen.dart';
-import 'mesh_screen.dart';
 import '../notifications/local_notifications_service.dart';
-import 'contacts_groups_hub_screen.dart';
-import 'settings_hub_screen.dart';
 import 'scan_screen.dart';
 import 'chats_list_screen.dart';
 import '../locale_notifier.dart';
@@ -35,6 +29,7 @@ import '../chat/chat_models.dart';
 import '../chat/chat_repository.dart';
 import 'chat/chat_screen_controller.dart';
 import 'chat/chat_ui_models.dart';
+import 'chat/chat_capabilities.dart';
 import 'chat/widgets/chat_input_bar.dart';
 import 'chat/widgets/chat_message_list.dart';
 import 'chat/widgets/chat_app_bar.dart';
@@ -43,6 +38,26 @@ import 'chat/widgets/chat_status_panel.dart';
 
 List<int> _filterUserGroups(List<int> raw) =>
     raw.where((g) => g != kMeshBroadcastGroupId).toList();
+
+enum _MenuSection { context, tools, system }
+
+class _MenuItemData {
+  final String id;
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+  final _MenuSection section;
+  final bool enabled;
+
+  const _MenuItemData({
+    required this.id,
+    required this.icon,
+    required this.title,
+    this.subtitle,
+    required this.section,
+    this.enabled = true,
+  });
+}
 
 class ChatScreen extends StatefulWidget {
   final RiftLinkBle ble;
@@ -187,6 +202,80 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       }
     }
     return null;
+  }
+
+  ChatContextType _chatContextType() {
+    final conv = _activeConversationId();
+    if (conv.startsWith('direct:')) return ChatContextType.direct;
+    if (conv.startsWith('groupv2:')) return ChatContextType.group;
+    return ChatContextType.broadcast;
+  }
+
+  ChatFeatureMatrix _featureMatrix() => featureMatrixFor(_chatContextType());
+
+  String? _activeDirectPeerId() {
+    if (_unicastTo != null && _unicastTo!.isNotEmpty) {
+      final id = _normNodeId(_unicastTo!);
+      if (id.isNotEmpty) return id;
+    }
+    final conv = _activeConversationId();
+    if (!conv.startsWith('direct:')) return null;
+    final id = _normNodeId(conv.substring('direct:'.length));
+    return id.isEmpty ? null : id;
+  }
+
+  String _chatTitle(AppLocalizations l) {
+    switch (_chatContextType()) {
+      case ChatContextType.direct:
+        final id = _activeDirectPeerId();
+        if (id == null) return l.tr('chat_context_direct_fallback');
+        return _nicknameForId(id) ?? id;
+      case ChatContextType.group:
+        final gv2 = _activeGroupV2Info();
+        if (gv2 != null && gv2.canonicalName.trim().isNotEmpty) {
+          return gv2.canonicalName.trim();
+        }
+        final gid = _group > 0 ? _group : _resolveGroupIdByUid(_groupUid ?? '');
+        return gid > 0 ? '${l.tr('group')} $gid' : l.tr('chats_folder_groups');
+      case ChatContextType.broadcast:
+        return l.tr('broadcast');
+    }
+  }
+
+  String _chatSubtitle(AppLocalizations l) {
+    if (!widget.ble.isConnected) return l.tr('disconnected');
+    switch (_chatContextType()) {
+      case ChatContextType.direct:
+        final id = _activeDirectPeerId();
+        if (id == null) return l.tr('chat_context_direct_subtitle');
+        return id;
+      case ChatContextType.group:
+        final gv2 = _activeGroupV2Info();
+        final role = switch (gv2?.myRole) {
+          'owner' => l.tr('group_role_owner'),
+          'admin' => l.tr('group_role_admin'),
+          'member' => l.tr('group_role_member'),
+          _ => l.tr('chats_folder_groups'),
+        };
+        final gid = gv2?.channelId32 ?? _group;
+        if (gid > 0) {
+          return l.tr('chat_context_group_subtitle', {'id': '$gid', 'role': role});
+        }
+        return role;
+      case ChatContextType.broadcast:
+        return l.tr('chat_context_broadcast_subtitle');
+    }
+  }
+
+  IconData _chatContextIcon() {
+    switch (_chatContextType()) {
+      case ChatContextType.direct:
+        return Icons.person_outline_rounded;
+      case ChatContextType.group:
+        return Icons.group_outlined;
+      case ChatContextType.broadcast:
+        return Icons.campaign_outlined;
+    }
   }
 
   Future<void> _initConversationContext() async {
@@ -433,38 +522,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   Future<void> _onConnectionLost() async {
-    if (widget.ble.isWifiMode) return;
-    if (_reconnecting || !mounted) return;
-    final remoteId = _currentBleRemoteId ?? widget.ble.device?.remoteId.toString();
-    if (remoteId == null || remoteId.isEmpty) return;
-    setState(() { _reconnecting = true; _reconnectAttempt = 1; });
-    final l = context.l10n;
-    for (var attempt = 1; attempt <= 3; attempt++) {
-      if (!mounted) return;
-      setState(() => _reconnectAttempt = attempt);
-      _showSnack(l.tr('reconnecting', {'n': '$attempt'}), duration: const Duration(seconds: 2));
-      try {
-        widget.ble.disconnect();
-        await Future<void>.delayed(const Duration(milliseconds: 500));
-        final device = BluetoothDevice.fromId(remoteId);
-        final ok = await widget.ble.connect(device);
-        if (mounted && ok) {
-          _currentBleRemoteId = remoteId;
-          _listenConnectionState();
-          _listenEvents(); // новый BLE-поток после connect(), иначе самотест/ping/info не приходят
-          widget.ble.getInfo();
-          setState(() => _reconnecting = false);
-          _showSnack(l.tr('reconnect_ok'), backgroundColor: context.palette.success);
-          return;
-        }
-      } catch (_) {}
-      if (attempt < 3) await Future<void>.delayed(const Duration(seconds: 2));
-    }
-    if (!mounted) return;
-    setState(() => _reconnecting = false);
-    await widget.ble.disconnect();
-    if (!mounted) return;
-    await _goToScan(l.tr('reconnect_failed'));
+    await _screenController.reconnectWithRetry(_buildReconnectDeps());
   }
 
   Future<void> _goToScan([String? message]) async {
@@ -479,9 +537,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     if (!widget.ble.isConnected) return;
     _recentDevices = await RecentDevicesService.load();
     final currentRemoteId = widget.ble.device?.remoteId.toString();
-    final others = _recentDevices
-        .where((d) => currentRemoteId == null || !RiftLinkBle.remoteIdsMatch(d.remoteId, currentRemoteId))
-        .toList();
+    final others = _screenController.filterSwitchTargets(_recentDevices, currentRemoteId);
     final l = context.l10n;
     FocusScope.of(context).unfocus();
     final value = await showAppModalBottomSheet<String>(
@@ -575,77 +631,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   void _onConnectMenuSelected(String value) async {
-    if (value.startsWith('forget:')) return;
-    if (value == 'disconnect') {
-      _intentionalDisconnect = true;
-      await widget.ble.disconnect();
-      if (!mounted) return;
-      await _goToScan();
-    } else if (value.startsWith('switch:')) {
-      final remoteId = value.substring(7);
-      _intentionalDisconnect = true;
-      await _switchToDevice(remoteId);
-    }
-  }
-
-  Future<void> _switchToDevice(String remoteId) async {
-    _intentionalDisconnect = true;
-    final l = context.l10n;
-    final dev = _recentDevices.where((d) => RiftLinkBle.remoteIdsMatch(d.remoteId, remoteId)).firstOrNull;
-    final name = dev?.displayName ?? remoteId;
-    _showSnack(l.tr('connecting_to', {'name': name}));
-    await widget.ble.disconnect();
-    await RiftLinkBle.stopScan();
-    // Как на ScanScreen: стек BLE после disconnect + FBP требует, чтобы цель была в scan до connect().
-    // BluetoothDevice.fromId без свежего скана часто не подключается ко «второму» узлу.
-    await Future<void>.delayed(const Duration(milliseconds: 800));
-
-    if (!mounted) return;
-    StreamSubscription? scanSub;
-    final foundCompleter = Completer<BluetoothDevice?>();
-    scanSub = FlutterBluePlus.scanResults.listen((results) {
-      if (foundCompleter.isCompleted) return;
-      final r = results.where(RiftLinkBle.isRiftLink).toList();
-      for (final r0 in r) {
-        if (RiftLinkBle.remoteIdsMatch(r0.device.remoteId.toString(), remoteId)) {
-          scanSub?.cancel();
-          RiftLinkBle.stopScan();
-          if (!foundCompleter.isCompleted) foundCompleter.complete(r0.device);
-          return;
-        }
-      }
-    });
-    const scanDuration = Duration(seconds: 12);
-    try {
-      await RiftLinkBle.startScan(timeout: scanDuration);
-      await Future.any([
-        foundCompleter.future,
-        Future<void>.delayed(scanDuration, () {
-          if (!foundCompleter.isCompleted) foundCompleter.complete(null);
-        }),
-      ]);
-    } catch (_) {
-      if (!foundCompleter.isCompleted) foundCompleter.complete(null);
-    }
-    await scanSub.cancel();
-    await RiftLinkBle.stopScan();
-    final found = await foundCompleter.future;
-    if (!mounted) return;
-    if (found != null) {
-      final ok = await widget.ble.connect(found);
-      if (mounted && ok) {
-        _intentionalDisconnect = false;
-        await ChatRepository.instance.clearAll();
-        if (!mounted) return;
-        await _goToChatsList();
-      } else {
-        _intentionalDisconnect = false;
-        await _goToScan(l.tr('ble_no_service'));
-      }
-    } else {
-      _intentionalDisconnect = false;
-      await _goToScan(l.tr('ble_timeout'));
-    }
+    await _screenController.handleConnectMenuSelection(_buildConnectDeps(), value);
   }
 
   void _onLocaleChanged() { if (mounted) _sendLangToFirmware(); }
@@ -983,13 +969,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   void _sendReadForUnread() {
-    if (!widget.ble.isConnected) return;
-    for (final m in _messages) {
-      if (m.isIncoming && m.msgId != null) {
-        final key = '${m.from}_${m.msgId}';
-        if (!_readSent.contains(key)) { _readSent.add(key); widget.ble.sendRead(from: m.from, msgId: m.msgId!); }
-      }
-    }
+    _screenController.sendReadForUnread(_buildReadDeps());
   }
 
   bool _sameNodeId(String? a, String? b) {
@@ -1254,7 +1234,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       pendingPings: _pendingPings,
       normalizeId: _normalizeId,
       sameNodeId: _sameNodeId,
-      tr: (key, params) => context.l10n.tr(key, params),
+      tr: (key, [params]) => context.l10n.tr(key, params),
       decodeVoicePayload: _decodeVoicePayload,
       voiceProfileLabel: _voiceProfileLabel,
       shouldEmitCriticalSummary: _shouldEmitCriticalSummary,
@@ -1434,10 +1414,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       voiceTtlMinutes: _voiceTtlMinutes,
       voiceProfileCode: _voiceProfileCode,
       normalizeId: _normalizeId,
-      tr: (key, params) => context.l10n.tr(key, params),
+      tr: (key, [params]) => context.l10n.tr(key, params),
       voiceProfileLabel: _voiceProfileLabel,
       isMounted: () => mounted,
       activeConversationId: _activeConversationId,
+      directVoiceTarget: _featureMatrix().canVoice ? _activeDirectPeerId() : null,
       setConversationId: (id) {
         _conversationId = id;
       },
@@ -1455,7 +1436,103 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       onLocationLoading: (value) {
         setState(() => _locationLoading = value);
       },
-      pickNeighbor: _pickNeighborDialog,
+    );
+  }
+
+  ChatReadDeps _buildReadDeps() {
+    return ChatReadDeps(
+      ble: widget.ble,
+      messages: _messages,
+      readSent: _readSent,
+    );
+  }
+
+  ChatReconnectDeps _buildReconnectDeps() {
+    return ChatReconnectDeps(
+      ble: widget.ble,
+      isMounted: () => mounted,
+      isReconnecting: () => _reconnecting,
+      currentRemoteId: () => _currentBleRemoteId,
+      setReconnectState: ({required reconnecting, int? attempt}) {
+        if (!mounted) return;
+        setState(() {
+          _reconnecting = reconnecting;
+          if (attempt != null) _reconnectAttempt = attempt;
+        });
+      },
+      showReconnectAttempt: (attempt) {
+        _showSnack(
+          context.l10n.tr('reconnecting', {'n': '$attempt'}),
+          duration: const Duration(seconds: 2),
+        );
+      },
+      showReconnectSuccess: () {
+        _showSnack(
+          context.l10n.tr('reconnect_ok'),
+          backgroundColor: context.palette.success,
+        );
+      },
+      onReconnectSuccess: (remoteId) async {
+        _currentBleRemoteId = remoteId;
+        _listenConnectionState();
+        _listenEvents();
+        widget.ble.getInfo();
+      },
+      onReconnectFailed: () async {
+        await _goToScan(context.l10n.tr('reconnect_failed'));
+      },
+    );
+  }
+
+  ChatConnectDeps _buildConnectDeps() {
+    return ChatConnectDeps(
+      ble: widget.ble,
+      recentDevices: _recentDevices,
+      isMounted: () => mounted,
+      setIntentionalDisconnect: (value) {
+        _intentionalDisconnect = value;
+      },
+      tr: (key, [params]) => context.l10n.tr(key, params),
+      showSnack: (text, {isError = false, isSuccess = false, duration = const Duration(seconds: 3)}) {
+        _showSnack(
+          text,
+          backgroundColor: isError
+              ? context.palette.error
+              : (isSuccess ? context.palette.success : null),
+          duration: duration,
+        );
+      },
+      goToScan: _goToScan,
+      goToChatsList: _goToChatsList,
+      switchChatRepoProfile: (remoteId) async {
+        String scope = remoteId;
+        for (final dev in _recentDevices) {
+          if (RiftLinkBle.remoteIdsMatch(dev.remoteId, remoteId) && dev.nodeId.isNotEmpty) {
+            scope = dev.nodeId;
+            break;
+          }
+        }
+        await ChatRepository.instance.setActiveNodeScope(scope);
+      },
+    );
+  }
+
+  ChatPingDeps _buildPingDeps() {
+    return ChatPingDeps(
+      ble: widget.ble,
+      pendingPings: _pendingPings,
+      isMounted: () => mounted,
+      tr: (key, [params]) => context.l10n.tr(key, params),
+      normalizeNodeId: _normNodeId,
+      showSnack: (text, {isError = false, isSuccess = false, duration = const Duration(seconds: 3)}) {
+        _showSnack(
+          text,
+          backgroundColor: isError
+              ? context.palette.error
+              : (isSuccess ? context.palette.success : null),
+          duration: duration,
+        );
+      },
     );
   }
 
@@ -1480,15 +1557,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   Future<void> _showTtlSendMenu() async {
-    final text = _controller.text.trim();
-    if (text.isEmpty) return;
-    final v = await _pickTtlMinutes();
-    if (v != null && mounted) _send(ttlMinutes: v);
+    await _screenController.sendWithTtlPipeline(
+      _buildActionDeps(),
+      pickTtl: _pickTtlMinutes,
+    );
   }
 
   Future<void> _sendCritical() async {
-    if (_controller.text.trim().isEmpty) return;
-    await _send(lane: 'critical');
+    await _screenController.sendCriticalIfAny(_buildActionDeps());
   }
 
   Future<void> _sendSosQuick() async {
@@ -1519,11 +1595,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       ),
     );
     if (!mounted || choice == null) return;
-    if (choice == 'target_online') {
-      await _send(trigger: 'target_online');
-    } else if (choice == 'deliver_after_time') {
-      await _send(trigger: 'deliver_after_time', triggerAtMs: now + 5 * 60 * 1000);
-    }
+    await _screenController.sendTimeCapsuleByChoice(
+      _buildActionDeps(),
+      choice: choice,
+      nowMs: now,
+    );
   }
 
   Future<int?> _pickTtlMinutes() async {
@@ -1609,48 +1685,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     await _startVoiceRecord(ttlMinutes: ttl);
   }
 
-  Future<String?> _pickNeighborDialog() {
-    FocusScope.of(context).unfocus();
-    return showAppModalBottomSheet<String>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (ctx) => Container(
-        decoration: BoxDecoration(
-          color: context.palette.card,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(AppSpacing.lg)),
-        ),
-        child: SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(AppSpacing.lg),
-                child: Text(
-                  context.l10n.tr('send_voice'),
-                  style: AppTypography.screenTitleBase().copyWith(
-                    fontSize: 18,
-                    color: context.palette.onSurface,
-                  ),
-                ),
-              ),
-              ..._neighbors.map((id) {
-                final nick = _nicknameForId(id);
-                return ListTile(
-                  title: Text(nick ?? id, style: AppTypography.bodyBase().copyWith(color: context.palette.onSurface)),
-                  subtitle: null,
-                  onTap: () => Navigator.pop(ctx, id),
-                );
-              }),
-              ListTile(title: Text(context.l10n.tr('cancel'), style: TextStyle(color: context.palette.onSurfaceVariant)), onTap: () => Navigator.pop(ctx)),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
   Future<int?> _pickVoiceTtlDialog() => _pickTtlMinutes();
 
   void _showSnack(String text, {Color? backgroundColor, Duration duration = const Duration(seconds: 3)}) {
@@ -1674,44 +1708,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     await showRiftSelftestDialog(context, evt, lastInfo: widget.ble.lastInfo);
   }
 
-  Color _batteryColorForMv(int mv) {
-    final v = mv / 1000.0;
-    if (v >= 3.75) return context.palette.success;
-    if (v >= 3.45) return const Color(0xFFFFB300);
-    return context.palette.error;
-  }
-
-  Widget _buildBatteryBadge() {
-    final mv = _batteryMv;
-    if (mv == null || mv <= 0) return const SizedBox.shrink();
-    final color = _batteryColorForMv(mv);
-    final pct = _batteryPercent;
-    final label = pct != null ? '$pct%' : '${(mv / 1000.0).toStringAsFixed(2)} V';
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.xs),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.14),
-        borderRadius: BorderRadius.circular(AppRadius.sm + 2),
-        border: Border.all(color: color.withOpacity(0.35), width: 0.5),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(_charging ? Icons.battery_charging_full : Icons.battery_std, size: 15, color: color),
-          const SizedBox(width: AppSpacing.xs),
-          Text(
-            label,
-            style: AppTypography.chipBase().copyWith(
-              fontWeight: FontWeight.w700,
-              color: color,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   void _showPingDialog({String? prefilledId}) {
     Navigator.push(
       context,
@@ -1719,19 +1715,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         l: context.l10n,
         prefilledId: prefilledId,
         onPing: (id) async {
-          final ok = await widget.ble.sendPing(id);
-          if (!mounted) return;
-          if (!ok) { _showSnack(context.l10n.tr('error')); return; }
-          final idNorm = _normNodeId(id);
-          if (idNorm.isEmpty) return;
-          _pendingPings.add(idNorm);
-          _showSnack(context.l10n.tr('ping_sent', {'id': id}));
-          Future.delayed(const Duration(seconds: 20), () {
-            if (!mounted) return;
-            if (_pendingPings.remove(idNorm)) {
-              _showSnack(context.l10n.tr('ping_timeout', {'id': id}), backgroundColor: context.palette.error, duration: const Duration(seconds: 4));
-            }
-          });
+          await _screenController.sendPingAndTrack(_buildPingDeps(), id);
         },
       ),
     );
@@ -1889,33 +1873,105 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   // ── Build ──
 
-  void _runSelftestFromToolsMenu() {
-    if (!widget.ble.isConnected) {
-      _showSnack(context.l10n.tr('connect_first'));
-      return;
-    }
-    HapticFeedback.lightImpact();
-    widget.ble.selftest();
+  List<_MenuItemData> _buildMenuItems(AppLocalizations l) {
+    final matrix = _featureMatrix();
+    final connected = widget.ble.isConnected;
+    final directPeer = _activeDirectPeerId();
+    final out = <_MenuItemData>[
+      if (matrix.canCritical)
+        _MenuItemData(
+          id: 'send_critical',
+          icon: Icons.priority_high,
+          title: l.tr('menu_send_critical'),
+          section: _MenuSection.context,
+          enabled: connected,
+        ),
+      if (matrix.canTimeCapsule)
+        _MenuItemData(
+          id: 'time_capsule',
+          icon: Icons.hourglass_bottom,
+          title: l.tr('menu_time_capsule'),
+          section: _MenuSection.context,
+          enabled: connected,
+        ),
+      if (matrix.canSos)
+        _MenuItemData(
+          id: 'send_sos',
+          icon: Icons.emergency,
+          title: l.tr('menu_send_sos'),
+          section: _MenuSection.context,
+          enabled: connected,
+        ),
+      if (matrix.canLocation)
+        _MenuItemData(
+          id: 'send_location',
+          icon: Icons.location_on,
+          title: l.tr('location'),
+          section: _MenuSection.context,
+          enabled: connected,
+        ),
+      if (matrix.canPingPeer && directPeer != null)
+        _MenuItemData(
+          id: 'ping_current',
+          icon: Icons.radar_rounded,
+          title: l.tr('chat_menu_ping_peer'),
+          subtitle: directPeer,
+          section: _MenuSection.context,
+          enabled: connected,
+        ),
+    ];
+    return out;
+  }
+
+  Widget _menuSectionTitle(String text) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.xs),
+      child: Text(
+        text,
+        style: AppTypography.chipBase().copyWith(
+          fontSize: 11,
+          color: context.palette.onSurfaceVariant,
+        ),
+      ),
+    );
   }
 
   Future<void> _showAppMenu(BuildContext context, AppLocalizations l) async {
     FocusScope.of(context).unfocus();
+    final items = _buildMenuItems(l);
     final value = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: Colors.transparent,
-      isScrollControlled: false,
+      isScrollControlled: true,
       builder: (sheetContext) {
         final pal = sheetContext.palette;
-        final tools = <(IconData, String, String)>[
-          (Icons.map, l.tr('map'), 'map'),
-          (Icons.location_on, l.tr('location'), 'send_location'),
-          (Icons.priority_high, l.tr('menu_send_critical'), 'send_critical'),
-          (Icons.emergency, l.tr('menu_send_sos'), 'send_sos'),
-          (Icons.hourglass_bottom, l.tr('menu_time_capsule'), 'time_capsule'),
-          (Icons.hub, l.tr('mesh_topology'), 'mesh'),
-          (Icons.radar, l.tr('ping'), 'ping'),
-          (Icons.health_and_safety, l.tr('selftest'), 'selftest'),
-        ];
+        Widget buildMenuTile(_MenuItemData item) {
+          final titleColor = item.enabled ? pal.onSurface : pal.onSurfaceVariant.withOpacity(0.55);
+          return ListTile(
+            leading: Icon(item.icon, color: titleColor),
+            title: Text(
+              item.title,
+              style: AppTypography.bodyBase().copyWith(color: titleColor),
+            ),
+            subtitle: item.subtitle == null
+                ? null
+                : Text(
+                    item.subtitle!,
+                    style: AppTypography.labelBase().copyWith(
+                      color: pal.onSurfaceVariant,
+                      fontSize: 11.5,
+                    ),
+                  ),
+            onTap: () {
+              HapticFeedback.selectionClick();
+              if (!item.enabled) {
+                _showSnack(l.tr('connect_first'));
+                return;
+              }
+              Navigator.pop(sheetContext, item.id);
+            },
+          );
+        }
         return Material(
           color: Colors.transparent,
           child: SafeArea(
@@ -1923,111 +1979,43 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
               borderRadius: BorderRadius.vertical(top: Radius.circular(AppRadius.card)),
               child: Container(
                 color: pal.card,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.only(top: AppSpacing.sm, bottom: AppSpacing.xs),
-                      child: Center(
-                        child: Container(
-                          width: 40,
-                          height: 4,
-                          decoration: BoxDecoration(
-                            color: pal.onSurfaceVariant.withOpacity(0.35),
-                            borderRadius: BorderRadius.circular(2),
-                          ),
-                        ),
-                      ),
-                    ),
-                    ListTile(
-                      leading: Icon(Icons.contact_mail_outlined, color: pal.onSurface),
-                      title: Text(
-                        l.tr('contacts_groups_title'),
-                        style: AppTypography.bodyBase().copyWith(color: pal.onSurface),
-                      ),
-                      onTap: () {
-                        HapticFeedback.selectionClick();
-                        Navigator.pop(sheetContext, 'contacts_hub');
-                      },
-                    ),
-                    ListTile(
-                      leading: Icon(Icons.settings, color: pal.onSurface),
-                      title: Text(
-                        l.tr('settings'),
-                        style: AppTypography.bodyBase().copyWith(color: pal.onSurface),
-                      ),
-                      onTap: () {
-                        HapticFeedback.selectionClick();
-                        Navigator.pop(sheetContext, 'settings');
-                      },
-                    ),
-                    Divider(height: 1, thickness: 1, color: pal.divider),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.sm),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: Text(
-                          l.tr('menu_tools'),
-                          style: AppTypography.bodyBase().copyWith(
-                            fontWeight: FontWeight.w600,
-                            color: pal.onSurface,
-                          ),
-                        ),
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(AppSpacing.md, 0, AppSpacing.md, AppSpacing.lg),
-                      child: GridView.count(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        crossAxisCount: 4,
-                        crossAxisSpacing: AppSpacing.sm,
-                        mainAxisSpacing: AppSpacing.sm,
-                        childAspectRatio: 0.78,
-                        children: [
-                          for (final t in tools)
-                            InkWell(
-                              onTap: () {
-                                HapticFeedback.selectionClick();
-                                Navigator.pop(sheetContext, t.$3);
-                              },
-                              borderRadius: BorderRadius.circular(AppRadius.sm),
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
-                                child: Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Container(
-                                      width: 48,
-                                      height: 48,
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        color: pal.primary.withOpacity(0.14),
-                                      ),
-                                      child: Icon(t.$1, color: pal.onSurface, size: 24),
-                                    ),
-                                    const SizedBox(height: AppSpacing.xs),
-                                    Text(
-                                      t.$2,
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                      textAlign: TextAlign.center,
-                                      style: AppTypography.labelBase().copyWith(
-                                        fontSize: 11,
-                                        height: 1.2,
-                                        color: pal.onSurface,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.of(sheetContext).size.height * 0.82,
+                  ),
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(top: AppSpacing.sm, bottom: AppSpacing.xs),
+                        child: Center(
+                          child: Container(
+                            width: 40,
+                            height: 4,
+                            decoration: BoxDecoration(
+                              color: pal.onSurfaceVariant.withOpacity(0.35),
+                              borderRadius: BorderRadius.circular(2),
                             ),
-                        ],
+                          ),
+                        ),
                       ),
-                    ),
-                  ],
+                    if (items.any((e) => e.section == _MenuSection.context)) ...[
+                      _menuSectionTitle(l.tr('chat_menu_section_context')),
+                      ...items.where((e) => e.section == _MenuSection.context).map(buildMenuTile),
+                    ],
+                    if (items.any((e) => e.section == _MenuSection.tools)) ...[
+                      Divider(height: 1, thickness: 1, color: pal.divider),
+                      _menuSectionTitle(l.tr('chat_menu_section_tools')),
+                      ...items.where((e) => e.section == _MenuSection.tools).map(buildMenuTile),
+                    ],
+                    if (items.any((e) => e.section == _MenuSection.system)) ...[
+                      Divider(height: 1, thickness: 1, color: pal.divider),
+                      _menuSectionTitle(l.tr('chat_menu_section_system')),
+                      ...items.where((e) => e.section == _MenuSection.system).map(buildMenuTile),
+                    ],
+                      SizedBox(height: AppSpacing.sm + MediaQuery.of(sheetContext).padding.bottom),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -2042,30 +2030,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     if (value == null || !mounted) return;
     FocusScope.of(context).unfocus();
     switch (value) {
-      case 'map':
-        appPush(context, MapScreen(ble: widget.ble));
-        break;
-      case 'mesh':
-        appPush(context, MeshScreen(ble: widget.ble, nodeId: _nodeId, neighbors: _neighbors, neighborsRssi: _neighborsRssi, routes: _routes));
-        break;
-      case 'contacts_hub':
-        appPush(
-          context,
-          ContactsGroupsHubScreen(
-            ble: widget.ble,
-            neighbors: _neighbors,
-            initialGroups: _groups,
-          ),
-        ).then((_) {
-          _loadContactNicknames();
-          widget.ble.getGroups();
-        });
-        break;
-      case 'ping':
-        _showPingDialog();
-        break;
-      case 'selftest':
-        _runSelftestFromToolsMenu();
+      case 'ping_current':
+        final peer = _activeDirectPeerId();
+        if (peer != null) {
+          _showPingDialog(prefilledId: peer);
+        } else {
+          _showSnack(context.l10n.tr('error'));
+        }
         break;
       case 'send_location':
         if (widget.ble.isConnected) {
@@ -2095,27 +2066,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           _showSnack(context.l10n.tr('connect_first'));
         }
         break;
-      case 'settings':
-        if (widget.ble.isConnected) {
-          appPush(context, SettingsHubScreen(
-            ble: widget.ble, nodeId: _nodeId, nickname: _nickname, region: _region, channel: _channel,
-            sf: _sf,
-            gpsPresent: _gpsPresent, gpsEnabled: _gpsEnabled, gpsFix: _gpsFix, powersave: _powersave,
-            offlinePending: _offlinePending, batteryMv: _batteryMv,
-            onNicknameChanged: (n) => setState(() => _nickname = n),
-            onRegionChanged: (r, c) => setState(() { _region = r; _channel = c; }),
-            onSfChanged: (v) => setState(() => _sf = v),
-            onPowersaveChanged: (v) => setState(() => _powersave = v),
-            onGpsChanged: (v) => setState(() => _gpsEnabled = v),
-            meshAnimationEnabled: _meshAnimationEnabled,
-            onMeshAnimationChanged: _onMeshAnimationChanged,
-          )).then((_) {
-            if (mounted) setState(() {});
-          });
-        } else {
-          _showSnack(context.l10n.tr('connect_first'));
-        }
-        break;
     }
   }
 
@@ -2133,26 +2083,16 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         await AppLifecycleBridge.moveToBackground();
       },
       child: Scaffold(
-        resizeToAvoidBottomInset: true,
+        resizeToAvoidBottomInset: false,
         backgroundColor: context.palette.surface,
         extendBody: true,
-        appBar: riftAppBar(context, title: '',
+        appBar: riftAppBar(context, title: '', showBack: true,
         titleWidget: Builder(
           builder: (context) {
-            final name = (_nickname ?? _nodeId).trim();
-            final label = widget.ble.isConnected
-                ? (name.isNotEmpty ? name : '—')
-                : l.tr('disconnected');
             return ChatAppBarTitle(
-              label: label,
-              isConnected: widget.ble.isConnected,
-              showBattery: widget.ble.isConnected && _batteryMv != null && _batteryMv! > 0,
-              batteryBadge: _buildBatteryBadge(),
-              offlinePending: _offlinePending,
-              onConnectedTap: _showConnectMenu,
-              onDisconnectedTap: () {
-                _goToScan();
-              },
+              chatIcon: _chatContextIcon(),
+              label: _chatTitle(l),
+              subtitle: _chatSubtitle(l),
             );
           },
         ),
@@ -2293,13 +2233,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   // ── Input bar: одна панель. При записи — кнопка растёт на месте, слева таймер и свайп. ──
 
-  IconData _activeRecipientIcon() {
-    if (_group > 0) return Icons.group_outlined;
-    if (_unicastTo != null) return Icons.person_outline;
-    return Icons.public;
+  void _showVoiceRestrictionSnack() {
+    _showSnack(context.l10n.tr('voice_only_direct_chat'));
   }
 
   Widget _buildInputBar(AppLocalizations l) {
+    final matrix = _featureMatrix();
     final elapsed = _voiceRecordStartTime != null
         ? DateTime.now().difference(_voiceRecordStartTime!)
         : Duration.zero;
@@ -2307,7 +2246,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     final tenths = (elapsed.inMilliseconds % 1000) ~/ 100;
     final timeStr = '${sec ~/ 60}:${(sec % 60).toString().padLeft(2, '0')},$tenths';
 
-    final bottomInset = MediaQuery.of(context).padding.bottom;
+    final mq = MediaQuery.of(context);
+    final bottomInset = mq.padding.bottom + mq.viewInsets.bottom;
     return ChatInputBar(
       bottomInset: bottomInset,
       child: Row(
@@ -2323,15 +2263,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  Padding(
-                    padding: const EdgeInsets.only(left: AppSpacing.xs),
-                    child: _inputIcon(
-                      _activeRecipientIcon(),
-                      widget.ble.isConnected ? _showRecipientPickerSheet : null,
-                      tooltip: '${l.tr('to')} ${_recipientPillLabel(l)}',
-                      iconColor: (_group > 0 || _unicastTo != null) ? context.palette.primary : null,
-                    ),
-                  ),
                   Expanded(
                     child: AnimatedSwitcher(
               duration: AppMotion.medium,
@@ -2434,8 +2365,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                                 iconSize: 18,
                               )
                             : _TtlTapButton(
-                                onTap: widget.ble.isConnected ? _toggleVoiceRecord : null,
-                                onLongPress: widget.ble.isConnected ? _onVoiceLongPress : null,
+                                onTap: widget.ble.isConnected
+                                    ? (matrix.canVoice
+                                        ? _toggleVoiceRecord
+                                        : _showVoiceRestrictionSnack)
+                                    : null,
+                                onLongPress: widget.ble.isConnected && matrix.canVoice
+                                    ? _onVoiceLongPress
+                                    : null,
                                 icon: Icons.mic,
                                 size: 36,
                                 iconSize: 20,

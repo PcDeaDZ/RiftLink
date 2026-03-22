@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'dart:math' as math;
 import '../prefs/mesh_prefs.dart';
 import '../theme/app_theme.dart';
 
@@ -72,6 +73,25 @@ class MeshBackgroundPainter extends CustomPainter {
   final bool animated;
   final AppPalette palette;
 
+  double _densityForY(double y, double height) {
+    final yNorm = (y / height).clamp(0.0, 1.0);
+    const fadeStart = 0.92;
+    const minDensity = 0.86;
+    if (yNorm <= fadeStart) return 1.0;
+    final t = (yNorm - fadeStart) / (1.0 - fadeStart);
+    return 1.0 - (1.0 - minDensity) * math.pow(t, 1.35);
+  }
+
+  double _stableNoise(Offset p) {
+    final v = math.sin(p.dx * 12.9898 + p.dy * 78.233) * 43758.5453;
+    return v - v.floorToDouble();
+  }
+
+  double _pingPong01(double x) {
+    final f = x - x.floorToDouble();
+    return f < 0.5 ? f * 2.0 : (1.0 - f) * 2.0;
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     const baseSpacing = 48.0;
@@ -88,24 +108,42 @@ class MeshBackgroundPainter extends CustomPainter {
       ..strokeWidth = 0.8
       ..style = PaintingStyle.stroke;
 
-    final points = <Offset>[];
+    final allPoints = <Offset>[];
     var y = 0.0;
     var row = 0;
-    while (y <= size.height * 1.5) {
+    while (y <= size.height * 2.2) {
       final spacing = baseSpacing + (y / size.height) * 24;
       final cols = (size.width / spacing).floor() + 2;
       for (var c = 0; c < cols; c++) {
         final x = c * spacing + (row.isOdd ? spacing * 0.5 : 0);
         if (x <= size.width + spacing) {
-          points.add(Offset(x, y));
+          allPoints.add(Offset(x, y));
         }
       }
       y += spacing * 0.85;
       row++;
     }
 
+    final points = <Offset>[];
+    for (final p in allPoints) {
+      final density = _densityForY(p.dy, size.height);
+      if (_stableNoise(p) <= density) {
+        points.add(p);
+      }
+    }
+
     for (final p in points) {
       canvas.drawCircle(p, dotRadius, paint);
+    }
+
+    // Bottom tail: keep sparse but visible points close to the lower edge.
+    final tailPaint = Paint()..color = palette.primary.withOpacity(0.06);
+    for (final p in allPoints) {
+      if (p.dy < size.height * 0.68 || p.dy > size.height * 1.1) continue;
+      final h = _stableNoise(Offset(p.dx + 19.0, p.dy + 47.0));
+      if (h <= 0.34) {
+        canvas.drawCircle(p, 1.05, tailPaint);
+      }
     }
 
     final edges = <({Offset a, Offset b})>[];
@@ -124,17 +162,48 @@ class MeshBackgroundPainter extends CustomPainter {
 
     if (animated && edges.isNotEmpty) {
       final animLimitY = size.height * animZoneFraction;
-      final animEdges = edges.where((e) => e.a.dy < animLimitY && e.b.dy < animLimitY).toList();
+      final animEdges = edges
+          .where((e) => e.a.dy < animLimitY && e.b.dy < animLimitY)
+          .where((e) =>
+              e.a.dx >= -8 &&
+              e.a.dx <= size.width + 8 &&
+              e.b.dx >= -8 &&
+              e.b.dx <= size.width + 8 &&
+              e.a.dy >= -8 &&
+              e.b.dy >= -8 &&
+              e.a.dy <= size.height + 8 &&
+              e.b.dy <= size.height + 8)
+          .where((e) {
+            final yMid = (e.a.dy + e.b.dy) * 0.5;
+            final density = _densityForY(yMid, size.height);
+            final boostedDensity = yMid > size.height * 0.76
+                ? math.max(density, 0.82)
+                : density;
+            final edgeSeed = Offset(e.a.dx + e.b.dx, e.a.dy + e.b.dy);
+            return _stableNoise(edgeSeed) <= boostedDensity;
+          })
+          .toList();
       if (animEdges.isEmpty) return;
       final pulsePaint = Paint()..color = palette.primary.withOpacity(pulseOpacity);
-      final maxPulses = animEdges.length.clamp(0, 24);
-      for (var k = 0; k < maxPulses; k++) {
-        final phase = (k / maxPulses) % 1.0;
-        final t = (progress + phase) % 1.0;
-        final edge = animEdges[k % animEdges.length];
+      // Use real time to avoid cycle seams from 0..1 progress reset.
+      final timeSec = DateTime.now().microsecondsSinceEpoch / 1000000.0;
+      var drawn = 0;
+      for (final edge in animEdges) {
+        final seed = Offset(
+          edge.a.dx * 0.71 + edge.b.dx * 1.31,
+          edge.a.dy * 1.91 + edge.b.dy * 0.47,
+        );
+        final h = _stableNoise(seed);
+        // Deterministic sparse subset: points appear across the whole mesh.
+        if (h > 0.18) continue;
+        final speed = 0.05 + h * 0.08; // edge-local speeds
+        final phase = h * 9.0;
+        final t = _pingPong01(timeSec * speed + phase);
         final x = edge.a.dx + (edge.b.dx - edge.a.dx) * t;
         final y = edge.a.dy + (edge.b.dy - edge.a.dy) * t;
         canvas.drawCircle(Offset(x, y), pulseRadius, pulsePaint);
+        drawn++;
+        if (drawn >= 42) break; // cap cost and visual clutter
       }
     }
   }

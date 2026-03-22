@@ -22,19 +22,30 @@ class ChatStatusPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (chips.length <= 2) return const SizedBox.shrink();
+    if (chips.isEmpty) return const SizedBox.shrink();
     return Container(
       padding: const EdgeInsets.fromLTRB(
         AppSpacing.sm + 2,
-        AppSpacing.sm,
+        AppSpacing.xs,
         AppSpacing.sm + 2,
-        AppSpacing.xs / 2,
+        AppSpacing.xs,
       ),
-      color: context.palette.surface.withOpacity(0.92),
-      child: Wrap(
-        spacing: AppSpacing.sm,
-        runSpacing: AppSpacing.sm,
-        children: chips.map((chip) => _StatusChip(chip: chip)).toList(),
+      decoration: BoxDecoration(
+        color: context.palette.surface.withOpacity(0.9),
+        border: Border(
+          bottom: BorderSide(color: context.palette.divider.withOpacity(0.45)),
+        ),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            for (var i = 0; i < chips.length; i++) ...[
+              _StatusChip(chip: chips[i]),
+              if (i != chips.length - 1) const SizedBox(width: AppSpacing.xs + 2),
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -48,20 +59,24 @@ class _StatusChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.xs),
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: 5),
       decoration: BoxDecoration(
-        color: chip.color.withOpacity(0.12),
-        borderRadius: BorderRadius.circular(AppRadius.sm),
-        border: Border.all(color: chip.color.withOpacity(0.35)),
+        color: context.palette.surfaceVariant.withOpacity(0.48),
+        borderRadius: BorderRadius.circular(AppRadius.sm + 2),
+        border: Border.all(color: context.palette.divider.withOpacity(0.4)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(chip.icon, size: 14, color: chip.color),
+          Icon(chip.icon, size: 13, color: chip.color.withOpacity(0.95)),
           const SizedBox(width: AppSpacing.xs),
           Text(
             chip.text,
-            style: AppTypography.chipBase().copyWith(color: chip.color),
+            style: AppTypography.chipBase().copyWith(
+              color: context.palette.onSurfaceVariant,
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ],
       ),

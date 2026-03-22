@@ -10,6 +10,7 @@ import 'package:geolocator/geolocator.dart';
 import '../../ble/riftlink_ble.dart';
 import '../../chat/chat_models.dart';
 import '../../chat/chat_repository.dart';
+import '../../recent_devices/recent_devices_service.dart';
 import '../../voice/voice_service.dart';
 import 'chat_ui_models.dart';
 
@@ -616,12 +617,11 @@ class ChatScreenController {
       if (deps.isMounted()) deps.showSnack(deps.tr('voice_mic_error'));
       return;
     }
-    if (deps.neighbors.isEmpty) {
-      deps.showSnack(deps.tr('no_neighbors_voice'));
+    final to = deps.directVoiceTarget;
+    if (to == null || to.isEmpty) {
+      deps.showSnack(deps.tr('voice_only_direct_chat'), isError: true);
       return;
     }
-    final to = await deps.pickNeighbor();
-    if (to == null || !deps.isMounted()) return;
     List<int> payload = bytes;
     if (deps.voiceTtlMinutes > 0) payload = [0xFF, deps.voiceTtlMinutes, ...payload];
     payload = [0xFE, deps.voiceProfileCode, ...payload];
@@ -690,6 +690,115 @@ class ChatScreenController {
     await deps.onReconnectFailed();
   }
 
+  List<RecentDevice> filterSwitchTargets(
+    List<RecentDevice> recentDevices,
+    String? currentRemoteId,
+  ) {
+    return recentDevices
+        .where((d) => currentRemoteId == null || !RiftLinkBle.remoteIdsMatch(d.remoteId, currentRemoteId))
+        .toList();
+  }
+
+  Future<void> handleConnectMenuSelection(ChatConnectDeps deps, String value) async {
+    if (value.startsWith('forget:')) return;
+    if (value == 'disconnect') {
+      deps.setIntentionalDisconnect(true);
+      await deps.ble.disconnect();
+      if (!deps.isMounted()) return;
+      await deps.goToScan();
+      return;
+    }
+    if (value.startsWith('switch:')) {
+      final remoteId = value.substring(7);
+      deps.setIntentionalDisconnect(true);
+      await _switchToDevice(deps, remoteId);
+    }
+  }
+
+  Future<void> _switchToDevice(ChatConnectDeps deps, String remoteId) async {
+    deps.setIntentionalDisconnect(true);
+    final dev = deps.recentDevices
+        .where((d) => RiftLinkBle.remoteIdsMatch(d.remoteId, remoteId))
+        .firstOrNull;
+    final name = dev?.displayName ?? remoteId;
+    deps.showSnack(deps.tr('connecting_to', {'name': name}));
+    await deps.ble.disconnect();
+    await RiftLinkBle.stopScan();
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    if (!deps.isMounted()) return;
+    final found = await _scanForRemote(remoteId, const Duration(seconds: 12));
+    if (!deps.isMounted()) return;
+    if (found != null) {
+      final ok = await deps.ble.connect(found);
+      if (deps.isMounted() && ok) {
+        deps.setIntentionalDisconnect(false);
+        await deps.switchChatRepoProfile(remoteId);
+        if (!deps.isMounted()) return;
+        await deps.goToChatsList();
+      } else {
+        deps.setIntentionalDisconnect(false);
+        await deps.goToScan(deps.tr('ble_no_service'));
+      }
+      return;
+    }
+    deps.setIntentionalDisconnect(false);
+    await deps.goToScan(deps.tr('ble_timeout'));
+  }
+
+  Future<BluetoothDevice?> _scanForRemote(String remoteId, Duration scanDuration) async {
+    StreamSubscription? scanSub;
+    final foundCompleter = Completer<BluetoothDevice?>();
+    scanSub = FlutterBluePlus.scanResults.listen((results) {
+      if (foundCompleter.isCompleted) return;
+      final r = results.where(RiftLinkBle.isRiftLink).toList();
+      for (final r0 in r) {
+        if (RiftLinkBle.remoteIdsMatch(r0.device.remoteId.toString(), remoteId)) {
+          scanSub?.cancel();
+          RiftLinkBle.stopScan();
+          if (!foundCompleter.isCompleted) foundCompleter.complete(r0.device);
+          return;
+        }
+      }
+    });
+    try {
+      await RiftLinkBle.startScan(timeout: scanDuration);
+      await Future.any([
+        foundCompleter.future,
+        Future<void>.delayed(scanDuration, () {
+          if (!foundCompleter.isCompleted) foundCompleter.complete(null);
+        }),
+      ]);
+    } catch (_) {
+      if (!foundCompleter.isCompleted) foundCompleter.complete(null);
+    }
+    await scanSub.cancel();
+    await RiftLinkBle.stopScan();
+    return foundCompleter.future;
+  }
+
+  Future<void> sendPingAndTrack(ChatPingDeps deps, String id) async {
+    final ok = await deps.ble.sendPing(id);
+    if (!deps.isMounted()) return;
+    if (!ok) {
+      deps.showSnack(deps.tr('error'));
+      return;
+    }
+    final idNorm = deps.normalizeNodeId(id);
+    if (idNorm.isEmpty) return;
+    deps.pendingPings.add(idNorm);
+    deps.showSnack(deps.tr('ping_sent', {'id': id}));
+    Future.delayed(const Duration(seconds: 20), () {
+      if (!deps.isMounted()) return;
+      if (deps.pendingPings.remove(idNorm)) {
+        deps.showSnack(
+          deps.tr('ping_timeout', {'id': id}),
+          isError: true,
+          duration: const Duration(seconds: 4),
+        );
+      }
+    });
+  }
+
   void dispose() {
     _eventSub?.cancel();
     _connectionSub?.cancel();
@@ -719,12 +828,12 @@ class ChatActionDeps {
   final String Function(int code) voiceProfileLabel;
   final bool Function() isMounted;
   final String Function() activeConversationId;
+  final String? directVoiceTarget;
   final void Function(String id) setConversationId;
   final void Function(void Function()) setState;
   final void Function() scrollToBottom;
   final void Function(String text, {bool isError, bool isSuccess, Duration duration}) showSnack;
   final void Function(bool value) onLocationLoading;
-  final Future<String?> Function() pickNeighbor;
 
   ChatActionDeps({
     required this.ble,
@@ -747,12 +856,12 @@ class ChatActionDeps {
     required this.voiceProfileLabel,
     required this.isMounted,
     required this.activeConversationId,
+    required this.directVoiceTarget,
     required this.setConversationId,
     required this.setState,
     required this.scrollToBottom,
     required this.showSnack,
     required this.onLocationLoading,
-    required this.pickNeighbor,
   });
 }
 
@@ -789,5 +898,47 @@ class ChatReconnectDeps {
     required this.showReconnectSuccess,
     required this.onReconnectSuccess,
     required this.onReconnectFailed,
+  });
+}
+
+class ChatConnectDeps {
+  final RiftLinkBle ble;
+  final List<RecentDevice> recentDevices;
+  final bool Function() isMounted;
+  final void Function(bool value) setIntentionalDisconnect;
+  final String Function(String key, [Map<String, String>? params]) tr;
+  final void Function(String text, {bool isError, bool isSuccess, Duration duration}) showSnack;
+  final Future<void> Function([String? message]) goToScan;
+  final Future<void> Function() goToChatsList;
+  final Future<void> Function(String remoteId) switchChatRepoProfile;
+
+  ChatConnectDeps({
+    required this.ble,
+    required this.recentDevices,
+    required this.isMounted,
+    required this.setIntentionalDisconnect,
+    required this.tr,
+    required this.showSnack,
+    required this.goToScan,
+    required this.goToChatsList,
+    required this.switchChatRepoProfile,
+  });
+}
+
+class ChatPingDeps {
+  final RiftLinkBle ble;
+  final Set<String> pendingPings;
+  final bool Function() isMounted;
+  final String Function(String key, [Map<String, String>? params]) tr;
+  final String Function(String raw) normalizeNodeId;
+  final void Function(String text, {bool isError, bool isSuccess, Duration duration}) showSnack;
+
+  ChatPingDeps({
+    required this.ble,
+    required this.pendingPings,
+    required this.isMounted,
+    required this.tr,
+    required this.normalizeNodeId,
+    required this.showSnack,
   });
 }

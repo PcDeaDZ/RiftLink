@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RiftLink Flash Tool</title>
+    <meta
+      name="description"
+      content="Веб-прошивка устройств RiftLink через ESP Web Tools"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <script
+      type="module"
+      src="https://unpkg.com/esp-web-tools@10.1.0/dist/web/install-button.js?module"
+    ></script>
+  </head>
+  <body>
+    <div class="background">
+      <span class="orb orb-a"></span>
+      <span class="orb orb-b"></span>
+      <span class="orb orb-c"></span>
+      <span class="grid"></span>
+    </div>
+
+    <main class="page">
+      <section class="card">
+        <header class="brand">
+          <img
+            id="brandLogo"
+            src="./assets/app_icon.png"
+            alt="RiftLink logo"
+          />
+          <div>
+            <p class="label">RiftLink</p>
+            <h1>Web Flash Tool</h1>
+          </div>
+        </header>
+
+        <p class="subtitle">
+          Прошивка устройств через браузер с выбором модели и автоматической
+          загрузкой правильного manifest.
+        </p>
+
+        <div class="controls">
+          <label for="deviceSelect">Выберите устройство</label>
+          <select id="deviceSelect">
+            <option value="heltec-v3">Heltec WiFi LoRa 32 V3 (OLED)</option>
+            <option value="heltec-v4" selected>
+              Heltec WiFi LoRa 32 V4 (OLED)
+            </option>
+            <option value="heltec-v3-paper">
+              Heltec Wireless Paper (V3 Paper, E-Ink)
+            </option>
+          </select>
+        </div>
+
+        <div class="install-box">
+          <esp-web-install-button id="installButton"></esp-web-install-button>
+        </div>
+
+        <div class="info" id="manifestInfo"></div>
+
+        <div class="tips">
+          <h2>Перед прошивкой</h2>
+          <ul>
+            <li>Используйте Chrome/Edge/Opera (нужен Web Serial).</li>
+            <li>Подключайте USB-кабель с поддержкой передачи данных.</li>
+            <li>Для V4 при необходимости войдите в bootloader через PRG.</li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
+

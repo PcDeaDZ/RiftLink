@@ -200,6 +200,7 @@ irm https://raw.githubusercontent.com/PcDeaDZ/RiftLink/master/install.ps1 | iex
 | [📡 PROTOCOL.md](docs/PROTOCOL.md) | Формат пакетов, opcodes, BLE, Serial |
 | [📘 API.md](docs/API.md) | BLE/Serial API с примерами |
 | [🔧 RECOVERY.md](docs/RECOVERY.md) | Восстановление при «не включается» |
+| [🌐 WEB_FLASH_GITHUB.md](docs/WEB_FLASH_GITHUB.md) | GitHub Pages веб‑прошивка через ESP Web Tools |
 
 ---
 
