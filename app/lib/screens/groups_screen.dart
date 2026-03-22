@@ -38,9 +38,13 @@ class GroupsScreen extends StatefulWidget {
 
 class _GroupsScreenState extends State<GroupsScreen> {
   final ChatRepository _chatRepo = ChatRepository.instance;
+  final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
   List<int> _groups = [];
   final Map<int, int> _groupKeyVersion = <int, int>{};
   final Map<int, RiftLinkGroupV2Info> _groupV2ByChannel = <int, RiftLinkGroupV2Info>{};
+  String _searchQuery = '';
+  bool _searchMode = false;
   bool _loading = false;
   StreamSubscription<RiftLinkEvent>? _sub;
 
@@ -93,7 +97,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
   }
 
   String? _uidByChannel(int gid) {
-    final uid = _groupV2ByChannel[gid]?.groupUid.trim().toUpperCase();
+    final uid = _groupV2ByChannel[gid]?.groupUid.trim();
     return (uid == null || uid.isEmpty) ? null : uid;
   }
 
@@ -102,6 +106,17 @@ class _GroupsScreenState extends State<GroupsScreen> {
     final name = v2?.canonicalName.trim();
     if (name != null && name.isNotEmpty) return name;
     return '${context.l10n.tr('group')} $gid';
+  }
+
+  List<int> get _visibleGroups {
+    final q = _searchQuery.trim().toLowerCase();
+    if (q.isEmpty) return _groups;
+    return _groups.where((gid) {
+      final byId = '$gid'.contains(q);
+      final byName = _groupDisplayName(gid).toLowerCase().contains(q);
+      final byUid = (_uidByChannel(gid) ?? '').toLowerCase().contains(q);
+      return byId || byName || byUid;
+    }).toList();
   }
 
   @override
@@ -125,6 +140,8 @@ class _GroupsScreenState extends State<GroupsScreen> {
         final gid = evt.channelId32 ?? _channelByUid(evt.groupUid);
         if (gid == null || gid <= 1) return;
         final prev = _groupV2ByChannel[gid];
+        final prevKnownVersion = prev?.keyVersion ?? (_groupKeyVersion[gid] ?? 0);
+        final nextVersion = evt.keyVersion > 0 ? evt.keyVersion : prevKnownVersion;
         final next = RiftLinkGroupV2Info(
           groupUid: evt.groupUid,
           groupTag: prev?.groupTag ?? '',
@@ -132,14 +149,16 @@ class _GroupsScreenState extends State<GroupsScreen> {
               ? evt.canonicalName
               : (prev?.canonicalName ?? ''),
           channelId32: gid,
-          keyVersion: evt.keyVersion,
+          keyVersion: nextVersion,
           myRole: evt.myRole,
           revocationEpoch: prev?.revocationEpoch ?? 0,
           ackApplied: !evt.rekeyRequired,
         );
         setState(() {
           _groupV2ByChannel[gid] = next;
-          _groupKeyVersion[gid] = evt.keyVersion;
+          if (nextVersion > 0) {
+            _groupKeyVersion[gid] = nextVersion;
+          }
           if (!_groups.contains(gid)) {
             _applyGroups([..._groups, gid], _groupV2ByChannel.values.toList());
           }
@@ -147,6 +166,28 @@ class _GroupsScreenState extends State<GroupsScreen> {
       } else if (evt is RiftLinkGroupRekeyProgressEvent) {
         final gid = _channelByUid(evt.groupUid);
         if (gid != null && mounted) {
+          final prev = _groupV2ByChannel[gid];
+          final nextAckApplied = evt.pending == 0 && evt.failed == 0;
+          final nextVersion = evt.keyVersion > 0
+              ? evt.keyVersion
+              : ((prev?.keyVersion ?? 0) > 0 ? (prev?.keyVersion ?? 0) : (_groupKeyVersion[gid] ?? 0));
+          setState(() {
+            if (nextVersion > 0) {
+              _groupKeyVersion[gid] = nextVersion;
+            }
+            if (prev != null) {
+              _groupV2ByChannel[gid] = RiftLinkGroupV2Info(
+                groupUid: prev.groupUid,
+                groupTag: prev.groupTag,
+                canonicalName: prev.canonicalName,
+                channelId32: prev.channelId32,
+                keyVersion: nextVersion > 0 ? nextVersion : prev.keyVersion,
+                myRole: prev.myRole,
+                revocationEpoch: prev.revocationEpoch,
+                ackApplied: nextAckApplied,
+              );
+            }
+          });
           _snack(
             '${context.l10n.tr('group_rotate_key')}: v${evt.keyVersion} (${evt.applied}/${evt.applied + evt.pending + evt.failed})',
           );
@@ -161,12 +202,30 @@ class _GroupsScreenState extends State<GroupsScreen> {
       }
     });
     _refresh();
+    _searchController.addListener(() {
+      if (!mounted) return;
+      setState(() => _searchQuery = _searchController.text);
+    });
   }
 
   @override
   void dispose() {
     _sub?.cancel();
+    _searchController.dispose();
+    _searchFocusNode.dispose();
     super.dispose();
+  }
+
+  void _toggleSearch() {
+    setState(() {
+      _searchMode = !_searchMode;
+      if (!_searchMode) {
+        _searchFocusNode.unfocus();
+        _searchController.clear();
+      } else {
+        _searchFocusNode.requestFocus();
+      }
+    });
   }
 
   Future<void> _refresh() async {
@@ -239,6 +298,10 @@ class _GroupsScreenState extends State<GroupsScreen> {
       _snack(l.tr('error'), backgroundColor: context.palette.error);
       return;
     }
+    final refreshed = await widget.ble.groupStatus(uid);
+    if (!refreshed) {
+      await widget.ble.getGroups();
+    }
     _snack('${l.tr('group_rotate_key')} · ${l.tr('group')} $gid');
   }
 
@@ -251,18 +314,18 @@ class _GroupsScreenState extends State<GroupsScreen> {
       return;
     }
     if (v2.myRole != 'owner') {
-      _snack('Only owner can rename', backgroundColor: context.palette.error);
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
       return;
     }
     final ctrl = TextEditingController(text: v2.canonicalName.trim().isEmpty ? _groupDisplayName(gid) : v2.canonicalName.trim());
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Rename canonical name'),
+        title: Text(l.tr('group_action_rename')),
         content: TextField(
           controller: ctrl,
           autofocus: true,
-          decoration: const InputDecoration(hintText: 'Canonical name'),
+          decoration: InputDecoration(hintText: l.tr('group_action_rename')),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(l.tr('cancel'))),
@@ -281,7 +344,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
       _snack(l.tr('error'), backgroundColor: context.palette.error);
       return;
     }
-    _snack('Canonical name updated');
+    _snack(l.tr('group_rename_saved'));
   }
 
   Future<void> _showGrantDialog(int gid) async {
@@ -297,7 +360,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setLocalState) => AlertDialog(
-          title: Text('${l.tr('group')} $gid · ${l.tr('group_role_admin')} / ${l.tr('group_role_member')}'),
+          title: Text('${l.tr('group_manage')} · ${l.tr('group')} $gid'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -340,7 +403,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
       _snack(l.tr('error'), backgroundColor: context.palette.error);
       return;
     }
-    _snack('Grant: $subject -> $role');
+    _snack(l.tr('group_grant_done', {'id': subject, 'role': role}));
   }
 
   Future<void> _showRevokeDialog(int gid) async {
@@ -354,7 +417,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('${l.tr('group')} $gid · revoke'),
+        title: Text('${l.tr('group_action_revoke')} · ${l.tr('group')} $gid'),
         content: TextField(
           controller: idCtrl,
           autofocus: true,
@@ -383,7 +446,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
       return;
     }
     await widget.ble.groupRekey(groupUid: uid, reason: 'revoke_followup_rekey');
-    _snack('Revoke + rekey: $subject');
+    _snack(l.tr('group_revoke_done', {'id': subject}));
   }
 
   Future<void> _copyInvite(int gid) async {
@@ -727,9 +790,55 @@ class _GroupsScreenState extends State<GroupsScreen> {
     );
   }
 
+  PopupMenuEntry<String> _menuHeader(String title, AppPalette p) {
+    return PopupMenuItem<String>(
+      enabled: false,
+      height: 30,
+      child: Text(
+        title.toUpperCase(),
+        style: AppTypography.labelBase().copyWith(
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          color: p.onSurfaceVariant.withOpacity(0.8),
+          letterSpacing: 0.35,
+        ),
+      ),
+    );
+  }
+
+  PopupMenuEntry<String> _menuAction(
+    String value,
+    String title,
+    IconData icon,
+    AppPalette p, {
+    bool destructive = false,
+  }) {
+    final color = destructive ? p.error : p.onSurface;
+    return PopupMenuItem<String>(
+      value: value,
+      height: 40,
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: color),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: Text(
+              title,
+              style: AppTypography.bodyBase().copyWith(
+                fontSize: 14,
+                color: color,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildGroupCard(int gid, AppLocalizations l, AppPalette p) {
     final v2 = _groupV2ByChannel[gid];
     final ver = _groupKeyVersion[gid] ?? 0;
+    final effectiveVersion = (v2 != null && v2.keyVersion > ver) ? v2.keyVersion : ver;
     final canRotate = v2 != null && (v2.myRole == 'owner' || v2.myRole == 'admin');
     final roleLabel = switch (v2?.myRole) {
       'owner' => l.tr('group_role_owner'),
@@ -739,7 +848,9 @@ class _GroupsScreenState extends State<GroupsScreen> {
     };
     final keyStateLabel = v2 == null
         ? null
-        : (v2.ackApplied ? l.tr('group_key_actual') : l.tr('group_key_rekey_required_short'));
+        : (effectiveVersion > 0
+              ? (v2.ackApplied ? l.tr('group_key_actual') : l.tr('group_key_rekey_required_short'))
+              : (_loading ? null : l.tr('group_key_unknown')));
 
     return AppSectionCard(
       margin: const EdgeInsets.only(bottom: AppSpacing.sm),
@@ -749,13 +860,14 @@ class _GroupsScreenState extends State<GroupsScreen> {
           HapticFeedback.lightImpact();
           await _openGroupChat(gid);
         },
-        contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: 4),
+        contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
+        minVerticalPadding: AppSpacing.xs,
         leading: CircleAvatar(
-          radius: 20,
+          radius: 21,
           backgroundColor: p.primary.withOpacity(0.13),
           child: Text(
             '$gid',
-            style: TextStyle(color: p.primary, fontWeight: FontWeight.w700, fontSize: 10),
+            style: TextStyle(color: p.primary, fontWeight: FontWeight.w700, fontSize: 11),
           ),
         ),
         title: Row(
@@ -777,7 +889,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             AppStateChip(
-              label: v2 != null ? 'V2 · v$ver' : 'V2: unresolved',
+              label: v2 == null ? 'V2: unresolved' : (effectiveVersion > 0 ? 'V2 · v$effectiveVersion' : 'V2'),
               kind: v2 != null ? AppStateKind.info : AppStateKind.neutral,
             ),
             if (v2 != null)
@@ -800,8 +912,13 @@ class _GroupsScreenState extends State<GroupsScreen> {
         trailing: PopupMenuButton<String>(
           tooltip: l.tr('settings'),
           position: PopupMenuPosition.under,
+          offset: const Offset(0, 6),
+          constraints: const BoxConstraints(minWidth: 220),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+          color: p.card,
           icon: Icon(Icons.more_vert_rounded, color: p.onSurfaceVariant),
           onSelected: (v) async {
+            if (v == 'open') await _openGroupChat(gid);
             if (v == 'invite') await _copyInvite(gid);
             if (v == 'status') await _requestGroupStatus(gid);
             if (v == 'ack') await _ackCurrentGroupKey(gid);
@@ -809,20 +926,28 @@ class _GroupsScreenState extends State<GroupsScreen> {
             if (v == 'rename') await _renameCanonicalName(gid);
             if (v == 'grant') await _showGrantDialog(gid);
             if (v == 'revoke') await _showRevokeDialog(gid);
+            if (v == 'leave') await _leaveGroupV2(gid);
           },
           itemBuilder: (ctx) => [
-            PopupMenuItem(value: 'status', child: Text('${l.tr('refresh')} status')),
-            if (v2 != null) PopupMenuItem(value: 'invite', child: Text(l.tr('group_copy_invite'))),
+            _menuHeader(l.tr('group_menu_actions'), p),
+            _menuAction('open', l.tr('group_open_chat'), Icons.chat_bubble_outline_rounded, p),
+            _menuAction('status', '${l.tr('refresh')} status', Icons.sync_rounded, p),
+            if (v2 != null) _menuAction('invite', l.tr('group_copy_invite'), Icons.content_copy_rounded, p),
             if (v2 != null && !(v2.ackApplied))
-              PopupMenuItem(value: 'ack', child: Text('${l.tr('group_key_actual')} ACK')),
+              _menuAction('ack', '${l.tr('group_key_actual')} ACK', Icons.verified_rounded, p),
             if (v2 != null && canRotate)
-              PopupMenuItem(value: 'rekey_v2', child: Text('V2 ${l.tr('group_rotate_key')}')),
+              _menuAction('rekey_v2', l.tr('group_rotate_key'), Icons.key_rounded, p),
+            if (v2 != null) const PopupMenuDivider(height: 8),
+            if (v2 != null) _menuHeader(l.tr('group_menu_security'), p),
             if (v2 != null && v2.myRole == 'owner')
-              const PopupMenuItem(value: 'rename', child: Text('Rename canonical name')),
+              _menuAction('rename', l.tr('group_action_rename'), Icons.edit_rounded, p),
             if (v2 != null && v2.myRole == 'owner')
-              const PopupMenuItem(value: 'grant', child: Text('Grant role')),
+              _menuAction('grant', l.tr('group_action_grant'), Icons.admin_panel_settings_outlined, p),
             if (v2 != null && (v2.myRole == 'owner' || v2.myRole == 'admin'))
-              const PopupMenuItem(value: 'revoke', child: Text('Revoke member')),
+              _menuAction('revoke', l.tr('group_action_revoke'), Icons.person_remove_alt_1_rounded, p),
+            if (v2 != null) const PopupMenuDivider(height: 8),
+            if (v2 != null) _menuHeader(l.tr('group_menu_danger'), p),
+            if (v2 != null) _menuAction('leave', l.tr('group_action_leave'), Icons.logout_rounded, p, destructive: true),
           ],
         ),
       ),
@@ -832,22 +957,55 @@ class _GroupsScreenState extends State<GroupsScreen> {
   Future<void> _openGroupChat(int gid) async {
     final uid = (_uidByChannel(gid) ?? 'UNRESOLVED_$gid').toUpperCase();
     final conversationId = ChatRepository.groupConversationIdByUid(uid);
-    await _chatRepo.ensureConversation(
-      id: conversationId,
-      kind: ConversationKind.group,
-      peerRef: ChatRepository.groupPeerRefByUid(uid),
-      title: _groupDisplayName(gid),
-    );
     if (!mounted) return;
     await appPush(
       context,
       ChatScreen(
         ble: widget.ble,
-        conversationId: conversationId,
+        conversationId: null,
         initialGroupId: gid,
         initialGroupUid: uid,
       ),
     );
+  }
+
+  Future<void> _leaveGroupV2(int gid) async {
+    final l = context.l10n;
+    final uid = _uidByChannel(gid);
+    if (uid == null) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(l.tr('group_leave_title')),
+        content: Text(l.tr('group_leave_confirm', {'id': '$gid'})),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(l.tr('cancel'))),
+          FilledButton(
+            style: AppTheme.destructiveFilledStyle(context.palette),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(l.tr('group_action_leave')),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    final ok = await widget.ble.groupLeave(groupUid: uid);
+    if (!ok) {
+      _snack(l.tr('error'), backgroundColor: context.palette.error);
+      return;
+    }
+    setState(() {
+      _groups.remove(gid);
+      _groupV2ByChannel.remove(gid);
+      _groupKeyVersion.remove(gid);
+    });
+    await _chatRepo.removeGroupConversation(groupUid: uid, channelId32: gid);
+    await _refresh();
+    _snack(l.tr('group_left', {'id': '$gid'}));
   }
 
   Widget _buildHintBanner(AppLocalizations l, AppPalette p) {
@@ -905,29 +1063,59 @@ class _GroupsScreenState extends State<GroupsScreen> {
   }
 
   Widget _buildTopActions(AppLocalizations l, AppPalette p) {
+    final horizontalInset = widget.embedded ? AppSpacing.sm + AppSpacing.xs : AppSpacing.lg;
+    const buttonHeight = 46.0;
+    final buttonLabelStyle = AppTypography.bodyBase().copyWith(fontWeight: FontWeight.w600);
+    const buttonPadding = EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm);
     return Padding(
       padding: EdgeInsets.fromLTRB(
-        widget.embedded ? AppSpacing.sm + AppSpacing.xs : AppSpacing.lg,
+        horizontalInset,
         AppSpacing.xs,
-        widget.embedded ? AppSpacing.sm + AppSpacing.xs : AppSpacing.lg,
+        horizontalInset,
         AppSpacing.sm,
       ),
       child: Row(
         children: [
           Expanded(
-            child: FilledButton.icon(
-              onPressed: widget.ble.isConnected ? _showAddSheet : null,
-              icon: const Icon(Icons.group_add_rounded, size: 18),
-              label: Text(l.tr('group_create')),
-            ),
+            child: SizedBox(
+              height: buttonHeight,
+              child: FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(buttonHeight),
+                  maximumSize: const Size.fromHeight(buttonHeight),
+                  padding: buttonPadding,
+                  textStyle: buttonLabelStyle,
+                  visualDensity: VisualDensity.standard,
+                ),
+                onPressed: widget.ble.isConnected ? _showAddSheet : null,
+                icon: const Icon(Icons.group_add_rounded, size: 18),
+                label: Text(
+                  l.tr('group_create'),
+                  style: buttonLabelStyle,
+                ),
+              ),
+            )
           ),
           const SizedBox(width: AppSpacing.sm),
           Expanded(
-            child: OutlinedButton.icon(
-              onPressed: widget.ble.isConnected ? _showJoinByCodeDialog : null,
-              icon: const Icon(Icons.vpn_key_outlined, size: 18),
-              label: Text(l.tr('group_join_by_code')),
-            ),
+            child: SizedBox(
+              height: buttonHeight,
+              child: OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(buttonHeight),
+                  maximumSize: const Size.fromHeight(buttonHeight),
+                  padding: buttonPadding,
+                  textStyle: buttonLabelStyle,
+                  visualDensity: VisualDensity.standard,
+                ),
+                onPressed: widget.ble.isConnected ? _showJoinByCodeDialog : null,
+                icon: const Icon(Icons.vpn_key_outlined, size: 18),
+                label: Text(
+                  l.tr('group_join_short'),
+                  style: buttonLabelStyle,
+                ),
+              ),
+            )
           ),
         ],
       ),
@@ -938,27 +1126,85 @@ class _GroupsScreenState extends State<GroupsScreen> {
   Widget build(BuildContext context) {
     final l = context.l10n;
     final p = context.palette;
+    final horizontalInset = widget.embedded ? AppSpacing.sm + AppSpacing.xs : AppSpacing.lg;
 
     final inner = Material(
       color: Colors.transparent,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _buildHintBanner(l, p),
+          if (widget.embedded)
+            Padding(
+              padding: EdgeInsets.fromLTRB(
+                horizontalInset,
+                AppSpacing.xs,
+                horizontalInset,
+                AppSpacing.sm + 2,
+              ),
+              child: AppSectionCard(
+                margin: EdgeInsets.zero,
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
+                child: TextField(
+                  controller: _searchController,
+                  textInputAction: TextInputAction.search,
+                  style: TextStyle(color: p.onSurface, fontSize: 14.5),
+                  decoration: InputDecoration(
+                    hintText: l.tr('group_search_hint'),
+                    prefixIcon: Icon(Icons.search_rounded, color: p.onSurfaceVariant),
+                    suffixIcon: _searchQuery.trim().isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: l.tr('cancel'),
+                            icon: Icon(Icons.close_rounded, color: p.onSurfaceVariant),
+                            onPressed: () => _searchController.clear(),
+                          ),
+                    border: InputBorder.none,
+                    isDense: true,
+                  ),
+                ),
+              ),
+            ),
           _buildTopActions(l, p),
           Expanded(
-            child: _groups.isEmpty
-                ? _buildEmptyState(l, p)
-                : ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(
-                      AppSpacing.sm + AppSpacing.xs,
-                      AppSpacing.xs,
-                      AppSpacing.sm + AppSpacing.xs,
-                      72,
-                    ),
-                    itemCount: _groups.length,
-                    itemBuilder: (_, i) => _buildGroupCard(_groups[i], l, p),
-                  ),
+            child: RefreshIndicator(
+              onRefresh: _refresh,
+              child: _groups.isEmpty
+                  ? CustomScrollView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      slivers: [
+                        SliverFillRemaining(
+                          hasScrollBody: false,
+                          child: _buildEmptyState(l, p),
+                        ),
+                      ],
+                    )
+                  : _visibleGroups.isEmpty
+                      ? CustomScrollView(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          slivers: [
+                            SliverFillRemaining(
+                              hasScrollBody: false,
+                              child: Center(
+                                child: Text(
+                                  l.tr('group_search_empty'),
+                                  style: AppTypography.bodyBase().copyWith(color: p.onSurfaceVariant),
+                                ),
+                              ),
+                            ),
+                          ],
+                        )
+                      : ListView.builder(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          padding: EdgeInsets.fromLTRB(
+                            horizontalInset,
+                            AppSpacing.xs,
+                            horizontalInset,
+                            72,
+                          ),
+                          itemCount: _visibleGroups.length,
+                          itemBuilder: (_, i) => _buildGroupCard(_visibleGroups[i], l, p),
+                        ),
+            ),
           ),
         ],
       ),
@@ -976,19 +1222,45 @@ class _GroupsScreenState extends State<GroupsScreen> {
       backgroundColor: p.surface,
       appBar: riftAppBar(
         context,
-        title: l.tr('groups'),
+        title: _searchMode ? '' : l.tr('groups'),
         showBack: true,
+        titleWidget: _searchMode
+            ? Container(
+                height: 39,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                decoration: BoxDecoration(
+                  color: p.card.withOpacity(0.36),
+                  borderRadius: BorderRadius.circular(11),
+                  border: Border.all(
+                    color: _searchFocusNode.hasFocus ? p.primary.withOpacity(0.80) : p.divider.withOpacity(0.55),
+                    width: _searchFocusNode.hasFocus ? 1.2 : 1.0,
+                  ),
+                ),
+                child: TextField(
+                  controller: _searchController,
+                  focusNode: _searchFocusNode,
+                  autofocus: true,
+                  textInputAction: TextInputAction.search,
+                  style: TextStyle(color: p.onSurface, fontSize: 15.5),
+                  decoration: InputDecoration(
+                    hintText: l.tr('group_search_hint'),
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    disabledBorder: InputBorder.none,
+                    errorBorder: InputBorder.none,
+                    focusedErrorBorder: InputBorder.none,
+                    isCollapsed: true,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 8.5),
+                  ),
+                ),
+              )
+            : null,
         actions: [
           IconButton(
-            onPressed: _loading ? null : _refresh,
-            icon: _loading
-                ? SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: p.onSurface),
-                  )
-                : Icon(Icons.refresh_rounded, color: p.onSurface),
-            tooltip: l.tr('refresh'),
+            onPressed: _toggleSearch,
+            icon: Icon(_searchMode ? Icons.close : Icons.search_rounded, color: p.onSurface),
+            tooltip: l.tr('group_search_hint'),
           ),
         ],
       ),

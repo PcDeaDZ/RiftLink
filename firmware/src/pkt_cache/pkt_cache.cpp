@@ -5,6 +5,7 @@
 #include "pkt_cache.h"
 #include "node/node.h"
 #include "radio/radio.h"
+#include "async_tasks.h"
 #include "neighbors/neighbors.h"
 #include "async_queues.h"
 #include "log.h"
@@ -128,9 +129,16 @@ bool retransmitOnNack(const uint8_t* from, uint16_t pktId) {
     if (memcmp(s_cache[i].to, from, protocol::NODE_ID_LEN) != 0) continue;
     if (s_cache[i].pktId != pktId) continue;
     uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(from));
-    bool ok = radio::send(s_cache[i].pkt, s_cache[i].len, txSf, true);  // priority
-    s_cache[i].inUse = false;
-    return ok;
+    char reasonBuf[40];
+    if (queueTxPacket(s_cache[i].pkt, s_cache[i].len, txSf, true, TxRequestClass::data,
+            reasonBuf, sizeof(reasonBuf))) {
+      s_cache[i].inUse = false;
+      return true;
+    }
+    queueDeferredSend(s_cache[i].pkt, s_cache[i].len, txSf, 70, true);
+    RIFTLINK_DIAG("NACK", "event=NACK_TX_DEFER type=cache from=%02X%02X pktId=%u cause=%s",
+        from[0], from[1], (unsigned)pktId, reasonBuf[0] ? reasonBuf : "?");
+    return false;
   }
   return false;
 }
@@ -170,9 +178,16 @@ bool retransmitOverheard(const uint8_t* nackFrom, const uint8_t* nackTo, uint16_
     if (s_overhear[i].pktId != pktId) continue;
     uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(nackFrom));
     if (txSf == 0) txSf = 12;
-    bool ok = radio::send(s_overhear[i].pkt, s_overhear[i].len, txSf, true);
-    s_overhear[i].inUse = false;
-    return ok;
+    char reasonBuf[40];
+    if (queueTxPacket(s_overhear[i].pkt, s_overhear[i].len, txSf, true, TxRequestClass::data,
+            reasonBuf, sizeof(reasonBuf))) {
+      s_overhear[i].inUse = false;
+      return true;
+    }
+    queueDeferredSend(s_overhear[i].pkt, s_overhear[i].len, txSf, 80, true);
+    RIFTLINK_DIAG("NACK", "event=NACK_TX_DEFER type=overhear from=%02X%02X to=%02X%02X pktId=%u cause=%s",
+        nackFrom[0], nackFrom[1], nackTo[0], nackTo[1], (unsigned)pktId, reasonBuf[0] ? reasonBuf : "?");
+    return false;
   }
   return false;
 }
@@ -200,8 +215,15 @@ bool retransmitBatchOnNack(const uint8_t* from, uint16_t pktId) {
       if (s_batchCache[i].pktIds[j] == pktId) {
         uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(from));
         if (txSf == 0) txSf = 12;
-        bool ok = radio::send(s_batchCache[i].pkt, s_batchCache[i].len, txSf, true);
-        return ok;
+        char reasonBuf[40];
+        if (queueTxPacket(s_batchCache[i].pkt, s_batchCache[i].len, txSf, true, TxRequestClass::data,
+                reasonBuf, sizeof(reasonBuf))) {
+          return true;
+        }
+        queueDeferredSend(s_batchCache[i].pkt, s_batchCache[i].len, txSf, 70, true);
+        RIFTLINK_DIAG("NACK", "event=NACK_TX_DEFER type=batch from=%02X%02X pktId=%u cause=%s",
+            from[0], from[1], (unsigned)pktId, reasonBuf[0] ? reasonBuf : "?");
+        return false;
       }
     }
   }

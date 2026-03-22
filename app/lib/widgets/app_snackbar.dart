@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../app_navigator.dart';
 import '../theme/app_theme.dart';
 
 // Единые токены overlay-слоёв (см. app_popover_menu, rift_dialogs).
@@ -50,6 +51,54 @@ void showAppSnackBar(
       break;
   }
 
+  messenger.showSnackBar(
+    SnackBar(
+      content: Text(
+        message,
+        style: TextStyle(color: fg, fontSize: 15, height: 1.35),
+      ),
+      backgroundColor: bg,
+      behavior: SnackBarBehavior.floating,
+      margin: margin,
+      padding: _kSnackContentPadding,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(_kOverlayRadius),
+      ),
+      elevation: 8,
+      duration: duration,
+    ),
+  );
+}
+
+void showGlobalAppSnackBar(
+  String message, {
+  AppSnackKind kind = AppSnackKind.neutral,
+  Duration duration = const Duration(seconds: 3),
+  EdgeInsetsGeometry margin = const EdgeInsets.fromLTRB(16, 0, 16, 20),
+}) {
+  final messenger = scaffoldMessengerKey.currentState;
+  final context = navigatorKey.currentContext;
+  if (messenger == null || context == null || !context.mounted) return;
+
+  late final Color bg;
+  late final Color fg;
+  final p = context.palette;
+  switch (kind) {
+    case AppSnackKind.error:
+      bg = p.error.withOpacity(0.92);
+      fg = Colors.white;
+      break;
+    case AppSnackKind.success:
+      bg = p.success.withOpacity(0.34);
+      fg = p.onSurface;
+      break;
+    case AppSnackKind.neutral:
+      bg = p.card;
+      fg = p.onSurface;
+      break;
+  }
+
+  messenger.hideCurrentSnackBar();
   messenger.showSnackBar(
     SnackBar(
       content: Text(

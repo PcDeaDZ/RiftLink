@@ -54,6 +54,7 @@ static SemaphoreHandle_t s_mutex = nullptr;
 // Троттлинг: не спамить KEY_EXCHANGE — иначе забивают канал, MSG не проходят
 #define KEY_EXCHANGE_THROTTLE_MS 8000    // первичный обмен без ключа: быстрее retry, чтобы не застрять в deadlock
 #define KEY_RESPONSE_THROTTLE_MS 60000  // ответ когда ключ уже был — макс. раз в 60с (пир может повторить)
+#define KEY_DUP_RECOVERY_THROTTLE_MS 2000  // key_rx_dup: ускоренный self-heal (2-node сеть), без долгого "тишина" окна
 #define KEY_DEBOUNCE_MS 1500             // мин. пауза между отправками одному пиру (HELLO+KEY_EXCHANGE подряд → 1 пакет)
 #define KEY_FORCE_MIN_GAP_MS 2500        // аварийный анти-шторм даже для forceSend(!hadKeyBefore)
 #define KEY_HELLO_SLOT_BASE_MS 35
@@ -62,6 +63,7 @@ static SemaphoreHandle_t s_mutex = nullptr;
 #define KEY_RESP_SLOT_BASE_MS 18
 #define KEY_RESP_SLOT_STEP_MS 70
 #define KEY_RESP_SLOT_JITTER_SPAN_MS 18
+#define KEY_STALE_SECOND_CHANCE_MS 160  // второй шанс после hello_stale_refresh (anti-loss, low-noise)
 struct ThrottleEntry {
   std::atomic<uint32_t> idLo;
   std::atomic<uint32_t> idHi;
@@ -325,6 +327,8 @@ void onKeyExchange(const uint8_t* peerId, const uint8_t* theirPubKey) {
     RIFTLINK_DIAG("KEY", "event=KEY_STORE_FAIL cause=mutex_timeout peer=%02X%02X", peerId[0], peerId[1]);
     RIFTLINK_LOG_ERR("[RiftLink] X25519 onKeyExchange: mutex timeout peer=%02X%02X\n",
         peerId[0], peerId[1]);
+    // Immediate self-heal request: don't wait for long periodic retry tick.
+    sendKeyExchange(peerId, true, false, "key_store_mutex_timeout");
     return;
   }
 
@@ -338,6 +342,8 @@ void onKeyExchange(const uint8_t* peerId, const uint8_t* theirPubKey) {
     // Частая причина «нет строки X25519 key»: мусор в 32 B после обрезанного KEY в эфире (см. NACK/retransmit)
     RIFTLINK_LOG_ERR("[RiftLink] X25519 crypto_box_beforenm FAILED peer=%02X%02X pub32=%02X%02X...\n",
         peerId[0], peerId[1], theirPubKey[0], theirPubKey[1]);
+    // Ask peer to re-announce key quickly (corrupted frame / asymmetric state).
+    sendKeyExchange(peerId, true, false, "key_store_beforenm_fail");
     return;
   }
 
@@ -455,11 +461,19 @@ void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, c
   if (forceSend && !hadKeyBefore) {
     // Первый ответ — без длинного троттла, пир ждёт наш ключ
   } else {
-    // key_rx_dup: peer can lose pairwise state while keeping same pubkey.
+    // Recovery paths when key existed but channel side may be asymmetric/stale:
+    // - key_rx_dup: peer lost pairwise state while pubkey stayed same
+    // - decrypt_fail*: decrypt failed even though hasKeyFor() may still be true
     // Use medium throttle to heal asymmetry faster without enabling KEY storm.
     bool isDupRecovery = forceSend && hadKeyBefore && reason && strcmp(reason, "key_rx_dup") == 0;
-    uint32_t throttleMs = isDupRecovery ? KEY_EXCHANGE_THROTTLE_MS
-                                        : (hadKeyBefore ? KEY_RESPONSE_THROTTLE_MS : KEY_EXCHANGE_THROTTLE_MS);
+    bool isDecryptRecovery = forceSend && hadKeyBefore && reason &&
+                             strncmp(reason, "decrypt_fail", strlen("decrypt_fail")) == 0;
+    bool isHelloStaleRecovery = forceSend && hadKeyBefore && reason &&
+                                strcmp(reason, "hello_stale_refresh") == 0;
+    uint32_t throttleMs = isDupRecovery ? KEY_DUP_RECOVERY_THROTTLE_MS
+                                        : ((isDecryptRecovery || isHelloStaleRecovery) ? KEY_EXCHANGE_THROTTLE_MS
+                                                             : (hadKeyBefore ? KEY_RESPONSE_THROTTLE_MS
+                                                                             : KEY_EXCHANGE_THROTTLE_MS));
     uint32_t lastSend = 0;
     if (throttleLastSendFor(peerId, &lastSend) && (now - lastSend < throttleMs)) {
       xSemaphoreGive(s_mutex);
@@ -493,20 +507,35 @@ void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, c
     // чтобы hello/retry не уходили одновременно на двух узлах.
     bool primaryPath = (!forceSend && !hadKeyBefore);
     bool keyRxResponse = (forceSend && reason && strcmp(reason, "key_rx") == 0);
+    bool helloStaleRefresh = (forceSend && hadKeyBefore && reason && strcmp(reason, "hello_stale_refresh") == 0);
     if (primaryPath) {
       uint32_t jitterMs = computeHelloSlotJitterMs(peerId);
       queueDeferredSend(pkt, len, 0, jitterMs);
       s_lastKeyTxReadyMs = millis();
-      RIFTLINK_DIAG("KEY", "event=KEY_TX_DEFER peer=%02X%02X pktId=%u len=%u delay_ms=%lu reason=%s slot_mode=%s",
+      RIFTLINK_DIAG("KEY", "event=KEY_TX_DEFER peer=%02X%02X pktId=%u len=%u delay_ms=%lu cause=%s slot_mode=%s",
           peerId[0], peerId[1], (unsigned)pktId, (unsigned)len, (unsigned long)jitterMs,
           safeReason(reason), "shortid_primary");
     } else if (keyRxResponse) {
       uint32_t jitterMs = computeKeyResponseSlotJitterMs(peerId);
       queueDeferredSend(pkt, len, 0, jitterMs);
       s_lastKeyTxReadyMs = millis();
-      RIFTLINK_DIAG("KEY", "event=KEY_TX_DEFER peer=%02X%02X pktId=%u len=%u delay_ms=%lu reason=%s slot_mode=%s",
+      RIFTLINK_DIAG("KEY", "event=KEY_TX_DEFER peer=%02X%02X pktId=%u len=%u delay_ms=%lu cause=%s slot_mode=%s",
           peerId[0], peerId[1], (unsigned)pktId, (unsigned)len, (unsigned long)jitterMs,
           safeReason(reason), "shortid_keyrx");
+    } else if (helloStaleRefresh) {
+      // Peer likely rebooted while we still considered it online.
+      // Send one immediate recovery attempt + one short delayed retry.
+      uint32_t firstMs = computeKeyResponseSlotJitterMs(peerId);
+      queueDeferredSend(pkt, len, 0, firstMs);
+      uint32_t secondMs = firstMs + KEY_STALE_SECOND_CHANCE_MS + (esp_random() % 40u);
+      queueDeferredSend(pkt, len, 0, secondMs);
+      s_lastKeyTxReadyMs = millis();
+      RIFTLINK_DIAG("KEY", "event=KEY_TX_DEFER peer=%02X%02X pktId=%u len=%u delay_ms=%lu cause=%s slot_mode=%s",
+          peerId[0], peerId[1], (unsigned)pktId, (unsigned)len, (unsigned long)firstMs,
+          safeReason(reason), "stale_refresh_primary");
+      RIFTLINK_DIAG("KEY", "event=KEY_TX_DEFER peer=%02X%02X pktId=%u len=%u delay_ms=%lu cause=%s slot_mode=%s",
+          peerId[0], peerId[1], (unsigned)pktId, (unsigned)len, (unsigned long)secondMs,
+          safeReason(reason), "stale_refresh_second");
     } else {
       char reasonBuf[40];
       RIFTLINK_DIAG("KEY", "event=KEY_TX_READY peer=%02X%02X pktId=%u len=%u txSf=mesh priority=1",

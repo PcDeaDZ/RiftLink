@@ -10,6 +10,7 @@ import 'package:geolocator/geolocator.dart';
 import '../../ble/riftlink_ble.dart';
 import '../../chat/chat_models.dart';
 import '../../chat/chat_repository.dart';
+import '../../connection/transport_reconnect_manager.dart';
 import '../../recent_devices/recent_devices_service.dart';
 import '../../voice/voice_service.dart';
 import 'chat_ui_models.dart';
@@ -99,6 +100,8 @@ class ChatBleHandlerDeps {
 class ChatScreenController {
   StreamSubscription<RiftLinkEvent>? _eventSub;
   StreamSubscription<BluetoothConnectionState>? _connectionSub;
+  StreamSubscription<OnConnectionStateChangedEvent>? _connectionEventsSub;
+  DateTime? _lastDisconnectHandledAt;
 
   void bindEvents({
     required RiftLinkBle ble,
@@ -140,14 +143,47 @@ class ChatScreenController {
   }) {
     final dev = ble.device;
     if (dev == null) return;
+    final trackedRemoteId = dev.remoteId.toString();
     _connectionSub?.cancel();
+    _connectionEventsSub?.cancel();
     _connectionSub = dev.connectionState.listen((state) {
       if (!shouldHandleDisconnect()) return;
       if (state == BluetoothConnectionState.disconnected) {
-        if (ble.isWifiMode) return;
-        onDisconnected();
+        _notifyDisconnected(
+          ble: ble,
+          shouldHandleDisconnect: shouldHandleDisconnect,
+          onDisconnected: onDisconnected,
+        );
       }
     });
+    _connectionEventsSub = FlutterBluePlus.events.onConnectionStateChanged.listen((event) {
+      if (!shouldHandleDisconnect()) return;
+      final eventRemoteId = event.device.remoteId.toString();
+      if (!RiftLinkBle.remoteIdsMatch(eventRemoteId, trackedRemoteId)) return;
+      if (event.connectionState == BluetoothConnectionState.disconnected) {
+        _notifyDisconnected(
+          ble: ble,
+          shouldHandleDisconnect: shouldHandleDisconnect,
+          onDisconnected: onDisconnected,
+        );
+      }
+    });
+  }
+
+  void _notifyDisconnected({
+    required RiftLinkBle ble,
+    required bool Function() shouldHandleDisconnect,
+    required void Function() onDisconnected,
+  }) {
+    if (!shouldHandleDisconnect()) return;
+    if (ble.isWifiMode) return;
+    final now = DateTime.now();
+    final last = _lastDisconnectHandledAt;
+    if (last != null && now.difference(last) < const Duration(milliseconds: 1200)) {
+      return;
+    }
+    _lastDisconnectHandledAt = now;
+    onDisconnected();
   }
 
   void handleBleEvent(RiftLinkEvent evt, ChatBleHandlerDeps deps) {
@@ -183,19 +219,27 @@ class ChatScreenController {
     if (evt is RiftLinkSentEvent) {
       deps.setState(() {
         final toMatch = evt.to.isEmpty ? null : evt.to;
-        for (var i = deps.messages.length - 1; i >= 0; i--) {
+        var matched = false;
+        for (var i = 0; i < deps.messages.length; i++) {
           final m = deps.messages[i];
           final sameTo = (m.to == null && toMatch == null) || deps.sameNodeId(m.to, toMatch);
           if (!m.isIncoming && m.msgId == null && sameTo) {
             deps.messages[i] = m.copyWith(msgId: evt.msgId, to: evt.to, status: ChatUiMessageStatus.sent);
+            matched = true;
             break;
           }
+        }
+        if (!matched) {
+          debugPrint(
+            '[BLE_CHAIN] stage=app_msg_state action=mismatch evt=sent msgId=${evt.msgId} to=${evt.to}',
+          );
         }
       });
       return;
     }
     if (evt is RiftLinkDeliveredEvent) {
       deps.setState(() {
+        var matched = false;
         for (var i = 0; i < deps.messages.length; i++) {
           final m = deps.messages[i];
           if (!m.isIncoming && deps.sameNodeId(m.to, evt.from) && m.msgId == evt.msgId) {
@@ -205,14 +249,36 @@ class ChatScreenController {
               deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.delivered));
             }
             deps.messages[i] = updated;
+            matched = true;
             break;
           }
+        }
+        if (!matched) {
+          // Fallback: delivered/read can be observed even if sent mapping was delayed.
+          for (var i = deps.messages.length - 1; i >= 0; i--) {
+            final m = deps.messages[i];
+            if (m.isIncoming || m.msgId != null || !deps.sameNodeId(m.to, evt.from)) continue;
+            var updated = m.copyWith(msgId: evt.msgId, status: ChatUiMessageStatus.delivered);
+            if (deps.shouldEmitCriticalSummary(updated, ChatUiMessageStatus.delivered)) {
+              updated = updated.copyWith(relaySummarySent: true);
+              deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.delivered));
+            }
+            deps.messages[i] = updated;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) {
+          debugPrint(
+            '[BLE_CHAIN] stage=app_msg_state action=mismatch evt=delivered msgId=${evt.msgId} from=${evt.from}',
+          );
         }
       });
       return;
     }
     if (evt is RiftLinkReadEvent) {
       deps.setState(() {
+        var matched = false;
         for (var i = 0; i < deps.messages.length; i++) {
           final m = deps.messages[i];
           if (!m.isIncoming && deps.sameNodeId(m.to, evt.from) && m.msgId == evt.msgId) {
@@ -222,14 +288,35 @@ class ChatScreenController {
               deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.read));
             }
             deps.messages[i] = updated;
+            matched = true;
             break;
           }
+        }
+        if (!matched) {
+          for (var i = deps.messages.length - 1; i >= 0; i--) {
+            final m = deps.messages[i];
+            if (m.isIncoming || m.msgId != null || !deps.sameNodeId(m.to, evt.from)) continue;
+            var updated = m.copyWith(msgId: evt.msgId, status: ChatUiMessageStatus.read);
+            if (deps.shouldEmitCriticalSummary(updated, ChatUiMessageStatus.read)) {
+              updated = updated.copyWith(relaySummarySent: true);
+              deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.read));
+            }
+            deps.messages[i] = updated;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) {
+          debugPrint(
+            '[BLE_CHAIN] stage=app_msg_state action=mismatch evt=read msgId=${evt.msgId} from=${evt.from}',
+          );
         }
       });
       return;
     }
     if (evt is RiftLinkUndeliveredEvent) {
       deps.setState(() {
+        var matched = false;
         for (var i = 0; i < deps.messages.length; i++) {
           final m = deps.messages[i];
           if (!m.isIncoming && m.msgId == evt.msgId) {
@@ -245,9 +332,36 @@ class ChatScreenController {
                 deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.undelivered));
               }
               deps.messages[i] = updated;
+              matched = true;
               break;
             }
           }
+        }
+        if (!matched) {
+          for (var i = deps.messages.length - 1; i >= 0; i--) {
+            final m = deps.messages[i];
+            if (m.isIncoming || m.msgId != null) continue;
+            final isBroadcast = evt.to.isEmpty || deps.sameNodeId(m.to, deps.broadcastTo);
+            if (!isBroadcast && !deps.sameNodeId(m.to, evt.to)) continue;
+            var updated = m.copyWith(
+              msgId: evt.msgId,
+              status: ChatUiMessageStatus.undelivered,
+              delivered: evt.delivered ?? 0,
+              total: evt.total ?? 0,
+            );
+            if (deps.shouldEmitCriticalSummary(updated, ChatUiMessageStatus.undelivered)) {
+              updated = updated.copyWith(relaySummarySent: true);
+              deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.undelivered));
+            }
+            deps.messages[i] = updated;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) {
+          debugPrint(
+            '[BLE_CHAIN] stage=app_msg_state action=mismatch evt=undelivered msgId=${evt.msgId} to=${evt.to}',
+          );
         }
       });
       return;
@@ -469,6 +583,7 @@ class ChatScreenController {
     }
 
     final toForMsg = deps.group > 0 ? null : (deps.unicastTo ?? deps.broadcastTo);
+    var localMessageIndex = -1;
     deps.setState(() {
       deps.messages.add(ChatUiMessage(
         from: deps.nodeId,
@@ -478,6 +593,7 @@ class ChatScreenController {
         lane: lane,
         type: trigger == null ? 'text' : 'timeCapsule',
       ));
+      localMessageIndex = deps.messages.length - 1;
     });
     deps.scrollToBottom();
     await deps.repo.setDraft(conversationId, '');
@@ -496,7 +612,7 @@ class ChatScreenController {
         createdAtMs: DateTime.now().millisecondsSinceEpoch,
       ),
     );
-    await deps.ble.send(
+    final ok = await deps.ble.send(
       text: text,
       to: deps.unicastTo,
       group: deps.group > 0 ? deps.group : null,
@@ -505,6 +621,26 @@ class ChatScreenController {
       trigger: trigger,
       triggerAtMs: triggerAtMs,
     );
+    if (!ok) {
+      debugPrint(
+        '[BLE_CHAIN] stage=app_tx action=send_fail chat_send to=${toForMsg ?? 'broadcast'} lane=$lane conversation=$conversationId',
+      );
+      if (deps.isMounted()) {
+        deps.setState(() {
+          if (localMessageIndex >= 0 && localMessageIndex < deps.messages.length) {
+            final m = deps.messages[localMessageIndex];
+            if (!m.isIncoming && m.msgId == null) {
+              deps.messages[localMessageIndex] = m.copyWith(
+                status: ChatUiMessageStatus.undelivered,
+                delivered: 0,
+                total: 0,
+              );
+            }
+          }
+        });
+      }
+      deps.showSnack(deps.tr('chat_send_failed'), isError: true);
+    }
   }
 
   Future<void> sendWithTtlPipeline(
@@ -660,22 +796,35 @@ class ChatScreenController {
   }
 
   Future<void> reconnectWithRetry(ChatReconnectDeps deps) async {
-    if (deps.ble.isWifiMode) return;
     if (deps.isReconnecting() || !deps.isMounted()) return;
+    final isWifi = deps.ble.isWifiMode;
     final remoteId = deps.currentRemoteId() ?? deps.ble.device?.remoteId.toString();
-    if (remoteId == null || remoteId.isEmpty) return;
+    final wifiIp = deps.ble.lastInfo?.wifiIp?.trim();
+    if (!isWifi && (remoteId == null || remoteId.isEmpty)) {
+      await deps.onReconnectFailed();
+      return;
+    }
+    if (isWifi && (wifiIp == null || wifiIp.isEmpty)) {
+      await deps.onReconnectFailed();
+      return;
+    }
     deps.setReconnectState(reconnecting: true, attempt: 1);
     for (var attempt = 1; attempt <= 3; attempt++) {
       if (!deps.isMounted()) return;
       deps.setReconnectState(reconnecting: true, attempt: attempt);
       deps.showReconnectAttempt(attempt);
       try {
-        deps.ble.disconnect();
+        await deps.ble.disconnect();
         await Future<void>.delayed(const Duration(milliseconds: 500));
-        final device = BluetoothDevice.fromId(remoteId);
-        final ok = await deps.ble.connect(device);
+        bool ok = false;
+        if (isWifi) {
+          ok = await deps.ble.connectWifi(wifiIp!);
+        } else {
+          final device = BluetoothDevice.fromId(remoteId!);
+          ok = await deps.ble.connect(device);
+        }
         if (deps.isMounted() && ok) {
-          await deps.onReconnectSuccess(remoteId);
+          await deps.onReconnectSuccess(isWifi ? (wifiIp ?? '') : remoteId!);
           deps.setReconnectState(reconnecting: false, attempt: attempt);
           deps.showReconnectSuccess();
           return;
@@ -703,6 +852,7 @@ class ChatScreenController {
     if (value.startsWith('forget:')) return;
     if (value == 'disconnect') {
       deps.setIntentionalDisconnect(true);
+      transportReconnectManager?.suppressAutoReconnectUntilNextConnection();
       await deps.ble.disconnect();
       if (!deps.isMounted()) return;
       await deps.goToScan();
@@ -711,6 +861,7 @@ class ChatScreenController {
     if (value.startsWith('switch:')) {
       final remoteId = value.substring(7);
       deps.setIntentionalDisconnect(true);
+      transportReconnectManager?.suppressAutoReconnectUntilNextConnection();
       await _switchToDevice(deps, remoteId);
     }
   }
@@ -802,8 +953,10 @@ class ChatScreenController {
   void dispose() {
     _eventSub?.cancel();
     _connectionSub?.cancel();
+    _connectionEventsSub?.cancel();
     _eventSub = null;
     _connectionSub = null;
+    _connectionEventsSub = null;
   }
 }
 

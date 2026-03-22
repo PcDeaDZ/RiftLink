@@ -27,6 +27,7 @@ import '../widgets/app_snackbar.dart';
 import '../widgets/rift_dialogs.dart';
 import '../chat/chat_models.dart';
 import '../chat/chat_repository.dart';
+import '../connection/transport_reconnect_manager.dart';
 import 'chat/chat_screen_controller.dart';
 import 'chat/chat_ui_models.dart';
 import 'chat/chat_capabilities.dart';
@@ -138,15 +139,18 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   Timer? _neighborsPollTimer;
   Timer? _gpsSyncTimer;
   Timer? _directOnlineTtlTimer;
+  Timer? _connectionWatchdogTimer;
+  DateTime _lastTransportActivityAt = DateTime.now();
+  bool _transportProbePending = false;
+  DateTime? _transportProbeAt;
   String? _lastAutoPingKey;
   DateTime? _lastAutoPingAt;
   bool _directPeerOnline = false;
   bool _meshAnimationEnabled = true;
   AnimationController? _meshAnimController;
-  bool _reconnecting = false;
-  int _reconnectAttempt = 0;
   bool _intentionalDisconnect = false;
   String? _currentBleRemoteId;
+  String? _connectionListenerRemoteId;
   List<RecentDevice> _recentDevices = [];
   AppLifecycleState _appLifecycle = AppLifecycleState.resumed;
 
@@ -400,6 +404,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   Future<void> _initConversationContext() async {
+    bool shouldEnsureConversation = true;
     if (widget.conversationId != null && widget.conversationId!.isNotEmpty) {
       _conversationId = widget.conversationId;
       if (_conversationId!.startsWith('direct:')) {
@@ -420,11 +425,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _group = 0;
       _groupUid = null;
       _conversationId = ChatRepository.directConversationId(_unicastTo!);
+      // Do not create an empty direct chat in DB on accidental open.
+      // Conversation will be created lazily on first outgoing message.
+      shouldEnsureConversation = false;
     } else if (widget.initialGroupUid != null && widget.initialGroupUid!.trim().isNotEmpty) {
       _groupUid = widget.initialGroupUid!.trim().toUpperCase();
       _group = _resolveGroupIdByUid(_groupUid!);
       _unicastTo = null;
       _conversationId = ChatRepository.groupConversationIdByUid(_groupUid!);
+      // Do not create an empty group chat in DB on accidental open.
+      // Conversation will be created lazily on first outgoing message.
+      shouldEnsureConversation = false;
     } else if (widget.initialGroupId != null && widget.initialGroupId! > 0) {
       _group = widget.initialGroupId!;
       _groupUid = null;
@@ -441,6 +452,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _conversationId = (_groupUid != null && _groupUid!.isNotEmpty)
           ? ChatRepository.groupConversationIdByUid(_groupUid!)
           : ChatRepository.groupConversationIdByUid('UNRESOLVED_${_group}');
+      // Do not create an empty group chat in DB on accidental open.
+      // Conversation will be created lazily on first outgoing message.
+      shouldEnsureConversation = false;
     } else if (widget.initialBroadcast) {
       _group = 0;
       _groupUid = null;
@@ -449,24 +463,26 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     }
 
     if (_conversationId == null) return;
-    await _chatRepo.ensureConversation(
-      id: _conversationId!,
-      kind: _conversationId!.startsWith('direct:')
-          ? ConversationKind.direct
-          : _conversationId!.startsWith('groupv2:')
-              ? ConversationKind.group
-              : ConversationKind.broadcast,
-      peerRef: _conversationId!.startsWith('groupv2:')
-          ? ChatRepository.groupPeerRefByUid(_conversationId!.substring('groupv2:'.length))
-          : _conversationId!.split(':').last,
-      title: _conversationId!.startsWith('direct:')
-          ? _conversationId!.substring('direct:'.length)
-          : _conversationId!.startsWith('groupv2:')
-              ? ((_activeGroupV2Info()?.canonicalName.trim().isNotEmpty ?? false)
-                    ? _activeGroupV2Info()!.canonicalName.trim()
-                    : 'Group ${_group > 0 ? _group : (_groupUid ?? '')}')
-              : 'Broadcast',
-    );
+    if (shouldEnsureConversation) {
+      await _chatRepo.ensureConversation(
+        id: _conversationId!,
+        kind: _conversationId!.startsWith('direct:')
+            ? ConversationKind.direct
+            : _conversationId!.startsWith('groupv2:')
+                ? ConversationKind.group
+                : ConversationKind.broadcast,
+        peerRef: _conversationId!.startsWith('groupv2:')
+            ? ChatRepository.groupPeerRefByUid(_conversationId!.substring('groupv2:'.length))
+            : _conversationId!.split(':').last,
+        title: _conversationId!.startsWith('direct:')
+            ? _conversationId!.substring('direct:'.length)
+            : _conversationId!.startsWith('groupv2:')
+                ? ((_activeGroupV2Info()?.canonicalName.trim().isNotEmpty ?? false)
+                      ? _activeGroupV2Info()!.canonicalName.trim()
+                      : 'Group ${_group > 0 ? _group : (_groupUid ?? '')}')
+                : 'Broadcast',
+      );
+    }
     final draft = await _chatRepo.getDraft(_conversationId!);
     if (draft.isNotEmpty) _controller.text = draft;
     final history = await _chatRepo.listMessages(_conversationId!);
@@ -529,6 +545,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   @override
   void initState() {
     super.initState();
+    _intentionalDisconnect = false;
     WidgetsBinding.instance.addObserver(this);
     _controller.addListener(_onTextChanged);
     _initConversationContext();
@@ -541,10 +558,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _sendLangToFirmware();
       VoiceService.requestPermission();
       if (widget.ble.isTransportConnected) {
-        _currentBleRemoteId = widget.ble.device?.remoteId.toString();
-        if (widget.ble.isConnected) {
-          _listenConnectionState();
-        }
+        _currentBleRemoteId = widget.ble.device?.remoteId.toString() ?? widget.ble.lastBleRemoteId;
+        _ensureConnectionStateListenerBound();
         _applyNodeIdFromDeviceName();
         final cachedInfo = widget.ble.lastInfo;
         if (cachedInfo != null) _onInfoEvent(cachedInfo);
@@ -572,6 +587,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     });
     // GPS sync от телефона: UTC + координаты для beacon-sync (устройство без GPS)
     _gpsSyncTimer = Timer.periodic(const Duration(seconds: 15), (_) => _sendGpsSyncFromPhone());
+    // Fallback на случай, если platform-stream connectionState не прислал disconnect.
+    _connectionWatchdogTimer = Timer.periodic(const Duration(milliseconds: 1200), (_) {
+      if (!mounted) return;
+      _checkConnectionWatchdog();
+    });
   }
 
   void _onTextChanged() {
@@ -627,6 +647,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _neighborsPollTimer?.cancel();
     _gpsSyncTimer?.cancel();
     _directOnlineTtlTimer?.cancel();
+    _connectionWatchdogTimer?.cancel();
     _voiceRecordTicker?.dispose();
     _meshAnimController?.dispose();
     _screenController.dispose();
@@ -651,8 +672,63 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     );
   }
 
+  void _ensureConnectionStateListenerBound() {
+    final dev = widget.ble.device;
+    if (dev == null) return;
+    final rid = dev.remoteId.toString();
+    final alreadyBound = _connectionListenerRemoteId != null &&
+        RiftLinkBle.remoteIdsMatch(_connectionListenerRemoteId!, rid);
+    if (alreadyBound) return;
+    _connectionListenerRemoteId = rid;
+    _listenConnectionState();
+  }
+
   Future<void> _onConnectionLost() async {
-    await _screenController.reconnectWithRetry(_buildReconnectDeps());
+    if (_intentionalDisconnect) return;
+    _transportProbePending = false;
+    _transportProbeAt = null;
+    await transportReconnectManager?.triggerReconnect(reason: 'chat_disconnect');
+  }
+
+  void _markTransportActivity() {
+    _lastTransportActivityAt = DateTime.now();
+    _transportProbePending = false;
+    _transportProbeAt = null;
+  }
+
+  void _checkConnectionWatchdog() {
+    if (_intentionalDisconnect || (transportReconnectManager?.uiState.value.reconnecting ?? false)) return;
+    final now = DateTime.now();
+    if (!widget.ble.isTransportConnected) {
+      unawaited(_onConnectionLost());
+      return;
+    }
+
+    const idleThreshold = Duration(seconds: 9);
+    const probeTimeout = Duration(seconds: 5);
+    final idleFor = now.difference(_lastTransportActivityAt);
+    if (idleFor < idleThreshold) return;
+
+    if (!_transportProbePending) {
+      _transportProbePending = true;
+      _transportProbeAt = now;
+      unawaited(widget.ble.getInfo(force: true).then((ok) {
+        if (!mounted || _intentionalDisconnect || (transportReconnectManager?.uiState.value.reconnecting ?? false)) return;
+        if (!ok) {
+          _transportProbePending = false;
+          _transportProbeAt = null;
+          unawaited(_onConnectionLost());
+        }
+      }));
+      return;
+    }
+
+    final probeAt = _transportProbeAt;
+    if (probeAt != null && now.difference(probeAt) >= probeTimeout) {
+      _transportProbePending = false;
+      _transportProbeAt = null;
+      unawaited(_onConnectionLost());
+    }
   }
 
   Future<void> _goToScan([String? message]) async {
@@ -1281,8 +1357,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   void _onInfoEvent(RiftLinkInfoEvent evt) {
+    _intentionalDisconnect = false;
     final bleDev = widget.ble.device;
     if (bleDev != null) _currentBleRemoteId = bleDev.remoteId.toString();
+    _ensureConnectionStateListenerBound();
     var resolvedId = _normNodeId(evt.id.isNotEmpty ? evt.id : _nodeId);
     if (resolvedId.isEmpty) {
       resolvedId = _normNodeId(RiftLinkBle.nodeIdHintFromDevice(bleDev) ?? '');
@@ -1353,8 +1431,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _screenController.bindEvents(
       ble: widget.ble,
       isMounted: () => mounted,
-      onEvent: _handleBleEvent,
-      onLastInfoReplay: _onInfoEvent,
+      onEvent: (evt) {
+        _markTransportActivity();
+        _handleBleEvent(evt);
+      },
+      onLastInfoReplay: (info) {
+        _markTransportActivity();
+        _onInfoEvent(info);
+      },
     );
   }
 
@@ -1611,44 +1695,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       ble: widget.ble,
       messages: _messages,
       readSent: _readSent,
-    );
-  }
-
-  ChatReconnectDeps _buildReconnectDeps() {
-    return ChatReconnectDeps(
-      ble: widget.ble,
-      isMounted: () => mounted,
-      isReconnecting: () => _reconnecting,
-      currentRemoteId: () => _currentBleRemoteId,
-      setReconnectState: ({required reconnecting, int? attempt}) {
-        if (!mounted) return;
-        setState(() {
-          _reconnecting = reconnecting;
-          if (attempt != null) _reconnectAttempt = attempt;
-        });
-      },
-      showReconnectAttempt: (attempt) {
-        _showSnack(
-          context.l10n.tr('reconnecting', {'n': '$attempt'}),
-          duration: const Duration(seconds: 2),
-        );
-      },
-      showReconnectSuccess: () {
-        _showSnack(
-          context.l10n.tr('reconnect_ok'),
-          backgroundColor: context.palette.success,
-        );
-      },
-      onReconnectSuccess: (remoteId) async {
-        _currentBleRemoteId = remoteId;
-        _listenConnectionState();
-        _listenEvents();
-        widget.ble.getInfo();
-        _scheduleDirectPeerAutoPing(force: true);
-      },
-      onReconnectFailed: () async {
-        await _goToScan(context.l10n.tr('reconnect_failed'));
-      },
     );
   }
 
@@ -2132,6 +2178,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           section: _MenuSection.context,
           enabled: true,
         ),
+      _MenuItemData(
+        id: 'clear_chat',
+        icon: Icons.cleaning_services_outlined,
+        title: l.tr('chat_action_clear'),
+        section: _MenuSection.context,
+        enabled: _conversationId != null,
+      ),
     ];
     return out;
   }
@@ -2271,6 +2324,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           _showSnack(context.l10n.tr('error'));
         }
         break;
+      case 'clear_chat':
+        await _clearCurrentChat();
+        break;
       case 'send_location':
         if (widget.ble.isTransportConnected) {
           _sendLocation();
@@ -2300,6 +2356,26 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         }
         break;
     }
+  }
+
+  Future<void> _clearCurrentChat() async {
+    final convId = _conversationId;
+    if (convId == null || convId.isEmpty || !mounted) return;
+    final l = context.l10n;
+    final ok = await showRiftConfirmDialog(
+      context: context,
+      title: l.tr('clear_chat_title'),
+      message: l.tr('clear_chat_confirm'),
+      cancelText: l.tr('cancel'),
+      confirmText: l.tr('chat_action_clear'),
+      danger: true,
+      icon: Icons.cleaning_services_outlined,
+    );
+    if (ok != true) return;
+    await _chatRepo.clearConversationMessages(convId);
+    if (!mounted) return;
+    setState(() => _messages.clear());
+    _showSnack(l.tr('chat_cleared'));
   }
 
   @override
@@ -2342,31 +2418,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       body: Stack(
         fit: StackFit.expand,
         children: [
-          if (_reconnecting)
-            Positioned.fill(
-              child: Container(
-                color: Colors.black54,
-                child: Center(
-                  child: Card(
-                    color: context.palette.card,
-                    child: Padding(
-                      padding: const EdgeInsets.all(AppSpacing.xxl),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          CircularProgressIndicator(color: context.palette.primary),
-                          const SizedBox(height: AppSpacing.lg),
-                          Text(
-                            l.tr('reconnecting', {'n': '${_reconnectAttempt}/3'}),
-                            style: AppTypography.bodyBase().copyWith(color: context.palette.onSurface),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
           Positioned.fill(
             child: IgnorePointer(
               child: ColoredBox(

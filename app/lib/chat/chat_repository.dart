@@ -504,6 +504,125 @@ class ChatRepository {
     _conversationsController.add(null);
   }
 
+  Future<void> clearConversationMessages(String conversationId) async {
+    final db = await _database;
+    await db.delete('messages', where: 'conversation_id = ?', whereArgs: [conversationId]);
+    await db.update(
+      'conversations',
+      {
+        'last_preview': null,
+        'last_at_ms': null,
+        'unread_count': 0,
+      },
+      where: 'id = ?',
+      whereArgs: [conversationId],
+    );
+    _conversationsController.add(null);
+  }
+
+  Future<void> upsertGroupConversationTitle({
+    required String canonicalName,
+    String? groupUid,
+    int? channelId32,
+  }) async {
+    final title = canonicalName.trim();
+    if (title.isEmpty) return;
+    final uid = groupUid?.trim().toUpperCase() ?? '';
+    final normalizedChannel = channelId32 ?? 0;
+    final candidateIds = <String>{};
+    final candidatePeerRefs = <String>{};
+    if (uid.isNotEmpty) {
+      candidateIds.add(groupConversationIdByUid(uid));
+      candidatePeerRefs.add(groupPeerRefByUid(uid));
+    }
+    if (normalizedChannel > 1) {
+      candidateIds.add(groupConversationIdByUid('UNRESOLVED_$normalizedChannel'));
+      candidateIds.add('group:$normalizedChannel');
+      candidatePeerRefs.add('$normalizedChannel');
+    }
+    if (candidateIds.isEmpty && candidatePeerRefs.isEmpty) return;
+
+    final db = await _database;
+    var changed = false;
+    await db.transaction((txn) async {
+      for (final id in candidateIds) {
+        final rows = await txn.query(
+          'conversations',
+          columns: ['title'],
+          where: 'id = ? AND kind = ?',
+          whereArgs: [id, ConversationKind.group.name],
+          limit: 1,
+        );
+        if (rows.isEmpty) continue;
+        final current = (rows.first['title'] as String?)?.trim() ?? '';
+        if (current == title) continue;
+        final count = await txn.update('conversations', {'title': title}, where: 'id = ?', whereArgs: [id]);
+        if (count > 0) changed = true;
+      }
+      for (final peerRef in candidatePeerRefs) {
+        final rows = await txn.query(
+          'conversations',
+          columns: ['id', 'title'],
+          where: 'peer_ref = ? AND kind = ?',
+          whereArgs: [peerRef, ConversationKind.group.name],
+        );
+        for (final row in rows) {
+          final current = (row['title'] as String?)?.trim() ?? '';
+          if (current == title) continue;
+          final id = row['id'] as String?;
+          if (id == null || id.isEmpty) continue;
+          final count = await txn.update('conversations', {'title': title}, where: 'id = ?', whereArgs: [id]);
+          if (count > 0) changed = true;
+        }
+      }
+    });
+    if (changed) _conversationsController.add(null);
+  }
+
+  Future<void> removeGroupConversation({
+    String? groupUid,
+    int? channelId32,
+  }) async {
+    final uid = groupUid?.trim().toUpperCase() ?? '';
+    final normalizedChannel = channelId32 ?? 0;
+    final candidateIds = <String>{};
+    final candidatePeerRefs = <String>{};
+    if (uid.isNotEmpty) {
+      candidateIds.add(groupConversationIdByUid(uid));
+      candidatePeerRefs.add(groupPeerRefByUid(uid));
+    }
+    if (normalizedChannel > 1) {
+      candidateIds.add(groupConversationIdByUid('UNRESOLVED_$normalizedChannel'));
+      candidateIds.add('group:$normalizedChannel');
+      candidatePeerRefs.add('$normalizedChannel');
+    }
+    if (candidateIds.isEmpty && candidatePeerRefs.isEmpty) return;
+
+    final db = await _database;
+    final idsToDelete = <String>{...candidateIds};
+    await db.transaction((txn) async {
+      for (final peerRef in candidatePeerRefs) {
+        final rows = await txn.query(
+          'conversations',
+          columns: ['id'],
+          where: 'peer_ref = ? AND kind = ?',
+          whereArgs: [peerRef, ConversationKind.group.name],
+        );
+        for (final row in rows) {
+          final id = row['id'] as String?;
+          if (id != null && id.isNotEmpty) idsToDelete.add(id);
+        }
+      }
+      for (final id in idsToDelete) {
+        await txn.delete('messages', where: 'conversation_id = ?', whereArgs: [id]);
+        await txn.delete('drafts', where: 'conversation_id = ?', whereArgs: [id]);
+        await txn.delete('conversation_pins', where: 'conversation_id = ?', whereArgs: [id]);
+        await txn.delete('conversations', where: 'id = ?', whereArgs: [id]);
+      }
+    });
+    _conversationsController.add(null);
+  }
+
   Future<void> clearAll() async {
     final db = await _database;
     await db.delete('messages');
@@ -532,7 +651,7 @@ class ChatRepository {
     return (rows.first['text'] as String?) ?? '';
   }
 
-  Future<void> updateByMsgId({
+  Future<int> updateByMsgId({
     required int msgId,
     required String conversationId,
     MessageStatus? status,
@@ -544,12 +663,65 @@ class ChatRepository {
     if (status != null) payload['status'] = status.name;
     if (delivered != null) payload['delivered'] = delivered;
     if (total != null) payload['total'] = total;
-    if (payload.isEmpty) return;
-    await db.update(
+    if (payload.isEmpty) return 0;
+    final updated = await db.update(
       'messages',
       payload,
       where: 'conversation_id = ? AND msg_id = ?',
       whereArgs: [conversationId, msgId],
+    );
+    return updated;
+  }
+
+  Future<int> updateByMsgIdAnyConversation({
+    required int msgId,
+    MessageStatus? status,
+    int? delivered,
+    int? total,
+  }) async {
+    final db = await _database;
+    final payload = <String, Object?>{};
+    if (status != null) payload['status'] = status.name;
+    if (delivered != null) payload['delivered'] = delivered;
+    if (total != null) payload['total'] = total;
+    if (payload.isEmpty) return 0;
+    final updated = await db.update(
+      'messages',
+      payload,
+      where: 'msg_id = ?',
+      whereArgs: [msgId],
+    );
+    return updated;
+  }
+
+  Future<int> bindMsgIdToLatestOutgoing({
+    required String conversationId,
+    required int msgId,
+    required MessageStatus status,
+    int? delivered,
+    int? total,
+  }) async {
+    final db = await _database;
+    final payload = <String, Object?>{
+      'msg_id': msgId,
+      'status': status.name,
+    };
+    if (delivered != null) payload['delivered'] = delivered;
+    if (total != null) payload['total'] = total;
+    return db.update(
+      'messages',
+      payload,
+      where: '''
+        id = (
+          SELECT id FROM messages
+          WHERE conversation_id = ?
+            AND direction = ?
+            AND msg_id IS NULL
+          ORDER BY created_at_ms DESC, id DESC
+          LIMIT 1
+        )
+      ''',
+      whereArgs: [conversationId, MessageDirection.outgoing.name],
     );
   }
 
@@ -620,6 +792,111 @@ class ChatRepository {
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+  }
+
+  Future<void> migrateUnresolvedGroupConversation({
+    required int channelId32,
+    required String groupUid,
+  }) async {
+    final uid = groupUid.trim().toUpperCase();
+    if (channelId32 <= 1 || uid.isEmpty) return;
+    final db = await _database;
+    final unresolvedId = groupConversationIdByUid('UNRESOLVED_$channelId32');
+    final resolvedId = groupConversationIdByUid(uid);
+    if (unresolvedId == resolvedId) return;
+
+    await db.transaction((txn) async {
+      final unresolvedRows = await txn.query(
+        'conversations',
+        where: 'id = ?',
+        whereArgs: [unresolvedId],
+        limit: 1,
+      );
+      if (unresolvedRows.isEmpty) return;
+
+      final unresolved = unresolvedRows.first;
+      final resolvedRows = await txn.query(
+        'conversations',
+        where: 'id = ?',
+        whereArgs: [resolvedId],
+        limit: 1,
+      );
+
+      if (resolvedRows.isEmpty) {
+        await txn.insert(
+          'conversations',
+          {
+            'id': resolvedId,
+            'kind': 'group',
+            'peer_ref': groupPeerRefByUid(uid),
+            'title': (unresolved['title'] as String?) ?? 'Group $channelId32',
+            'subtitle': unresolved['subtitle'],
+            'last_preview': unresolved['last_preview'],
+            'last_at_ms': unresolved['last_at_ms'],
+            'unread_count': unresolved['unread_count'] ?? 0,
+            'archived': unresolved['archived'] ?? 0,
+            'pinned': unresolved['pinned'] ?? 0,
+            'muted': unresolved['muted'] ?? 0,
+            'folder_id': unresolved['folder_id'] ?? 'all',
+          },
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
+      } else {
+        final resolved = resolvedRows.first;
+        final unresolvedUnread = (unresolved['unread_count'] as int?) ?? 0;
+        final resolvedUnread = (resolved['unread_count'] as int?) ?? 0;
+        if (unresolvedUnread > 0) {
+          await txn.update(
+            'conversations',
+            {'unread_count': resolvedUnread + unresolvedUnread},
+            where: 'id = ?',
+            whereArgs: [resolvedId],
+          );
+        }
+      }
+
+      await txn.update(
+        'messages',
+        {
+          'conversation_id': resolvedId,
+          'group_id': channelId32,
+          'group_uid': uid,
+        },
+        where: 'conversation_id = ?',
+        whereArgs: [unresolvedId],
+      );
+
+      final unresolvedDraft = await txn.query(
+        'drafts',
+        columns: ['text'],
+        where: 'conversation_id = ?',
+        whereArgs: [unresolvedId],
+        limit: 1,
+      );
+      if (unresolvedDraft.isNotEmpty) {
+        final existingResolvedDraft = await txn.query(
+          'drafts',
+          columns: ['conversation_id'],
+          where: 'conversation_id = ?',
+          whereArgs: [resolvedId],
+          limit: 1,
+        );
+        if (existingResolvedDraft.isEmpty) {
+          await txn.insert(
+            'drafts',
+            {
+              'conversation_id': resolvedId,
+              'text': (unresolvedDraft.first['text'] as String?) ?? '',
+            },
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        }
+      }
+
+      await txn.delete('drafts', where: 'conversation_id = ?', whereArgs: [unresolvedId]);
+      await txn.delete('conversations', where: 'id = ?', whereArgs: [unresolvedId]);
+    });
+    _conversationsController.add(null);
   }
 
   Future<void> migrateLegacyGroupConversationsToUid(Map<int, String> groupIdToUid) async {

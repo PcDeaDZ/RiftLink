@@ -7,6 +7,8 @@
 #include "neighbors/neighbors.h"
 #include "node/node.h"
 #include "radio/radio.h"
+#include "async_tasks.h"
+#include "log.h"
 #include <Arduino.h>
 #include <nvs.h>
 #include <esp_err.h>
@@ -252,11 +254,25 @@ void onNodeOnline(const uint8_t* nodeId) {
           m->payload, m->payloadLen, true, true, compressed, channel);
     }
     if (len > 0) {
-      radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(nodeId)), isCritical);  // priority for critical lane
-      Serial.printf("[RiftLink] Offline delivery to %02X%02X\n", nodeId[0], nodeId[1]);
+      uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(nodeId));
+      char reasonBuf[40];
+      bool queued = queueTxPacket(pkt, len, txSf, isCritical,
+          isCritical ? TxRequestClass::critical : TxRequestClass::data,
+          reasonBuf, sizeof(reasonBuf));
+      if (queued) {
+        Serial.printf("[RiftLink] Offline delivery to %02X%02X\n", nodeId[0], nodeId[1]);
+        m->inUse = false;
+        modified = true;
+      } else {
+        // Best-effort deferred fallback. Keep entry in queue as safety net in case deferred slots are full.
+        queueDeferredSend(pkt, len, txSf, 90, true);
+        RIFTLINK_DIAG("OFFLINE", "event=OFFLINE_TX_DEFER to=%02X%02X cause=%s",
+            nodeId[0], nodeId[1], reasonBuf[0] ? reasonBuf : "?");
+      }
+    } else {
+      m->inUse = false;
+      modified = true;
     }
-    m->inUse = false;
-    modified = true;
   }
   if (modified) s_dirty = true;
   xSemaphoreGive(s_mutex);

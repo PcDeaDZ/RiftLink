@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:collection';
+import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../ble/riftlink_ble.dart';
 import '../contacts/contacts_service.dart';
@@ -9,7 +11,13 @@ class ChatEventIngestor {
   final RiftLinkBle ble;
   final ChatRepository repo;
   StreamSubscription<RiftLinkEvent>? _sub;
+  final Queue<_QueuedBleEvent> _eventQueue = Queue<_QueuedBleEvent>();
+  bool _processingQueue = false;
   final Set<String> _dedup = <String>{};
+  final Map<String, int> _statusCounters = <String, int>{};
+  int _statusEventsSinceDump = 0;
+  DateTime _lastStatusDumpAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastQueueLagLogAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   ChatEventIngestor({
     required this.ble,
@@ -19,12 +27,66 @@ class ChatEventIngestor {
   Future<void> start() async {
     await repo.init();
     _sub?.cancel();
-    _sub = ble.events.listen(_handle);
+    _sub = ble.events.listen(_enqueue);
   }
 
   Future<void> stop() async {
     await _sub?.cancel();
     _sub = null;
+    _eventQueue.clear();
+    _processingQueue = false;
+  }
+
+  void _enqueue(RiftLinkEvent event) {
+    _eventQueue.addLast(_QueuedBleEvent(event, DateTime.now()));
+    _drainQueue();
+  }
+
+  void _maybeLogQueueLag(_QueuedBleEvent queued) {
+    final lagMs = DateTime.now().difference(queued.enqueuedAt).inMilliseconds;
+    if (lagMs < 150 && _eventQueue.length < 30) return;
+    final now = DateTime.now();
+    if (now.difference(_lastQueueLagLogAt) < const Duration(seconds: 2)) return;
+    _lastQueueLagLogAt = now;
+    debugPrint(
+      '[BLE_CHAIN] stage=app_ingest action=queue_lag lag_ms=$lagMs depth=${_eventQueue.length} evt=${queued.event.runtimeType}',
+    );
+  }
+
+  void _drainQueue() {
+    if (_processingQueue) return;
+    _processingQueue = true;
+    unawaited(() async {
+      try {
+        while (_eventQueue.isNotEmpty) {
+          final queued = _eventQueue.removeFirst();
+          _maybeLogQueueLag(queued);
+          await _handle(queued.event);
+        }
+      } finally {
+        _processingQueue = false;
+        // In case new events arrived between the last loop check and finally.
+        if (_eventQueue.isNotEmpty) {
+          _drainQueue();
+        }
+      }
+    }());
+  }
+
+  void _recordStatus(String evt, int? msgId, String peer) {
+    _statusCounters[evt] = (_statusCounters[evt] ?? 0) + 1;
+    _statusEventsSinceDump++;
+    final now = DateTime.now();
+    final shouldDump = _statusEventsSinceDump >= 15 || now.difference(_lastStatusDumpAt) >= const Duration(seconds: 30);
+    if (!shouldDump) return;
+    _statusEventsSinceDump = 0;
+    _lastStatusDumpAt = now;
+    debugPrint(
+      '[BLE_CHAIN] stage=app_msg_state action=ingest evt=$evt msgId=${msgId ?? 0} peer=$peer '
+      'sent=${_statusCounters['sent'] ?? 0} delivered=${_statusCounters['delivered'] ?? 0} '
+      'read=${_statusCounters['read'] ?? 0} undelivered=${_statusCounters['undelivered'] ?? 0} '
+      'broadcast_delivery=${_statusCounters['broadcast_delivery'] ?? 0}',
+    );
   }
 
   String _normalizeId(String raw) => raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
@@ -83,16 +145,39 @@ class ChatEventIngestor {
   Future<void> _handle(RiftLinkEvent event) async {
     if (event is RiftLinkMsgEvent) {
       final from = _normalizeId(event.from);
-      final dedupKey = 'msg:$from:${event.msgId ?? -1}:${event.text.hashCode}';
+      final rawGroupUid = event.groupUid?.trim().toUpperCase();
+      final hasGroupUid = rawGroupUid != null && rawGroupUid.isNotEmpty;
+      final hasGroupId = (event.group ?? 0) > 0;
+      final groupContext = hasGroupUid
+          ? rawGroupUid
+          : (hasGroupId ? 'UNRESOLVED_${event.group}' : null);
+      final dedupKey = 'msg:$from:${event.msgId ?? -1}:${event.text.hashCode}:${groupContext ?? 'direct'}';
       if (!_dedup.add(dedupKey)) return;
 
-      final conversationId = ChatRepository.directConversationId(from);
-      await _ensureConversationForDirect(from);
+      final conversationId = groupContext != null
+          ? ChatRepository.groupConversationIdByUid(groupContext)
+          : ChatRepository.directConversationId(from);
+      if (groupContext != null) {
+        if (hasGroupUid && hasGroupId) {
+          await repo.migrateUnresolvedGroupConversation(
+            channelId32: event.group!,
+            groupUid: groupContext,
+          );
+        }
+        await _ensureConversationForGroupUid(
+          groupContext,
+          channelId32: event.group,
+        );
+      } else {
+        await _ensureConversationForDirect(from);
+      }
       await repo.appendMessage(
         ChatMessage(
           conversationId: conversationId,
           from: from,
           text: event.text,
+          groupId: event.group,
+          groupUid: groupContext,
           type: event.type,
           lane: event.lane,
           direction: MessageDirection.incoming,
@@ -111,6 +196,7 @@ class ChatEventIngestor {
 
     if (event is RiftLinkSentEvent) {
       final to = _normalizeId(event.to);
+      _recordStatus('sent', event.msgId, to);
       final conversationId = to == 'FFFFFFFFFFFFFFFF'
           ? ChatRepository.broadcastConversationId()
           : ChatRepository.directConversationId(to);
@@ -119,63 +205,132 @@ class ChatEventIngestor {
       } else {
         await _ensureConversationForDirect(to);
       }
-      await repo.updateByMsgId(
+      var updated = await repo.updateByMsgId(
         msgId: event.msgId,
         conversationId: conversationId,
         status: MessageStatus.sent,
       );
+      if (updated == 0) {
+        // Fallback: sent can arrive before local outgoing row gets msg_id.
+        updated = await repo.bindMsgIdToLatestOutgoing(
+          conversationId: conversationId,
+          msgId: event.msgId,
+          status: MessageStatus.sent,
+        );
+      }
+      if (updated == 0) {
+        await repo.updateByMsgIdAnyConversation(
+          msgId: event.msgId,
+          status: MessageStatus.sent,
+        );
+      }
       return;
     }
 
     if (event is RiftLinkDeliveredEvent) {
       final from = _normalizeId(event.from);
+      _recordStatus('delivered', event.msgId, from);
       final conversationId = ChatRepository.directConversationId(from);
       await _ensureConversationForDirect(from);
-      await repo.updateByMsgId(
+      var updated = await repo.updateByMsgId(
         msgId: event.msgId,
         conversationId: conversationId,
         status: MessageStatus.delivered,
       );
+      if (updated == 0) {
+        updated = await repo.bindMsgIdToLatestOutgoing(
+          conversationId: conversationId,
+          msgId: event.msgId,
+          status: MessageStatus.delivered,
+        );
+      }
+      if (updated == 0) {
+        await repo.updateByMsgIdAnyConversation(
+          msgId: event.msgId,
+          status: MessageStatus.delivered,
+        );
+      }
       return;
     }
 
     if (event is RiftLinkReadEvent) {
       final from = _normalizeId(event.from);
+      _recordStatus('read', event.msgId, from);
       final conversationId = ChatRepository.directConversationId(from);
       await _ensureConversationForDirect(from);
-      await repo.updateByMsgId(
+      var updated = await repo.updateByMsgId(
         msgId: event.msgId,
         conversationId: conversationId,
         status: MessageStatus.read,
       );
+      if (updated == 0) {
+        updated = await repo.bindMsgIdToLatestOutgoing(
+          conversationId: conversationId,
+          msgId: event.msgId,
+          status: MessageStatus.read,
+        );
+      }
+      if (updated == 0) {
+        await repo.updateByMsgIdAnyConversation(
+          msgId: event.msgId,
+          status: MessageStatus.read,
+        );
+      }
       return;
     }
 
     if (event is RiftLinkUndeliveredEvent) {
       final to = _normalizeId(event.to);
+      _recordStatus('undelivered', event.msgId, to);
       final conversationId = to == 'FFFFFFFFFFFFFFFF'
           ? ChatRepository.broadcastConversationId()
           : ChatRepository.directConversationId(to);
-      await repo.updateByMsgId(
+      var updated = await repo.updateByMsgId(
         msgId: event.msgId,
         conversationId: conversationId,
         status: MessageStatus.undelivered,
         delivered: event.delivered,
         total: event.total,
       );
+      if (updated == 0) {
+        updated = await repo.bindMsgIdToLatestOutgoing(
+          conversationId: conversationId,
+          msgId: event.msgId,
+          status: MessageStatus.undelivered,
+          delivered: event.delivered,
+          total: event.total,
+        );
+      }
+      if (updated == 0) {
+        await repo.updateByMsgIdAnyConversation(
+          msgId: event.msgId,
+          status: MessageStatus.undelivered,
+          delivered: event.delivered,
+          total: event.total,
+        );
+      }
       return;
     }
 
     if (event is RiftLinkBroadcastDeliveryEvent) {
+      _recordStatus('broadcast_delivery', event.msgId, 'FFFFFFFFFFFFFFFF');
       final conversationId = ChatRepository.broadcastConversationId();
       await _ensureBroadcastConversation();
-      await repo.updateByMsgId(
+      var updated = await repo.updateByMsgId(
         msgId: event.msgId,
         conversationId: conversationId,
         status: event.delivered > 0 ? MessageStatus.delivered : MessageStatus.undelivered,
         delivered: event.delivered,
         total: event.total,
       );
+      if (updated == 0) {
+        await repo.updateByMsgIdAnyConversation(
+          msgId: event.msgId,
+          status: event.delivered > 0 ? MessageStatus.delivered : MessageStatus.undelivered,
+          delivered: event.delivered,
+          total: event.total,
+        );
+      }
       return;
     }
 
@@ -264,5 +419,12 @@ class ChatEventIngestor {
     // Do not auto-create chats from node info/groups snapshots.
     // We only create conversations by explicit user action or real messages.
   }
+}
+
+class _QueuedBleEvent {
+  final RiftLinkEvent event;
+  final DateTime enqueuedAt;
+
+  const _QueuedBleEvent(this.event, this.enqueuedAt);
 }
 

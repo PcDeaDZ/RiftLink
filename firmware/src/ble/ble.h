@@ -19,9 +19,9 @@ void setOnSend(void (*cb)(const uint8_t* to, const char* text, uint8_t ttlMinute
     bool critical, uint8_t triggerType, uint32_t triggerValueMs, bool isSos));
 void setOnLocation(void (*cb)(float lat, float lon, int16_t alt, uint16_t radiusM, uint32_t expiryEpochSec));
 void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId = 0, int rssi = 0, uint8_t ttlMinutes = 0,
-    const char* lane = "normal", const char* type = "text");
+    const char* lane = "normal", const char* type = "text", uint32_t groupId = 0, const char* groupUid = nullptr);
 void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId = 0, int rssi = 0, uint8_t ttlMinutes = 0,
-    const char* lane = "normal", const char* type = "text");  // отложить — снизить стек в handlePacket
+    const char* lane = "normal", const char* type = "text", uint32_t groupId = 0, const char* groupUid = nullptr);  // отложить — снизить стек в handlePacket
 void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi = 0);
 void notifyRead(const uint8_t* from, uint32_t msgId, int rssi = 0);
 /** evt "sent" — unicast поставлен в очередь (to, msgId) */

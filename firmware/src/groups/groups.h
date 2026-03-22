@@ -55,6 +55,8 @@ bool updateGroupKeyV2(const char* groupUid, const uint8_t* groupKey32, uint16_t 
 bool ackKeyAppliedV2(const char* groupUid, uint16_t keyVersion);
 /** Обновить watermark отзыва прав. */
 bool setRevocationEpochV2(const char* groupUid, uint32_t revocationEpoch);
+/** Удалить V2-группу из локального runtime/NVS состояния. */
+bool removeGroupV2(const char* groupUid);
 /** Получить V2-состояние по groupUid. */
 bool getGroupV2(
     const char* groupUid,

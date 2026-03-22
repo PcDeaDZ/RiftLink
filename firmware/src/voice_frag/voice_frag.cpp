@@ -6,6 +6,8 @@
 #include "neighbors/neighbors.h"
 #include "node/node.h"
 #include "radio/radio.h"
+#include "async_tasks.h"
+#include "log.h"
 #include "crypto/crypto.h"
 #include <Arduino.h>
 #include <esp_random.h>
@@ -131,7 +133,14 @@ bool send(const uint8_t* to, const uint8_t* data, size_t dataLen) {
         node::getId(), to, 31, protocol::OP_VOICE_MSG,
         fragPayload, FRAG_HEADER_LEN + chunkLen, true, false, false, txProfile.channel);
     if (pktLen > 0) {
-      radio::send(pkt, pktLen, txSf, txProfile.channel == protocol::CHANNEL_CRITICAL);
+      bool priority = (txProfile.channel == protocol::CHANNEL_CRITICAL);
+      char reasonBuf[40];
+      if (!queueTxPacket(pkt, pktLen, txSf, priority, TxRequestClass::voice, reasonBuf, sizeof(reasonBuf))) {
+        uint32_t delayMs = 50u + (uint32_t)((part - 1) * 16u);
+        queueDeferredSend(pkt, pktLen, txSf, delayMs, true);
+        RIFTLINK_DIAG("VOICE", "event=VOICE_TX_DEFER part=%u/%u to=%02X%02X sf=%u cause=%s",
+            (unsigned)part, (unsigned)nFrags, to[0], to[1], (unsigned)txSf, reasonBuf[0] ? reasonBuf : "?");
+      }
       if (part < nFrags && txProfile.interFragDelayMs > 0) {
         delay(txProfile.interFragDelayMs);
       }

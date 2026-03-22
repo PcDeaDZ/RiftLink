@@ -515,6 +515,25 @@ void test_opcode_group_msg_min_payload() {
   TEST_ASSERT_EQUAL(protocol::OP_GROUP_MSG, hdr.opcode);
 }
 
+void test_opcode_group_msg_pktid_roundtrip() {
+  uint8_t buf[128];
+  uint8_t grpPl[40];
+  for (int i = 0; i < 40; i++) grpPl[i] = (uint8_t)(0x80 + i);
+  size_t len = protocol::buildPacket(buf, sizeof(buf),
+      s_from, protocol::BROADCAST_ID, 3, protocol::OP_GROUP_MSG,
+      grpPl, 40, true, false, false, 0, 77);
+  TEST_ASSERT_EQUAL(protocol::HEADER_LEN_BROADCAST_PKTID + 40, len);
+  protocol::PacketHeader hdr;
+  const uint8_t* pl = nullptr;
+  size_t plLen = 0;
+  bool ok = protocol::parsePacket(buf, len, &hdr, &pl, &plLen);
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL(protocol::OP_GROUP_MSG, hdr.opcode);
+  TEST_ASSERT_EQUAL(77, hdr.pktId);
+  TEST_ASSERT_EQUAL(40, plLen);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(grpPl, pl, 40);
+}
+
 // --- buildPacket граничные ---
 void test_build_buffer_too_small() {
   uint8_t buf[5];
@@ -870,6 +889,47 @@ void test_scenario_read_unicast_to_sender() {
   TEST_ASSERT_EQUAL_UINT8_ARRAY(s_from, hdr.to, 8);
 }
 
+void test_parse_len_mismatch_on_truncated_key_exchange_pktid() {
+  uint8_t pkt[128];
+  uint8_t key[32];
+  for (int i = 0; i < 32; i++) key[i] = (uint8_t)(0xA0 + i);
+  size_t len = protocol::buildPacket(pkt, sizeof(pkt),
+      s_from, s_to, 1, protocol::OP_KEY_EXCHANGE,
+      key, 32, false, false, false, 0, 99);
+  TEST_ASSERT_EQUAL(protocol::HEADER_LEN_PKTID + 32, len);
+
+  protocol::PacketHeader hdr;
+  protocol::ParseResult res;
+  bool ok = protocol::parsePacketEx(pkt, len - 3, &hdr, nullptr, nullptr, &res);
+  TEST_ASSERT_FALSE(ok);
+  TEST_ASSERT_EQUAL(protocol::ParseStatus::len_mismatch, res.status);
+  TEST_ASSERT_EQUAL_UINT32((uint32_t)len, (uint32_t)res.expectedLen);
+}
+
+void test_parse_accepts_trailing_radio_garbage() {
+  uint8_t pkt[128];
+  uint8_t payload[32];
+  for (int i = 0; i < 32; i++) payload[i] = (uint8_t)(i + 1);
+  size_t len = protocol::buildPacket(pkt, sizeof(pkt),
+      s_from, s_to, 2, protocol::OP_MSG,
+      payload, 32, true, true, false, 0, 0);
+  TEST_ASSERT_GREATER_THAN(0, len);
+
+  uint8_t withTail[160];
+  memcpy(withTail, pkt, len);
+  memset(withTail + len, 0xEE, 7);  // имитация радиомусора после валидного кадра
+
+  protocol::PacketHeader hdr;
+  const uint8_t* pl = nullptr;
+  size_t plLen = 0;
+  protocol::ParseResult res;
+  bool ok = protocol::parsePacketEx(withTail, len + 7, &hdr, &pl, &plLen, &res);
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL(protocol::OP_MSG, hdr.opcode);
+  TEST_ASSERT_EQUAL(32, plLen);
+  TEST_ASSERT_EQUAL(protocol::ParseStatus::ok, res.status);
+}
+
 int main(int argc, char** argv) {
   UNITY_BEGIN();
   RUN_TEST(test_build_parse_broadcast_roundtrip);
@@ -904,6 +964,7 @@ int main(int argc, char** argv) {
   RUN_TEST(test_opcode_read_unicast);
   RUN_TEST(test_opcode_msg_frag_min_payload);
   RUN_TEST(test_opcode_group_msg_min_payload);
+  RUN_TEST(test_opcode_group_msg_pktid_roundtrip);
   RUN_TEST(test_build_buffer_too_small);
   RUN_TEST(test_build_null_payload_zero_len);
   RUN_TEST(test_build_all_flags);
@@ -930,5 +991,7 @@ int main(int argc, char** argv) {
   RUN_TEST(test_get_expected_packet_length_extended);
   RUN_TEST(test_scenario_route_req_always_broadcast);
   RUN_TEST(test_scenario_read_unicast_to_sender);
+  RUN_TEST(test_parse_len_mismatch_on_truncated_key_exchange_pktid);
+  RUN_TEST(test_parse_accepts_trailing_radio_garbage);
   return UNITY_END();
 }

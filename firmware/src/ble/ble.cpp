@@ -29,6 +29,7 @@
 #include "ui/display.h"
 #include "async_tasks.h"
 #include "version.h"
+#include "log.h"
 #include "bls_n/bls_n.h"
 #include "crypto/crypto.h"
 #include "esp_now_slots/esp_now_slots.h"
@@ -39,6 +40,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <esp_heap_caps.h>
 #include <stdlib.h>
 #include <nvs.h>
@@ -163,6 +165,7 @@ static volatile bool s_pendingSelftest = false;
 static volatile bool s_pendingGroupSend = false;
 static uint32_t s_pendingGroupId = 0;
 static char s_pendingGroupText[256] = {0};
+static uint16_t s_diagPktIdCounter = 0;  // pktId for BLE diagnostic traffic (ping/signalTest)
 static volatile bool s_pendingMsg = false;
 static uint8_t s_pendingMsgFrom[8] = {0};
 static char s_pendingMsgText[256] = {0};
@@ -171,6 +174,8 @@ static int s_pendingMsgRssi = 0;
 static uint8_t s_pendingMsgTtl = 0;
 static char s_pendingMsgLane[10] = "normal";
 static char s_pendingMsgType[10] = "text";
+static uint32_t s_pendingMsgGroupId = 0;
+static char s_pendingMsgGroupUid[groups::GROUP_UID_MAX_LEN + 1] = {0};
 static volatile bool s_pendingNickname = false;
 static char s_pendingNicknameBuf[33] = {0};
 static volatile bool s_pendingGps = false;
@@ -317,6 +322,47 @@ struct BleCmdQueueItem {
   uint8_t data[BLE_ATT_MAX_JSON_BYTES];
 };
 static QueueHandle_t s_bleCmdQueue = nullptr;
+static SemaphoreHandle_t s_notifyMutex = nullptr;
+struct BleDiagCounters {
+  uint32_t cmdEnqueued = 0;
+  uint32_t cmdDroppedQueueFull = 0;
+  uint32_t cmdConsumed = 0;
+  uint32_t cmdQueueHighWater = 0;
+  uint32_t notifySent = 0;
+  uint32_t notifySkipNoTransport = 0;
+  uint32_t notifyBytes = 0;
+  uint32_t notifyChunks = 0;
+  uint32_t statusSent = 0;
+  uint32_t statusDelivered = 0;
+  uint32_t statusRead = 0;
+  uint32_t statusUndelivered = 0;
+  uint32_t statusBroadcastDelivery = 0;
+};
+static BleDiagCounters s_bleDiag;
+static uint32_t s_bleDiagLastSnapshotMs = 0;
+
+static void bleDiagMaybeSnapshot(const char* reason, uint32_t minIntervalMs = 10000) {
+  const uint32_t now = millis();
+  if (now - s_bleDiagLastSnapshotMs < minIntervalMs) return;
+  s_bleDiagLastSnapshotMs = now;
+  const uint32_t waiting = s_bleCmdQueue ? (uint32_t)uxQueueMessagesWaiting(s_bleCmdQueue) : 0;
+  Serial.printf("[BLE_CHAIN] stage=fw_diag action=snapshot reason=%s cmd_enq=%u cmd_drop=%u cmd_consume=%u cmdq_wait=%u cmdq_hwm=%u notify_sent=%u notify_skip=%u notify_bytes=%u notify_chunks=%u st_sent=%u st_delivered=%u st_read=%u st_undelivered=%u st_broadcast=%u\n",
+      reason ? reason : "-",
+      (unsigned)s_bleDiag.cmdEnqueued,
+      (unsigned)s_bleDiag.cmdDroppedQueueFull,
+      (unsigned)s_bleDiag.cmdConsumed,
+      (unsigned)waiting,
+      (unsigned)s_bleDiag.cmdQueueHighWater,
+      (unsigned)s_bleDiag.notifySent,
+      (unsigned)s_bleDiag.notifySkipNoTransport,
+      (unsigned)s_bleDiag.notifyBytes,
+      (unsigned)s_bleDiag.notifyChunks,
+      (unsigned)s_bleDiag.statusSent,
+      (unsigned)s_bleDiag.statusDelivered,
+      (unsigned)s_bleDiag.statusRead,
+      (unsigned)s_bleDiag.statusUndelivered,
+      (unsigned)s_bleDiag.statusBroadcastDelivery);
+}
 
 static const char* transportModeTag() {
   return (radio_mode::current() == radio_mode::WIFI) ? "wifi" : "ble";
@@ -353,6 +399,10 @@ static size_t bleNotifyMtu() {
 
 static void notifyJsonToApp(const char* payload, size_t len) {
   if (!payload || len == 0) return;
+  if (!s_notifyMutex || xSemaphoreTake(s_notifyMutex, pdMS_TO_TICKS(60)) != pdTRUE) {
+    Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=drop reason=notify_mutex_busy len=%u\n", (unsigned)len);
+    return;
+  }
   char evtTag[24];
   extractEvtForLog(payload, len, evtTag, sizeof(evtTag));
   const char* evt = evtTag[0] ? evtTag : "unknown";
@@ -367,14 +417,22 @@ static void notifyJsonToApp(const char* payload, size_t len) {
     Serial.println();
 #endif
     ws_server::sendEvent(payload, (int)len);
+    s_bleDiag.notifySent++;
+    s_bleDiag.notifyBytes += (uint32_t)len;
+    s_bleDiag.notifyChunks++;
     Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=sent mode=wifi evt=%s len=%u\n",
         evt, (unsigned)len);
+    bleDiagMaybeSnapshot("notify_wifi", 8000);
+    xSemaphoreGive(s_notifyMutex);
     return;
   }
 
   if (!pRxChar || !s_connected) {
+    s_bleDiag.notifySkipNoTransport++;
     Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=skip reason=no_transport mode=%s evt=%s len=%u\n",
         transportModeTag(), evt, (unsigned)len);
+    bleDiagMaybeSnapshot("notify_skip", 1500);
+    xSemaphoreGive(s_notifyMutex);
     return;
   }
 
@@ -414,8 +472,13 @@ static void notifyJsonToApp(const char* payload, size_t len) {
 
     if (!lastChunk) vTaskDelay(pdMS_TO_TICKS(8));
   }
+  s_bleDiag.notifySent++;
+  s_bleDiag.notifyBytes += (uint32_t)len;
+  s_bleDiag.notifyChunks += chunks;
   Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=sent mode=ble evt=%s len=%u chunks=%u\n",
       evt, (unsigned)len, (unsigned)chunks);
+  bleDiagMaybeSnapshot("notify_ble", 8000);
+  xSemaphoreGive(s_notifyMutex);
 }
 
 #if !defined(RIFTLINK_DISABLE_BLS_N)
@@ -449,9 +512,16 @@ class BlsScanCallbacks : public NimBLEScanCallbacks {
 static BlsScanCallbacks s_blsScanCallbacks;
 #endif /* !RIFTLINK_DISABLE_BLS_N */
 
+/** Большой evt info — раньше String::reserve(1200); теперь BSS, без heap. */
+static constexpr size_t NOTIFY_INFO_JSON_CAP = 1280;
+static char s_notifyInfoPayload[NOTIFY_INFO_JSON_CAP];
+static char s_lastInfoPayload[NOTIFY_INFO_JSON_CAP];
+static size_t s_lastInfoPayloadLen = 0;
+
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
     s_connected = true;
+    s_lastInfoPayloadLen = 0;  // send first info snapshot on every new BLE session
     displayWakeRequest();
     vTaskDelay(pdMS_TO_TICKS(5));   // краткая пауза для GATT
   }
@@ -500,19 +570,21 @@ class RiftTxCharacteristic : public NimBLECharacteristic {
     item.len = len;
     memcpy(item.data, val, len);
     if (xQueueSend(s_bleCmdQueue, &item, 0) != pdTRUE) {
+      s_bleDiag.cmdDroppedQueueFull++;
       static uint32_t s_lastCmdDropLogMs = 0;
       uint32_t now = millis();
       if (now - s_lastCmdDropLogMs >= 2000) {
         s_lastCmdDropLogMs = now;
         Serial.println("[BLE] cmd queue full, drop");
+        bleDiagMaybeSnapshot("cmd_drop", 1500);
       }
+    } else {
+      s_bleDiag.cmdEnqueued++;
+      const uint32_t waiting = (uint32_t)uxQueueMessagesWaiting(s_bleCmdQueue);
+      if (waiting > s_bleDiag.cmdQueueHighWater) s_bleDiag.cmdQueueHighWater = waiting;
     }
   }
 };
-
-/** Большой evt info — раньше String::reserve(1200); теперь BSS, без heap. */
-static constexpr size_t NOTIFY_INFO_JSON_CAP = 1280;
-static char s_notifyInfoPayload[NOTIFY_INFO_JSON_CAP];
 
 static void notifyGroupStatusV2(const char* groupUid) {
   if (!groupUid || !groupUid[0]) return;
@@ -1000,7 +1072,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       uint16_t keyVersion = (uint16_t)(doc["keyVersion"] | 1);
       const char* roleStr = doc["myRole"];
       uint32_t revEpoch = doc["revocationEpoch"] | 0;
-      if (!groupUid || !groupUid[0] || !groupTag || !groupTag[0] || !canonicalName || !canonicalName[0] || channelId32 == 0) {
+      if (!groupUid || !groupUid[0] || !groupTag || !groupTag[0] || !canonicalName || !canonicalName[0] || channelId32 <= groups::GROUP_ALL) {
         notifyGroupSecurityErrorV2(groupUid, "group_v3_bad", "Missing groupUid/groupTag/canonicalName/channelId32");
         return;
       }
@@ -1265,7 +1337,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       const uint16_t keyVersion = (uint16_t)strtoul(keyVersionStr, nullptr, 10);
       uint8_t key[32];
       size_t keyLen = 0;
-      if (channelId32 == 0 ||
+      if (channelId32 <= groups::GROUP_ALL ||
           mbedtls_base64_decode(key, sizeof(key), &keyLen, (const unsigned char*)keyB64, strlen(keyB64)) != 0 ||
           keyLen != 32) {
         notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Invalid key/channel");
@@ -1328,6 +1400,20 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         groups::setRevocationEpochV2(groupUid, revEpoch);
       }
       notifyGroupStatusV2(groupUid);
+      return;
+    }
+    if (strcmp(cmd, "groupLeave") == 0) {
+      const char* groupUid = doc["groupUid"];
+      if (!groupUid || !groupUid[0]) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_leave_bad", "Missing groupUid");
+        return;
+      }
+      if (!groups::removeGroupV2(groupUid)) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_leave_bad", "Unknown group");
+        return;
+      }
+      s_pendingGroups = true;
+      scheduleInfoNotify();
       return;
     }
     if (strcmp(cmd, "groupRekey") == 0) {
@@ -1402,7 +1488,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         uint16_t keyVersion = (uint16_t)(g["keyVersion"] | 1);
         uint32_t revEpoch = g["revocationEpoch"] | 0;
         if (!groupUid || !groupUid[0] || !groupTag || !groupTag[0] || !canonicalName || !canonicalName[0] ||
-            channelId32 == 0 || !keyB64 || !keyB64[0]) continue;
+            channelId32 <= groups::GROUP_ALL || !keyB64 || !keyB64[0]) continue;
         uint8_t key[32];
         size_t decLen = 0;
         if (mbedtls_base64_decode(key, sizeof(key), &decLen, (const unsigned char*)keyB64, strlen(keyB64)) != 0 || decLen != 32) {
@@ -1482,10 +1568,18 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       for (int i = 0; i < n && i < 8; i++) {
         uint8_t peerId[protocol::NODE_ID_LEN];
         if (!neighbors::getId(i, peerId)) continue;
-        uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
+        uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN_PKTID];
+        uint16_t pktId = ++s_diagPktIdCounter;
         size_t len = protocol::buildPacket(pkt, sizeof(pkt),
-            node::getId(), peerId, 31, protocol::OP_PING, nullptr, 0);
-        if (len > 0) radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(peerId)));
+            node::getId(), peerId, 31, protocol::OP_PING, nullptr, 0,
+            false, false, false, protocol::CHANNEL_DEFAULT, pktId);
+        if (len > 0) {
+          uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(peerId));
+          uint32_t delayMs = 35u + (uint32_t)(i * 45u) + (uint32_t)(esp_random() % 25u);
+          queueDeferredSend(pkt, len, txSf, delayMs, true);
+          RIFTLINK_DIAG("PING", "event=PING_PLAN mode=signal_test to=%02X%02X pktId=%u sf=%u delay_ms=%lu",
+              peerId[0], peerId[1], (unsigned)pktId, (unsigned)txSf, (unsigned long)delayMs);
+        }
       }
       return;
     }
@@ -1518,7 +1612,15 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         uint8_t pkt[protocol::PAYLOAD_OFFSET + 4];
         size_t pktLen = protocol::buildPacket(pkt, sizeof(pkt),
             node::getId(), to, 31, protocol::OP_READ, payload, 4, false, false);
-        if (pktLen > 0) radio::send(pkt, pktLen, neighbors::rssiToSf(neighbors::getRssiFor(to)));
+        if (pktLen > 0) {
+          uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(to));
+          char reasonBuf[40];
+          if (!queueTxPacket(pkt, pktLen, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
+            queueDeferredSend(pkt, pktLen, txSf, 60 + (esp_random() % 40), true);
+            RIFTLINK_DIAG("READ", "event=READ_TX_DEFER to=%02X%02X cause=%s",
+                to[0], to[1], reasonBuf[0] ? reasonBuf : "?");
+          }
+        }
       }
       return;
     }
@@ -1531,10 +1633,23 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         ble::notifyError("ping_to_bad", "to must be full 16 hex node id");
         return;
       }
-      uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
+      uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN_PKTID];
+      uint16_t pktId = ++s_diagPktIdCounter;
       size_t len = protocol::buildPacket(pkt, sizeof(pkt),
-          node::getId(), to, 31, protocol::OP_PING, nullptr, 0);
-      if (len > 0) radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(to)));
+          node::getId(), to, 31, protocol::OP_PING, nullptr, 0,
+          false, false, false, protocol::CHANNEL_DEFAULT, pktId);
+      if (len > 0) {
+        uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(to));
+        char reasonBuf[40];
+        if (!queueTxPacket(pkt, len, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
+          queueDeferredSend(pkt, len, txSf, 60 + (esp_random() % 40), true);
+          RIFTLINK_DIAG("PING", "event=PING_TX_DEFER to=%02X%02X pktId=%u cause=%s",
+              to[0], to[1], (unsigned)pktId, reasonBuf[0] ? reasonBuf : "?");
+        } else {
+          RIFTLINK_DIAG("PING", "event=PING_TX_QUEUED to=%02X%02X pktId=%u sf=%u",
+              to[0], to[1], (unsigned)pktId, (unsigned)txSf);
+        }
+      }
       return;
     }
 
@@ -1583,6 +1698,8 @@ void processCommand(const uint8_t* data, size_t len) {
 
 bool init() {
   Serial.println("[BLE] Init...");
+  memset(&s_bleDiag, 0, sizeof(s_bleDiag));
+  s_bleDiagLastSnapshotMs = 0;
   s_bleDeinitInProgress = false;
   if (!NimBLEDevice::init(DEVICE_NAME)) {
     Serial.println("[BLE] NimBLEDevice::init FAILED — устройство не будет видно в скане BLE");
@@ -1612,6 +1729,18 @@ bool init() {
     if (!s_bleCmdQueue) {
       Serial.println("[BLE] cmd queue alloc FAILED");
       NimBLEDevice::deinit(true);
+      return false;
+    }
+  }
+  if (!s_notifyMutex) {
+    s_notifyMutex = xSemaphoreCreateMutex();
+    if (!s_notifyMutex) {
+      Serial.println("[BLE] notify mutex alloc FAILED");
+      NimBLEDevice::deinit(true);
+      if (s_bleCmdQueue) {
+        vQueueDelete(s_bleCmdQueue);
+        s_bleCmdQueue = nullptr;
+      }
       return false;
     }
   }
@@ -1681,6 +1810,10 @@ void deinit() {
     vQueueDelete(s_bleCmdQueue);
     s_bleCmdQueue = nullptr;
   }
+  if (s_notifyMutex) {
+    vSemaphoreDelete(s_notifyMutex);
+    s_notifyMutex = nullptr;
+  }
   s_bleInited = false;
   s_bleDeinitInProgress = false;
   Serial.printf("[BLE] Deinit done, heap free=%u\n",
@@ -1697,16 +1830,19 @@ void setOnLocation(void (*cb)(float lat, float lon, int16_t alt, uint16_t radius
 }
 
 void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes,
-    const char* lane, const char* type) {
+    const char* lane, const char* type, uint32_t groupId, const char* groupUid) {
   if (!from || !text) return;
   if (s_pendingMsg) {
     Serial.printf("[BLE_CHAIN] stage=fw_request_msg action=overwrite prevMsgId=%u prevFrom=%02X%02X\n",
         (unsigned)s_pendingMsgId, s_pendingMsgFrom[0], s_pendingMsgFrom[1]);
   }
   size_t textLen = strnlen(text, 255);
-  Serial.printf("[BLE_CHAIN] stage=fw_request_msg action=enqueue from=%02X%02X msgId=%u len=%u rssi=%d ttl=%u lane=%s type=%s mode=%s\n",
+  Serial.printf("[BLE_CHAIN] stage=fw_request_msg action=enqueue from=%02X%02X msgId=%u len=%u rssi=%d ttl=%u lane=%s type=%s group=%lu uid=%s mode=%s\n",
       from[0], from[1], (unsigned)msgId, (unsigned)textLen, rssi, (unsigned)ttlMinutes,
-      lane ? lane : "normal", type ? type : "text", transportModeTag());
+      lane ? lane : "normal", type ? type : "text",
+      (unsigned long)groupId,
+      (groupUid && groupUid[0]) ? groupUid : "-",
+      transportModeTag());
   memcpy(s_pendingMsgFrom, from, 8);
   strncpy(s_pendingMsgText, text, 255);
   s_pendingMsgText[255] = '\0';
@@ -1717,11 +1853,18 @@ void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId, int
   s_pendingMsgLane[sizeof(s_pendingMsgLane) - 1] = '\0';
   strncpy(s_pendingMsgType, type ? type : "text", sizeof(s_pendingMsgType) - 1);
   s_pendingMsgType[sizeof(s_pendingMsgType) - 1] = '\0';
+  s_pendingMsgGroupId = groupId;
+  if (groupUid && groupUid[0]) {
+    strncpy(s_pendingMsgGroupUid, groupUid, sizeof(s_pendingMsgGroupUid) - 1);
+    s_pendingMsgGroupUid[sizeof(s_pendingMsgGroupUid) - 1] = '\0';
+  } else {
+    s_pendingMsgGroupUid[0] = '\0';
+  }
   s_pendingMsg = true;
 }
 
 void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes,
-    const char* lane, const char* type) {
+    const char* lane, const char* type, uint32_t groupId, const char* groupUid) {
   if (!pRxChar || !s_connected) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
@@ -1735,6 +1878,8 @@ void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, 
   if (ttlMinutes != 0) doc["ttl"] = ttlMinutes;
   if (lane && lane[0]) doc["lane"] = lane;
   if (type && type[0]) doc["type"] = type;
+  if (groupId > 0) doc["group"] = groupId;
+  if (groupUid && groupUid[0]) doc["groupUid"] = groupUid;
 
   char buf[400];
   size_t len = serializeJson(doc, buf);
@@ -1743,6 +1888,7 @@ void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, 
 
 void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi) {
   if (!pRxChar || !s_connected) return;
+  s_bleDiag.statusDelivered++;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "delivered";
@@ -1754,11 +1900,14 @@ void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi) {
 
   char buf[80];
   size_t len = serializeJson(doc, buf);
+  Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=emit evt=delivered msgId=%u from=%s\n",
+      (unsigned)msgId, fromHex);
   notifyJsonToApp(buf, len);
 }
 
 void notifyRead(const uint8_t* from, uint32_t msgId, int rssi) {
   if (!pRxChar || !s_connected) return;
+  s_bleDiag.statusRead++;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "read";
@@ -1770,11 +1919,14 @@ void notifyRead(const uint8_t* from, uint32_t msgId, int rssi) {
 
   char buf[80];
   size_t len = serializeJson(doc, buf);
+  Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=emit evt=read msgId=%u from=%s\n",
+      (unsigned)msgId, fromHex);
   notifyJsonToApp(buf, len);
 }
 
 void notifySent(const uint8_t* to, uint32_t msgId) {
   if (!pRxChar || !s_connected) return;
+  s_bleDiag.statusSent++;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "sent";
@@ -1785,6 +1937,8 @@ void notifySent(const uint8_t* to, uint32_t msgId) {
 
   char buf[80];
   size_t len = serializeJson(doc, buf);
+  Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=emit evt=sent msgId=%u to=%s\n",
+      (unsigned)msgId, toHex);
   notifyJsonToApp(buf, len);
 }
 
@@ -1804,6 +1958,7 @@ void notifyWaitingKey(const uint8_t* to) {
 
 void notifyUndelivered(const uint8_t* to, uint32_t msgId) {
   if (!pRxChar || !s_connected) return;
+  s_bleDiag.statusUndelivered++;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "undelivered";
@@ -1814,11 +1969,14 @@ void notifyUndelivered(const uint8_t* to, uint32_t msgId) {
 
   char buf[80];
   size_t len = serializeJson(doc, buf);
+  Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=emit evt=undelivered msgId=%u to=%s\n",
+      (unsigned)msgId, toHex);
   notifyJsonToApp(buf, len);
 }
 
 void notifyBroadcastDelivery(uint32_t msgId, int delivered, int total) {
   if (!pRxChar || !s_connected) return;
+  s_bleDiag.statusBroadcastDelivery++;
 
   JsonDocument doc(&s_bleJsonAllocator);
   if (total > 0 && delivered == 0) {
@@ -1832,6 +1990,9 @@ void notifyBroadcastDelivery(uint32_t msgId, int delivered, int total) {
 
   char buf[80];
   size_t len = serializeJson(doc, buf);
+  Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=emit evt=%s msgId=%u delivered=%d total=%d\n",
+      (total > 0 && delivered == 0) ? "undelivered" : "broadcast_delivery",
+      (unsigned)msgId, delivered, total);
   notifyJsonToApp(buf, len);
 }
 
@@ -2033,6 +2194,14 @@ void notifyInfo() {
   // Буфер 600 обрезал большой `info` (соседи/маршруты) → невалидный JSON в приложении.
   size_t plen = serializeJson(doc, s_notifyInfoPayload, sizeof(s_notifyInfoPayload));
   if (plen == 0) return;
+  if (s_lastInfoPayloadLen == plen && memcmp(s_lastInfoPayload, s_notifyInfoPayload, plen) == 0) {
+    Serial.println("[BLE_CHAIN] stage=fw_notify_info action=skip reason=unchanged");
+    return;
+  }
+  if (plen <= sizeof(s_lastInfoPayload)) {
+    memcpy(s_lastInfoPayload, s_notifyInfoPayload, plen);
+    s_lastInfoPayloadLen = plen;
+  }
   notifyJsonToApp(s_notifyInfoPayload, plen);
 }
 
@@ -2149,8 +2318,13 @@ void notifyGroups() {
     gv2["ackApplied"] = ackApplied;
   }
 
-  char buf[420];
-  size_t len = serializeJson(doc, buf);
+  const size_t needed = measureJson(doc);
+  if (needed >= 768) {
+    notifyError("groups_payload_too_large", "groups payload exceeds BLE notify buffer");
+    return;
+  }
+  char buf[768];
+  size_t len = serializeJson(doc, buf, sizeof(buf));
   notifyJsonToApp(buf, len);
 }
 
@@ -2310,11 +2484,13 @@ void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen) {
 }
 
 void update() {
+  bleDiagMaybeSnapshot("tick", 15000);
   if (s_bleCmdQueue) {
     BleCmdQueueItem cmdItem{};
     // Parse commands outside nimble_host context to avoid stack canary under heavy app traffic.
     for (int i = 0; i < 3; i++) {
       if (xQueueReceive(s_bleCmdQueue, &cmdItem, 0) != pdTRUE) break;
+      s_bleDiag.cmdConsumed++;
       bleHandleTxJson(cmdItem.data, cmdItem.len);
     }
   }
@@ -2355,7 +2531,7 @@ void update() {
     if (s_pendingMsg) {
       s_pendingMsg = false;
       notifyMsg(s_pendingMsgFrom, s_pendingMsgText, s_pendingMsgId, s_pendingMsgRssi, s_pendingMsgTtl,
-          s_pendingMsgLane, s_pendingMsgType);
+          s_pendingMsgLane, s_pendingMsgType, s_pendingMsgGroupId, s_pendingMsgGroupUid);
       return;
     }
     if (s_pendingGroups) { s_pendingGroups = false; notifyGroups(); return; }

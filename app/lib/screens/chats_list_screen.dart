@@ -19,6 +19,7 @@ import '../widgets/rift_dialogs.dart';
 import '../chat/chat_models.dart';
 import '../chat/chat_repository.dart';
 import '../mesh_constants.dart';
+import '../connection/transport_reconnect_manager.dart';
 import 'contacts_screen.dart';
 import 'chat_screen.dart';
 import 'groups_screen.dart';
@@ -68,6 +69,8 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   Map<String, int> _pinsGroups = const {};
   Set<String> _pinAnimating = <String>{};
   Set<String> _archiveAnimating = <String>{};
+  final Map<int, String> _groupRoleOverrides = <int, String>{};
+  final Map<int, bool> _groupAckOverrides = <int, bool>{};
   String _query = '';
   bool _searchMode = false;
   bool _rightToolsExpanded = false;
@@ -150,8 +153,28 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         setState(() {
           _neighborIds = evt.neighbors.map((e) => e.toUpperCase()).toSet();
         });
+        _load();
       } else if (evt is RiftLinkRoutesEvent || evt is RiftLinkNeighborsEvent) {
         setState(() {});
+      } else if (evt is RiftLinkGroupsEvent) {
+        _load();
+      } else if (evt is RiftLinkGroupStatusEvent) {
+        final gid = evt.channelId32 ?? _groupIdByUid(evt.groupUid);
+        if (gid != null && gid > 1) {
+          setState(() {
+            _groupRoleOverrides[gid] = evt.myRole;
+            _groupAckOverrides[gid] = !evt.rekeyRequired;
+          });
+        }
+        _load();
+      } else if (evt is RiftLinkGroupRekeyProgressEvent) {
+        final gid = _groupIdByUid(evt.groupUid);
+        if (gid != null && gid > 1) {
+          setState(() {
+            _groupAckOverrides[gid] = evt.pending == 0 && evt.failed == 0;
+          });
+        }
+        _load();
       } else if (evt is RiftLinkPongEvent) {
         final from = _normNodeId(evt.from);
         if (_pendingPings.remove(from)) {
@@ -207,6 +230,8 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     }
     final list = await _repo.listConversations(query: _query);
     final archived = await _repo.listArchivedConversations();
+    await _syncGroupConversationTitles(list);
+    await _syncGroupConversationTitles(archived);
     final contacts = await ContactsService.load();
     final nickById = ContactsService.buildNicknameMap(contacts);
     final pinsAll = await _repo.listPinnedByScope('all');
@@ -296,6 +321,10 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     if (c.kind == ConversationKind.direct) {
       return ContactsService.displayNodeLabel(c.peerRef, _nickById);
     }
+    if (c.kind == ConversationKind.group) {
+      final canonical = _canonicalNameForConversation(c);
+      if (canonical != null) return canonical;
+    }
     return c.title;
   }
 
@@ -362,6 +391,17 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     return null;
   }
 
+  RiftLinkGroupV2Info? _groupV2ByUid(String groupUid) {
+    final uid = groupUid.trim();
+    if (uid.isEmpty) return null;
+    final li = widget.ble.lastInfo;
+    if (li == null) return null;
+    for (final g in li.groupsV2) {
+      if (g.groupUid.toUpperCase() == uid.toUpperCase()) return g;
+    }
+    return null;
+  }
+
   String _groupDisplayNameById(int groupId) {
     final name = _groupV2ById(groupId)?.canonicalName.trim();
     if (name != null && name.isNotEmpty) return name;
@@ -389,6 +429,8 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
 
   String? _groupUidById(int groupId) => _groupV2ById(groupId)?.groupUid;
 
+  int? _groupIdByUid(String groupUid) => _groupV2ByUid(groupUid)?.channelId32;
+
   int? _groupIdFromPeerRef(String peerRef) {
     final direct = int.tryParse(peerRef);
     if (direct != null && direct > 1) return direct;
@@ -410,9 +452,40 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     return _groupUidById(gid);
   }
 
-  String? _groupRoleById(int groupId) => _groupV2ById(groupId)?.myRole;
+  String? _groupRoleById(int groupId) {
+    final override = _groupRoleOverrides[groupId];
+    if (override != null && override.trim().isNotEmpty) return override;
+    return _groupV2ById(groupId)?.myRole;
+  }
 
-  bool? _groupKeyActualById(int groupId) => _groupV2ById(groupId)?.ackApplied;
+  bool? _groupKeyActualById(int groupId) {
+    if (_groupAckOverrides.containsKey(groupId)) return _groupAckOverrides[groupId];
+    return _groupV2ById(groupId)?.ackApplied;
+  }
+
+  String? _canonicalNameForConversation(ChatConversation c) {
+    if (c.kind != ConversationKind.group) return null;
+    final uid = _groupUidFromPeerRef(c.peerRef);
+    final byUid = uid == null ? null : _groupV2ByUid(uid)?.canonicalName.trim();
+    if (byUid != null && byUid.isNotEmpty) return byUid;
+    final gid = _groupIdFromPeerRef(c.peerRef);
+    final byId = gid == null ? null : _groupV2ById(gid)?.canonicalName.trim();
+    if (byId != null && byId.isNotEmpty) return byId;
+    return null;
+  }
+
+  Future<void> _syncGroupConversationTitles(Iterable<ChatConversation> rows) async {
+    for (final c in rows) {
+      if (c.kind != ConversationKind.group) continue;
+      final canonical = _canonicalNameForConversation(c);
+      if (canonical == null || canonical == c.title) continue;
+      await _repo.upsertGroupConversationTitle(
+        canonicalName: canonical,
+        groupUid: _groupUidFromPeerRef(c.peerRef),
+        channelId32: _groupIdFromPeerRef(c.peerRef),
+      );
+    }
+  }
 
   List<ChatConversation> _groupTabItemsFull() {
     final byGroupId = <int, ChatConversation>{};
@@ -615,11 +688,13 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     return switch (_activeTab) {
       _ChatsTab.all => null,
       _ChatsTab.personal => null,
-      _ChatsTab.groups => (
-        tooltip: l.tr('group_join_by_code'),
-        icon: Icons.login_rounded,
-        onPressed: _joinGroupByCodeDialog,
-      ),
+      _ChatsTab.groups => _groupTabItemsFull().isEmpty
+          ? null
+          : (
+              tooltip: l.tr('group_join_by_code'),
+              icon: Icons.login_rounded,
+              onPressed: _joinGroupByCodeDialog,
+            ),
       _ChatsTab.neighbors => null,
       _ChatsTab.archived => null,
     };
@@ -644,19 +719,13 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
 
   Future<void> _openDirect(String peerId) async {
     final id = ChatRepository.directConversationId(peerId.toUpperCase());
-    await _repo.ensureConversation(
-      id: id,
-      kind: ConversationKind.direct,
-      peerRef: peerId.toUpperCase(),
-      title: await ContactsService.getNickname(peerId.toUpperCase()) ?? peerId.toUpperCase(),
-    );
     if (mounted) setState(() => _activeConversationId = id);
     if (!mounted) return;
     await appPush(
       context,
       ChatScreen(
         ble: widget.ble,
-        conversationId: id,
+        conversationId: null,
         initialPeerId: peerId.toUpperCase(),
       ),
     );
@@ -669,19 +738,13 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       return;
     }
     final id = ChatRepository.groupConversationIdByUid(uid);
-    await _repo.ensureConversation(
-      id: id,
-      kind: ConversationKind.group,
-      peerRef: ChatRepository.groupPeerRefByUid(uid),
-      title: _groupDisplayNameById(groupId),
-    );
     if (mounted) setState(() => _activeConversationId = id);
     if (!mounted) return;
     await appPush(
       context,
       ChatScreen(
         ble: widget.ble,
-        conversationId: id,
+        conversationId: null,
         initialGroupId: groupId,
         initialGroupUid: uid,
       ),
@@ -764,6 +827,43 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   Future<void> _deleteConversation(ChatConversation c) async {
     if (c.kind == ConversationKind.broadcast) return;
     final l = context.l10n;
+    if (c.kind == ConversationKind.group) {
+      final uid = _groupUidFromPeerRef(c.peerRef);
+      final gid = _groupIdFromPeerRef(c.peerRef);
+      final title = gid != null ? _groupDisplayNameById(gid) : _titleForConversation(c);
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(l.tr('group_leave_title')),
+          content: Text(l.tr('group_leave_confirm', {'id': title})),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text(l.tr('cancel')),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text(l.tr('group_action_leave')),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+      if (uid != null && uid.isNotEmpty) {
+        final ok = await widget.ble.groupLeave(groupUid: uid);
+        if (!ok) {
+          _snack(l.tr('error'));
+          return;
+        }
+      }
+      if (_activeConversationId == c.id && mounted) {
+        setState(() => _activeConversationId = null);
+      }
+      await _repo.removeGroupConversation(groupUid: uid, channelId32: gid);
+      await _load();
+      _snack(l.tr('group_left', {'id': gid != null ? '$gid' : title}));
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -923,6 +1023,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       return;
     }
     if (selected == 'disconnect') {
+      transportReconnectManager?.suppressAutoReconnectUntilNextConnection();
       await widget.ble.disconnect();
       if (!mounted) return;
       await appResetTo(context, const ScanScreen());
@@ -1566,19 +1667,20 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 alignment: WrapAlignment.center,
                 children: [
                   FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(220, 44),
+                    ),
                     onPressed: widget.ble.isConnected ? _createGroupFromFab : null,
-                    icon: const Icon(Icons.group_add_rounded, size: 16),
+                    icon: const Icon(Icons.group_add_rounded, size: 18),
                     label: Text(l.tr('group_create')),
                   ),
                   OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(220, 44),
+                    ),
                     onPressed: widget.ble.isConnected ? _joinGroupByCodeDialog : null,
-                    icon: const Icon(Icons.vpn_key_outlined, size: 16),
+                    icon: const Icon(Icons.vpn_key_outlined, size: 18),
                     label: Text(l.tr('group_join_by_code')),
-                  ),
-                  TextButton.icon(
-                    onPressed: () => _onRightMenuAction('contacts_page'),
-                    icon: const Icon(_kContactsPageIcon, size: 16),
-                    label: Text(l.tr('contacts')),
                   ),
                   TextButton.icon(
                     onPressed: () => _onRightMenuAction('groups_page'),
@@ -1610,11 +1712,13 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     final scaffold = _scaffoldKey.currentState;
     if (scaffold != null) {
       if (scaffold.isEndDrawerOpen) {
-        Navigator.of(context).maybePop();
+        // Close drawer route directly to avoid PopScope re-entry loop.
+        Navigator.of(context).pop();
         return;
       }
       if (scaffold.isDrawerOpen) {
-        Navigator.of(context).maybePop();
+        // Close drawer route directly to avoid PopScope re-entry loop.
+        Navigator.of(context).pop();
         return;
       }
     }
@@ -2481,9 +2585,14 @@ class _ConversationTile extends StatelessWidget {
                 ),
               if (canDelete)
                 ListTile(
-                  leading: Icon(Icons.delete_outline_rounded, color: context.palette.error),
+                  leading: Icon(
+                    conversation.kind == ConversationKind.group ? Icons.logout_rounded : Icons.delete_outline_rounded,
+                    color: context.palette.error,
+                  ),
                   title: Text(
-                    context.l10n.tr('chats_action_delete'),
+                    conversation.kind == ConversationKind.group
+                        ? context.l10n.tr('group_action_leave')
+                        : context.l10n.tr('chats_action_delete'),
                     style: TextStyle(color: context.palette.error),
                   ),
                   onTap: () => Navigator.pop(ctx, 'delete'),

@@ -37,11 +37,13 @@ class ContactsScreen extends StatefulWidget {
 class _ContactsScreenState extends State<ContactsScreen> {
   final ChatRepository _chatRepo = ChatRepository.instance;
   final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
   List<Contact> _contacts = [];
   List<String> _neighbors = const [];
   StreamSubscription<RiftLinkEvent>? _bleSub;
   bool _loading = true;
   String _searchQuery = '';
+  bool _searchMode = false;
 
   static const double _fabClearance = AppSpacing.xxl + 56 + AppSpacing.sm;
 
@@ -121,7 +123,21 @@ class _ContactsScreenState extends State<ContactsScreen> {
   void dispose() {
     _bleSub?.cancel();
     _searchController.dispose();
+    _searchFocusNode.dispose();
     super.dispose();
+  }
+
+  void _toggleSearch() {
+    setState(() {
+      _searchMode = !_searchMode;
+      if (!_searchMode) {
+        _searchFocusNode.unfocus();
+        _searchController.clear();
+        _searchQuery = '';
+      } else {
+        _searchFocusNode.requestFocus();
+      }
+    });
   }
 
   Future<void> _load() async {
@@ -385,19 +401,13 @@ class _ContactsScreenState extends State<ContactsScreen> {
     final peerId = _normalizeId(c.id);
     if (peerId.length != 16) return;
     final conversationId = ChatRepository.directConversationId(peerId);
-    await _chatRepo.ensureConversation(
-      id: conversationId,
-      kind: ConversationKind.direct,
-      peerRef: peerId,
-      title: c.nickname.trim().isNotEmpty ? c.nickname.trim() : peerId,
-    );
     if (!mounted) return;
     final ble = RiftLinkBleScope.of(context);
     await appPush(
       context,
       ChatScreen(
         ble: ble,
-        conversationId: conversationId,
+        conversationId: null,
         initialPeerId: peerId,
       ),
     );
@@ -674,7 +684,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           ? Center(child: CircularProgressIndicator(color: p.primary))
           : Column(
               children: [
-                if (_contacts.isNotEmpty) _buildSearchField(),
+                if (widget.embedded && _contacts.isNotEmpty) _buildSearchField(),
                 if (suggestions.isNotEmpty)
                   Padding(
                     padding: EdgeInsets.fromLTRB(
@@ -750,8 +760,48 @@ class _ContactsScreenState extends State<ContactsScreen> {
       backgroundColor: p.surface,
       appBar: riftAppBar(
         context,
-        title: l.tr('contacts'),
+        title: _searchMode ? '' : l.tr('contacts'),
         showBack: true,
+        titleWidget: _searchMode
+            ? Container(
+                height: 39,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                decoration: BoxDecoration(
+                  color: p.card.withOpacity(0.36),
+                  borderRadius: BorderRadius.circular(11),
+                  border: Border.all(
+                    color: _searchFocusNode.hasFocus ? p.primary.withOpacity(0.80) : p.divider.withOpacity(0.55),
+                    width: _searchFocusNode.hasFocus ? 1.2 : 1.0,
+                  ),
+                ),
+                child: TextField(
+                  controller: _searchController,
+                  focusNode: _searchFocusNode,
+                  autofocus: true,
+                  textInputAction: TextInputAction.search,
+                  onChanged: (v) => setState(() => _searchQuery = v),
+                  style: TextStyle(color: p.onSurface, fontSize: 15.5),
+                  decoration: InputDecoration(
+                    hintText: l.tr('search_contacts_hint'),
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    disabledBorder: InputBorder.none,
+                    errorBorder: InputBorder.none,
+                    focusedErrorBorder: InputBorder.none,
+                    isCollapsed: true,
+                    contentPadding: const EdgeInsets.symmetric(vertical: 8.5),
+                  ),
+                ),
+              )
+            : null,
+        actions: [
+          IconButton(
+            tooltip: l.tr('search_contacts_hint'),
+            icon: Icon(_searchMode ? Icons.close : Icons.search_rounded),
+            onPressed: _toggleSearch,
+          ),
+        ],
       ),
       body: body,
       floatingActionButton: fab,

@@ -100,9 +100,6 @@ class MeshBackgroundPainter extends CustomPainter {
     const dotOpacity = 0.06;
     const pulseRadius = 2.0;
     const pulseOpacity = 0.12;
-    // Requested UX tweak: dots should descend up to 70% of screen height,
-    // while still starting from their original upper positions.
-    const pulseVerticalDropFraction = 0.70;
     const animZoneFraction = 1.0;
 
     final paint = Paint()..color = palette.primary.withOpacity(dotOpacity);
@@ -189,6 +186,36 @@ class MeshBackgroundPainter extends CustomPainter {
       if (animEdges.isEmpty) return;
       final pulsePaintSoft = Paint()..color = palette.primary.withOpacity(pulseOpacity * 0.85);
       final pulsePaintBright = Paint()..color = palette.primary.withOpacity(pulseOpacity * 1.25);
+      String pointKey(Offset p) => '${p.dx.toStringAsFixed(2)}:${p.dy.toStringAsFixed(2)}';
+      final byPoint = <String, List<Offset>>{};
+      for (final e in animEdges) {
+        final ka = pointKey(e.a);
+        final kb = pointKey(e.b);
+        (byPoint[ka] ??= <Offset>[]).add(e.b);
+        (byPoint[kb] ??= <Offset>[]).add(e.a);
+      }
+      Offset pickNextHop(Offset prev, Offset cur, double selector, {required bool preferDown}) {
+        final curKey = pointKey(cur);
+        final prevKey = pointKey(prev);
+        final all = (byPoint[curKey] ?? const <Offset>[])
+            .where((n) => pointKey(n) != prevKey)
+            .toList();
+        if (all.isEmpty) return prev;
+        final directed = preferDown
+            ? all.where((n) => n.dy >= cur.dy + 0.5).toList()
+            : all.where((n) => n.dy <= cur.dy - 0.5).toList();
+        final pool = directed.isNotEmpty ? directed : all;
+        if (preferDown && pool.length > 1) {
+          // Push particles deeper: prefer lower candidates in the pool.
+          pool.sort((a, b) => b.dy.compareTo(a.dy));
+          final topCount = math.max(1, (pool.length * 0.85).ceil());
+          final top = pool.take(topCount).toList();
+          final idx = (selector * top.length).floor().clamp(0, top.length - 1);
+          return top[idx];
+        }
+        final idx = (selector * pool.length).floor().clamp(0, pool.length - 1);
+        return pool[idx];
+      }
       // Use real time to avoid cycle seams from 0..1 progress reset.
       final timeSec = DateTime.now().microsecondsSinceEpoch / 1000000.0;
       var drawn = 0;
@@ -198,36 +225,103 @@ class MeshBackgroundPainter extends CustomPainter {
           edge.a.dy * 1.91 + edge.b.dy * 0.47,
         );
         final h = _stableNoise(seed);
-        // Deterministic sparse subset: points appear across the whole mesh.
-        if (h > 0.26) continue;
+        // Deterministic sparse subset: slightly calmer density.
+        if (h > 0.22) continue;
 
-        // Denser edges may carry up to 3 independent pulses with unique phases/speeds.
-        final laneCount = h < 0.08 ? 3 : (h < 0.17 ? 2 : 1);
+        // Some edges can carry two pulses, but avoid excessive clutter.
+        final laneCount = h < 0.10 ? 2 : 1;
         for (var lane = 0; lane < laneCount; lane++) {
           final laneSeed = Offset(seed.dx + lane * 13.7, seed.dy + lane * 9.1);
           final lh = _stableNoise(laneSeed);
-          // Wide per-lane speed spread makes motion less mechanical.
-          final speed = 0.03 + lh * 0.22;
+          // Tighter speed range to avoid very fast jumps.
+          final speed = 0.018 + lh * 0.05;
           final phase = h * 7.0 + lh * 13.0 + lane * 0.61;
-          final dirForward = lh >= 0.45;
           final v = timeSec * speed + phase;
-          final f = v - v.floorToDouble();
-          final t = dirForward ? f : (1.0 - f);
+          final turn = v.floorToDouble();
+          final cycle = (v - turn) * 14.0; // 0..14
+          final seg = cycle.floor();
+          final u = cycle - seg;
 
-          final x = edge.a.dx + (edge.b.dx - edge.a.dx) * t;
+          final a = edge.a;
+          final b = edge.b;
+          double selectorFor(int salt) {
+            return _stableNoise(
+              Offset(
+                seed.dx * 0.17 + lane * 11.0 + turn * 0.73 + salt * 7.0,
+                seed.dy * 0.23 + lane * 13.0 + turn * 1.11 + salt * 5.0,
+              ),
+            );
+          }
+          final c = pickNextHop(a, b, selectorFor(1), preferDown: true);
+          final d = pickNextHop(b, c, selectorFor(2), preferDown: true);
+          final e = pickNextHop(c, d, selectorFor(3), preferDown: true);
+          final f = pickNextHop(d, e, selectorFor(4), preferDown: true);
+          final g = pickNextHop(e, f, selectorFor(5), preferDown: true);
+          final h2 = pickNextHop(f, g, selectorFor(6), preferDown: true);
 
-          // Small perpendicular wobble so different lanes on one edge diverge slightly.
-          final dx = edge.b.dx - edge.a.dx;
-          final dy = edge.b.dy - edge.a.dy;
-          final len = math.max(1.0, math.sqrt(dx * dx + dy * dy));
-          final nx = -dy / len;
-          final ny = dx / len;
-          final wobble = (lh - 0.5) * 2.0; // -1..1
-          final yRaw = edge.a.dy +
-              (edge.b.dy - edge.a.dy) * t +
-              (size.height * pulseVerticalDropFraction * t) +
-              ny * wobble * 1.6;
-          final xRaw = x + nx * wobble * 1.6;
+          late Offset from;
+          late Offset to;
+          switch (seg) {
+            case 0:
+              from = a;
+              to = b;
+              break; // A -> B
+            case 1:
+              from = b;
+              to = c;
+              break; // B -> C
+            case 2:
+              from = c;
+              to = d;
+              break; // C -> D
+            case 3:
+              from = d;
+              to = e;
+              break; // D -> E
+            case 4:
+              from = e;
+              to = f;
+              break; // E -> F
+            case 5:
+              from = f;
+              to = g;
+              break; // F -> G
+            case 6:
+              from = g;
+              to = h2;
+              break; // G -> H
+            case 7:
+              from = h2;
+              to = g;
+              break; // H -> G
+            case 8:
+              from = g;
+              to = f;
+              break; // G -> F
+            case 9:
+              from = f;
+              to = e;
+              break; // F -> E
+            case 10:
+              from = e;
+              to = d;
+              break; // E -> D
+            case 11:
+              from = d;
+              to = c;
+              break; // D -> C
+            case 12:
+              from = c;
+              to = b;
+              break; // C -> B
+            default:
+              from = b;
+              to = a;
+              break; // B -> A
+          }
+
+          final xRaw = from.dx + (to.dx - from.dx) * u;
+          final yRaw = from.dy + (to.dy - from.dy) * u;
           final y = yRaw.clamp(-8.0, size.height + 8.0);
 
           final paint = (lane % 2 == 0) ? pulsePaintBright : pulsePaintSoft;
@@ -235,9 +329,9 @@ class MeshBackgroundPainter extends CustomPainter {
           canvas.drawCircle(Offset(xRaw, y), radius, paint);
 
           drawn++;
-          if (drawn >= 64) break; // cap cost and visual clutter
+          if (drawn >= 48) break; // cap cost and visual clutter
         }
-        if (drawn >= 64) break;
+        if (drawn >= 48) break;
       }
     }
   }

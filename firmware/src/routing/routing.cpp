@@ -6,6 +6,8 @@
 #include "node/node.h"
 #include "radio/radio.h"
 #include "neighbors/neighbors.h"
+#include "async_tasks.h"
+#include "log.h"
 #include <Arduino.h>
 #include <string.h>
 #include <freertos/FreeRTOS.h>
@@ -310,7 +312,16 @@ void requestRoute(const uint8_t* target) {
       node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_ROUTE_REQ,
       payload, ROUTE_PAYLOAD_LEN);
   if (len > 0) {
-    radio::send(pkt, len, neighbors::rssiToSf(neighbors::getMinRssi()));
+    uint8_t txSf = neighbors::rssiToSf(neighbors::getMinRssi());
+    char reasonBuf[40];
+    if (!queueTxPacket(pkt, len, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
+      queueDeferredSend(pkt, len, txSf, 60, true);
+      RIFTLINK_DIAG("ROUTE", "event=ROUTE_TX_DEFER type=req to=%02X%02X cause=%s",
+          target[0], target[1], reasonBuf[0] ? reasonBuf : "?");
+    } else {
+      RIFTLINK_DIAG("ROUTE", "event=ROUTE_TX_QUEUED type=req to=%02X%02X reqId=%u sf=%u",
+          target[0], target[1], (unsigned)reqId, (unsigned)txSf);
+    }
     Serial.printf("[RiftLink] ROUTE_REQ to %02X%02X reqId=%u\n", target[0], target[1], (unsigned)reqId);
   }
   xSemaphoreGive(s_mutex);
@@ -345,7 +356,13 @@ bool onRouteReq(const uint8_t* from, const uint8_t* payload, size_t payloadLen) 
         node::getId(), sender, 31, protocol::OP_ROUTE_REPLY,
         replyPayload, ROUTE_PAYLOAD_LEN);
     if (len > 0) {
-      radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(sender)));
+      uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(sender));
+      char reasonBuf[40];
+      if (!queueTxPacket(pkt, len, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
+        queueDeferredSend(pkt, len, txSf, 60, true);
+        RIFTLINK_DIAG("ROUTE", "event=ROUTE_TX_DEFER type=reply target=me to=%02X%02X cause=%s",
+            sender[0], sender[1], reasonBuf[0] ? reasonBuf : "?");
+      }
       Serial.printf("[RiftLink] ROUTE_REPLY to %02X%02X (target=me)\n", sender[0], sender[1]);
     }
     xSemaphoreGive(s_mutex);
@@ -364,7 +381,13 @@ bool onRouteReq(const uint8_t* from, const uint8_t* payload, size_t payloadLen) 
       node::getId(), protocol::BROADCAST_ID, 31 - (hops + 1), protocol::OP_ROUTE_REQ,
       fwdPayload, ROUTE_PAYLOAD_LEN);
   if (len > 0) {
-    radio::send(pkt, len, neighbors::rssiToSf(neighbors::getMinRssi()));
+    uint8_t txSf = neighbors::rssiToSf(neighbors::getMinRssi());
+    char reasonBuf[40];
+    if (!queueTxPacket(pkt, len, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
+      queueDeferredSend(pkt, len, txSf, 70, true);
+      RIFTLINK_DIAG("ROUTE", "event=ROUTE_TX_DEFER type=req_relay hops=%u cause=%s",
+          (unsigned)(hops + 1), reasonBuf[0] ? reasonBuf : "?");
+    }
     Serial.printf("[RiftLink] ROUTE_REQ relay hops=%u\n", (unsigned)(hops + 1));
   }
   xSemaphoreGive(s_mutex);
@@ -402,7 +425,13 @@ bool onRouteReply(const uint8_t* from, const uint8_t* to, const uint8_t* payload
       node::getId(), s_reverse[revIdx].prevHop, 31, protocol::OP_ROUTE_REPLY,
       payload, payloadLen);
   if (len > 0) {
-    radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(s_reverse[revIdx].prevHop)));
+    uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(s_reverse[revIdx].prevHop));
+    char reasonBuf[40];
+    if (!queueTxPacket(pkt, len, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
+      queueDeferredSend(pkt, len, txSf, 60, true);
+      RIFTLINK_DIAG("ROUTE", "event=ROUTE_TX_DEFER type=reply_relay to=%02X%02X cause=%s",
+          s_reverse[revIdx].prevHop[0], s_reverse[revIdx].prevHop[1], reasonBuf[0] ? reasonBuf : "?");
+    }
     Serial.printf("[RiftLink] ROUTE_REPLY relay to %02X%02X\n", s_reverse[revIdx].prevHop[0], s_reverse[revIdx].prevHop[1]);
   }
   s_reverse[revIdx].used = false;

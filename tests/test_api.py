@@ -51,6 +51,18 @@ class TestBLECommands:
         parsed = json.loads(json.dumps(cmd))
         assert len(parsed['to']) >= 8
 
+    def test_send_group_v2_channel(self):
+        cmd = {'cmd': 'send', 'group': 12345, 'text': 'Group hello'}
+        parsed = json.loads(json.dumps(cmd))
+        assert parsed['cmd'] == 'send'
+        assert parsed['group'] >= 2
+
+    def test_group_leave_command(self):
+        cmd = {'cmd': 'groupLeave', 'groupUid': 'B64_16_or_32B'}
+        parsed = json.loads(json.dumps(cmd))
+        assert parsed['cmd'] == 'groupLeave'
+        assert parsed['groupUid']
+
 
 class TestBLEEvents:
     """Проверка формата BLE событий"""
@@ -76,6 +88,43 @@ class TestBLEEvents:
         evt = {'evt': 'msg', 'from': 'A1B2C3D4', 'text': 'Hello'}
         parsed = json.loads(json.dumps(evt))
         assert parsed['evt'] == 'msg'
+
+    def test_msg_event_group_context(self):
+        evt = {
+            'evt': 'msg',
+            'from': 'A1B2C3D4E5F60708',
+            'text': 'Group payload',
+            'group': 12345,
+            'groupUid': 'B64_16_or_32B',
+        }
+        parsed = json.loads(json.dumps(evt))
+        assert parsed['evt'] == 'msg'
+        assert parsed['group'] >= 2
+        assert parsed['groupUid']
+
+    def test_info_event_groups_v2(self):
+        evt = {
+            'evt': 'info',
+            'id': 'A1B2C3D4E5F60708',
+            'region': 'EU',
+            'freq': 868.1,
+            'power': 14,
+            'groups': [1, 12345],
+            'groupsV2': [
+                {
+                    'groupUid': 'B64_16_or_32B',
+                    'groupTag': 'B64_8_or_16B',
+                    'canonicalName': 'Team Alpha',
+                    'channelId32': 12345,
+                    'keyVersion': 7,
+                    'myRole': 'admin',
+                }
+            ],
+        }
+        parsed = json.loads(json.dumps(evt))
+        assert parsed['evt'] == 'info'
+        assert isinstance(parsed['groupsV2'], list)
+        assert parsed['groupsV2'][0]['channelId32'] >= 2
 
     def test_neighbors_event(self):
         evt = {'evt': 'neighbors', 'neighbors': ['A1B2C3D4E5F60708']}

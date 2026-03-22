@@ -205,6 +205,20 @@ bool setRevocationEpochV2(const char* groupUid, uint32_t revocationEpoch) {
   return true;
 }
 
+bool removeGroupV2(const char* groupUid) {
+  int idx = findV2Index(groupUid);
+  if (idx < 0) return false;
+  for (int i = idx; i < s_countV2 - 1; i++) {
+    s_groupsV2[i] = s_groupsV2[i + 1];
+  }
+  if (s_countV2 > 0) {
+    s_countV2--;
+    memset(&s_groupsV2[s_countV2], 0, sizeof(s_groupsV2[s_countV2]));
+  }
+  persistV2();
+  return true;
+}
+
 bool getGroupV2(const char* groupUid, uint32_t* outChannelId32, char* outGroupTag, size_t outGroupTagLen, char* outCanonicalName, size_t outCanonicalNameLen, uint16_t* outKeyVersion, GroupRole* outRole, uint32_t* outRevocationEpoch, bool* outAckApplied) {
   int idx = findV2Index(groupUid);
   if (idx < 0) return false;

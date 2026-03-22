@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 /// Глобальный ключ навигатора — для показа диалогов при любой локали
 final navigatorKey = GlobalKey<NavigatorState>();
+final scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
 
 /// Показывает диалог через корневой контекст (обходит проблемы с русской локалью)
 Future<T?> showAppDialog<T>({

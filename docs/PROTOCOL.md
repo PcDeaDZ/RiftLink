@@ -69,7 +69,7 @@ Groups V2 использует `groupUID` как основной идентиф
 Минимальная модель V2:
 
 - `groupUID` — неизменяемый ID группы (не секрет).
-- `channelId32` — короткий transport ID для эфира.
+- `channelId32` — короткий transport ID для эфира (`>= 2` для пользовательских групп; `1` зарезервирован под `GROUP_ALL`).
 - `groupTag` — дополнительный контекстный маркер группы.
 - `canonicalName` — каноническое имя группы для UI (управляется owner).
 - `ownerSignPubKey` — owner Ed25519 public key для signed invite.
@@ -77,6 +77,7 @@ Groups V2 использует `groupUID` как основной идентиф
 - Роли: `owner`, `admin`, `member`.
 
 Право доступа определяется не ID группы, а валидным role-grant и актуальной версией ключа.
+При обработке `GROUP_MSG` приложение использует `channelId32` для маршрутизации в чат и, при наличии, `groupUID` для канонического сопоставления с хранилищем.
 
 #### 1.6.1 Root of trust
 
@@ -120,7 +121,7 @@ Groups V2 использует `groupUID` как основной идентиф
 | 0x06 | KEY_EXCHANGE | X25519: публичный ключ 32 байта (unicast) |
 | 0x07 | TELEMETRY | Батарея + heap (шифр., broadcast) |
 | 0x08 | LOCATION | Геолокация lat/lon/alt (шифр., broadcast) |
-| 0x09 | GROUP_MSG | Групповое сообщение (шифр., broadcast, payload: [group_id 4B][text]) |
+| 0x09 | GROUP_MSG | Групповое сообщение (шифр., broadcast, payload: [channelId32 4B][text]) |
 | 0x0A | MSG_FRAG | Фрагмент длинного сообщения |
 | 0x0B | VOICE_MSG | Голосовое сообщение (Opus, фрагменты как MSG_FRAG) |
 | 0x0C | READ | Подтверждение прочтения (payload: msg_id 4B) |
@@ -180,8 +181,9 @@ Groups V2 использует `groupUID` как основной идентиф
 - Unicast MSG с `ack_req`: первые 4 байта plaintext = msg_id
 - Получатель отправляет ACK с этим msg_id (✓✓ доставлено)
 - Получатель отправляет READ (OP_READ, payload: msg_id) при просмотре сообщения (✓✓✓ прочитано)
-- Отправитель повторяет до 4 раз при отсутствии ACK (таймаут 6 с)
-- Очередь: до 8 pending unicast, до 4 broadcast; после неудачи → offline_queue (до 16 в NVS)
+- Отправитель повторяет до 4 раз при отсутствии ACK (для `critical` до 6 попыток)
+- ACK timeout зависит от SF: `SF7≈2.5s … SF12≈5s` (`getAckTimeoutMs`), не фиксированные 6 секунд
+- Очередь: до 12 pending unicast, до 4 broadcast; после неудачи → offline_queue (до 16 в NVS)
 
 ---
 
@@ -193,6 +195,8 @@ Groups V2 использует `groupUID` как основной идентиф
 
 **Фрагментация по MTU:** несколько JSON подряд без разделителя приложение склеивает по скобкам; прошивка после **каждого** JSON в notify добавляет `\n` (NDJSON: один JSON на строку; в `ble.cpp` — `notifyJsonToApp`). Если JSON ровно 512 байт, `\n` не добавляется (редкий край). Внутри строковых полей неэкранированный `\n` недопустим.
 
+**Важное ограничение BLE transport:** запись команд из app выполняется как `write without response`, поэтому подтверждение на этом уровне не гарантируется; прикладной статус доставки задаётся событиями `sent/delivered/read/undelivered`.
+
 ### 7.1 Команды (приложение → устройство)
 
 | cmd | Параметры | Описание |
@@ -200,6 +204,12 @@ Groups V2 использует `groupUID` как основной идентиф
 | send | text, to?, lane?, trigger?, triggerAtMs? | Отправить сообщение (normal/critical, Time Capsule trigger) |
 | sos | text? | Emergency flood |
 | location | lat, lon, alt, radiusM?, expiryEpochSec? | Геолокация (в т.ч. geofence) |
+| read | from, msgId | Маркер «прочитано» для входящего сообщения |
+| info | — | Запросить `evt:"info"` snapshot |
+| groups | — | Запросить `evt:"groups"` snapshot |
+| neighbors | — | Запросить `evt:"neighbors"` snapshot |
+| ping | to? | Диагностический ping (`evt:"pong"`) |
+| voice | to, chunk, total, data(base64) | Отправка голосовых фрагментов |
 
 GeoFence baseline hardening (приёмник):
 - валидный диапазон координат (`lat/lon`);
@@ -207,8 +217,10 @@ GeoFence baseline hardening (приёмник):
 - фильтрация явно некорректного `expiryEpochSec`;
 - anti-spoof по нереалистичному скачку позиции относительно предыдущего пакета от того же узла.
 | ota | — | Запустить OTA (WiFi AP) |
-| region | region | Установить регион (EU, RU, US, AU) |
+| region | region | Установить регион (EU, UK, RU, US, AU) |
 | routes | — | Запросить маршруты (evt "routes") |
+
+Список команд выше — рабочий минимум для app↔device, не исчерпывающий для всех debug/maintenance команд прошивки.
 
 ### 7.2 События (устройство → приложение)
 
@@ -217,11 +229,17 @@ GeoFence baseline hardening (приёмник):
 | info | id, nickname?, region, freq, power, channel?, neighbors?, version? | При подключении |
 | neighbors | neighbors | Обновление списка соседей (при новом HELLO) |
 | routes | routes | Маршруты: [{dest, nextHop, hops, rssi, trustScore}] |
-| msg | from, text, lane?, type? | Входящее сообщение (normal/critical, text/sos/...) |
+| msg | from, text, lane?, type?, group?, groupUid? | Входящее сообщение (normal/critical, text/sos/...); для `GROUP_MSG` добавляются `group=channelId32` и опционально `groupUid` |
+| sent | to, msgId | Сообщение принято в обработку на узле (не ACK mesh-доставки) |
+| delivered | from, msgId, rssi? | Получен ACK доставки от адресата |
+| read | from, msgId, rssi? | Получен READ от адресата |
+| undelivered | to, msgId, delivered?, total? | Доставка не подтверждена/частично подтверждена |
+| broadcast_delivery | msgId, delivered, total | Итог по broadcast доставке |
 | location | from, lat, lon, alt | Геолокация от узла |
 | telemetry | from, battery, heapKb | Телеметрия |
 | relayProof | relayedBy, from, to, pktId, opcode | Proof-of-Relay Lite (sampling) |
 | timeCapsuleQueued | to, trigger, triggerAtMs? | Подтверждение постановки в отложенную отправку |
+| timeCapsuleReleased | to, msgId, trigger | Сработал trigger отложенной отправки |
 | ota | ip, ssid, password | OTA запущен |
 | region | region, freq, power | Регион изменён |
 

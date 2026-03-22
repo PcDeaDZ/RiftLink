@@ -15,6 +15,8 @@ RiftLinkEvent? parseEvent(Map<String, dynamic> json) {
       ttlMinutes: (json['ttl'] as num?)?.toInt(),
       lane: json['lane'] as String? ?? 'normal',
       type: json['type'] as String? ?? 'text',
+      group: (json['group'] as num?)?.toInt(),
+      groupUid: json['groupUid'] as String?,
     );
   }
   if (evt == 'invite') {
@@ -81,6 +83,20 @@ RiftLinkEvent? parseEvent(Map<String, dynamic> json) {
 }
 
 void main() {
+  group('retainRxTailFromLastBraceBytes', () {
+    test('retains bytes from last opening brace', () {
+      final src = utf8.encode('junk{"evt":"msg"}noise{"evt":"info"}');
+      final tail = retainRxTailFromLastBraceBytes(src, maxRetain: 4096);
+      expect(utf8.decode(tail), '{"evt":"info"}');
+    });
+
+    test('returns empty list when no brace exists', () {
+      final src = utf8.encode('abcdef');
+      final tail = retainRxTailFromLastBraceBytes(src, maxRetain: 4096);
+      expect(tail, isEmpty);
+    });
+  });
+
   group('parseEvent: msg', () {
     test('parses msg event', () {
       final json = jsonDecode('{"evt":"msg","from":"A1B2C3D4E5F60708","text":"Hello","msgId":42}') as Map<String, dynamic>;
@@ -111,6 +127,15 @@ void main() {
       final e = parseEvent(json) as RiftLinkMsgEvent;
       expect(e.lane, 'critical');
       expect(e.type, 'sos');
+    });
+
+    test('parses msg group context', () {
+      final json = jsonDecode(
+        '{"evt":"msg","from":"A1B2C3D4E5F60708","text":"hello group","group":12345,"groupUid":"GID_ALPHA"}',
+      ) as Map<String, dynamic>;
+      final e = parseEvent(json) as RiftLinkMsgEvent;
+      expect(e.group, 12345);
+      expect(e.groupUid, 'GID_ALPHA');
     });
   });
 

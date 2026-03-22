@@ -256,6 +256,8 @@ size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadca
     case OP_NACK:
       return (payloadLen == 2) ? (hdrLen + 2) : 0;
     case OP_HELLO:
+      // v2.3 strict-only: mandatory 2-byte sender tag for from-ID integrity check.
+      return (payloadLen == 2) ? (hdrLen + 2) : 0;
     case OP_PING:
     case OP_PONG:
       return (payloadLen == 0) ? hdrLen : 0;
@@ -289,6 +291,10 @@ bool getExpectedPayloadRange(uint8_t opcode, size_t* minOut, size_t* maxOut) {
   if (!minOut || !maxOut) return false;
   switch (opcode) {
     case OP_HELLO:
+      // v2.3 strict-only: HELLO must carry sender tag (2 bytes).
+      *minOut = 2;
+      *maxOut = 2;
+      return true;
     case OP_PING:
     case OP_PONG:
       *minOut = *maxOut = 0;

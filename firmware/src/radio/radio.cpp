@@ -32,6 +32,9 @@ static SemaphoreHandle_t s_radioMutex = nullptr;
 static std::atomic<bool> s_rxListenActive{false};
 static std::atomic<bool> s_arbiterHold{false};
 static std::atomic<uint32_t> s_dio1IrqCount{0};
+static std::atomic<uint32_t> s_rxLenOversizeDrops{0};
+static std::atomic<uint32_t> s_rxShortReads{0};
+static std::atomic<uint32_t> s_rxReadErrors{0};
 
 static void IRAM_ATTR onDio1Rise() {
   s_dio1IrqCount.fetch_add(1, std::memory_order_relaxed);
@@ -394,19 +397,46 @@ bool startReceiveWithTimeout(uint32_t timeoutMs) {
   return (st == RADIOLIB_ERR_NONE);
 }
 
+static int normalizeReadLength(size_t requestedLen, int16_t readStatus) {
+  if (readStatus < 0) return -1;
+  if (readStatus == RADIOLIB_ERR_NONE) return (int)requestedLen;
+  int normalized = (int)readStatus;
+  if (normalized <= 0) return -1;
+  if ((size_t)normalized > requestedLen) normalized = (int)requestedLen;
+  return normalized;
+}
+
 int receiveAsync(uint8_t* buf, size_t maxLen) {
   if (!lora || !buf || maxLen == 0) return -1;
   size_t len = lora->getPacketLength();
   if (len == 0 || len > maxLen) {
+    if (len > maxLen) {
+      s_rxLenOversizeDrops.fetch_add(1, std::memory_order_relaxed);
+      RIFTLINK_DIAG("RADIO", "event=RX_LEN_DROP mode=async reason=oversize chip_len=%u max_len=%u",
+          (unsigned)len, (unsigned)maxLen);
+    }
     // Таймаут RX — перевести в standby, иначе следующий TX (selftest и т.д.) падает при BLE.
     lora->standby();
     return 0;
   }
   int16_t st = lora->readData(buf, len);
+  int readLen = normalizeReadLength(len, st);
   if (st == RADIOLIB_ERR_RX_TIMEOUT) return 0;
-  if (st < 0) return -1;
+  if (readLen < 0) {
+    s_rxReadErrors.fetch_add(1, std::memory_order_relaxed);
+    RIFTLINK_DIAG("RADIO", "event=RX_READ_FAIL mode=async chip_len=%u st=%d",
+        (unsigned)len, (int)st);
+    return -1;
+  }
+  if ((size_t)readLen < len) {
+    s_rxShortReads.fetch_add(1, std::memory_order_relaxed);
+    RIFTLINK_DIAG("RADIO", "event=RX_SHORT_READ mode=async chip_len=%u read_len=%u st=%d",
+        (unsigned)len, (unsigned)readLen, (int)st);
+  }
   lora->standby();  // гарантировать standby после RX — иначе следующий TX может дать -705
-  return (int)len;
+  RIFTLINK_DIAG("RADIO", "event=RX_CHAIN stage=radio_read mode=async chip_len=%u read_len=%u st=%d",
+      (unsigned)len, (unsigned)readLen, (int)st);
+  return readLen;
 }
 
 bool isRxPacketReadyUnderMutex() {
@@ -420,13 +450,35 @@ int readReceivedPacketUnderMutex(uint8_t* buf, size_t maxLen) {
   size_t len = lora->getPacketLength();
   if (len == 0) return 0;
   if (len > maxLen) {
+    s_rxLenOversizeDrops.fetch_add(1, std::memory_order_relaxed);
+    RIFTLINK_DIAG("RADIO", "event=RX_LEN_DROP mode=cont reason=oversize chip_len=%u max_len=%u",
+        (unsigned)len, (unsigned)maxLen);
     lora->standby();
     return -1;
   }
   int16_t st = lora->readData(buf, len);
+  int readLen = normalizeReadLength(len, st);
   if (st == RADIOLIB_ERR_RX_TIMEOUT) return 0;
-  if (st < 0) return -1;
-  return (int)len;
+  if (readLen < 0) {
+    s_rxReadErrors.fetch_add(1, std::memory_order_relaxed);
+    RIFTLINK_DIAG("RADIO", "event=RX_READ_FAIL mode=cont chip_len=%u st=%d",
+        (unsigned)len, (int)st);
+    return -1;
+  }
+  if ((size_t)readLen < len) {
+    s_rxShortReads.fetch_add(1, std::memory_order_relaxed);
+    RIFTLINK_DIAG("RADIO", "event=RX_SHORT_READ mode=cont chip_len=%u read_len=%u st=%d",
+        (unsigned)len, (unsigned)readLen, (int)st);
+  }
+  RIFTLINK_DIAG("RADIO", "event=RX_CHAIN stage=radio_read mode=cont chip_len=%u read_len=%u st=%d",
+      (unsigned)len, (unsigned)readLen, (int)st);
+  return readLen;
+}
+
+void getRxDiagCounters(uint32_t* oversizeDrops, uint32_t* shortReads, uint32_t* readErrors) {
+  if (oversizeDrops) *oversizeDrops = s_rxLenOversizeDrops.load(std::memory_order_relaxed);
+  if (shortReads) *shortReads = s_rxShortReads.load(std::memory_order_relaxed);
+  if (readErrors) *readErrors = s_rxReadErrors.load(std::memory_order_relaxed);
 }
 
 bool consumeIrqEvent() {

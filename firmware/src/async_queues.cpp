@@ -14,19 +14,19 @@ static constexpr size_t PACKET_QUEUE_LEN =
 #if defined(USE_EINK)
     16;
 #else
-    6;
+    16;
 #endif
 static constexpr size_t SEND_QUEUE_LEN =
 #if defined(USE_EINK)
     16;
 #else
-    6;
+    16;
 #endif
 static constexpr size_t DISPLAY_QUEUE_LEN =
 #if defined(USE_EINK)
     12;
 #else
-    6;
+    12;
 #endif
 
 static bool tryCreateQueues(size_t pktLen, size_t sendLen, size_t dispLen) {

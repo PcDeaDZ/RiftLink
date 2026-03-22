@@ -17,6 +17,7 @@ class RiftLinkBle {
   static const deviceName = 'RiftLink';
 
   BluetoothDevice? _device;
+  String? _lastBleRemoteId;
   BluetoothCharacteristic? _txChar;
   BluetoothCharacteristic? _rxChar;
 
@@ -26,6 +27,9 @@ class RiftLinkBle {
   int _eventsStreamListeners = 0;
   final List<RiftLinkEvent> _preListenBuffer = [];
   static const int _maxPreListenBuffer = 64;
+  final Map<String, int> _diagCounters = <String, int>{};
+  int _diagEventsSinceDump = 0;
+  DateTime _diagLastDumpAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   late final StreamController<RiftLinkEvent> _eventBus = StreamController<RiftLinkEvent>.broadcast(
     onListen: _onEventsStreamListen,
@@ -34,6 +38,36 @@ class RiftLinkBle {
 
   void _trace(String message) {
     debugPrint('[BLE_CHAIN] $message');
+  }
+
+  void _diagInc(String key, [int by = 1]) {
+    _diagCounters[key] = (_diagCounters[key] ?? 0) + by;
+    _diagEventsSinceDump += by;
+  }
+
+  void _diagMaybeDump(String reason) {
+    final now = DateTime.now();
+    if (_diagEventsSinceDump < 20 && now.difference(_diagLastDumpAt) < const Duration(seconds: 30)) {
+      return;
+    }
+    _diagLastDumpAt = now;
+    _diagEventsSinceDump = 0;
+    _trace(
+      'stage=app_diag action=snapshot reason=$reason '
+      'tx_attempt=${_diagCounters['tx_attempt'] ?? 0} '
+      'tx_ok=${_diagCounters['tx_ok'] ?? 0} '
+      'tx_fail=${_diagCounters['tx_fail'] ?? 0} '
+      'tx_fail_no_transport=${_diagCounters['tx_fail_no_transport'] ?? 0} '
+      'rx_chunk=${_diagCounters['rx_chunk'] ?? 0} '
+      'rx_retain_overflow=${_diagCounters['rx_retain_overflow'] ?? 0} '
+      'rx_retain_timeout=${_diagCounters['rx_retain_timeout'] ?? 0} '
+      'rx_retain_large_partial=${_diagCounters['rx_retain_large_partial'] ?? 0} '
+      'drop_unknown_evt=${_diagCounters['drop_unknown_evt'] ?? 0} '
+      'drop_json_to_event=${_diagCounters['drop_json_to_event'] ?? 0} '
+      'drop_parse_ndjson=${_diagCounters['drop_parse_ndjson'] ?? 0} '
+      'drop_parse_extracted=${_diagCounters['drop_parse_extracted'] ?? 0} '
+      'prelisten_drop=${_diagCounters['prelisten_drop'] ?? 0}',
+    );
   }
 
   void _onEventsStreamListen() {
@@ -61,6 +95,7 @@ class RiftLinkBle {
   Timer? _rxAccumTimeout;
   Completer<void>? _txLock;
   DateTime? _lastInfoRequestAt;
+  DateTime? _lastInfoEventAt;
   Timer? _queuedInfoTimer;
   bool _hasQueuedInfoRequest = false;
 
@@ -70,6 +105,7 @@ class RiftLinkBle {
   RiftLinkInfoEvent? get lastInfo => _lastInfo;
 
   BluetoothDevice? get device => _device;
+  String? get lastBleRemoteId => _lastBleRemoteId;
   bool get isConnected => _device?.isConnected ?? false;
   bool get isTransportConnected =>
       (_isWifiMode && _wifiTransport?.isConnected == true) || isConnected;
@@ -136,21 +172,39 @@ class RiftLinkBle {
   }
 
   Future<bool> _sendCmd(Map<String, dynamic> payload) async {
+    final cmd = payload['cmd']?.toString() ?? 'unknown';
+    final json = jsonEncode(payload);
+    _diagInc('tx_attempt');
     // WiFi mode: route through WebSocket (no MTU limit)
     if (_isWifiMode && _wifiTransport != null && _wifiTransport!.isConnected) {
-      return _wifiTransport!.sendJson(jsonEncode(payload));
+      final ok = await _wifiTransport!.sendJson(json);
+      _diagInc(ok ? 'tx_ok' : 'tx_fail');
+      _trace('stage=app_tx action=send mode=wifi cmd=$cmd len=${json.length} ok=$ok');
+      _diagMaybeDump(ok ? 'tx_ok' : 'tx_fail');
+      return ok;
     }
-    if (_txChar == null || !isConnected) return false;
+    if (_txChar == null || !isConnected) {
+      _diagInc('tx_fail');
+      _diagInc('tx_fail_no_transport');
+      _trace('stage=app_tx action=drop reason=no_transport mode=ble cmd=$cmd len=${json.length}');
+      _diagMaybeDump('tx_fail_no_transport');
+      return false;
+    }
 
     while (_txLock != null) {
       await _txLock!.future;
     }
     _txLock = Completer<void>();
     try {
-      final json = jsonEncode(payload);
       await _txChar!.write(utf8.encode(json), withoutResponse: true);
+      _diagInc('tx_ok');
+      _trace('stage=app_tx action=send mode=ble cmd=$cmd len=${json.length} ok=true');
+      _diagMaybeDump('tx_ok');
       return true;
     } catch (e) {
+      _diagInc('tx_fail');
+      _trace('stage=app_tx action=send mode=ble cmd=$cmd len=${json.length} ok=false err=$e');
+      _diagMaybeDump('tx_fail');
       debugPrint('RiftLinkBle: _sendCmd error: $e');
       return false;
     } finally {
@@ -199,6 +253,7 @@ class RiftLinkBle {
       } catch (_) {}
     }
     await _startRxDispatcher();
+    _lastBleRemoteId = dev.remoteId.toString();
     getInfo(force: true);
     getGroups();
     getRoutes();
@@ -208,16 +263,38 @@ class RiftLinkBle {
   /// Запросить info (evt "info"). Централизованный throttle, чтобы экраны не спамили устройству.
   Future<bool> getInfo({bool force = false}) async {
     if (!isTransportConnected) return false;
+    final now = DateTime.now();
+    const forceMinGap = Duration(milliseconds: 900);
     if (force) {
+      final last = _lastInfoRequestAt;
+      if (last != null && now.difference(last) < forceMinGap) {
+        if (_hasQueuedInfoRequest) return true;
+        _hasQueuedInfoRequest = true;
+        final wait = forceMinGap - now.difference(last);
+        _queuedInfoTimer?.cancel();
+        _queuedInfoTimer = Timer(wait, () async {
+          _hasQueuedInfoRequest = false;
+          if (!isTransportConnected) return;
+          _lastInfoRequestAt = DateTime.now();
+          await _sendCmd({'cmd': 'info'});
+        });
+        return true;
+      }
       _queuedInfoTimer?.cancel();
       _queuedInfoTimer = null;
       _hasQueuedInfoRequest = false;
-      _lastInfoRequestAt = DateTime.now();
+      _lastInfoRequestAt = now;
       return _sendCmd({'cmd': 'info'});
     }
 
-    const minGap = Duration(milliseconds: 700);
-    final now = DateTime.now();
+    // Keep BLE channel free for status events (sent/delivered/read/undelivered).
+    // Frequent info polling floods notify stream and can mask short chat events.
+    const minGap = Duration(seconds: 2);
+    const freshInfoSkip = Duration(milliseconds: 1800);
+    final lastInfoEvt = _lastInfoEventAt;
+    if (lastInfoEvt != null && now.difference(lastInfoEvt) < freshInfoSkip) {
+      return true;
+    }
     final last = _lastInfoRequestAt;
     if (last == null || now.difference(last) >= minGap) {
       _lastInfoRequestAt = now;
@@ -239,6 +316,7 @@ class RiftLinkBle {
 
   Future<void> disconnect() async {
     _lastInfo = null;
+    _lastInfoEventAt = null;
     _preListenBuffer.clear();
     _queuedInfoTimer?.cancel();
     _queuedInfoTimer = null;
@@ -255,6 +333,10 @@ class RiftLinkBle {
     _txChar = null;
     _rxChar = null;
   }
+
+  /// Explicit transport-level disconnect (BLE or Wi-Fi).
+  /// Kept as a semantic alias for call sites where BLE-only naming is confusing.
+  Future<void> disconnectTransport() async => disconnect();
 
   Future<void> _startRxDispatcher() async {
     if (_rxChar == null || _device == null) return;
@@ -304,22 +386,37 @@ class RiftLinkBle {
 
   void _feedRxChunk(List<int> chunk) {
     if (chunk.isEmpty) return;
+    _diagInc('rx_chunk');
     _trace('stage=app_rx action=chunk len=${chunk.length} accum_before=${_rxAccum.length}');
     _rxAccum.addAll(chunk);
     const maxAccum = 16384;
     if (_rxAccum.length > maxAccum) {
-      debugPrint('RiftLinkBle: RX buffer overflow (${_rxAccum.length} bytes), clearing');
-      _trace('stage=app_rx action=drop reason=overflow bufferLen=${_rxAccum.length}');
-      _rxAccum.clear();
+      final retained = retainRxTailFromLastBraceBytes(_rxAccum, maxRetain: 4096);
+      debugPrint(
+        'RiftLinkBle: RX buffer overflow (${_rxAccum.length} bytes), retaining tail ${retained.length} bytes',
+      );
+      _trace('stage=app_rx action=retain reason=overflow before=${_rxAccum.length} after=${retained.length}');
+      _diagInc('rx_retain_overflow');
+      _diagMaybeDump('rx_retain_overflow');
+      _rxAccum
+        ..clear()
+        ..addAll(retained);
       _rxAccumTimeout?.cancel();
       return;
     }
     _rxAccumTimeout?.cancel();
     _rxAccumTimeout = Timer(const Duration(seconds: 5), () {
       if (_rxAccum.isNotEmpty) {
-        debugPrint('RiftLinkBle: RX timeout, discarding ${_rxAccum.length} incomplete bytes');
-        _trace('stage=app_rx action=drop reason=timeout bufferLen=${_rxAccum.length}');
-        _rxAccum.clear();
+        final retained = retainRxTailFromLastBraceBytes(_rxAccum, maxRetain: 2048);
+        debugPrint(
+          'RiftLinkBle: RX timeout, retaining tail ${retained.length} of ${_rxAccum.length} bytes',
+        );
+        _trace('stage=app_rx action=retain reason=timeout before=${_rxAccum.length} after=${retained.length}');
+        _diagInc('rx_retain_timeout');
+        _diagMaybeDump('rx_retain_timeout');
+        _rxAccum
+          ..clear()
+          ..addAll(retained);
         _lastRxIncompleteLogLen = 0;
       }
     });
@@ -334,10 +431,13 @@ class RiftLinkBle {
     } catch (e, st) {
       debugPrint('RiftLinkBle: _jsonToEvent FAILED evt=${json['evt']}: $e\n$st');
       _trace('stage=app_parse action=parse_error evt=${json['evt']} reason=json_to_event err=$e');
+      _diagInc('drop_json_to_event');
+      _diagMaybeDump('drop_json_to_event');
       return;
     }
     if (evt is RiftLinkInfoEvent) {
       _lastInfo = evt;
+      _lastInfoEventAt = DateTime.now();
     }
     if (_eventBus.isClosed) return;
     if (evt == null) {
@@ -347,6 +447,8 @@ class RiftLinkBle {
         );
       }
       _trace('stage=app_parse action=drop reason=unknown_evt evt=${json['evt']}');
+      _diagInc('drop_unknown_evt');
+      _diagMaybeDump('drop_unknown_evt');
       return;
     }
 
@@ -356,6 +458,8 @@ class RiftLinkBle {
       if (_preListenBuffer.length > _maxPreListenBuffer) {
         _preListenBuffer.removeAt(0);
         _trace('stage=app_event_bus action=prelisten_drop reason=overflow limit=$_maxPreListenBuffer');
+        _diagInc('prelisten_drop');
+        _diagMaybeDump('prelisten_drop');
       }
     } else {
       _trace('stage=app_event_bus action=emit evt=${evt.runtimeType} listeners=$_eventsStreamListeners');
@@ -404,6 +508,7 @@ class RiftLinkBle {
       } catch (e) {
         if (kDebugMode) debugPrint('RiftLinkBle: NDJSON parse error: $e');
         _trace('stage=app_parse action=parse_error reason=ndjson err=$e');
+        _diagInc('drop_parse_ndjson');
       }
     }
     return tail;
@@ -425,18 +530,27 @@ class RiftLinkBle {
         return;
       }
       if (i0 > 0) {
-        _rxAccum
-          ..clear()
-          ..addAll(utf8.encode(s.substring(i0)));
+        // Keep raw bytes to avoid re-encoding/truncating malformed UTF-8 tails.
+        final firstBraceByte = _rxAccum.indexWhere((b) => b == 0x7B);
+        if (firstBraceByte <= 0) {
+          _rxAccum.clear();
+        } else {
+          _rxAccum.removeRange(0, firstBraceByte);
+        }
         continue;
       }
 
       final t = s;
       final ndTail = _tryDrainNewlineDelimitedJson(t);
       if (ndTail != null) {
-        _rxAccum
-          ..clear()
-          ..addAll(utf8.encode(ndTail));
+        final lastNlByte = _rxAccum.lastIndexOf(0x0A);
+        if (lastNlByte >= 0) {
+          _rxAccum.removeRange(0, lastNlByte + 1);
+        } else {
+          _rxAccum
+            ..clear()
+            ..addAll(utf8.encode(ndTail));
+        }
         if (ndTail.isEmpty) return;
         continue;
       }
@@ -491,14 +605,13 @@ class RiftLinkBle {
           }
         }
         if (_rxAccum.length > 4096) {
-          final lastBrace = s.lastIndexOf('{');
-          if (lastBrace > 0) {
-            _rxAccum
-              ..clear()
-              ..addAll(utf8.encode(s.substring(lastBrace)));
-          } else {
-            _rxAccum.clear();
-          }
+          final retained = retainRxTailFromLastBraceBytes(_rxAccum, maxRetain: 4096);
+          _trace('stage=app_rx action=retain reason=large_partial before=${_rxAccum.length} after=${retained.length}');
+          _diagInc('rx_retain_large_partial');
+          _diagMaybeDump('rx_retain_large_partial');
+          _rxAccum
+            ..clear()
+            ..addAll(retained);
         }
         return;
       }
@@ -511,6 +624,7 @@ class RiftLinkBle {
         } catch (e) {
           if (kDebugMode) debugPrint('RiftLinkBle: extracted object parse error: $e');
           _trace('stage=app_parse action=parse_error reason=extracted_object err=$e');
+          _diagInc('drop_parse_extracted');
         }
       }
       final tailBytes = utf8.encode(objs.tail);
@@ -622,7 +736,7 @@ class RiftLinkBle {
     required int channelId32,
     required String groupTag,
   }) async {
-    if (!_isValidGroupUid(groupUid) || displayName.trim().isEmpty || channelId32 <= 0 || groupTag.trim().isEmpty) {
+    if (!_isValidGroupUid(groupUid) || displayName.trim().isEmpty || channelId32 <= 1 || groupTag.trim().isEmpty) {
       return false;
     }
     return _sendCmd({
@@ -727,6 +841,11 @@ class RiftLinkBle {
   Future<bool> groupSyncSnapshot(List<Map<String, dynamic>> groups) async {
     if (groups.isEmpty) return false;
     return _sendCmd({'cmd': 'groupSyncSnapshot', 'groups': groups});
+  }
+
+  Future<bool> groupLeave({required String groupUid}) async {
+    if (!_isValidGroupUid(groupUid)) return false;
+    return _sendCmd({'cmd': 'groupLeave', 'groupUid': groupUid.trim()});
   }
 
   /// Отправить PING на узел (проверка связи)
@@ -939,6 +1058,16 @@ class RiftLinkBle {
 
   /// Все подписчики получают каждое событие (multicast). Длинные JSON склеиваются в [_drainRxAccum].
   Stream<RiftLinkEvent> get events => _eventBus.stream;
+}
+
+List<int> retainRxTailFromLastBraceBytes(List<int> bytes, {int maxRetain = 4096}) {
+  if (bytes.isEmpty) return const <int>[];
+  final lastBrace = bytes.lastIndexOf(0x7B);
+  if (lastBrace < 0) return const <int>[];
+  var start = lastBrace;
+  final minStart = bytes.length - maxRetain;
+  if (minStart > 0 && start < minStart) start = minStart;
+  return List<int>.from(bytes.sublist(start));
 }
 
 int _jsonInt(dynamic e) {
@@ -1163,6 +1292,8 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       ttlMinutes: (json['ttl'] as num?)?.toInt(),
       lane: json['lane']?.toString() ?? 'normal',
       type: json['type']?.toString() ?? 'text',
+      group: _jsonIntNullable(json['group']),
+      groupUid: _trimmedStringOrNull(json['groupUid']),
     );
   }
   if (evt == 'sent') {
@@ -1512,6 +1643,8 @@ class RiftLinkMsgEvent extends RiftLinkEvent {
   final int? ttlMinutes;
   final String lane; // normal|critical
   final String type; // text|sos|...
+  final int? group; // channelId32 for GROUP_MSG
+  final String? groupUid; // canonical UID for GROUP_MSG
   RiftLinkMsgEvent({
     required this.from,
     required this.text,
@@ -1520,6 +1653,8 @@ class RiftLinkMsgEvent extends RiftLinkEvent {
     this.ttlMinutes,
     this.lane = 'normal',
     this.type = 'text',
+    this.group,
+    this.groupUid,
   });
 }
 

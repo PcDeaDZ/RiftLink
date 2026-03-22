@@ -6,6 +6,8 @@
 #include "neighbors/neighbors.h"
 #include "node/node.h"
 #include "radio/radio.h"
+#include "async_tasks.h"
+#include "log.h"
 #include "crypto/crypto.h"
 #include "compress/compress.h"
 #include <Arduino.h>
@@ -106,7 +108,17 @@ bool send(const uint8_t* to, const uint8_t* plain, size_t plainLen, bool compres
     size_t pktLen = protocol::buildPacket(pkt, sizeof(pkt),
         node::getId(), to, 31, protocol::OP_MSG_FRAG,
         fragPayload, FRAG_HEADER_LEN + chunkLen, false, false, useCompressed);
-    if (pktLen > 0) radio::send(pkt, pktLen, neighbors::rssiToSf(neighbors::getRssiFor(to)));
+    if (pktLen > 0) {
+      uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(to));
+      char reasonBuf[40];
+      if (!queueTxPacket(pkt, pktLen, txSf, false, TxRequestClass::data, reasonBuf, sizeof(reasonBuf))) {
+        // Keep frag order predictable: part index contributes to deferred delay.
+        uint32_t delayMs = 60u + (uint32_t)((part - 1) * 18u);
+        queueDeferredSend(pkt, pktLen, txSf, delayMs, true);
+        RIFTLINK_DIAG("FRAG", "event=FRAG_TX_DEFER part=%u/%u to=%02X%02X cause=%s",
+            (unsigned)part, (unsigned)nFrags, to[0], to[1], reasonBuf[0] ? reasonBuf : "?");
+      }
+    }
   }
   return true;
 }

@@ -22,6 +22,7 @@ import '../wifi/mdns_discovery.dart';
 import '../widgets/rift_dialogs.dart';
 import '../chat/chat_repository.dart';
 import '../contacts/contacts_service.dart';
+import '../connection/transport_reconnect_manager.dart';
 import 'chats_list_screen.dart';
 import 'debug_screen.dart';
 
@@ -374,6 +375,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _connect(BluetoothDevice device, {String? displayName}) async {
+    transportReconnectManager?.resumeAutoReconnect();
     final name = displayName ?? (device.advName.isNotEmpty ? device.advName
         : device.platformName.isNotEmpty ? device.platformName
         : device.remoteId.toString().length > 12 ? device.remoteId.toString().substring(device.remoteId.toString().length - 12) : device.remoteId.toString());
@@ -403,6 +405,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _connectWifi() async {
+    transportReconnectManager?.resumeAutoReconnect();
     if (!_wifiNetworkAvailable) {
       setState(() => _error = context.l10n.tr('wifi_tab_locked'));
       return;

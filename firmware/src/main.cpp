@@ -89,6 +89,7 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #define HELLO_DROP_RETRY_MS 350
 #define HELLO_QUIET_AFTER_KEY_MS 2500  // после KEY дать эфиру окно под ответный KEY
 #define HANDSHAKE_TRAFFIC_QUIET_MS 3000  // на время handshake приглушаем HELLO/telemetry
+#define HELLO_STALE_KEY_REFRESH_MS 15000  // HELLO после заметной паузы: возможный reboot peer, push KEY refresh
 static uint32_t s_lastHelloAirMs = 0;
 static uint32_t s_nextHelloAfterDropMs = 0;
 static uint32_t s_handshakeQuietUntilMs = 0;
@@ -178,7 +179,7 @@ static void bcDedupAdd(const uint8_t* from, uint32_t msgId) {
 }
 
 #define PING_REPLY_GUARD_SIZE 16
-#define PING_REPLY_GUARD_MS 800
+#define PING_REPLY_GUARD_MS 400
 struct PingReplyGuardEntry {
   uint8_t from[protocol::NODE_ID_LEN];
   uint16_t pktId;
@@ -242,6 +243,7 @@ static uint16_t rxNoiseWindowMs(const protocol::PacketHeader& hdr) {
   switch (hdr.opcode) {
     case protocol::OP_ACK:
     case protocol::OP_ACK_BATCH:
+      return 300;
     case protocol::OP_NACK:
     case protocol::OP_ECHO:
       return 1800;
@@ -663,9 +665,32 @@ static void armNextHelloDeadlineAfterSuccessfulSend() {
   s_nextHelloDueMs = (uint32_t)due;
 }
 
-/** CAD отложил TX в queueDeferredSend — для HELLO это не «drop». */
+/** CAD/queue deferred TX — для HELLO это не «drop». */
 static bool helloTxReasonIsCadDefer(const char* sepReason) {
-  return sepReason && strstr(sepReason, "cad_defer") != nullptr;
+  return sepReason &&
+      (strstr(sepReason, "cad_defer") != nullptr || strstr(sepReason, "queue_defer") != nullptr);
+}
+
+// Lightweight sender-tag for HELLO: detects from-ID corruption without crypto handshake.
+// Tag is deterministic from full NODE_ID and validated by receiver when payloadLen==2.
+static inline uint16_t helloSenderTag16(const uint8_t* nodeId) {
+  if (!nodeId) return 0;
+  uint32_t h = 2166136261u;  // FNV-1a 32
+  for (size_t i = 0; i < protocol::NODE_ID_LEN; i++) {
+    h ^= nodeId[i];
+    h *= 16777619u;
+  }
+  return (uint16_t)((h >> 16) ^ (h & 0xFFFFu));
+}
+
+static bool validateHelloSenderTag(const protocol::PacketHeader& hdr, const uint8_t* payload, size_t payloadLen) {
+  if (!payload || payloadLen != 2) return false;
+  uint16_t got = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
+  uint16_t expected = helloSenderTag16(hdr.from);
+  if (got == expected) return true;
+  RIFTLINK_DIAG("HELLO", "event=HELLO_TAG_MISMATCH from=%02X%02X got=%u expected=%u",
+      hdr.from[0], hdr.from[1], (unsigned)got, (unsigned)expected);
+  return false;
 }
 
 /** @return true если пакет ушёл в radio (или в очередь TX), false если слишком рано после предыдущего HELLO */
@@ -716,10 +741,14 @@ static bool sendHello() {
       return false;
     }
   }
-  uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
+  uint8_t helloPayload[2];
+  uint16_t helloTag = helloSenderTag16(node::getId());
+  helloPayload[0] = (uint8_t)(helloTag & 0xFF);
+  helloPayload[1] = (uint8_t)(helloTag >> 8);
+  uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN + sizeof(helloPayload)];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
       node::getId(), protocol::BROADCAST_ID,
-      31, protocol::OP_HELLO, nullptr, 0);
+      31, protocol::OP_HELLO, helloPayload, sizeof(helloPayload));
   if (len == 0) return false;
 
   bool manyNeighbors = (n >= 6);
@@ -731,16 +760,31 @@ static bool sendHello() {
   bool helloSent = false;
 #if defined(SF_FORCE_7)
   (void)manyNeighbors;
-  helloSent = radio::send(pkt, len, 7, priority, helloWhy, sizeof helloWhy);
+  if (queueTxPacket(pkt, len, 7, priority, TxRequestClass::control, helloWhy, sizeof helloWhy)) {
+    helloSent = true;
+  } else {
+    queueDeferredSend(pkt, len, 7, 60, true);
+    strncpy(helloWhy, "queue_defer", sizeof(helloWhy) - 1);
+  }
 #else
   if (n > 0) {
     uint8_t txSf = getDiscoverySf();
-    helloSent = radio::send(pkt, len, txSf, priority, helloWhy, sizeof helloWhy);
+    if (queueTxPacket(pkt, len, txSf, priority, TxRequestClass::control, helloWhy, sizeof helloWhy)) {
+      helloSent = true;
+    } else {
+      queueDeferredSend(pkt, len, txSf, 60, true);
+      strncpy(helloWhy, "queue_defer", sizeof(helloWhy) - 1);
+    }
     (void)manyNeighbors;
   } else {
     // Discovery и mesh работают на едином фиксированном SF.
     uint8_t txSf = getDiscoverySf();
-    helloSent = radio::send(pkt, len, txSf, priority, helloWhy, sizeof helloWhy);
+    if (queueTxPacket(pkt, len, txSf, priority, TxRequestClass::control, helloWhy, sizeof helloWhy)) {
+      helloSent = true;
+    } else {
+      queueDeferredSend(pkt, len, txSf, 60, true);
+      strncpy(helloWhy, "queue_defer", sizeof(helloWhy) - 1);
+    }
   }
 #endif
   bool viaCadDefer = false;
@@ -789,7 +833,7 @@ void sendPoll() {
   uint8_t txSf = getDiscoverySf();
   uint32_t jitterMs = computePollJitterMs();
   queueDeferredSend(pkt, len, txSf, jitterMs);
-  RIFTLINK_DIAG("HELLO", "event=POLL_TX_DEFER sf=%u delay_ms=%lu",
+  RIFTLINK_DIAG("HELLO", "event=POLL_TX_DEFER sf=%u delay_ms=%lu cause=scheduled_jitter",
       (unsigned)txSf, (unsigned long)jitterMs);
 }
 
@@ -846,7 +890,12 @@ void sendLocation(float lat, float lon, int16_t alt, uint16_t radiusM = 0, uint3
       node::getId(), protocol::BROADCAST_ID, 31, protocol::OP_LOCATION,
       encBuf, encLen, true, false, false);
   if (len > 0) {
-    radio::send(pkt, len, neighbors::rssiToSf(neighbors::getMinRssi()));
+    uint8_t txSf = neighbors::rssiToSf(neighbors::getMinRssi());
+    char reasonBuf[40];
+    if (!queueTxPacket(pkt, len, txSf, false, TxRequestClass::data, reasonBuf, sizeof(reasonBuf))) {
+      queueDeferredSend(pkt, len, txSf, 120, true);
+      RIFTLINK_DIAG("GEO", "event=LOCATION_TX_DEFER cause=%s", reasonBuf[0] ? reasonBuf : "?");
+    }
   }
 }
 
@@ -860,6 +909,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
   const uint8_t* payload = nullptr;
   size_t payloadLen = 0;
   protocol::ParseResult parseRes;
+  static uint32_t s_rxLenMismatchCount = 0;
   if (!protocol::parsePacketEx(buf, len, &hdr, &payload, &payloadLen, &parseRes)) {
     // Strict mode: many short/broken self-echo fragments can trigger parse fail but are not real channel congestion.
     // Escalate congestion only for "substantial" malformed frames that look like real on-air collisions.
@@ -875,9 +925,13 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       region::switchChannelOnCongestion();
       collision_slots::recordCollision();
     }
-    RIFTLINK_DIAG("PARSE", "event=RX_PARSE_FAIL status=%s len=%u off=%u op=0x%02X pktId=%u rssi=%d sf=%u",
-        protocol::parseStatusToString(parseRes.status), (unsigned)len, (unsigned)parseRes.startOffset,
-        (unsigned)parseRes.opcode, (unsigned)parseRes.pktId, rssi, (unsigned)sf);
+    if (parseRes.status == protocol::ParseStatus::len_mismatch) {
+      s_rxLenMismatchCount++;
+    }
+    RIFTLINK_DIAG("PARSE", "event=RX_PARSE_FAIL status=%s len=%u expected=%u off=%u op=0x%02X pktId=%u rssi=%d sf=%u len_mismatch_total=%lu",
+        protocol::parseStatusToString(parseRes.status), (unsigned)len, (unsigned)parseRes.expectedLen,
+        (unsigned)parseRes.startOffset, (unsigned)parseRes.opcode, (unsigned)parseRes.pktId, rssi, (unsigned)sf,
+        (unsigned long)s_rxLenMismatchCount);
     {
       static const char HEX_CHARS[] = "0123456789ABCDEF";
       constexpr size_t DUMP_BYTES = 24;
@@ -1093,6 +1147,11 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSE_FAIL cause=payload_len_ne_32 from=%02X%02X payload=%u pktId=%u",
           hdr.from[0], hdr.from[1], (unsigned)payloadLen, (unsigned)hdr.pktId);
     } else if (hdr.opcode == protocol::OP_HELLO) {
+      if (!validateHelloSenderTag(hdr, payload, payloadLen)) {
+        RIFTLINK_DIAG("HELLO", "event=HELLO_DROP reason=tag_invalid from=%02X%02X len=%u",
+            hdr.from[0], hdr.from[1], (unsigned)payloadLen);
+        return;
+      }
       beacon_sync::onBeaconReceived(hdr.from);
       offline_queue::onNodeOnline(hdr.from);
       if (neighbors::onHello(hdr.from, rssi)) {
@@ -1132,6 +1191,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         if (hadKey) {
           RIFTLINK_DIAG("KEY", "event=KEY_RX_DUP from=%02X%02X pktId=%u action=reply_with_throttle",
               hdr.from[0], hdr.from[1], (unsigned)hdr.pktId);
+          extendHandshakeQuiet("key_rx_dup");
           // Peer may have lost pairwise state while keeping the same pubkey.
           // Reply with throttled KEY_EXCHANGE to heal asymmetry without KEY storm.
           x25519_keys::sendKeyExchange(hdr.from, true, true, "key_rx_dup");
@@ -1159,10 +1219,17 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       break;
 
     case protocol::OP_HELLO: {
+      if (!validateHelloSenderTag(hdr, payload, payloadLen)) {
+        RIFTLINK_DIAG("HELLO", "event=HELLO_DROP reason=tag_invalid from=%02X%02X len=%u",
+            hdr.from[0], hdr.from[1], (unsigned)payloadLen);
+        break;
+      }
       RIFTLINK_DIAG("HELLO", "event=HELLO_RX from=%02X%02X rssi=%d sf=%u heap=%u",
           hdr.from[0], hdr.from[1], rssi, (unsigned)sf, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       Serial.printf("[RiftLink] HELLO rx from %02X%02X rssi=%d heap=%u\n",
           hdr.from[0], hdr.from[1], rssi, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+      uint32_t freshnessBeforeMs = neighbors::getFreshnessMs(hdr.from);
+      bool staleSeenBefore = (freshnessBeforeMs != UINT32_MAX) && (freshnessBeforeMs >= HELLO_STALE_KEY_REFRESH_MS);
       clock_drift::onHelloReceived(hdr.from);
       offline_queue::onNodeOnline(hdr.from);
       bool rediscoveredPeer = false;
@@ -1195,6 +1262,12 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         // Rediscover after peer reboot: push our pubkey immediately to heal asymmetry.
         // Use force first-response path to bypass long throttle/debounce window.
         x25519_keys::sendKeyExchange(hdr.from, true, false, "hello_rediscover");
+      } else if (staleSeenBefore) {
+        // Peer looked stale right before HELLO refresh; this often means reboot on the other side.
+        // Proactively re-announce our pubkey to recover one-sided "A has key, B doesn't" state.
+        RIFTLINK_DIAG("KEY", "event=KEY_REUSE_ATTEMPT peer=%02X%02X reason=hello_stale_refresh age_ms=%lu",
+            hdr.from[0], hdr.from[1], (unsigned long)freshnessBeforeMs);
+        x25519_keys::sendKeyExchange(hdr.from, true, true, "hello_stale_refresh");
       }
       break;
     }
@@ -1207,11 +1280,14 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           size_t decLen = 0;
           if (!crypto::decryptFrom(hdr.from, payload, payloadLen, decBuf, &decLen) || decLen >= 256) {
             RIFTLINK_LOG_ERR("[RiftLink] Decrypt FAILED (from %02X%02X — no key?)\n", hdr.from[0], hdr.from[1]);
-            if (!x25519_keys::hasKeyFor(hdr.from)) {
-              // Fast self-heal: message arrived encrypted, but pairwise key is missing locally.
-              // Force response path to bypass long throttle/debounce of primary hello exchange.
-              x25519_keys::sendKeyExchange(hdr.from, true, false, "msg_no_key");
-            }
+            bool hasKeyNow = x25519_keys::hasKeyFor(hdr.from);
+            RIFTLINK_DIAG("KEY", "event=KEY_DECRYPT_FAIL type=op_msg from=%02X%02X has_key=%u len=%u pktId=%u",
+                hdr.from[0], hdr.from[1], (unsigned)hasKeyNow, (unsigned)payloadLen, (unsigned)hdr.pktId);
+            // Self-heal both paths:
+            // - no key locally
+            // - key exists, but pairwise state may be stale/asymmetric
+            x25519_keys::sendKeyExchange(hdr.from, true, hasKeyNow,
+                hasKeyNow ? "decrypt_fail_msg" : "msg_no_key");
             break;
           }
           if (protocol::isCompressed(hdr)) {
@@ -1289,9 +1365,11 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             if (encLen == 0 || off + encLen > payloadLen) break;
             size_t decLen = 0;
             if (!crypto::decryptFrom(hdr.from, payload + off, encLen, decBuf, &decLen) || decLen >= 256) {
-              if (!x25519_keys::hasKeyFor(hdr.from)) {
-                x25519_keys::sendKeyExchange(hdr.from, true, false, "msg_batch_no_key");
-              }
+              bool hasKeyNow = x25519_keys::hasKeyFor(hdr.from);
+              RIFTLINK_DIAG("KEY", "event=KEY_DECRYPT_FAIL type=op_msg_batch from=%02X%02X has_key=%u len=%u pktId=%u",
+                  hdr.from[0], hdr.from[1], (unsigned)hasKeyNow, (unsigned)encLen, (unsigned)hdr.pktId);
+              x25519_keys::sendKeyExchange(hdr.from, true, hasKeyNow,
+                  hasKeyNow ? "decrypt_fail_batch" : "msg_batch_no_key");
               break;
             }
             off += encLen;
@@ -1366,6 +1444,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             ackPlainLen != msg_queue::MSG_ID_LEN) {
           RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=decrypt_or_len from=%02X%02X len=%u",
               hdr.from[0], hdr.from[1], (unsigned)payloadLen);
+          bool hasKeyNow = x25519_keys::hasKeyFor(hdr.from);
+          x25519_keys::sendKeyExchange(hdr.from, true, hasKeyNow,
+              hasKeyNow ? "decrypt_fail_ack" : "ack_no_key");
           break;
         }
         uint32_t msgId = 0;
@@ -1391,6 +1472,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         if (!crypto::decryptFrom(hdr.from, payload, payloadLen, batchPlain, &batchPlainLen)) {
           RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=batch_decrypt_fail from=%02X%02X len=%u",
               hdr.from[0], hdr.from[1], (unsigned)payloadLen);
+          bool hasKeyNow = x25519_keys::hasKeyFor(hdr.from);
+          x25519_keys::sendKeyExchange(hdr.from, true, hasKeyNow,
+              hasKeyNow ? "decrypt_fail_ack_batch" : "ack_batch_no_key");
           break;
         }
         msg_queue::onAckBatchReceived(hdr.from, batchPlain, batchPlainLen, rssi, ble::notifyDelivered);
@@ -1542,8 +1626,11 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         if (pongLen > 0) {
           uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(hdr.from));
           if (txSf == 0) txSf = 12;
-          if (!radio::send(pongPkt, pongLen, txSf, true)) {
-            queueDeferredSend(pongPkt, pongLen, txSf, 50);  // deferred send при полной radioCmdQueue
+          char reasonBuf[40];
+          if (!queueTxPacket(pongPkt, pongLen, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
+            queueDeferredSend(pongPkt, pongLen, txSf, 50, true);  // deferred send при полной radioCmdQueue
+            RIFTLINK_DIAG("PING", "event=PONG_TX_DEFER to=%02X%02X cause=%s",
+                hdr.from[0], hdr.from[1], reasonBuf[0] ? reasonBuf : "?");
           }
         }
       }
@@ -1624,10 +1711,11 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         if (!decrypted || decLen < GROUP_ID_LEN) break;
         uint32_t groupId;
         memcpy(&groupId, decBuf, GROUP_ID_LEN);
+        char groupUid[groups::GROUP_UID_MAX_LEN + 1] = {0};
         // GROUP_ALL — служебный id широковещательных сообщений; не хранится в списке подписок
-        if (groupId != groups::GROUP_ALL) {
-          char groupUid[groups::GROUP_UID_MAX_LEN] = {0};
-          if (!groups::findGroupUidByChannelV2(groupId, groupUid, sizeof(groupUid))) break;
+        if (groupId != groups::GROUP_ALL &&
+            !groups::findGroupUidByChannelV2(groupId, groupUid, sizeof(groupUid))) {
+          break;
         }
         const char* msg;
         size_t msgLen;
@@ -1662,7 +1750,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           memcpy(msgStrBuf, msg, msgLen);
           msgStrBuf[msgLen] = '\0';
           ble::requestMsgNotify(hdr.from, msgStrBuf, 0, rssi, 0,
-              (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal", "text");
+              (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal", "text",
+              groupId, groupUid[0] ? groupUid : nullptr);
           RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_packet action=request_msg_notify from=%02X%02X msgId=0 len=%u lane=%s type=text",
               hdr.from[0], hdr.from[1], (unsigned)msgLen,
               (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal");
@@ -1996,7 +2085,20 @@ void loop() {
         uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
         size_t len = protocol::buildPacket(pkt, sizeof(pkt),
             node::getId(), to, 31, protocol::OP_PING, nullptr, 0);
-        if (len > 0 && radio::send(pkt, len, neighbors::rssiToSf(neighbors::getRssiFor(to)))) {
+        bool pingSent = false;
+        if (len > 0) {
+          uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(to));
+          char reasonBuf[40];
+          if (queueTxPacket(pkt, len, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
+            pingSent = true;
+          } else {
+            queueDeferredSend(pkt, len, txSf, 60, true);
+            RIFTLINK_DIAG("PING", "event=PING_TX_DEFER mode=serial to=%02X%02X cause=%s",
+                to[0], to[1], reasonBuf[0] ? reasonBuf : "?");
+            pingSent = true;  // deferred fallback scheduled
+          }
+        }
+        if (pingSent) {
           Serial.printf("[RiftLink] PING sent to %s\n", hex16.c_str());
         } else {
           Serial.println("[RiftLink] PING failed");

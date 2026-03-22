@@ -46,9 +46,9 @@
 {"cmd":"send","text":"Hello mesh!"}
 ```
 
-**В группу** (group = ID группы, по умолчанию 1):
+**В группу** (`group` = `channelId32` группы, `>= 2`; `1` зарезервирован под broadcast `GROUP_ALL`):
 ```json
-{"cmd":"send","group":1,"text":"Hello group!"}
+{"cmd":"send","group":12345,"text":"Hello group!"}
 ```
 
 **Unicast** (to = 16 hex-символов полного Node ID):
@@ -194,6 +194,7 @@ Groups V2 работает по `groupUid` и signed grants. Команды `gro
 {"cmd":"groupRevoke","groupUid":"B64_16_or_32B","subjectId":"A1B2C3D4E5F60708","reason":"kick"}
 {"cmd":"groupRekey","groupUid":"B64_16_or_32B","reason":"kick"}
 {"cmd":"groupAckKeyApplied","groupUid":"B64_16_or_32B","keyVersion":7}
+{"cmd":"groupLeave","groupUid":"B64_16_or_32B"}
 {"cmd":"groupStatus","groupUid":"B64_16_or_32B"}
 {"cmd":"groupSyncSnapshot","groups":[...]}
 ```
@@ -214,20 +215,28 @@ Groups V2 работает по `groupUid` и signed grants. Команды `gro
 ### 3.1 info — при подключении
 
 ```json
-{"evt":"info","id":"A1B2C3D4E5F60708","nickname":"Alice","region":"EU","freq":868.1,"power":14,"channel":0,"version":"1.3.6"}
+{"evt":"info","id":"A1B2C3D4E5F60708","nickname":"Alice","region":"EU","freq":868.1,"power":14,"channel":0,"version":"1.3.6","groups":[1,12345],"groupsV2":[{"groupUid":"B64_16_or_32B","channelId32":12345,"canonicalName":"Team Alpha","groupTag":"B64_8_or_16B","myRole":"admin","keyVersion":7}]}
 ```
 
 `nickname` — опционально. `channel` — только для EU/UK (0–2). `neighbors` — массив Node ID (hex) видимых соседей. `version` — версия прошивки (например 1.3.6).  
+`groups` — legacy-массив transport group id. `groupsV2` — расширенный список групп (`groupUid`, `channelId32`, `canonicalName`, `groupTag`, `myRole`, `keyVersion`) для no-legacy клиента.
 Для наблюдаемости SCF могут приходить поля `offlineCourierPending` (курьерские) и `offlineDirectPending` (обычные офлайн).
 
 ### 3.2 msg — входящее сообщение
 
 ```json
-{"evt":"msg","from":"A1B2C3D4E5F60708","text":"Hello!","msgId":123456,"rssi":-72,"lane":"normal","type":"text"}
+{"evt":"msg","from":"A1B2C3D4E5F60708","text":"Hello!","msgId":123456,"rssi":-72,"lane":"normal","type":"text","group":12345,"groupUid":"B64_16_or_32B"}
 ```
 
 `msgId` — только для unicast (для отправки READ при просмотре). `rssi` — уровень сигнала LoRa в dBm (опционально).  
 `lane` — `normal|critical`. `type` — `text|sos|...`.
+`group` (`channelId32`) и `groupUid` — опциональные поля для `GROUP_MSG`; если их нет, событие трактуется как direct/broadcast без контекста группы.
+
+### 3.2.1 Backward compatibility для `evt:"msg"`
+
+- Новые поля `group` и `groupUid` считаются опциональными.
+- Старые клиенты могут игнорировать неизвестные поля без поломки.
+- Новые клиенты должны уметь корректно обрабатывать события и с group-контекстом, и без него.
 
 ### 3.3 sent — отправлено (unicast поставлен в очередь)
 

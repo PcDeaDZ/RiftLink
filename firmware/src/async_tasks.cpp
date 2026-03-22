@@ -196,7 +196,7 @@ static constexpr size_t TX_REQUEST_QUEUE_LEN =
 #if defined(USE_EINK)
     24;
 #else
-    10;
+    24;
 #endif
 
 bool asyncInfraEnsure() {
@@ -701,6 +701,8 @@ void asyncSignalDisplaySpiSessionDone(void) {
 #endif
 
 static TickType_t s_packetRxDropLogTick = 0;
+static std::atomic<uint32_t> s_rxIrqGapSuppressed{0};
+static std::atomic<uint32_t> s_rxHealthRearmCount{0};
 
 enum class RadioFsmState : uint8_t {
   Idle = 0,
@@ -731,6 +733,16 @@ static inline bool shouldLogRxDone(uint8_t op) {
            op == protocol::OP_SF_BEACON);
 }
 
+static inline uint32_t computeRxIrqGapGuardMs() {
+  // Physics-based guard: minimal on-air time for smallest valid broadcast frame on current modem.
+  // This avoids stale FIFO re-reads while still allowing valid packets on fast modem presets.
+  uint32_t toaUs = radio::getTimeOnAir(protocol::HEADER_LEN_BROADCAST);
+  uint32_t guardMs = toaUs ? ((toaUs + 999) / 1000) : FSM_RX_IRQ_MIN_GAP_MS;
+  if (guardMs < 8) guardMs = 8;
+  if (guardMs > 120) guardMs = 120;
+  return guardMs;
+}
+
 static const char* fsmStateName(RadioFsmState s) {
   switch (s) {
     case RadioFsmState::Idle: return "IDLE";
@@ -759,23 +771,25 @@ static inline void fsmTransition(RadioFsmState* state, RadioFsmState next, const
   *state = next;
 }
 
-static uint32_t simpleRxFingerprint(const uint8_t* buf, int len, int rssi) {
+static uint32_t simpleRxFingerprint(const uint8_t* buf, int len, int /*rssi*/) {
   if (!buf || len <= 0) return 0;
   uint32_t h = 2166136261u;
-  int sample = (len < 24) ? len : 24;
+  int sample = (len < 48) ? len : 48;
   for (int i = 0; i < sample; i++) {
     h ^= (uint32_t)buf[i];
     h *= 16777619u;
   }
   h ^= (uint32_t)(len & 0xFFFF);
   h *= 16777619u;
-  h ^= (uint32_t)((rssi + 128) & 0xFF);
   return h;
 }
 
 /** Доставка RX из планировщика в packetTask или прямой handlePacket (общая логика normal + powersave RX). */
 static void deliverRxToPacketQueue(uint8_t* rxBuf, int n, int rssi, uint8_t sf) {
   if (n <= 0) return;
+  uint8_t op = (n > 2 && rxBuf[0] == protocol::SYNC_BYTE) ? rxBuf[2] : 0xFF;
+  RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_rx_queue action=enqueue len=%u rssi=%d sf=%u op=0x%02X",
+      (unsigned)n, rssi, (unsigned)sf, (unsigned)op);
   if (packetQueue) {
     PacketQueueItem pitem;
     if ((size_t)n <= sizeof(pitem.buf)) {
@@ -804,7 +818,6 @@ static void deliverRxToPacketQueue(uint8_t* rxBuf, int n, int rssi, uint8_t sf) 
         TickType_t t = xTaskGetTickCount();
         if (t - s_packetRxDropLogTick >= pdMS_TO_TICKS(5000)) {
           s_packetRxDropLogTick = t;
-          uint8_t op = (n > 2 && rxBuf[0] == protocol::SYNC_BYTE) ? rxBuf[2] : 0xFF;
           RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_rx_queue action=drop reason=queue_full queue=packetQueue len=%u rssi=%d sf=%u op=0x%02X",
               (unsigned)n, rssi, (unsigned)sf, (unsigned)op);
           RIFTLINK_DIAG("QUEUE", "event=RX_DROP queue=packetQueue len=%u rssi=%d sf=%u op=0x%02X",
@@ -841,6 +854,7 @@ static void radioSchedulerTask(void* arg) {
   static uint8_t rxDupBurstCount = 0;
   static uint32_t lastRxIrqHandleMs = 0;
   static uint32_t lastRxHealthRearmMs = 0;
+  static uint32_t lastRxGapSuppressedLogMs = 0;
   static bool contRxArmed = false;
   static RadioFsmState lastFsmStateLogged = RadioFsmState::Idle;
   RadioFsmState fsmState = RadioFsmState::Idle;
@@ -873,9 +887,17 @@ static void radioSchedulerTask(void* arg) {
       RIFTLINK_DIAG("RADIO", "event=RX_STATS ok=%lu timeout=%lu err=%lu mutex_timeout=%lu",
           (unsigned long)rxOkCount, (unsigned long)rxTimeoutCount,
           (unsigned long)rxErrCount, (unsigned long)rxMutexTimeoutCount);
+      uint32_t oversizeDrops = 0;
+      uint32_t shortReads = 0;
+      uint32_t readErrors = 0;
+      radio::getRxDiagCounters(&oversizeDrops, &shortReads, &readErrors);
+      RIFTLINK_DIAG("RADIO", "event=RX_CHAIN_STATS oversize_drop=%lu short_read=%lu read_error=%lu irq_gap_suppressed=%lu",
+          (unsigned long)oversizeDrops, (unsigned long)shortReads, (unsigned long)readErrors,
+          (unsigned long)s_rxIrqGapSuppressed.load(std::memory_order_relaxed));
       if (useFsmV2) {
-        RIFTLINK_DIAG("FSM", "event=FSM_STATS recovery=%lu tx_wait_to_air_max_ms=%lu rx_event_to_handle_max_ms=%lu",
-            (unsigned long)fsmRecoveryCount, (unsigned long)txWaitToAirMaxMs, (unsigned long)rxEventToHandleMaxMs);
+        RIFTLINK_DIAG("FSM", "event=FSM_STATS recovery=%lu tx_wait_to_air_max_ms=%lu rx_event_to_handle_max_ms=%lu health_rearm=%lu",
+            (unsigned long)fsmRecoveryCount, (unsigned long)txWaitToAirMaxMs, (unsigned long)rxEventToHandleMaxMs,
+            (unsigned long)s_rxHealthRearmCount.load(std::memory_order_relaxed));
 #if defined(USE_EINK)
         RIFTLINK_DIAG("FSM", "event=FSM_HOLD_STATS requested=%u active=%u grant=%lu done=%lu skip_busy=%lu force_done=%lu",
             (unsigned)s_displaySpiRequested.load(std::memory_order_relaxed),
@@ -1104,9 +1126,20 @@ static void radioSchedulerTask(void* arg) {
           if (queuedMs > txWaitToAirMaxMs) txWaitToAirMaxMs = queuedMs;
           lastToaUs = pktToaUs;
           burstToaUs += pktToaUs;
-          radio::sendDirectInternal(item.buf, item.len);
+          if (!radio::sendDirectInternal(item.buf, item.len)) {
+            queueDeferredSend(item.buf, item.len, item.txSf, 80, item.priority);
+            RIFTLINK_DIAG("RADIO", "event=TX_FAIL_REQUEUE len=%u sf=%u", (unsigned)item.len, (unsigned)item.txSf);
+          }
           didTx = true;
-          vTaskDelay(pdMS_TO_TICKS(1));  // отдать квант idle/task_wdt
+          vTaskDelay(pdMS_TO_TICKS(1));
+        }
+        if (didTx) {
+          uint8_t rxSf; uint32_t _unusedSlotMs;
+          getNextRxSlotParams(&rxSf, &_unusedSlotMs);
+          radio::applyHardwareSpreadingFactor(rxSf);
+          (void)radio::startReceiveWithTimeout(FSM_CONT_RX_TIMEOUT_MS);
+          radio::setRxListenActive(true);
+          contRxArmed = true;
         }
         radio::releaseMutex();
 
@@ -1117,8 +1150,6 @@ static void radioSchedulerTask(void* arg) {
 #if !defined(SF_FORCE_7)
         if (!didTx) highSfDrained = 0;
 #endif
-        // Важно: если TX не состоялся (например, временный pushback), не spin-loop'им —
-        // возвращаемся в RX и отдаём квант планировщику, иначе ловим task_wdt.
         if (!didTx) {
           if (radio::takeMutex(pdMS_TO_TICKS(120)) == pdTRUE) {
             uint8_t sf; uint32_t _unusedSlotMs;
@@ -1135,7 +1166,7 @@ static void radioSchedulerTask(void* arg) {
           vTaskDelay(pdMS_TO_TICKS(8));
           continue;
         }
-        contRxArmed = false;  // перевооружаем RX после успешного preempt TX
+        contRxArmed = false;
         fsmTransition(&fsmState, RadioFsmState::RXListen, "tx_done_resume_rx");
         continue;
       }
@@ -1147,10 +1178,25 @@ static void radioSchedulerTask(void* arg) {
       bool rxIrq = radio::consumeIrqEvent();
       uint32_t nowPoll = millis();
       if (rxIrq) {
-        // Physics guard: at SF7 even tiny packets cannot validly arrive every few milliseconds.
-        // Ignore bursty IRQs faster than minimal on-air spacing to avoid stale FIFO re-reads.
-        if ((nowPoll - lastRxIrqHandleMs) < FSM_RX_IRQ_MIN_GAP_MS) {
-          rxIrq = false;
+        uint32_t gapGuardMs = computeRxIrqGapGuardMs();
+        if ((nowPoll - lastRxIrqHandleMs) < gapGuardMs) {
+          if (radio::takeMutex(pdMS_TO_TICKS(20)) == pdTRUE) {
+            if (radio::isRxPacketReadyUnderMutex()) {
+              lastRxIrqHandleMs = nowPoll;
+            } else {
+              rxIrq = false;
+              s_rxIrqGapSuppressed.fetch_add(1, std::memory_order_relaxed);
+            }
+            radio::releaseMutex();
+          } else {
+            rxIrq = false;
+            s_rxIrqGapSuppressed.fetch_add(1, std::memory_order_relaxed);
+          }
+          if (!rxIrq && (nowPoll - lastRxGapSuppressedLogMs) >= 1000) {
+            lastRxGapSuppressedLogMs = nowPoll;
+            RIFTLINK_DIAG("FSM", "event=FSM_RX_IRQ_SUPPRESS delta_ms=%lu guard_ms=%lu sf=%u",
+                (unsigned long)(nowPoll - lastRxIrqHandleMs), (unsigned long)gapGuardMs, (unsigned)sfNow);
+          }
         } else {
           lastRxIrqHandleMs = nowPoll;
         }
@@ -1172,6 +1218,10 @@ static void radioSchedulerTask(void* arg) {
       }
       if (n > 0) {
         uint8_t op = (n > 2 && rxBuf[0] == protocol::SYNC_BYTE) ? rxBuf[2] : 0xFF;
+        if (shouldLogRxDone(op)) {
+          RIFTLINK_DIAG("RADIO", "event=RX_CHAIN stage=scheduler_read delivered_len=%u rssi=%d sf=%u op=0x%02X",
+              (unsigned)n, rssi, (unsigned)sfNow, (unsigned)op);
+        }
         uint32_t nowRx = millis();
         uint32_t fp = simpleRxFingerprint(rxBuf, n, rssi);
         bool dupBurst = (fp == lastRxFingerprint) && ((nowRx - lastRxFingerprintMs) <= FSM_RX_DUP_GUARD_MS);
@@ -1248,7 +1298,9 @@ static void radioSchedulerTask(void* arg) {
           radio::releaseMutex();
           contRxArmed = true;
           lastRxHealthRearmMs = nowPoll;
-          RIFTLINK_DIAG("FSM", "event=FSM_RECOVERY action=rx_irq_silence_rearm");
+          s_rxHealthRearmCount.fetch_add(1, std::memory_order_relaxed);
+          RIFTLINK_DIAG("FSM", "event=FSM_RECOVERY action=rx_irq_silence_rearm total=%lu",
+              (unsigned long)s_rxHealthRearmCount.load(std::memory_order_relaxed));
         }
       }
 
@@ -1292,7 +1344,10 @@ static void radioSchedulerTask(void* arg) {
         uint32_t queuedMs = item.enqueueMs ? (millis() - item.enqueueMs) : 0;
         if (queuedMs > txWaitToAirMaxMs) txWaitToAirMaxMs = queuedMs;
         lastToaUs = radio::getTimeOnAir(item.len);
-        radio::sendDirectInternal(item.buf, item.len);
+        if (!radio::sendDirectInternal(item.buf, item.len)) {
+          queueDeferredSend(item.buf, item.len, item.txSf, 80, item.priority);
+          RIFTLINK_DIAG("RADIO", "event=TX_FAIL_REQUEUE len=%u sf=%u", (unsigned)item.len, (unsigned)item.txSf);
+        }
         didTx = true;
         if (item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_MSG) {
           vTaskDelay(pdMS_TO_TICKS(60));
@@ -1328,7 +1383,10 @@ static void radioSchedulerTask(void* arg) {
           }
           lastToaUs = pktToaUs;
           burstToaUs += pktToaUs;
-          radio::sendDirectInternal(item.buf, item.len);
+          if (!radio::sendDirectInternal(item.buf, item.len)) {
+            queueDeferredSend(item.buf, item.len, item.txSf, 80, item.priority);
+            RIFTLINK_DIAG("RADIO", "event=TX_FAIL_REQUEUE len=%u sf=%u", (unsigned)item.len, (unsigned)item.txSf);
+          }
           didTx = true;
           vTaskDelay(pdMS_TO_TICKS(1));
           if (item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_MSG) {
@@ -1337,35 +1395,47 @@ static void radioSchedulerTask(void* arg) {
         }
 #endif
     }  // for drainIdx
+    if (didTx) {
+      uint8_t rxSfLeg; uint32_t _unusedSlotLeg;
+      getNextRxSlotParams(&rxSfLeg, &_unusedSlotLeg);
+      radio::applyHardwareSpreadingFactor(rxSfLeg);
+      (void)radio::startReceiveWithTimeout(FSM_CONT_RX_TIMEOUT_MS);
+      radio::setRxListenActive(true);
+    }
+    radio::releaseMutex();
     if (didTx && lastToaUs > 0) {
       uint32_t toaMs = (lastToaUs + 999) / 1000;
       if (toaMs > 0 && toaMs < 500) vTaskDelay(pdMS_TO_TICKS(toaMs));
     }
 #if !defined(SF_FORCE_7)
-    if (!didTx && !pushedBack) highSfDrained = 0;  // очередь пуста — сброс. pushedBack — не сбрасывать
+    if (!didTx && !pushedBack) highSfDrained = 0;
 #endif
-    // RX: mutex не держим на vTaskDelay — иначе E-Ink/CAD/msg_queue залипают на сотни мс.
     uint8_t sf;
     uint32_t slotMs;
     getNextRxSlotParams(&sf, &slotMs);
+    if (didTx) {
+      vTaskDelay(pdMS_TO_TICKS(slotMs > 220 ? 220 : slotMs));
+      continue;
+    }
     if (useFsmV2 && slotMs > 220) {
-      slotMs = 220;  // bounded preempt latency for TX windows
+      slotMs = 220;
       uint32_t txWaiting = (uint32_t)(s_txRequestQueue ? uxQueueMessagesWaiting(s_txRequestQueue) : 0);
       uint32_t now = millis();
-      // Лог preempt только когда реально есть ожидание TX и не чаще чем раз в несколько секунд.
       if (txWaiting > 0 && (now - lastFsmPreemptLogMs) >= FSM_PREEMPT_LOG_INTERVAL_MS) {
         RIFTLINK_DIAG("FSM", "event=FSM_PREEMPT reason=rx_slice_cap slot_ms=%u tx_waiting=%u",
             (unsigned)slotMs, (unsigned)txWaiting);
         lastFsmPreemptLogMs = now;
       }
     }
-    radio::applyHardwareSpreadingFactor(sf);
-    if (useFsmV2) fsmTransition(&fsmState, RadioFsmState::RXListen, "rx_window");
-    RIFTLINK_DIAG("RADIO", "event=RX_SLOT_START mode=normal sf=%u slot_ms=%u",
-        (unsigned)sf, (unsigned)slotMs);
-    radio::startReceiveWithTimeout(slotMs);
-    radio::setRxListenActive(true);
-    radio::releaseMutex();
+    if (radio::takeMutex(pdMS_TO_TICKS(200)) == pdTRUE) {
+      radio::applyHardwareSpreadingFactor(sf);
+      if (useFsmV2) fsmTransition(&fsmState, RadioFsmState::RXListen, "rx_window");
+      RIFTLINK_DIAG("RADIO", "event=RX_SLOT_START mode=normal sf=%u slot_ms=%u",
+          (unsigned)sf, (unsigned)slotMs);
+      radio::startReceiveWithTimeout(slotMs);
+      radio::setRxListenActive(true);
+      radio::releaseMutex();
+    }
     vTaskDelay(pdMS_TO_TICKS(slotMs));
     if (radio::takeMutex(pdMS_TO_TICKS(800)) != pdTRUE) {
       rxMutexTimeoutCount++;

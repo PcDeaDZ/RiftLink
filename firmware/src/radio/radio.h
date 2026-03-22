@@ -56,6 +56,8 @@ int receiveAsync(uint8_t* buf, size_t maxLen);
 bool isRxPacketReadyUnderMutex();
 /** Чтение готового RX пакета без принудительного standby (только под takeMutex). */
 int readReceivedPacketUnderMutex(uint8_t* buf, size_t maxLen);
+/** Диагностика RX path: oversize/short-read/read-error. */
+void getRxDiagCounters(uint32_t* oversizeDrops, uint32_t* shortReads, uint32_t* readErrors);
 /** true один раз на новое DIO1-событие (RX/TX IRQ), затем сбрасывается. */
 bool consumeIrqEvent();
 /** RSSI последнего принятого пакета (dBm), 0 если недоступно */
