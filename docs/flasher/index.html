@@ -59,89 +59,95 @@
         <div class="info" id="manifestInfo"></div>
         <div class="minor-note" id="eraseNote"></div>
 
-        <section class="about-box">
-          <h2 id="aboutTitle"></h2>
-          <p id="aboutLead" class="about-lead"></p>
-          <div class="about-grid">
-            <article class="about-item">
-              <h3 id="aboutFeature1Title"></h3>
-              <p id="aboutFeature1Text"></p>
-            </article>
-            <article class="about-item">
-              <h3 id="aboutFeature2Title"></h3>
-              <p id="aboutFeature2Text"></p>
-            </article>
-            <article class="about-item">
-              <h3 id="aboutFeature3Title"></h3>
-              <p id="aboutFeature3Text"></p>
-            </article>
+        <div class="content-grid">
+          <div class="col-stack">
+            <section class="about-box">
+              <h2 id="aboutTitle"></h2>
+              <p id="aboutLead" class="about-lead"></p>
+              <div class="about-grid">
+                <article class="about-item">
+                  <h3 id="aboutFeature1Title"></h3>
+                  <p id="aboutFeature1Text"></p>
+                </article>
+                <article class="about-item">
+                  <h3 id="aboutFeature2Title"></h3>
+                  <p id="aboutFeature2Text"></p>
+                </article>
+                <article class="about-item">
+                  <h3 id="aboutFeature3Title"></h3>
+                  <p id="aboutFeature3Text"></p>
+                </article>
+              </div>
+              <div class="about-links">
+                <a id="linkGithub" class="about-link" href="https://github.com/PcDeaDZ/RiftLink" target="_blank" rel="noopener noreferrer"></a>
+                <a id="linkReleases" class="about-link" href="https://github.com/PcDeaDZ/RiftLink/releases" target="_blank" rel="noopener noreferrer"></a>
+                <a id="linkDocs" class="about-link" href="https://github.com/PcDeaDZ/RiftLink/tree/master/docs" target="_blank" rel="noopener noreferrer"></a>
+              </div>
+            </section>
+
+            <section class="roadmap-box">
+              <h2 id="roadmapTitle"></h2>
+              <p id="roadmapLead" class="roadmap-lead"></p>
+              <ul id="roadmapList" class="roadmap-list"></ul>
+            </section>
+
+            <div class="tips">
+              <h2 id="tipsTitle"></h2>
+              <ul>
+                <li id="tip1"></li>
+                <li id="tip2"></li>
+                <li id="tip3"></li>
+              </ul>
+            </div>
           </div>
-          <div class="about-links">
-            <a id="linkGithub" class="about-link" href="https://github.com/PcDeaDZ/RiftLink" target="_blank" rel="noopener noreferrer"></a>
-            <a id="linkReleases" class="about-link" href="https://github.com/PcDeaDZ/RiftLink/releases" target="_blank" rel="noopener noreferrer"></a>
-            <a id="linkDocs" class="about-link" href="https://github.com/PcDeaDZ/RiftLink/tree/master/docs" target="_blank" rel="noopener noreferrer"></a>
+
+          <div class="col-stack">
+            <section class="release-box">
+              <h2 id="latestReleaseTitle"></h2>
+              <p class="release-line"><span id="releaseTagLabel"></span> <strong id="releaseTag">...</strong></p>
+              <p class="release-line"><span id="firmwareLabel"></span> <strong id="firmwareVersion">...</strong></p>
+              <p class="release-line"><span id="appLabel"></span> <strong id="appVersion">...</strong></p>
+              <a
+                id="apkDownloadLink"
+                class="apk-button"
+                href="#"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-disabled="true"
+              ></a>
+            </section>
+
+            <section class="notes-box">
+              <h2 id="whatsNewTitle"></h2>
+              <ul id="whatsNewList" class="notes-list"></ul>
+            </section>
+
+            <section class="faq-box">
+              <h2 id="faqTitle"></h2>
+              <details>
+                <summary id="faqQ1"></summary>
+                <p id="faqA1"></p>
+              </details>
+              <details>
+                <summary id="faqQ2"></summary>
+                <p id="faqA2"></p>
+              </details>
+              <details>
+                <summary id="faqQ3"></summary>
+                <p id="faqA3"></p>
+              </details>
+            </section>
+
+            <footer class="footer-box">
+              <p id="footerTitle" class="footer-title"></p>
+              <div class="footer-links">
+                <a id="footerLinkIssues" class="footer-link" href="https://github.com/PcDeaDZ/RiftLink/issues" target="_blank" rel="noopener noreferrer"></a>
+                <a id="footerLinkReleases" class="footer-link" href="https://github.com/PcDeaDZ/RiftLink/releases" target="_blank" rel="noopener noreferrer"></a>
+                <a id="footerLinkRepo" class="footer-link" href="https://github.com/PcDeaDZ/RiftLink" target="_blank" rel="noopener noreferrer"></a>
+              </div>
+            </footer>
           </div>
-        </section>
-
-        <section class="roadmap-box">
-          <h2 id="roadmapTitle"></h2>
-          <p id="roadmapLead" class="roadmap-lead"></p>
-          <ul id="roadmapList" class="roadmap-list"></ul>
-        </section>
-
-        <section class="release-box">
-          <h2 id="latestReleaseTitle"></h2>
-          <p class="release-line"><span id="releaseTagLabel"></span> <strong id="releaseTag">...</strong></p>
-          <p class="release-line"><span id="firmwareLabel"></span> <strong id="firmwareVersion">...</strong></p>
-          <p class="release-line"><span id="appLabel"></span> <strong id="appVersion">...</strong></p>
-          <a
-            id="apkDownloadLink"
-            class="apk-button"
-            href="#"
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-disabled="true"
-          ></a>
-        </section>
-
-        <section class="notes-box">
-          <h2 id="whatsNewTitle"></h2>
-          <ul id="whatsNewList" class="notes-list"></ul>
-        </section>
-
-        <section class="faq-box">
-          <h2 id="faqTitle"></h2>
-          <details>
-            <summary id="faqQ1"></summary>
-            <p id="faqA1"></p>
-          </details>
-          <details>
-            <summary id="faqQ2"></summary>
-            <p id="faqA2"></p>
-          </details>
-          <details>
-            <summary id="faqQ3"></summary>
-            <p id="faqA3"></p>
-          </details>
-        </section>
-
-        <div class="tips">
-          <h2 id="tipsTitle"></h2>
-          <ul>
-            <li id="tip1"></li>
-            <li id="tip2"></li>
-            <li id="tip3"></li>
-          </ul>
         </div>
-
-        <footer class="footer-box">
-          <p id="footerTitle" class="footer-title"></p>
-          <div class="footer-links">
-            <a id="footerLinkIssues" class="footer-link" href="https://github.com/PcDeaDZ/RiftLink/issues" target="_blank" rel="noopener noreferrer"></a>
-            <a id="footerLinkReleases" class="footer-link" href="https://github.com/PcDeaDZ/RiftLink/releases" target="_blank" rel="noopener noreferrer"></a>
-            <a id="footerLinkRepo" class="footer-link" href="https://github.com/PcDeaDZ/RiftLink" target="_blank" rel="noopener noreferrer"></a>
-          </div>
-        </footer>
       </section>
     </main>
 
