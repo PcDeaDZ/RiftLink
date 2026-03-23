@@ -508,6 +508,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       }
       final uid = _groupUidFromPeerRef(c.peerRef);
       if (uid != null && uid.isNotEmpty) {
+        if (uid == 'UNRESOLVED_$kMeshBroadcastGroupId') continue;
         unresolvedByUid[uid] = c;
       }
     }
@@ -732,6 +733,10 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   }
 
   Future<void> _openGroup(int groupId, {String? groupUid}) async {
+    if (groupId <= kMeshBroadcastGroupId) {
+      await _openBroadcast();
+      return;
+    }
     final uid = ((groupUid ?? _groupUidById(groupId))?.toUpperCase() ?? 'UNRESOLVED_$groupId');
     if (uid.isEmpty) {
       _snack(context.l10n.tr('error'));

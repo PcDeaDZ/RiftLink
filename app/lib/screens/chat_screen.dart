@@ -246,7 +246,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         if (gv2 != null && gv2.canonicalName.trim().isNotEmpty) {
           return gv2.canonicalName.trim();
         }
-        final gid = _group > 0 ? _group : _resolveGroupIdByUid(_groupUid ?? '');
+        final gid = _group > 1 ? _group : _resolveGroupIdByUid(_groupUid ?? '');
         return gid > 0 ? '${l.tr('group')} $gid' : l.tr('chats_folder_groups');
       case ChatContextType.broadcast:
         return l.tr('broadcast');
@@ -458,7 +458,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       // Do not create an empty group chat in DB on accidental open.
       // Conversation will be created lazily on first outgoing message.
       shouldEnsureConversation = false;
-    } else if (widget.initialGroupId != null && widget.initialGroupId! > 0) {
+    } else if (widget.initialGroupId != null && widget.initialGroupId! > 1) {
       _group = widget.initialGroupId!;
       _groupUid = null;
       final info = widget.ble.lastInfo;
@@ -501,7 +501,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             : _conversationId!.startsWith('groupv2:')
                 ? ((_activeGroupV2Info()?.canonicalName.trim().isNotEmpty ?? false)
                       ? _activeGroupV2Info()!.canonicalName.trim()
-                      : 'Group ${_group > 0 ? _group : (_groupUid ?? '')}')
+                      : 'Group ${_group > 1 ? _group : (_groupUid ?? '')}')
                 : 'Broadcast',
       );
     }
@@ -555,7 +555,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     if (_groupUid != null && _groupUid!.isNotEmpty) {
       return ChatRepository.groupConversationIdByUid(_groupUid!);
     }
-    if (_group > 0) return ChatRepository.groupConversationIdByUid('UNRESOLVED_$_group');
+    if (_group > 1) return ChatRepository.groupConversationIdByUid('UNRESOLVED_$_group');
     if (_unicastTo != null && _unicastTo!.isNotEmpty) {
       return ChatRepository.directConversationId(_normalizeId(_unicastTo!));
     }
@@ -932,7 +932,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   String _recipientPillLabel(AppLocalizations l) {
-    if (_group > 0) return 'G$_group';
+    if (_group > 1) return 'G$_group';
     if (_unicastTo != null) {
       final id = _normNodeId(_unicastTo!);
       if (id.isEmpty) return 'BC';
@@ -2629,7 +2629,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                         controller: _controller,
                         maxLines: 6,
                         minLines: 1,
-                        maxLength: _group > 0 ? 160 : 200,
+                        maxLength: _group > 1 ? 160 : 200,
                         style: AppTypography.bodyBase().copyWith(color: context.palette.onSurface, fontSize: 16),
                         placeholder: l.tr('message_hint'),
                         placeholderStyle: TextStyle(color: context.palette.onSurfaceVariant),

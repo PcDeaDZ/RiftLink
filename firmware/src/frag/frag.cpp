@@ -124,12 +124,14 @@ bool send(const uint8_t* to, const uint8_t* plain, size_t plainLen, bool compres
 }
 
 bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, size_t payloadLen,
-                bool compressed, uint8_t* out, size_t outMaxLen, size_t* outLen) {
-  if (!s_inited || payloadLen < FRAG_HEADER_LEN) return false;
+                bool compressed, uint8_t* out, size_t outMaxLen, size_t* outLen, uint32_t* outMsgId) {
+  if (!s_inited || payloadLen < FRAG_HEADER_LEN || !outLen || !outMsgId) return false;
   *outLen = 0;
+  *outMsgId = 0;
 
   uint32_t msgId;
   memcpy(&msgId, payload, 4);
+  if (msgId == 0) return false;  // strict: MSG_FRAG без msgId не поддерживаем
   uint8_t part = payload[4];
   uint8_t total = payload[5];
   if (part == 0 || total == 0 || part > total) return false;
@@ -184,6 +186,7 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
   }
   memcpy(out, plain, plainLen);
   *outLen = plainLen;
+  *outMsgId = msgId;
   slot->inUse = false;
   return true;
 }

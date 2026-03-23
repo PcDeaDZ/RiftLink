@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../ble/riftlink_ble.dart';
 import '../contacts/contacts_service.dart';
+import '../mesh_constants.dart';
 import 'chat_models.dart';
 import 'chat_repository.dart';
 
@@ -90,6 +91,7 @@ class ChatEventIngestor {
   }
 
   String _normalizeId(String raw) => raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+  bool _hasValidStatusMsgId(int msgId) => msgId > 0;
 
   Future<String> _titleFromId(String id) async {
     final n = _normalizeId(id);
@@ -145,19 +147,26 @@ class ChatEventIngestor {
   Future<void> _handle(RiftLinkEvent event) async {
     if (event is RiftLinkMsgEvent) {
       final from = _normalizeId(event.from);
+      final groupId = event.group ?? 0;
       final rawGroupUid = event.groupUid?.trim().toUpperCase();
       final hasGroupUid = rawGroupUid != null && rawGroupUid.isNotEmpty;
-      final hasGroupId = (event.group ?? 0) > 0;
+      final hasGroupId = groupId > kMeshBroadcastGroupId;
+      final isBroadcastByGroupId = !hasGroupUid && groupId == kMeshBroadcastGroupId;
       final groupContext = hasGroupUid
           ? rawGroupUid
           : (hasGroupId ? 'UNRESOLVED_${event.group}' : null);
-      final dedupKey = 'msg:$from:${event.msgId ?? -1}:${event.text.hashCode}:${groupContext ?? 'direct'}';
+      final scopeTag = isBroadcastByGroupId ? 'broadcast' : (groupContext ?? 'direct');
+      final dedupKey = 'msg:$from:${event.msgId ?? -1}:${event.text.hashCode}:$scopeTag';
       if (!_dedup.add(dedupKey)) return;
 
-      final conversationId = groupContext != null
-          ? ChatRepository.groupConversationIdByUid(groupContext)
-          : ChatRepository.directConversationId(from);
-      if (groupContext != null) {
+      final conversationId = isBroadcastByGroupId
+          ? ChatRepository.broadcastConversationId()
+          : (groupContext != null
+              ? ChatRepository.groupConversationIdByUid(groupContext)
+              : ChatRepository.directConversationId(from));
+      if (isBroadcastByGroupId) {
+        await _ensureBroadcastConversation();
+      } else if (groupContext != null) {
         if (hasGroupUid && hasGroupId) {
           await repo.migrateUnresolvedGroupConversation(
             channelId32: event.group!,
@@ -176,7 +185,7 @@ class ChatEventIngestor {
           conversationId: conversationId,
           from: from,
           text: event.text,
-          groupId: event.group,
+          groupId: hasGroupId ? event.group : (isBroadcastByGroupId ? kMeshBroadcastGroupId : null),
           groupUid: groupContext,
           type: event.type,
           lane: event.lane,
@@ -195,6 +204,10 @@ class ChatEventIngestor {
     }
 
     if (event is RiftLinkSentEvent) {
+      if (!_hasValidStatusMsgId(event.msgId)) {
+        debugPrint('[BLE_CHAIN] stage=app_msg_state action=drop reason=invalid_msg_id evt=sent msgId=${event.msgId}');
+        return;
+      }
       final to = _normalizeId(event.to);
       _recordStatus('sent', event.msgId, to);
       final conversationId = to == 'FFFFFFFFFFFFFFFF'
@@ -228,6 +241,10 @@ class ChatEventIngestor {
     }
 
     if (event is RiftLinkDeliveredEvent) {
+      if (!_hasValidStatusMsgId(event.msgId)) {
+        debugPrint('[BLE_CHAIN] stage=app_msg_state action=drop reason=invalid_msg_id evt=delivered msgId=${event.msgId}');
+        return;
+      }
       final from = _normalizeId(event.from);
       _recordStatus('delivered', event.msgId, from);
       final conversationId = ChatRepository.directConversationId(from);
@@ -254,6 +271,10 @@ class ChatEventIngestor {
     }
 
     if (event is RiftLinkReadEvent) {
+      if (!_hasValidStatusMsgId(event.msgId)) {
+        debugPrint('[BLE_CHAIN] stage=app_msg_state action=drop reason=invalid_msg_id evt=read msgId=${event.msgId}');
+        return;
+      }
       final from = _normalizeId(event.from);
       _recordStatus('read', event.msgId, from);
       final conversationId = ChatRepository.directConversationId(from);
@@ -280,6 +301,10 @@ class ChatEventIngestor {
     }
 
     if (event is RiftLinkUndeliveredEvent) {
+      if (!_hasValidStatusMsgId(event.msgId)) {
+        debugPrint('[BLE_CHAIN] stage=app_msg_state action=drop reason=invalid_msg_id evt=undelivered msgId=${event.msgId}');
+        return;
+      }
       final to = _normalizeId(event.to);
       _recordStatus('undelivered', event.msgId, to);
       final conversationId = to == 'FFFFFFFFFFFFFFFF'
@@ -313,6 +338,12 @@ class ChatEventIngestor {
     }
 
     if (event is RiftLinkBroadcastDeliveryEvent) {
+      if (!_hasValidStatusMsgId(event.msgId)) {
+        debugPrint(
+          '[BLE_CHAIN] stage=app_msg_state action=drop reason=invalid_msg_id evt=broadcast_delivery msgId=${event.msgId}',
+        );
+        return;
+      }
       _recordStatus('broadcast_delivery', event.msgId, 'FFFFFFFFFFFFFFFF');
       final conversationId = ChatRepository.broadcastConversationId();
       await _ensureBroadcastConversation();

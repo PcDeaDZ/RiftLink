@@ -23,7 +23,7 @@ bool send(const uint8_t* to, const uint8_t* plain, size_t plainLen, bool compres
 // Обработка входящего фрагмента. Возвращает true если сообщение собрано полностью.
 // compressed — флаг из заголовка пакета (payload до расшифровки был сжат)
 bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, size_t payloadLen,
-                bool compressed, uint8_t* out, size_t outMaxLen, size_t* outLen);
+                bool compressed, uint8_t* out, size_t outMaxLen, size_t* outLen, uint32_t* outMsgId);
 
 void init();
 

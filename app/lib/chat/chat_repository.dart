@@ -5,6 +5,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 
 import 'chat_models.dart';
+import 'outgoing_status_policy.dart';
 
 class ChatRepository {
   ChatRepository._();
@@ -20,6 +21,13 @@ class ChatRepository {
   static const int _dbVersion = 3;
   static const String _defaultNodeScope = 'UNBOUND';
   static const String _dbFilePrefix = 'riftlink_chat_';
+
+  static MessageStatus _statusFromDb(String? raw) {
+    return MessageStatus.values.firstWhere(
+      (v) => v.name == raw,
+      orElse: () => MessageStatus.pending,
+    );
+  }
 
   static String normalizeNodeScope(String? raw) {
     final trimmed = (raw ?? '').trim();
@@ -159,7 +167,141 @@ class ChatRepository {
         }
       },
     );
+    await _repairMisclassifiedBroadcastGroup(_db!);
     _openedNodeScope = _activeNodeScope;
+  }
+
+  Future<void> _repairMisclassifiedBroadcastGroup(Database db) async {
+    final badId = groupConversationIdByUid('UNRESOLVED_1');
+    final broadcastId = broadcastConversationId();
+    await db.transaction((txn) async {
+      final badRows = await txn.query(
+        'conversations',
+        columns: ['id', 'unread_count', 'last_preview', 'last_at_ms'],
+        where: 'id = ?',
+        whereArgs: [badId],
+        limit: 1,
+      );
+      if (badRows.isEmpty) return;
+
+      final broadcastRows = await txn.query(
+        'conversations',
+        columns: ['id', 'unread_count', 'last_at_ms'],
+        where: 'id = ?',
+        whereArgs: [broadcastId],
+        limit: 1,
+      );
+      if (broadcastRows.isEmpty) {
+        await txn.insert(
+          'conversations',
+          {
+            'id': broadcastId,
+            'kind': ConversationKind.broadcast.name,
+            'peer_ref': 'broadcast',
+            'title': 'Broadcast',
+            'subtitle': null,
+            'last_preview': null,
+            'last_at_ms': null,
+            'unread_count': 0,
+            'archived': 0,
+            'pinned': 0,
+            'muted': 0,
+            'folder_id': 'all',
+          },
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
+      }
+
+      // Move misclassified traffic into broadcast chat.
+      await txn.rawUpdate(
+        '''
+        UPDATE messages
+        SET conversation_id = ?, group_id = NULL, group_uid = NULL
+        WHERE conversation_id = ? AND (group_id IS NULL OR group_id <= 1)
+        ''',
+        [broadcastId, badId],
+      );
+
+      final movedStats = await txn.rawQuery(
+        '''
+        SELECT
+          COUNT(*) AS cnt,
+          MAX(created_at_ms) AS last_at
+        FROM messages
+        WHERE conversation_id = ?
+        ''',
+        [broadcastId],
+      );
+      final movedCount = (movedStats.first['cnt'] as int?) ?? 0;
+      final movedLastAt = (movedStats.first['last_at'] as int?) ?? 0;
+      final badUnread = (badRows.first['unread_count'] as int?) ?? 0;
+      final currentBroadcast = await txn.query(
+        'conversations',
+        columns: ['unread_count'],
+        where: 'id = ?',
+        whereArgs: [broadcastId],
+        limit: 1,
+      );
+      final broadcastUnread = currentBroadcast.isNotEmpty
+          ? ((currentBroadcast.first['unread_count'] as int?) ?? 0)
+          : 0;
+      if (movedCount > 0) {
+        await txn.update(
+          'conversations',
+          {
+            'last_at_ms': movedLastAt > 0 ? movedLastAt : null,
+            'unread_count': broadcastUnread + badUnread,
+          },
+          where: 'id = ?',
+          whereArgs: [broadcastId],
+        );
+      } else if (badUnread > 0) {
+        await txn.update(
+          'conversations',
+          {'unread_count': broadcastUnread + badUnread},
+          where: 'id = ?',
+          whereArgs: [broadcastId],
+        );
+      }
+
+      final badDraftRows = await txn.query(
+        'drafts',
+        columns: ['text'],
+        where: 'conversation_id = ?',
+        whereArgs: [badId],
+        limit: 1,
+      );
+      if (badDraftRows.isNotEmpty) {
+        final badDraftText = (badDraftRows.first['text'] as String?) ?? '';
+        final broadcastDraftRows = await txn.query(
+          'drafts',
+          columns: ['text'],
+          where: 'conversation_id = ?',
+          whereArgs: [broadcastId],
+          limit: 1,
+        );
+        final broadcastDraftText = broadcastDraftRows.isNotEmpty
+            ? ((broadcastDraftRows.first['text'] as String?) ?? '')
+            : '';
+        if (broadcastDraftText.trim().isEmpty && badDraftText.trim().isNotEmpty) {
+          await txn.insert(
+            'drafts',
+            {
+              'conversation_id': broadcastId,
+              'text': badDraftText,
+            },
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        }
+      }
+      await txn.delete(
+        'drafts',
+        where: 'conversation_id = ?',
+        whereArgs: [badId],
+      );
+      await txn.delete('conversation_pins', where: 'conversation_id = ?', whereArgs: [badId]);
+      await txn.delete('conversations', where: 'id = ?', whereArgs: [badId]);
+    });
   }
 
   Future<void> _createGroupSecurityTables(Database db) async {
@@ -660,7 +802,21 @@ class ChatRepository {
   }) async {
     final db = await _database;
     final payload = <String, Object?>{};
-    if (status != null) payload['status'] = status.name;
+    if (status != null) {
+      final currentRows = await db.query(
+        'messages',
+        columns: ['status'],
+        where: 'conversation_id = ? AND msg_id = ?',
+        whereArgs: [conversationId, msgId],
+        limit: 1,
+      );
+      if (currentRows.isNotEmpty) {
+        final currentStatus = _statusFromDb(currentRows.first['status'] as String?);
+        payload['status'] = mergeOutgoingMessageStatus(currentStatus, status).name;
+      } else {
+        payload['status'] = status.name;
+      }
+    }
     if (delivered != null) payload['delivered'] = delivered;
     if (total != null) payload['total'] = total;
     if (payload.isEmpty) return 0;
@@ -680,17 +836,30 @@ class ChatRepository {
     int? total,
   }) async {
     final db = await _database;
-    final payload = <String, Object?>{};
-    if (status != null) payload['status'] = status.name;
-    if (delivered != null) payload['delivered'] = delivered;
-    if (total != null) payload['total'] = total;
-    if (payload.isEmpty) return 0;
-    final updated = await db.update(
+    final rows = await db.query(
       'messages',
-      payload,
+      columns: ['id', 'status'],
       where: 'msg_id = ?',
       whereArgs: [msgId],
     );
+    if (rows.isEmpty) return 0;
+    var updated = 0;
+    for (final row in rows) {
+      final payload = <String, Object?>{};
+      if (status != null) {
+        final currentStatus = _statusFromDb(row['status'] as String?);
+        payload['status'] = mergeOutgoingMessageStatus(currentStatus, status).name;
+      }
+      if (delivered != null) payload['delivered'] = delivered;
+      if (total != null) payload['total'] = total;
+      if (payload.isEmpty) continue;
+      updated += await db.update(
+        'messages',
+        payload,
+        where: 'id = ?',
+        whereArgs: [row['id']],
+      );
+    }
     return updated;
   }
 

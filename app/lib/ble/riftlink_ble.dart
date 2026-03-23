@@ -1162,7 +1162,7 @@ class RiftLinkBle {
     String? trigger,
     int? triggerAtMs,
   }) async {
-    final Map<String, dynamic>? payload = group != null && group > 0
+    final Map<String, dynamic>? payload = group != null && group > 1
         ? {
             'cmd': 'send',
             'group': group,

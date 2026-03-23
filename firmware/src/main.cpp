@@ -1719,11 +1719,13 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         }
         const char* msg;
         size_t msgLen;
+        uint32_t appMsgId = 0;
         if (decLen >= GROUP_ID_LEN + msg_queue::MSG_ID_LEN) {
           uint32_t bcMsgId;
           memcpy(&bcMsgId, decBuf + GROUP_ID_LEN, msg_queue::MSG_ID_LEN);
           if (bcDedupSeen(hdr.from, bcMsgId)) break;  // дубликат broadcast (3x repeat)
           bcDedupAdd(hdr.from, bcMsgId);
+          appMsgId = bcMsgId;
           msg = (const char*)(decBuf + GROUP_ID_LEN + msg_queue::MSG_ID_LEN);
           msgLen = decLen - GROUP_ID_LEN - msg_queue::MSG_ID_LEN;
           // strict mode: для group/broadcast подтверждение только через ECHO witness (без ACK).
@@ -1749,11 +1751,11 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         if (msgLen < 256) {
           memcpy(msgStrBuf, msg, msgLen);
           msgStrBuf[msgLen] = '\0';
-          ble::requestMsgNotify(hdr.from, msgStrBuf, 0, rssi, 0,
+          ble::requestMsgNotify(hdr.from, msgStrBuf, appMsgId, rssi, 0,
               (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal", "text",
               groupId, groupUid[0] ? groupUid : nullptr);
-          RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_packet action=request_msg_notify from=%02X%02X msgId=0 len=%u lane=%s type=text",
-              hdr.from[0], hdr.from[1], (unsigned)msgLen,
+          RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_packet action=request_msg_notify from=%02X%02X msgId=%u len=%u lane=%s type=text",
+              hdr.from[0], hdr.from[1], (unsigned)appMsgId, (unsigned)msgLen,
               (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal");
           char fromHex[17];
           snprintf(fromHex, sizeof(fromHex), "grp%u %02X%02X", (unsigned)groupId, hdr.from[0], hdr.from[1]);
@@ -1765,15 +1767,21 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     case protocol::OP_MSG_FRAG:
       if (payloadLen >= 6) {
         size_t outLen = 0;
+        uint32_t fragMsgId = 0;
         if (frag::onFragment(hdr.from, hdr.to, payload, payloadLen,
-                             protocol::isCompressed(hdr), s_fragOutBuf, sizeof(s_fragOutBuf), &outLen)) {
+                             protocol::isCompressed(hdr), s_fragOutBuf, sizeof(s_fragOutBuf), &outLen, &fragMsgId)) {
           if (outLen > 0 && outLen < sizeof(s_fragOutBuf)) {
             s_fragOutBuf[outLen] = '\0';
             const char* msgStr = (const char*)s_fragOutBuf;
-            ble::requestMsgNotify(hdr.from, msgStr, 0, rssi, 0,
+            if (fragMsgId == 0) {
+              RIFTLINK_DIAG("FRAG", "event=FRAG_RX_DROP reason=msg_id_missing from=%02X%02X len=%u",
+                  hdr.from[0], hdr.from[1], (unsigned)outLen);
+              break;
+            }
+            ble::requestMsgNotify(hdr.from, msgStr, fragMsgId, rssi, 0,
                 (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal", "text");
-            RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_packet action=request_msg_notify from=%02X%02X msgId=0 len=%u lane=%s type=text",
-                hdr.from[0], hdr.from[1], (unsigned)outLen,
+            RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_packet action=request_msg_notify from=%02X%02X msgId=%u len=%u lane=%s type=text",
+                hdr.from[0], hdr.from[1], (unsigned)fragMsgId, (unsigned)outLen,
                 (hdr.channel == protocol::CHANNEL_CRITICAL) ? "critical" : "normal");
             char fromHex[17];
             snprintf(fromHex, sizeof(fromHex), "%02X%02X%02X%02X%02X%02X%02X%02X",

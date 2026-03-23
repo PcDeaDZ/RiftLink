@@ -9,11 +9,37 @@ import 'package:geolocator/geolocator.dart';
 
 import '../../ble/riftlink_ble.dart';
 import '../../chat/chat_models.dart';
+import '../../chat/outgoing_status_policy.dart';
 import '../../chat/chat_repository.dart';
 import '../../connection/transport_reconnect_manager.dart';
+import '../../mesh_constants.dart';
 import '../../recent_devices/recent_devices_service.dart';
 import '../../voice/voice_service.dart';
 import 'chat_ui_models.dart';
+
+ChatUiMessageStatus _mergeUiOutgoingStatus(ChatUiMessageStatus current, ChatUiMessageStatus incoming) {
+  final merged = mergeOutgoingMessageStatus(
+    _domainStatusFromUi(current),
+    _domainStatusFromUi(incoming),
+  );
+  return _uiStatusFromDomain(merged, incoming);
+}
+
+MessageStatus _domainStatusFromUi(ChatUiMessageStatus status) {
+  return MessageStatus.values.firstWhere(
+    (v) => v.name == status.name,
+    orElse: () => MessageStatus.sent,
+  );
+}
+
+ChatUiMessageStatus _uiStatusFromDomain(MessageStatus status, ChatUiMessageStatus fallback) {
+  return ChatUiMessageStatus.values.firstWhere(
+    (v) => v.name == status.name,
+    orElse: () => fallback,
+  );
+}
+
+bool _hasValidStatusMsgId(int msgId) => msgId > 0;
 
 class ChatBleHandlerDeps {
   final bool isMounted;
@@ -189,6 +215,26 @@ class ChatScreenController {
   void handleBleEvent(RiftLinkEvent evt, ChatBleHandlerDeps deps) {
     if (!deps.isMounted) return;
     if (evt is RiftLinkMsgEvent) {
+      final fromNorm = deps.normalizeId(evt.from);
+      final groupId = evt.group ?? 0;
+      final rawGroupUid = evt.groupUid?.trim().toUpperCase();
+      final hasGroupUid = rawGroupUid != null && rawGroupUid.isNotEmpty;
+      final hasGroupId = groupId > kMeshBroadcastGroupId;
+      final isBroadcastByGroupId = !hasGroupUid && groupId == kMeshBroadcastGroupId;
+      final incomingConv = isBroadcastByGroupId
+          ? ChatRepository.broadcastConversationId()
+          : (hasGroupUid
+              ? ChatRepository.groupConversationIdByUid(rawGroupUid!)
+              : (hasGroupId
+                  ? ChatRepository.groupConversationIdByUid('UNRESOLVED_$groupId')
+                  : ChatRepository.directConversationId(fromNorm)));
+      final active = deps.conversationId;
+      if (active != null && active != incomingConv) {
+        if (deps.appLifecycle != AppLifecycleState.resumed) {
+          deps.showIncomingNotification(evt.from, evt.text);
+        }
+        return;
+      }
       deps.setState(() {
         final ttl = evt.ttlMinutes ?? 0;
         deps.messages.add(ChatUiMessage(
@@ -202,9 +248,7 @@ class ChatScreenController {
           deleteAt: ttl > 0 ? DateTime.now().add(Duration(minutes: ttl)) : null,
         ));
       });
-      final active = deps.conversationId;
       if (active != null) {
-        final incomingConv = ChatRepository.directConversationId(deps.normalizeId(evt.from));
         if (active == incomingConv) {
           deps.markConversationRead(active);
         }
@@ -212,11 +256,17 @@ class ChatScreenController {
       if (deps.appLifecycle != AppLifecycleState.resumed) {
         deps.showIncomingNotification(evt.from, evt.text);
       }
-      deps.sendReadForUnread();
+      if (active != null && active == incomingConv && incomingConv.startsWith('direct:')) {
+        deps.sendReadForUnread();
+      }
       deps.scrollToBottom();
       return;
     }
     if (evt is RiftLinkSentEvent) {
+      if (!_hasValidStatusMsgId(evt.msgId)) {
+        debugPrint('[BLE_CHAIN] stage=app_msg_state action=drop reason=invalid_msg_id evt=sent msgId=${evt.msgId}');
+        return;
+      }
       deps.setState(() {
         final toMatch = evt.to.isEmpty ? null : evt.to;
         var matched = false;
@@ -225,7 +275,11 @@ class ChatScreenController {
           final m = deps.messages[i];
           final sameTo = (m.to == null && toMatch == null) || deps.sameNodeId(m.to, toMatch);
           if (!m.isIncoming && m.msgId == null && sameTo) {
-            deps.messages[i] = m.copyWith(msgId: evt.msgId, to: evt.to, status: ChatUiMessageStatus.sent);
+            deps.messages[i] = m.copyWith(
+              msgId: evt.msgId,
+              to: evt.to,
+              status: _mergeUiOutgoingStatus(m.status, ChatUiMessageStatus.sent),
+            );
             matched = true;
             break;
           }
@@ -239,15 +293,20 @@ class ChatScreenController {
       return;
     }
     if (evt is RiftLinkDeliveredEvent) {
+      if (!_hasValidStatusMsgId(evt.msgId)) {
+        debugPrint('[BLE_CHAIN] stage=app_msg_state action=drop reason=invalid_msg_id evt=delivered msgId=${evt.msgId}');
+        return;
+      }
       deps.setState(() {
         var matched = false;
         for (var i = 0; i < deps.messages.length; i++) {
           final m = deps.messages[i];
           if (!m.isIncoming && deps.sameNodeId(m.to, evt.from) && m.msgId == evt.msgId) {
-            var updated = m.copyWith(status: ChatUiMessageStatus.delivered);
-            if (deps.shouldEmitCriticalSummary(updated, ChatUiMessageStatus.delivered)) {
+            final nextStatus = _mergeUiOutgoingStatus(m.status, ChatUiMessageStatus.delivered);
+            var updated = m.copyWith(status: nextStatus);
+            if (nextStatus != m.status && deps.shouldEmitCriticalSummary(updated, nextStatus)) {
               updated = updated.copyWith(relaySummarySent: true);
-              deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.delivered));
+              deps.messages.add(deps.buildCriticalSummaryMessage(updated, nextStatus));
             }
             deps.messages[i] = updated;
             matched = true;
@@ -259,10 +318,11 @@ class ChatScreenController {
           for (var i = deps.messages.length - 1; i >= 0; i--) {
             final m = deps.messages[i];
             if (m.isIncoming || m.msgId != null || !deps.sameNodeId(m.to, evt.from)) continue;
-            var updated = m.copyWith(msgId: evt.msgId, status: ChatUiMessageStatus.delivered);
-            if (deps.shouldEmitCriticalSummary(updated, ChatUiMessageStatus.delivered)) {
+            final nextStatus = _mergeUiOutgoingStatus(m.status, ChatUiMessageStatus.delivered);
+            var updated = m.copyWith(msgId: evt.msgId, status: nextStatus);
+            if (nextStatus != m.status && deps.shouldEmitCriticalSummary(updated, nextStatus)) {
               updated = updated.copyWith(relaySummarySent: true);
-              deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.delivered));
+              deps.messages.add(deps.buildCriticalSummaryMessage(updated, nextStatus));
             }
             deps.messages[i] = updated;
             matched = true;
@@ -278,15 +338,20 @@ class ChatScreenController {
       return;
     }
     if (evt is RiftLinkReadEvent) {
+      if (!_hasValidStatusMsgId(evt.msgId)) {
+        debugPrint('[BLE_CHAIN] stage=app_msg_state action=drop reason=invalid_msg_id evt=read msgId=${evt.msgId}');
+        return;
+      }
       deps.setState(() {
         var matched = false;
         for (var i = 0; i < deps.messages.length; i++) {
           final m = deps.messages[i];
           if (!m.isIncoming && deps.sameNodeId(m.to, evt.from) && m.msgId == evt.msgId) {
-            var updated = m.copyWith(status: ChatUiMessageStatus.read);
-            if (deps.shouldEmitCriticalSummary(updated, ChatUiMessageStatus.read)) {
+            final nextStatus = _mergeUiOutgoingStatus(m.status, ChatUiMessageStatus.read);
+            var updated = m.copyWith(status: nextStatus);
+            if (nextStatus != m.status && deps.shouldEmitCriticalSummary(updated, nextStatus)) {
               updated = updated.copyWith(relaySummarySent: true);
-              deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.read));
+              deps.messages.add(deps.buildCriticalSummaryMessage(updated, nextStatus));
             }
             deps.messages[i] = updated;
             matched = true;
@@ -297,10 +362,11 @@ class ChatScreenController {
           for (var i = deps.messages.length - 1; i >= 0; i--) {
             final m = deps.messages[i];
             if (m.isIncoming || m.msgId != null || !deps.sameNodeId(m.to, evt.from)) continue;
-            var updated = m.copyWith(msgId: evt.msgId, status: ChatUiMessageStatus.read);
-            if (deps.shouldEmitCriticalSummary(updated, ChatUiMessageStatus.read)) {
+            final nextStatus = _mergeUiOutgoingStatus(m.status, ChatUiMessageStatus.read);
+            var updated = m.copyWith(msgId: evt.msgId, status: nextStatus);
+            if (nextStatus != m.status && deps.shouldEmitCriticalSummary(updated, nextStatus)) {
               updated = updated.copyWith(relaySummarySent: true);
-              deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.read));
+              deps.messages.add(deps.buildCriticalSummaryMessage(updated, nextStatus));
             }
             deps.messages[i] = updated;
             matched = true;
@@ -316,6 +382,12 @@ class ChatScreenController {
       return;
     }
     if (evt is RiftLinkUndeliveredEvent) {
+      if (!_hasValidStatusMsgId(evt.msgId)) {
+        debugPrint(
+          '[BLE_CHAIN] stage=app_msg_state action=drop reason=invalid_msg_id evt=undelivered msgId=${evt.msgId}',
+        );
+        return;
+      }
       deps.setState(() {
         var matched = false;
         for (var i = 0; i < deps.messages.length; i++) {
@@ -323,14 +395,15 @@ class ChatScreenController {
           if (!m.isIncoming && m.msgId == evt.msgId) {
             final isBroadcast = evt.to.isEmpty || deps.sameNodeId(m.to, deps.broadcastTo);
             if (isBroadcast || deps.sameNodeId(m.to, evt.to)) {
+              final nextStatus = _mergeUiOutgoingStatus(m.status, ChatUiMessageStatus.undelivered);
               var updated = m.copyWith(
-                status: ChatUiMessageStatus.undelivered,
+                status: nextStatus,
                 delivered: evt.delivered ?? 0,
                 total: evt.total ?? 0,
               );
-              if (deps.shouldEmitCriticalSummary(updated, ChatUiMessageStatus.undelivered)) {
+              if (nextStatus != m.status && deps.shouldEmitCriticalSummary(updated, nextStatus)) {
                 updated = updated.copyWith(relaySummarySent: true);
-                deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.undelivered));
+                deps.messages.add(deps.buildCriticalSummaryMessage(updated, nextStatus));
               }
               deps.messages[i] = updated;
               matched = true;
@@ -344,15 +417,16 @@ class ChatScreenController {
             if (m.isIncoming || m.msgId != null) continue;
             final isBroadcast = evt.to.isEmpty || deps.sameNodeId(m.to, deps.broadcastTo);
             if (!isBroadcast && !deps.sameNodeId(m.to, evt.to)) continue;
+            final nextStatus = _mergeUiOutgoingStatus(m.status, ChatUiMessageStatus.undelivered);
             var updated = m.copyWith(
               msgId: evt.msgId,
-              status: ChatUiMessageStatus.undelivered,
+              status: nextStatus,
               delivered: evt.delivered ?? 0,
               total: evt.total ?? 0,
             );
-            if (deps.shouldEmitCriticalSummary(updated, ChatUiMessageStatus.undelivered)) {
+            if (nextStatus != m.status && deps.shouldEmitCriticalSummary(updated, nextStatus)) {
               updated = updated.copyWith(relaySummarySent: true);
-              deps.messages.add(deps.buildCriticalSummaryMessage(updated, ChatUiMessageStatus.undelivered));
+              deps.messages.add(deps.buildCriticalSummaryMessage(updated, nextStatus));
             }
             deps.messages[i] = updated;
             matched = true;
@@ -368,15 +442,22 @@ class ChatScreenController {
       return;
     }
     if (evt is RiftLinkBroadcastDeliveryEvent) {
+      if (!_hasValidStatusMsgId(evt.msgId)) {
+        debugPrint(
+          '[BLE_CHAIN] stage=app_msg_state action=drop reason=invalid_msg_id evt=broadcast_delivery msgId=${evt.msgId}',
+        );
+        return;
+      }
       deps.setState(() {
         for (var i = 0; i < deps.messages.length; i++) {
           final m = deps.messages[i];
           if (!m.isIncoming && m.msgId == evt.msgId && (m.to == deps.broadcastTo || m.to == null)) {
             final st = evt.delivered > 0 ? ChatUiMessageStatus.delivered : ChatUiMessageStatus.undelivered;
-            var updated = m.copyWith(status: st, delivered: evt.delivered, total: evt.total);
-            if (deps.shouldEmitCriticalSummary(updated, st)) {
+            final nextStatus = _mergeUiOutgoingStatus(m.status, st);
+            var updated = m.copyWith(status: nextStatus, delivered: evt.delivered, total: evt.total);
+            if (nextStatus != m.status && deps.shouldEmitCriticalSummary(updated, nextStatus)) {
               updated = updated.copyWith(relaySummarySent: true);
-              deps.messages.add(deps.buildCriticalSummaryMessage(updated, st));
+              deps.messages.add(deps.buildCriticalSummaryMessage(updated, nextStatus));
             }
             deps.messages[i] = updated;
             break;
@@ -583,7 +664,8 @@ class ChatScreenController {
       );
     }
 
-    final toForMsg = deps.group > 0 ? null : (deps.unicastTo ?? deps.broadcastTo);
+    final isGroupSend = deps.group > 1;
+    final toForMsg = isGroupSend ? null : (deps.unicastTo ?? deps.broadcastTo);
     var localMessageIndex = -1;
     deps.setState(() {
       deps.messages.add(ChatUiMessage(
@@ -603,7 +685,7 @@ class ChatScreenController {
         conversationId: conversationId,
         from: deps.nodeId,
         to: toForMsg,
-        groupId: deps.group > 0 ? deps.group : null,
+        groupId: isGroupSend ? deps.group : null,
         groupUid: deps.groupUid,
         text: text,
         type: trigger == null ? 'text' : 'timeCapsule',
@@ -616,7 +698,7 @@ class ChatScreenController {
     final ok = await deps.ble.send(
       text: text,
       to: deps.unicastTo,
-      group: deps.group > 0 ? deps.group : null,
+      group: isGroupSend ? deps.group : null,
       ttlMinutes: ttlMinutes,
       lane: lane,
       trigger: trigger,
