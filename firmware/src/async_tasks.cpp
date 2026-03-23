@@ -407,7 +407,7 @@ static bool queueSendInternal(const uint8_t* buf, size_t len, uint8_t txSf, bool
 }
 
 #define DEFERRED_ACK_SLOTS 8   // broadcast: несколько соседей шлют ACK почти одновременно
-#define DEFERRED_SEND_SLOTS 16   // MSG copy2–3, broadcast 2–3, KEY_EXCHANGE — burst 1–15
+#define DEFERRED_SEND_SLOTS 24   // MSG copy2–3, broadcast 2–3, KEY/HELLO — при переполнении важен корректный klass у fallback
 #define HEARD_RELAY_SIZE 8   // Managed flooding: отмена relay при услышанной ретрансляции
 struct DeferredSlot {
   TxRequest req;
@@ -504,7 +504,9 @@ void queueDeferredSend(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t de
       return;
     }
   }
-  if (!queueTxPacket(pkt, len, txSf, true, TxRequestClass::data, nullptr, 0)) {
+  TxRequestClass fallbackKlass = (pkt && len >= 3 && pkt[0] == protocol::SYNC_BYTE)
+      ? classifyOpcode(pkt[2]) : TxRequestClass::data;
+  if (!queueTxPacket(pkt, len, txSf, true, fallbackKlass, nullptr, 0)) {
     RIFTLINK_LOG_ERR("[RiftLink] deferred fallback txRequestQueue full, drop copy\n");
   }
 }
@@ -538,7 +540,9 @@ void queueDeferredRelay(const uint8_t* pkt, size_t len, uint8_t txSf, uint32_t d
       return;
     }
   }
-  if (!queueTxPacket(pkt, len, txSf, true, TxRequestClass::data, nullptr, 0)) {
+  TxRequestClass relayFallbackKlass = (pkt && len >= 3 && pkt[0] == protocol::SYNC_BYTE)
+      ? classifyOpcode(pkt[2]) : TxRequestClass::data;
+  if (!queueTxPacket(pkt, len, txSf, true, relayFallbackKlass, nullptr, 0)) {
     RIFTLINK_LOG_ERR("[RiftLink] deferred relay fallback txRequestQueue full, drop\n");
   }
 }

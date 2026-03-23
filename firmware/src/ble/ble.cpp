@@ -125,6 +125,16 @@ static constexpr size_t kBleJsonProtocolMaxBytes = BLE_ATT_MAX_JSON_BYTES;
 static constexpr size_t BLE_PENDING_MSG_TEXT_MAX = frag::MAX_MSG_PLAIN;
 static_assert(kBleJsonProtocolMaxBytes == 512, "согласовано с BLE_ATT_ATTR_MAX_LEN");
 
+/** Пауза между chunk одного длинного notify (мс). Раньше было фиксированно 2 ms — сильно раздувало время
+ *  длинного evt:info. 0 = только taskYIELD() (максимум скорости). При редких сбоях склейки на телефоне — 1. */
+#ifndef RIFTLINK_BLE_NOTIFY_INTER_CHUNK_DELAY_MS
+#define RIFTLINK_BLE_NOTIFY_INTER_CHUNK_DELAY_MS 0
+#endif
+/** 1 = подробный Serial на каждый BLE notify (заметно тормозит MCU). */
+#ifndef RIFTLINK_BLE_CHAIN_NOTIFY_LOG
+#define RIFTLINK_BLE_CHAIN_NOTIFY_LOG 0
+#endif
+
 namespace {
 struct BleJsonAllocator : ArduinoJson::Allocator {
   void* allocate(size_t size) override {
@@ -479,6 +489,8 @@ struct BleCmdQueueItem {
 };
 static QueueHandle_t s_bleCmdQueue = nullptr;
 static SemaphoreHandle_t s_notifyMutex = nullptr;
+/** Защита s_statusRing (producer: packetTask и др., consumer: loop в ble::update). Не путать с lock-free send_overflow. */
+static SemaphoreHandle_t s_statusRingMutex = nullptr;
 struct BleDiagCounters {
   uint32_t cmdEnqueued = 0;
   uint32_t cmdDroppedQueueFull = 0;
@@ -614,11 +626,15 @@ static bool notifyJsonToApp(const char* payload, size_t len) {
   const size_t mtuChunk = bleNotifyMtu();
   const size_t chunkMax = (mtuChunk < sizeof(s_notifyTxBuf)) ? mtuChunk : sizeof(s_notifyTxBuf);
   if (mtuChunk > sizeof(s_notifyTxBuf)) {
+#if RIFTLINK_BLE_CHAIN_NOTIFY_LOG
     Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=clamp reason=tx_buf_limit mtuChunk=%u txBuf=%u\n",
         (unsigned)mtuChunk, (unsigned)sizeof(s_notifyTxBuf));
+#endif
   }
+#if RIFTLINK_BLE_CHAIN_NOTIFY_LOG
   Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=send mode=ble evt=%s len=%u chunkMax=%u\n",
       evt, (unsigned)len, (unsigned)chunkMax);
+#endif
   size_t off = 0;
   uint32_t chunks = 0;
   while (off < len) {
@@ -639,15 +655,158 @@ static bool notifyJsonToApp(const char* payload, size_t len) {
     off += chunk;
     chunks++;
 
-    if (!lastChunk) vTaskDelay(pdMS_TO_TICKS(2));
+    if (!lastChunk) {
+#if RIFTLINK_BLE_NOTIFY_INTER_CHUNK_DELAY_MS > 0
+      vTaskDelay(pdMS_TO_TICKS(RIFTLINK_BLE_NOTIFY_INTER_CHUNK_DELAY_MS));
+#else
+      taskYIELD();
+#endif
+    }
   }
   s_bleDiag.notifySent++;
   s_bleDiag.notifyBytes += (uint32_t)len;
   s_bleDiag.notifyChunks += chunks;
+#if RIFTLINK_BLE_CHAIN_NOTIFY_LOG
   Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=sent mode=ble evt=%s len=%u chunks=%u\n",
       evt, (unsigned)len, (unsigned)chunks);
+#endif
   bleDiagMaybeSnapshot("notify_ble", 8000);
   xSemaphoreGive(s_notifyMutex);
+  return true;
+}
+
+/** Очередь мелких evt (delivered/read/sent/…): при занятости notify mutex тяжёлым multi-chunk info
+ *  мгновенные вызовы notify* терялись — повтор в ble::update() до успешной отправки. */
+enum class PendingStatusKind : uint8_t { kDelivered, kRead, kSent, kUndelivered, kBroadcast };
+struct PendingStatusEvt {
+  PendingStatusKind kind;
+  uint8_t peer[protocol::NODE_ID_LEN];
+  uint32_t msgId;
+  int16_t rssi;
+  int16_t delivered;
+  int16_t total;
+};
+static constexpr uint8_t kStatusRingCap = 8;
+static PendingStatusEvt s_statusRing[kStatusRingCap];
+static uint8_t s_statusRingCount = 0;
+static uint8_t s_statusRingHead = 0;
+static uint8_t s_statusRingTail = 0;
+
+static void statusRingPush(const PendingStatusEvt& e) {
+  if (!s_statusRingMutex) return;
+  if (xSemaphoreTake(s_statusRingMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
+  if (s_statusRingCount >= kStatusRingCap) {
+    s_statusRingHead = (s_statusRingHead + 1) % kStatusRingCap;
+    s_statusRingCount--;
+    Serial.printf("[BLE_CHAIN] stage=fw_status_ring action=drop_oldest kind=%u\n", (unsigned)e.kind);
+  }
+  s_statusRing[s_statusRingTail] = e;
+  s_statusRingTail = (s_statusRingTail + 1) % kStatusRingCap;
+  s_statusRingCount++;
+  xSemaphoreGive(s_statusRingMutex);
+}
+
+static bool tryNotifyDelivered(const uint8_t* from, uint32_t msgId, int rssi) {
+  JsonDocument doc(&s_bleJsonAllocator);
+  doc["evt"] = "delivered";
+  char fromHex[17] = {0};
+  for (int i = 0; i < 8; i++) snprintf(fromHex + i * 2, 3, "%02X", from[i]);
+  doc["from"] = fromHex;
+  doc["msgId"] = msgId;
+  if (rssi != 0) doc["rssi"] = rssi;
+  char buf[80];
+  size_t len = serializeJson(doc, buf);
+  return notifyJsonToApp(buf, len);
+}
+
+static bool tryNotifyRead(const uint8_t* from, uint32_t msgId, int rssi) {
+  JsonDocument doc(&s_bleJsonAllocator);
+  doc["evt"] = "read";
+  char fromHex[17] = {0};
+  for (int i = 0; i < 8; i++) snprintf(fromHex + i * 2, 3, "%02X", from[i]);
+  doc["from"] = fromHex;
+  doc["msgId"] = msgId;
+  if (rssi != 0) doc["rssi"] = rssi;
+  char buf[80];
+  size_t len = serializeJson(doc, buf);
+  return notifyJsonToApp(buf, len);
+}
+
+static bool tryNotifySent(const uint8_t* to, uint32_t msgId) {
+  JsonDocument doc(&s_bleJsonAllocator);
+  doc["evt"] = "sent";
+  char toHex[17] = {0};
+  for (int i = 0; i < 8; i++) snprintf(toHex + i * 2, 3, "%02X", to[i]);
+  doc["to"] = toHex;
+  doc["msgId"] = msgId;
+  char buf[80];
+  size_t len = serializeJson(doc, buf);
+  return notifyJsonToApp(buf, len);
+}
+
+static bool tryNotifyUndelivered(const uint8_t* to, uint32_t msgId) {
+  JsonDocument doc(&s_bleJsonAllocator);
+  doc["evt"] = "undelivered";
+  char toHex[17] = {0};
+  for (int i = 0; i < 8; i++) snprintf(toHex + i * 2, 3, "%02X", to[i]);
+  doc["to"] = toHex;
+  doc["msgId"] = msgId;
+  char buf[80];
+  size_t len = serializeJson(doc, buf);
+  return notifyJsonToApp(buf, len);
+}
+
+static bool tryNotifyBroadcastDelivery(uint32_t msgId, int delivered, int total) {
+  JsonDocument doc(&s_bleJsonAllocator);
+  if (total > 0 && delivered == 0) {
+    doc["evt"] = "undelivered";
+  } else {
+    doc["evt"] = "broadcast_delivery";
+  }
+  doc["msgId"] = msgId;
+  doc["delivered"] = delivered;
+  doc["total"] = total;
+  char buf[80];
+  size_t len = serializeJson(doc, buf);
+  return notifyJsonToApp(buf, len);
+}
+
+static bool statusRingEmitOne() {
+  if (!s_statusRingMutex) return false;
+  PendingStatusEvt e{};
+  if (xSemaphoreTake(s_statusRingMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+  if (s_statusRingCount == 0) {
+    xSemaphoreGive(s_statusRingMutex);
+    return false;
+  }
+  e = s_statusRing[s_statusRingHead];
+  xSemaphoreGive(s_statusRingMutex);
+  bool ok = false;
+  switch (e.kind) {
+    case PendingStatusKind::kDelivered:
+      ok = tryNotifyDelivered(e.peer, e.msgId, (int)e.rssi);
+      break;
+    case PendingStatusKind::kRead:
+      ok = tryNotifyRead(e.peer, e.msgId, (int)e.rssi);
+      break;
+    case PendingStatusKind::kSent:
+      ok = tryNotifySent(e.peer, e.msgId);
+      break;
+    case PendingStatusKind::kUndelivered:
+      ok = tryNotifyUndelivered(e.peer, e.msgId);
+      break;
+    case PendingStatusKind::kBroadcast:
+      ok = tryNotifyBroadcastDelivery(e.msgId, (int)e.delivered, (int)e.total);
+      break;
+  }
+  if (!ok) return false;
+  // После успешного notify обязаны снять элемент с кольца — иначе повторная доставка в приложение.
+  if (xSemaphoreTake(s_statusRingMutex, portMAX_DELAY) != pdTRUE) return false;
+  if (s_statusRingCount > 0) {
+    s_statusRingHead = (s_statusRingHead + 1) % kStatusRingCap;
+    s_statusRingCount--;
+  }
+  xSemaphoreGive(s_statusRingMutex);
   return true;
 }
 
@@ -1959,6 +2118,20 @@ bool init() {
       return false;
     }
   }
+  if (!s_statusRingMutex) {
+    s_statusRingMutex = xSemaphoreCreateMutex();
+    if (!s_statusRingMutex) {
+      Serial.println("[BLE] statusRing mutex alloc FAILED");
+      vSemaphoreDelete(s_notifyMutex);
+      s_notifyMutex = nullptr;
+      NimBLEDevice::deinit(true);
+      if (s_bleCmdQueue) {
+        vQueueDelete(s_bleCmdQueue);
+        s_bleCmdQueue = nullptr;
+      }
+      return false;
+    }
+  }
 
   pServer = NimBLEDevice::createServer();
   ServerCallbacks* serverCallbacks = new (std::nothrow) ServerCallbacks();
@@ -2028,6 +2201,10 @@ void deinit() {
   if (s_notifyMutex) {
     vSemaphoreDelete(s_notifyMutex);
     s_notifyMutex = nullptr;
+  }
+  if (s_statusRingMutex) {
+    vSemaphoreDelete(s_statusRingMutex);
+    s_statusRingMutex = nullptr;
   }
   s_bleInited = false;
   s_bleDeinitInProgress = false;
@@ -2113,56 +2290,56 @@ void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi) {
   if (!hasActiveTransport()) return;
   s_bleDiag.statusDelivered++;
 
-  JsonDocument doc(&s_bleJsonAllocator);
-  doc["evt"] = "delivered";
   char fromHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(fromHex + i*2, 3, "%02X", from[i]);
-  doc["from"] = fromHex;
-  doc["msgId"] = msgId;
-  if (rssi != 0) doc["rssi"] = rssi;
-
-  char buf[80];
-  size_t len = serializeJson(doc, buf);
   Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=emit evt=delivered msgId=%u from=%s\n",
       (unsigned)msgId, fromHex);
-  notifyJsonToApp(buf, len);
+  if (tryNotifyDelivered(from, msgId, rssi)) return;
+  PendingStatusEvt e{};
+  e.kind = PendingStatusKind::kDelivered;
+  memcpy(e.peer, from, protocol::NODE_ID_LEN);
+  e.msgId = msgId;
+  e.rssi = (int16_t)rssi;
+  statusRingPush(e);
+  Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=enqueue evt=delivered msgId=%u (notify busy)\n",
+      (unsigned)msgId);
 }
 
 void notifyRead(const uint8_t* from, uint32_t msgId, int rssi) {
   if (!hasActiveTransport()) return;
   s_bleDiag.statusRead++;
 
-  JsonDocument doc(&s_bleJsonAllocator);
-  doc["evt"] = "read";
   char fromHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(fromHex + i*2, 3, "%02X", from[i]);
-  doc["from"] = fromHex;
-  doc["msgId"] = msgId;
-  if (rssi != 0) doc["rssi"] = rssi;
-
-  char buf[80];
-  size_t len = serializeJson(doc, buf);
   Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=emit evt=read msgId=%u from=%s\n",
       (unsigned)msgId, fromHex);
-  notifyJsonToApp(buf, len);
+  if (tryNotifyRead(from, msgId, rssi)) return;
+  PendingStatusEvt e{};
+  e.kind = PendingStatusKind::kRead;
+  memcpy(e.peer, from, protocol::NODE_ID_LEN);
+  e.msgId = msgId;
+  e.rssi = (int16_t)rssi;
+  statusRingPush(e);
+  Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=enqueue evt=read msgId=%u (notify busy)\n",
+      (unsigned)msgId);
 }
 
 void notifySent(const uint8_t* to, uint32_t msgId) {
   if (!hasActiveTransport()) return;
   s_bleDiag.statusSent++;
 
-  JsonDocument doc(&s_bleJsonAllocator);
-  doc["evt"] = "sent";
   char toHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(toHex + i*2, 3, "%02X", to[i]);
-  doc["to"] = toHex;
-  doc["msgId"] = msgId;
-
-  char buf[80];
-  size_t len = serializeJson(doc, buf);
   Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=emit evt=sent msgId=%u to=%s\n",
       (unsigned)msgId, toHex);
-  notifyJsonToApp(buf, len);
+  if (tryNotifySent(to, msgId)) return;
+  PendingStatusEvt e{};
+  e.kind = PendingStatusKind::kSent;
+  memcpy(e.peer, to, protocol::NODE_ID_LEN);
+  e.msgId = msgId;
+  statusRingPush(e);
+  Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=enqueue evt=sent msgId=%u (notify busy)\n",
+      (unsigned)msgId);
 }
 
 void notifyWaitingKey(const uint8_t* to) {
@@ -2183,40 +2360,36 @@ void notifyUndelivered(const uint8_t* to, uint32_t msgId) {
   if (!hasActiveTransport()) return;
   s_bleDiag.statusUndelivered++;
 
-  JsonDocument doc(&s_bleJsonAllocator);
-  doc["evt"] = "undelivered";
   char toHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(toHex + i*2, 3, "%02X", to[i]);
-  doc["to"] = toHex;
-  doc["msgId"] = msgId;
-
-  char buf[80];
-  size_t len = serializeJson(doc, buf);
   Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=emit evt=undelivered msgId=%u to=%s\n",
       (unsigned)msgId, toHex);
-  notifyJsonToApp(buf, len);
+  if (tryNotifyUndelivered(to, msgId)) return;
+  PendingStatusEvt e{};
+  e.kind = PendingStatusKind::kUndelivered;
+  memcpy(e.peer, to, protocol::NODE_ID_LEN);
+  e.msgId = msgId;
+  statusRingPush(e);
+  Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=enqueue evt=undelivered msgId=%u (notify busy)\n",
+      (unsigned)msgId);
 }
 
 void notifyBroadcastDelivery(uint32_t msgId, int delivered, int total) {
   if (!hasActiveTransport()) return;
   s_bleDiag.statusBroadcastDelivery++;
 
-  JsonDocument doc(&s_bleJsonAllocator);
-  if (total > 0 && delivered == 0) {
-    doc["evt"] = "undelivered";
-  } else {
-    doc["evt"] = "broadcast_delivery";
-  }
-  doc["msgId"] = msgId;
-  doc["delivered"] = delivered;
-  doc["total"] = total;
-
-  char buf[80];
-  size_t len = serializeJson(doc, buf);
   Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=emit evt=%s msgId=%u delivered=%d total=%d\n",
       (total > 0 && delivered == 0) ? "undelivered" : "broadcast_delivery",
       (unsigned)msgId, delivered, total);
-  notifyJsonToApp(buf, len);
+  if (tryNotifyBroadcastDelivery(msgId, delivered, total)) return;
+  PendingStatusEvt e{};
+  e.kind = PendingStatusKind::kBroadcast;
+  e.msgId = msgId;
+  e.delivered = (int16_t)delivered;
+  e.total = (int16_t)total;
+  statusRingPush(e);
+  Serial.printf("[BLE_CHAIN] stage=fw_msg_state action=enqueue evt=broadcast_status msgId=%u (notify busy)\n",
+      (unsigned)msgId);
 }
 
 void notifyLocation(const uint8_t* from, float lat, float lon, int16_t alt, int rssi) {
@@ -2849,6 +3022,11 @@ void update() {
     return;
   }
   if (hasActiveTransport()) {
+    // Раньше всего: повторить evt delivered/read/sent, отложенные из-за занятости notify mutex (evt:info multi-chunk)
+    constexpr int kStatusRingFlushMax = 16;
+    for (int si = 0; si < kStatusRingFlushMax && s_statusRingCount > 0; si++) {
+      if (!statusRingEmitOne()) break;
+    }
     if (pendTest(PEND_MSG) || pendTest(PEND_INFO) || pendTest(PEND_PONG) || pendTest(PEND_GROUPS) || pendTest(PEND_ROUTES) || pendTest(PEND_NEIGHBORS) || pendTest(PEND_INVITE)) {
       Serial.printf("[BLE_CHAIN] stage=fw_update action=pending mode=%s msg=%u info=%u pong=%u groups=%u routes=%u neighbors=%u invite=%u\n",
           transportModeTag(),
@@ -2861,7 +3039,7 @@ void update() {
       node::setNickname(s_pendingNicknameBuf);
     }
     // Batch: process up to kNotifyBatchMax pending notifies per tick to reduce latency.
-    // Priority order: info > pong > msg > groups > routes > neighbors > invite > selftest > groupSend.
+    // Ранее в тике: statusRing (delivered/read/sent). Дальше порядок: info > pong > msg > groups > routes > neighbors > invite > selftest > groupSend.
     constexpr int kNotifyBatchMax = 4;
     int notifySent = 0;
     if (notifySent < kNotifyBatchMax && pendTest(PEND_INFO) && (int32_t)(millis() - s_pendingInfoNotBeforeMs) >= 0) {
