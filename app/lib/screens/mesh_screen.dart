@@ -69,6 +69,19 @@ class _MeshScreenState extends State<MeshScreen> {
     }
   }
 
+  /// Сопоставление id из [RiftLinkPongEvent] со списком соседей (полный 16 hex vs префикс).
+  String? _matchNeighborKeyForPong(String rawFrom) {
+    final n = _normalizeNodeId(rawFrom);
+    if (n.isEmpty) return null;
+    for (final nb in _neighbors) {
+      final b = _normalizeNodeId(nb);
+      if (b == n) return b;
+      if (n.length >= 8 && b.length >= 8 && (b.startsWith(n) || n.startsWith(b))) return b;
+    }
+    if (RegExp(r'^[0-9A-F]{16}$').hasMatch(n)) return n;
+    return n.length >= 8 ? n : null;
+  }
+
   void _recordLiveRssi(String nodeId, int rssi) {
     final id = _normalizeNodeId(nodeId);
     if (!RegExp(r'^[0-9A-F]{16}$').hasMatch(id)) return;
@@ -151,6 +164,15 @@ class _MeshScreenState extends State<MeshScreen> {
     _routes = List.from(widget.routes);
     _loadNicknames();
     debugPrint('[BLE_CHAIN] stage=app_listener action=mesh_subscribe');
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(() async {
+        try {
+          await widget.ble.getInfo();
+          await Future<void>.delayed(const Duration(milliseconds: 90));
+          if (mounted) await widget.ble.getRoutes();
+        } catch (_) {}
+      }());
+    });
     _sub = widget.ble.events.listen((evt) {
       if (!mounted) return;
       debugPrint('[BLE_CHAIN] stage=app_listener action=mesh_event evt=${evt.runtimeType}');
@@ -181,15 +203,16 @@ class _MeshScreenState extends State<MeshScreen> {
         final from = evt.from;
         if (from.isEmpty) return;
         setState(() {
-          final normalized = _normalizeNodeId(from);
-          _signalRssiByNode[normalized] = evt.rssi ?? 0;
+          final key = _matchNeighborKeyForPong(from);
+          if (key == null) return;
+          _signalRssiByNode[key] = evt.rssi ?? 0;
           final rssi = evt.rssi;
-          if (rssi != null) _recordLiveRssi(normalized, rssi);
+          if (rssi != null && RegExp(r'^[0-9A-F]{16}$').hasMatch(key)) {
+            _recordLiveRssi(key, rssi);
+          }
         });
       }
     });
-    widget.ble.getInfo();
-    widget.ble.getRoutes();
   }
 
   @override

@@ -1716,7 +1716,8 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         if (len > 0) {
           if (cmdId != 0) rememberPingCmdId(peerId, cmdId);
           uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(peerId));
-          uint32_t delayMs = 35u + (uint32_t)(i * 45u) + (uint32_t)(esp_random() % 25u);
+          // Разнести во времени: плотный залп давал коллизии в эфире и лавину notify на BLE (mutex drop).
+          uint32_t delayMs = 140u + (uint32_t)(i * 220u) + (uint32_t)(esp_random() % 90u);
           queueDeferredSend(pkt, len, txSf, delayMs, true);
           RIFTLINK_DIAG("PING", "event=PING_PLAN mode=signal_test to=%02X%02X pktId=%u sf=%u delay_ms=%lu",
               peerId[0], peerId[1], (unsigned)pktId, (unsigned)txSf, (unsigned long)delayMs);

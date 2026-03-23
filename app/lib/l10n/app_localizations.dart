@@ -187,7 +187,7 @@ final Map<String, Map<String, String>> _strings = {
   'contact_removed': {'en': 'Contact removed', 'ru': 'Контакт удален'},
   'link_ok': {'en': 'Link with {from} established', 'ru': 'Связь с {from} установлена'},
   'ping_sent': {'en': 'Ping sent to {id}. Waiting for response...', 'ru': 'Пинг отправлен на {id}. Ожидание ответа...'},
-  'ping_checking': {'en': 'Checking link with {id}...', 'ru': 'Проверяем связь с {id}...'},
+  'ping_checking': {'en': 'Checking link...', 'ru': 'Проверяем связь...'},
   'ping_online': {'en': '{id} is online', 'ru': '{id} в сети'},
   'ping_timeout': {'en': 'Ping to {id} did not reach — no response', 'ru': 'Пинг до {id} не дошёл — ответа нет'},
   'error': {'en': 'Error', 'ru': 'Ошибка'},

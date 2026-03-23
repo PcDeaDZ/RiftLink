@@ -114,7 +114,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     final l = context.l10n;
     showAppSnackBar(
       context,
-      '${l.tr('ping_checking', {'id': id})}\nID: $id',
+      l.tr('ping_checking'),
       kind: AppSnackKind.neutral,
       duration: const Duration(seconds: 3),
     );

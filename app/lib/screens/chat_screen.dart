@@ -261,7 +261,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         final id = _activeDirectPeerId();
         if (id == null) return l.tr('chat_context_direct_subtitle');
         if (_isDirectPeerPingPending(id)) {
-          return l.tr('ping_checking', {'id': _pingPeerLabel(id)});
+          return l.tr('ping_checking');
         }
         final nick = _nicknameForId(id);
         if (nick == null || nick.trim().isEmpty) {
@@ -369,7 +369,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _setDirectPeerOnline(false);
     }
     if (showSuccessSnack) {
-      _showSnack(context.l10n.tr('ping_checking', {'id': _pingPeerLabel(peerId)}));
+      _showSnack(context.l10n.tr('ping_checking'));
     }
     Future.delayed(const Duration(seconds: 20), () {
       if (!mounted) return;
@@ -1495,7 +1495,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         ContactsService.promoteLegacy(norm);
       }
     }
-    _scheduleDirectPeerAutoPing();
   }
 
   // ── BLE Events ──
