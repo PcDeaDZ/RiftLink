@@ -2,7 +2,7 @@
   "tag": "v1.5.20",
   "firmwareVersion": "1.5.20",
   "appVersion": "1.5.20",
-  "apkDownloadUrl": null,
+  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.20/RiftLink-1.5.20-arm64-v8a.apk",
   "notesRu": [
     "Единая дизайн-система: токены типографики, отступов, иконок, теней и анимаций; глобальный textTheme в теме.",
     "Заголовок AppBar и riftAppBar согласованы (navTitle 18).",
