@@ -41,6 +41,12 @@ ChatUiMessageStatus _uiStatusFromDomain(MessageStatus status, ChatUiMessageStatu
 
 bool _hasValidStatusMsgId(int msgId) => msgId > 0;
 
+/// Исходящие в группу/broadcast хранят `to == null`; delivered/read приходят с `from` = получатель.
+bool _conversationIsGroupOrBroadcast(String? id) {
+  if (id == null || id.isEmpty) return false;
+  return id.startsWith('groupv2:') || id.startsWith('broadcast:');
+}
+
 class ChatBleHandlerDeps {
   final bool isMounted;
   final List<ChatUiMessage> messages;
@@ -332,6 +338,21 @@ class ChatScreenController {
             break;
           }
         }
+        if (!matched && _conversationIsGroupOrBroadcast(deps.conversationId)) {
+          for (var i = 0; i < deps.messages.length; i++) {
+            final m = deps.messages[i];
+            if (m.isIncoming || m.msgId != evt.msgId) continue;
+            final nextStatus = _mergeUiOutgoingStatus(m.status, ChatUiMessageStatus.delivered);
+            var updated = m.copyWith(status: nextStatus);
+            if (nextStatus != m.status && deps.shouldEmitCriticalSummary(updated, nextStatus)) {
+              updated = updated.copyWith(relaySummarySent: true);
+              deps.messages.add(deps.buildCriticalSummaryMessage(updated, nextStatus));
+            }
+            deps.messages[i] = updated;
+            matched = true;
+            break;
+          }
+        }
         if (!matched) {
           debugPrint(
             '[BLE_CHAIN] stage=app_msg_state action=mismatch evt=delivered msgId=${evt.msgId} from=${evt.from}',
@@ -367,6 +388,21 @@ class ChatScreenController {
             if (m.isIncoming || m.msgId != null || !deps.sameNodeId(m.to, evt.from)) continue;
             final nextStatus = _mergeUiOutgoingStatus(m.status, ChatUiMessageStatus.read);
             var updated = m.copyWith(msgId: evt.msgId, status: nextStatus);
+            if (nextStatus != m.status && deps.shouldEmitCriticalSummary(updated, nextStatus)) {
+              updated = updated.copyWith(relaySummarySent: true);
+              deps.messages.add(deps.buildCriticalSummaryMessage(updated, nextStatus));
+            }
+            deps.messages[i] = updated;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched && _conversationIsGroupOrBroadcast(deps.conversationId)) {
+          for (var i = 0; i < deps.messages.length; i++) {
+            final m = deps.messages[i];
+            if (m.isIncoming || m.msgId != evt.msgId) continue;
+            final nextStatus = _mergeUiOutgoingStatus(m.status, ChatUiMessageStatus.read);
+            var updated = m.copyWith(status: nextStatus);
             if (nextStatus != m.status && deps.shouldEmitCriticalSummary(updated, nextStatus)) {
               updated = updated.copyWith(relaySummarySent: true);
               deps.messages.add(deps.buildCriticalSummaryMessage(updated, nextStatus));

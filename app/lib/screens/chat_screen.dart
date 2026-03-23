@@ -579,6 +579,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _sendReadForUnread();
       _sendLangToFirmware();
       VoiceService.requestPermission();
+      // Ingestor может записать delivered/read в SQLite чуть позже первого listMessages в _initConversationContext.
+      Future.delayed(const Duration(milliseconds: 400), () {
+        unawaited(_reloadMessagesFromRepository());
+      });
       if (widget.ble.isTransportConnected) {
         _currentBleRemoteId = widget.ble.device?.remoteId.toString() ?? widget.ble.lastBleRemoteId;
         _ensureConnectionStateListenerBound();
@@ -684,7 +688,21 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _appLifecycle = state;
     if (state == AppLifecycleState.resumed) {
       _scheduleDirectPeerAutoPing();
+      unawaited(_reloadMessagesFromRepository());
     }
+  }
+
+  /// SQLite — источник истины: пересобрать ленту (после фона, или короткая задержка после открытия чата).
+  Future<void> _reloadMessagesFromRepository() async {
+    final convId = _conversationId;
+    if (convId == null || convId.isEmpty || !mounted) return;
+    final history = await _chatRepo.listMessages(convId);
+    if (!mounted) return;
+    setState(() {
+      _messages
+        ..clear()
+        ..addAll(history.map(_msgFromStored));
+    });
   }
 
   void _listenConnectionState() {
@@ -1218,32 +1236,43 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     return an == bn;
   }
 
-  bool _isGroupOrBroadcastMsg(_Msg m) {
-    return m.to == null || _sameNodeId(m.to, _broadcastTo);
-  }
-
-  String _outgoingStatusBadge(_Msg m) {
-    final isGroupOrBroadcast = _isGroupOrBroadcastMsg(m);
-    if (isGroupOrBroadcast) {
-      // Requested UX model:
-      // X = delivered to nobody, cloud = in progress, check = delivered to at least one.
-      if (m.status == _St.undelivered) return '✗';
-      if (m.status == _St.delivered || m.status == _St.read) return '✓';
-      return '☁';
+  /// Личные, группы, broadcast: крест — не доставлено, облако — отправлено,
+  /// одна серая галочка — доставлено, одна синяя галочка — прочитано.
+  Widget _buildOutgoingDeliveryStatus(_Msg m) {
+    final IconData icon;
+    final Color color;
+    if (m.status == _St.undelivered) {
+      icon = Icons.close;
+      color = context.palette.error;
+    } else if (m.status == _St.read) {
+      icon = Icons.done;
+      color = context.palette.primary;
+    } else if (m.status == _St.delivered) {
+      icon = Icons.done;
+      color = context.palette.onSurfaceVariant;
+    } else {
+      icon = Icons.cloud_outlined;
+      color = context.palette.onSurfaceVariant;
     }
-    if (m.status == _St.undelivered) return '✗';
-    if (m.status == _St.read) return '✓✓';
-    if (m.status == _St.delivered) return '✓✓';
-    return '✓';
-  }
-
-  Color _outgoingStatusColor(_Msg m) {
-    if (m.status == _St.undelivered) return context.palette.error;
-    final isGroupOrBroadcast = _isGroupOrBroadcastMsg(m);
-    if (isGroupOrBroadcast && (m.status != _St.delivered && m.status != _St.read)) {
-      return context.palette.onSurfaceVariant;
-    }
-    return (m.status == _St.read) ? context.palette.primary : context.palette.onSurfaceVariant;
+    final relay = (m.relayCount ?? 0) > 0 ? '↻${m.relayCount}' : null;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Icon(icon, size: 15, color: color),
+        if (relay != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 3),
+            child: Text(
+              relay,
+              style: AppTypography.chipBase().copyWith(
+                fontSize: 10,
+                color: context.palette.onSurfaceVariant,
+              ),
+            ),
+          ),
+      ],
+    );
   }
 
   void _cleanupStaleVoiceAssemblies() {
@@ -2765,13 +2794,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             if (!m.isIncoming)
               Padding(
                 padding: const EdgeInsets.only(left: AppSpacing.sm),
-                child: Text(
-                  _outgoingStatusBadge(m) + ((m.relayCount ?? 0) > 0 ? '  ↻${m.relayCount}' : ''),
-                  style: AppTypography.chipBase().copyWith(
-                    fontSize: 10,
-                    color: _outgoingStatusColor(m),
-                  ),
-                ),
+                child: _buildOutgoingDeliveryStatus(m),
               ),
             if (m.isIncoming && m.rssi != null && m.rssi != 0)
               Padding(

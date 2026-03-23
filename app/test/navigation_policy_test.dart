@@ -8,7 +8,8 @@ void main() {
 
     await tester.tap(find.byKey(const Key('open_chat')));
     await tester.pumpAndSettle();
-    expect(find.text('chat'), findsOneWidget);
+    // _SimplePage shows title in AppBar and body.
+    expect(find.text('chat'), findsNWidgets(2));
 
     await tester.pageBack();
     await tester.pumpAndSettle();
@@ -23,7 +24,7 @@ void main() {
     await tester.tap(find.byKey(const Key('drawer_open_chat')));
     await tester.pumpAndSettle();
 
-    expect(find.text('chat'), findsOneWidget);
+    expect(find.text('chat'), findsNWidgets(2));
   });
 
   testWidgets('disconnect redirect resets to scan', (tester) async {
@@ -32,7 +33,7 @@ void main() {
     await tester.tap(find.byKey(const Key('disconnect')));
     await tester.pumpAndSettle();
 
-    expect(find.text('scan'), findsOneWidget);
+    expect(find.text('scan'), findsNWidgets(2));
     expect(find.text('home'), findsNothing);
   });
 
@@ -42,7 +43,7 @@ void main() {
     await tester.tap(find.byKey(const Key('reconnect_failed')));
     await tester.pumpAndSettle();
 
-    expect(find.text('scan_error'), findsOneWidget);
+    expect(find.text('scan_error'), findsNWidgets(2));
     expect(find.text('home'), findsNothing);
   });
 }

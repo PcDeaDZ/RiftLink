@@ -7,6 +7,7 @@ import '../contacts/contacts_service.dart';
 import '../mesh_constants.dart';
 import 'chat_models.dart';
 import 'chat_repository.dart';
+import 'msg_ingress_dedup.dart';
 
 class ChatEventIngestor {
   final RiftLinkBle ble;
@@ -14,7 +15,10 @@ class ChatEventIngestor {
   StreamSubscription<RiftLinkEvent>? _sub;
   final Queue<_QueuedBleEvent> _eventQueue = Queue<_QueuedBleEvent>();
   bool _processingQueue = false;
-  final Set<String> _dedup = <String>{};
+  static const int _dedupMaxEntries = 4096;
+  final Set<String> _dedupKeys = <String>{};
+  final Queue<String> _dedupFifo = Queue<String>();
+  int _incomingNoIdSeq = 0;
   final Map<String, int> _statusCounters = <String, int>{};
   int _statusEventsSinceDump = 0;
   DateTime _lastStatusDumpAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -36,6 +40,20 @@ class ChatEventIngestor {
     _sub = null;
     _eventQueue.clear();
     _processingQueue = false;
+    _dedupKeys.clear();
+    _dedupFifo.clear();
+    _incomingNoIdSeq = 0;
+  }
+
+  bool _dedupTryAdd(String key) {
+    if (_dedupKeys.contains(key)) return false;
+    _dedupKeys.add(key);
+    _dedupFifo.addLast(key);
+    while (_dedupFifo.length > _dedupMaxEntries) {
+      final old = _dedupFifo.removeFirst();
+      _dedupKeys.remove(old);
+    }
+    return true;
   }
 
   void _enqueue(RiftLinkEvent event) {
@@ -156,14 +174,23 @@ class ChatEventIngestor {
           ? rawGroupUid
           : (hasGroupId ? 'UNRESOLVED_${event.group}' : null);
       final scopeTag = isBroadcastByGroupId ? 'broadcast' : (groupContext ?? 'direct');
-      final dedupKey = 'msg:$from:${event.msgId ?? -1}:${event.text.hashCode}:$scopeTag';
-      if (!_dedup.add(dedupKey)) return;
+      final dedupKey = buildMsgIngressDedupKey(
+        fromNormalized: from,
+        scopeTag: scopeTag,
+        msgId: event.msgId,
+        noIdSequence: (event.msgId != null && event.msgId! > 0) ? 0 : ++_incomingNoIdSeq,
+      );
+      if (!_dedupTryAdd(dedupKey)) return;
 
       final conversationId = isBroadcastByGroupId
           ? ChatRepository.broadcastConversationId()
           : (groupContext != null
               ? ChatRepository.groupConversationIdByUid(groupContext)
               : ChatRepository.directConversationId(from));
+      debugPrint(
+        '[BLE_CHAIN] stage=app_msg_state action=ingest evt=msg msgId=${event.msgId ?? 0} '
+        'from=$from conv=$conversationId scope=$scopeTag',
+      );
       if (isBroadcastByGroupId) {
         await _ensureBroadcastConversation();
       } else if (groupContext != null) {
@@ -262,7 +289,7 @@ class ChatEventIngestor {
         );
       }
       if (updated == 0) {
-        await repo.updateByMsgIdAnyConversation(
+        updated = await repo.updateByMsgIdAnyConversation(
           msgId: event.msgId,
           status: MessageStatus.delivered,
         );
@@ -270,6 +297,8 @@ class ChatEventIngestor {
       return;
     }
 
+    // Личка: `from` — узел получателя (читателя); чат direct:<from>. Цепочка при серой галочке при прочтении:
+    // прошивка notifyRead → BLE evt:read → сюда → updateByMsgId(direct) / bind / updateByMsgIdAnyConversation.
     if (event is RiftLinkReadEvent) {
       if (!_hasValidStatusMsgId(event.msgId)) {
         debugPrint('[BLE_CHAIN] stage=app_msg_state action=drop reason=invalid_msg_id evt=read msgId=${event.msgId}');
@@ -292,9 +321,15 @@ class ChatEventIngestor {
         );
       }
       if (updated == 0) {
-        await repo.updateByMsgIdAnyConversation(
+        updated = await repo.updateByMsgIdAnyConversation(
           msgId: event.msgId,
           status: MessageStatus.read,
+        );
+      }
+      if (updated == 0) {
+        debugPrint(
+          '[BLE_CHAIN] stage=app_msg_state action=no_row evt=read msgId=${event.msgId} peer=$from '
+          '(нет исходящего с этим msg_id в SQLite — проверить sent, совпадение msg_id с прошивкой, RX OP_READ→notifyRead)',
         );
       }
       return;
@@ -327,7 +362,7 @@ class ChatEventIngestor {
         );
       }
       if (updated == 0) {
-        await repo.updateByMsgIdAnyConversation(
+        updated = await repo.updateByMsgIdAnyConversation(
           msgId: event.msgId,
           status: MessageStatus.undelivered,
           delivered: event.delivered,

@@ -361,8 +361,12 @@ class RiftLinkBle {
     if (force) {
       final last = _lastInfoRequestAt;
       if (last != null && now.difference(last) < forceMinGap) {
-        if (_hasQueuedInfoRequest) return true;
+        if (_hasQueuedInfoRequest) {
+          _replayLastInfo();
+          return true;
+        }
         _hasQueuedInfoRequest = true;
+        _replayLastInfo();
         final wait = forceMinGap - now.difference(last);
         _queuedInfoTimer?.cancel();
         _queuedInfoTimer = Timer(wait, () async {
@@ -407,7 +411,11 @@ class RiftLinkBle {
       );
     }
 
-    if (_hasQueuedInfoRequest) return true;
+    if (_hasQueuedInfoRequest) {
+      _replayLastInfo();
+      return true;
+    }
+    _replayLastInfo();
     _hasQueuedInfoRequest = true;
     final wait = minGap - now.difference(last);
     _queuedInfoTimer?.cancel();
