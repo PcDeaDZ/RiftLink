@@ -100,6 +100,21 @@ class _MeshScreenState extends State<MeshScreen> {
     }
   }
 
+  void _reconcileNeighborsFromLastInfo() {
+    if (!mounted) return;
+    final li = widget.ble.lastInfo;
+    if (li == null || li.neighbors.isEmpty) return;
+    if (_neighbors.isNotEmpty) return;
+    setState(() {
+      _applySnapshot(
+        nodeId: li.id,
+        neighbors: li.neighbors,
+        neighborsRssi: li.neighborsRssi,
+      );
+      _routes = List<Map<String, dynamic>>.from(li.routes.map((e) => Map<String, dynamic>.from(e)));
+    });
+  }
+
   void _applySnapshot({
     String? nodeId,
     List<String>? neighbors,
@@ -170,11 +185,13 @@ class _MeshScreenState extends State<MeshScreen> {
     _loadNicknames();
     debugPrint('[BLE_CHAIN] stage=app_listener action=mesh_subscribe');
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _reconcileNeighborsFromLastInfo();
       unawaited(() async {
         try {
           await widget.ble.getInfo();
           await Future<void>.delayed(const Duration(milliseconds: 90));
           if (mounted) await widget.ble.getRoutes();
+          if (mounted) _reconcileNeighborsFromLastInfo();
         } catch (_) {}
       }());
     });
@@ -197,6 +214,20 @@ class _MeshScreenState extends State<MeshScreen> {
           _normalizeTraceTarget();
         });
       } else if (evt is RiftLinkNeighborsEvent) {
+        if (evt.neighbors.isEmpty) {
+          final li = widget.ble.lastInfo;
+          if (li != null && li.neighbors.isNotEmpty) {
+            setState(() {
+              _applySnapshot(
+                neighbors: li.neighbors,
+                neighborsRssi: li.neighborsRssi,
+              );
+              _normalizeTraceTarget();
+            });
+            unawaited(widget.ble.getInfo(force: true));
+            return;
+          }
+        }
         setState(() {
           _applySnapshot(
             neighbors: evt.neighbors,

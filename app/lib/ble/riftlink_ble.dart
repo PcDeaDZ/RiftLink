@@ -1608,6 +1608,32 @@ List<RiftLinkGroupV2Info> _parseGroupsV2(dynamic raw) {
   return out;
 }
 
+/// Список id соседей: в прошивке обычно JSON-массив; иначе (строка, одна запись) — не терять данные.
+List<String> _parseNeighborIdList(dynamic raw) {
+  if (raw == null) return [];
+  if (raw is List) {
+    return raw.map((e) => e.toString()).toList();
+  }
+  if (raw is String) {
+    final s = raw.trim();
+    if (s.isEmpty) return [];
+    if (s.startsWith('[')) {
+      try {
+        final decoded = jsonDecode(s);
+        if (decoded is List) {
+          return decoded.map((e) => e.toString()).toList();
+        }
+      } catch (_) {}
+    }
+    return s
+        .split(',')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+  }
+  return [];
+}
+
 /// Парсинг одного JSON-уведомления с RX (вынесено из потока для единого диспетчера).
 RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
   final evtRaw = json['evt'];
@@ -1659,8 +1685,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     );
   }
   if (evt == 'info') {
-    final nb = json['neighbors'];
-    final neighbors = nb is List ? (nb as List).map((e) => e.toString()).toList() : <String>[];
+    final neighbors = _parseNeighborIdList(json['neighbors']);
     final rssiList = json['neighborsRssi'];
     final neighborsRssi = rssiList is List ? (rssiList as List).map(_jsonInt).toList() : <int>[];
     final hasKeyList = json['neighborsHasKey'];
@@ -1823,13 +1848,15 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     );
   }
   if (evt == 'neighbors') {
-    final list = json['neighbors'];
+    final neighbors = _parseNeighborIdList(json['neighbors']);
     final rssiList = json['rssi'];
     final rssi = rssiList is List ? (rssiList as List).map(_jsonInt).toList() : <int>[];
     final hasKeyList = json['hasKey'];
-    final hasKey = hasKeyList is List ? (hasKeyList as List).map((e) => e == true).toList() : <bool>[];
+    final hasKey = hasKeyList is List
+        ? (hasKeyList as List).map((e) => e == true || e == 1).toList()
+        : <bool>[];
     return RiftLinkNeighborsEvent(
-      neighbors: list is List ? (list as List).map((e) => e.toString()).toList() : [],
+      neighbors: neighbors,
       rssi: rssi,
       hasKey: hasKey,
     );

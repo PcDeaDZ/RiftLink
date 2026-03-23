@@ -639,6 +639,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         _applyNodeIdFromDeviceName();
         final cachedInfo = widget.ble.lastInfo;
         if (cachedInfo != null) _onInfoEvent(cachedInfo);
+        _reconcileNeighborsFromBleCache();
         if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo();
         if (cachedInfo == null) {
           Future.delayed(const Duration(milliseconds: 450), () {
@@ -656,6 +657,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     // Периодический getInfo: пустые соседи — discovery; есть без ключа — обновить hasKey после KEY_EXCHANGE
     _neighborsPollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (!mounted || !widget.ble.isTransportConnected) return;
+      _reconcileNeighborsFromBleCache();
       final needRefresh = _neighbors.isEmpty ||
           _neighborsHasKey.length != _neighbors.length ||
           _neighborsHasKey.any((k) => !k);
@@ -742,6 +744,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _appLifecycle = state;
     if (state == AppLifecycleState.resumed) {
       _scheduleDirectPeerAutoPing();
+      _reconcileNeighborsFromBleCache();
       unawaited(_reloadMessagesFromRepository());
     }
   }
@@ -958,6 +961,20 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   void _onLocaleChanged() { if (mounted) _sendLangToFirmware(); }
 
   /// После смены BLE-узла сбрасываем кэш, пока не придёт свежий evt info (иначе в UI «залипает» EU и старый SF).
+  /// Если в [RiftLinkBle.lastInfo] уже есть соседи, а локальные списки пустые (гонка notify / порядок событий).
+  void _reconcileNeighborsFromBleCache() {
+    if (!mounted) return;
+    final li = widget.ble.lastInfo;
+    if (li == null || li.neighbors.isEmpty) return;
+    if (_neighbors.isNotEmpty) return;
+    setState(() {
+      _neighbors = List<String>.from(li.neighbors);
+      _neighborsRssi = List<int>.from(li.neighborsRssi);
+      _neighborsHasKey = List<bool>.from(li.neighborsHasKey);
+      _routes = li.routes.map((e) => Map<String, dynamic>.from(e)).toList();
+    });
+  }
+
   void _resetStateUntilInfo() {
     _region = '';
     _channel = null;
@@ -1647,6 +1664,19 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         });
       },
       onNeighborsEvent: (event) {
+        // Пустой evt:neighbors после полного evt:info с соседями затирал списки в UI (рассинхрон порядка notify).
+        if (event.neighbors.isEmpty) {
+          final li = widget.ble.lastInfo;
+          if (li != null && li.neighbors.isNotEmpty) {
+            setState(() {
+              _neighbors = List<String>.from(li.neighbors);
+              _neighborsRssi = List<int>.from(li.neighborsRssi);
+              _neighborsHasKey = List<bool>.from(li.neighborsHasKey);
+            });
+            unawaited(widget.ble.getInfo(force: true));
+            return;
+          }
+        }
         setState(() {
           _neighbors = event.neighbors;
           _neighborsRssi = event.rssi;
