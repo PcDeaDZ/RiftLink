@@ -1,0 +1,17 @@
+{
+  "tag": "v1.5.20",
+  "firmwareVersion": "1.5.20",
+  "appVersion": "1.5.20",
+  "notesRu": [
+    "Единая дизайн-система: токены типографики, отступов, иконок, теней и анимаций; глобальный textTheme в теме.",
+    "Заголовок AppBar и riftAppBar согласованы (navTitle 18).",
+    "Образы прошивки V3 / V4 / V3 Paper в этом флешере соответствуют версии выше.",
+    "APK для Android по-прежнему подтягивается из GitHub Releases, если вложен в последний релиз."
+  ],
+  "notesEn": [
+    "Unified design system: typography, spacing, icons, shadows, motion tokens; global textTheme.",
+    "AppBar / riftAppBar titles aligned (navTitle 18).",
+    "Firmware images (V3 / V4 / V3 Paper) bundled with this flasher match the version above.",
+    "Android APK is linked from GitHub Releases when attached to the latest release."
+  ]
+}

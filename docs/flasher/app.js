@@ -2,7 +2,12 @@ const REPO_OWNER = "PcDeaDZ";
 const REPO_NAME = "RiftLink";
 const RELEASE_API_URL = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest`;
 const ROADMAP_RAW_URL = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/master/docs/CUSTOM_PROTOCOL_PLAN.md`;
+const EMBEDDED_RELEASE_URL = "./embedded-release.json";
+const RELEASE_FETCH_TIMEOUT_MS = 12000;
 const LANG_STORAGE_KEY = "riftlink_flasher_lang";
+
+/** Данные из репозитория (версия прошивки в комплекте с флешером); GitHub API подмешивается поверх. */
+let embeddedReleaseRaw = null;
 
 const STATIC_MANIFESTS = {
   "heltec-v3": "./manifests/heltec-v3.json",
@@ -331,8 +336,58 @@ function renderRoadmap() {
   }
 }
 
+function embeddedNotesForLang() {
+  if (!embeddedReleaseRaw) return [];
+  const key = currentLang === "en" ? "notesEn" : "notesRu";
+  const arr = embeddedReleaseRaw[key];
+  return Array.isArray(arr) ? arr : [];
+}
+
+function applyReleaseStateFromEmbedded(data) {
+  if (!data) return;
+  const fv = String(data.firmwareVersion ?? "?");
+  const av = String(data.appVersion ?? data.firmwareVersion ?? "?");
+  const tagRaw = data.tag != null ? String(data.tag) : `v${fv}`;
+  const tag = tagRaw.startsWith("v") ? tagRaw : `v${tagRaw}`;
+  releaseState = {
+    tag,
+    firmwareVersion: fv,
+    appVersion: av,
+    apkUrl: null,
+    notes: embeddedNotesForLang(),
+  };
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = RELEASE_FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+async function loadEmbeddedRelease() {
+  try {
+    const response = await fetchWithTimeout(EMBEDDED_RELEASE_URL, { cache: "no-store" });
+    if (!response.ok) return null;
+    const data = await response.json();
+    embeddedReleaseRaw = data;
+    applyReleaseStateFromEmbedded(data);
+    renderReleaseState();
+    return data;
+  } catch (e) {
+    console.warn("embedded-release.json unavailable:", e);
+    return null;
+  }
+}
+
 function renderLanguage() {
   document.documentElement.lang = currentLang;
+  if (embeddedReleaseRaw) {
+    releaseState.notes = embeddedNotesForLang();
+  }
   if (titleTextEl) titleTextEl.textContent = t("title");
   if (subtitleTextEl) subtitleTextEl.textContent = t("subtitle");
   if (deviceLabelEl) deviceLabelEl.textContent = t("deviceLabel");
@@ -405,8 +460,14 @@ function setApkLink(url, versionText) {
 }
 
 async function loadLatestRelease() {
+  const snapshot = {
+    ...releaseState,
+    notes: Array.isArray(releaseState.notes) ? [...releaseState.notes] : [],
+  };
+  const hadEmbedded = embeddedReleaseRaw != null;
+
   try {
-    const response = await fetch(RELEASE_API_URL, {
+    const response = await fetchWithTimeout(RELEASE_API_URL, {
       headers: { Accept: "application/vnd.github+json" },
     });
     if (!response.ok) {
@@ -422,31 +483,54 @@ async function loadLatestRelease() {
       (a) => a.name.toLowerCase().includes("arm64-v8a") && a.name.toLowerCase().endsWith(".apk"),
     );
 
-    const fallbackTag = (release.tag_name ?? "unknown").replace(/^v/i, "");
-    const firmwareVersion =
+    const fallbackTag = (release.tag_name ?? "").replace(/^v/i, "") || "unknown";
+    const firmwareFromAssets =
       parseSemverFromName(fwV4?.name ?? "") ??
       parseSemverFromName(fwV3?.name ?? "") ??
       parseSemverFromName(fwPaper?.name ?? "") ??
-      fallbackTag;
-    const appVersion = parseSemverFromName(apkArm64?.name ?? "") ?? fallbackTag;
+      null;
+    const firmwareVersion = firmwareFromAssets || fallbackTag || snapshot.firmwareVersion;
+    const appVersionFromApk = parseSemverFromName(apkArm64?.name ?? "");
+    const appVersion = appVersionFromApk || fallbackTag || snapshot.appVersion;
 
-    releaseState = {
-      tag: release.tag_name ?? "unknown",
-      firmwareVersion,
-      appVersion,
-      apkUrl: apkArm64?.browser_download_url ?? null,
-      notes: normalizeReleaseNotes(release.body),
-    };
+    const githubNotes = normalizeReleaseNotes(release.body);
+    const useGithubNotes = githubNotes.length > 0;
+    const apkUrl = apkArm64?.browser_download_url ?? snapshot.apkUrl;
+
+    if (hadEmbedded) {
+      /** Версия образов в этом деплое — из embedded-release.json; GitHub даёт только APK и release notes. */
+      releaseState = {
+        tag: snapshot.tag,
+        firmwareVersion: snapshot.firmwareVersion,
+        appVersion: appVersionFromApk || snapshot.appVersion,
+        apkUrl,
+        notes: useGithubNotes ? githubNotes : snapshot.notes,
+      };
+    } else {
+      releaseState = {
+        tag: release.tag_name ?? "unknown",
+        firmwareVersion,
+        appVersion,
+        apkUrl,
+        notes: useGithubNotes ? githubNotes : snapshot.notes,
+      };
+    }
     renderReleaseState();
-
   } catch (error) {
-    releaseState = {
-      tag: t("latestUnavailable"),
-      firmwareVersion: t("loadFailed"),
-      appVersion: t("loadFailed"),
-      apkUrl: null,
-      notes: [],
-    };
+    if (!hadEmbedded && (!snapshot.firmwareVersion || snapshot.firmwareVersion === t("loading"))) {
+      releaseState = {
+        tag: t("latestUnavailable"),
+        firmwareVersion: t("loadFailed"),
+        appVersion: t("loadFailed"),
+        apkUrl: null,
+        notes: [],
+      };
+    } else {
+      releaseState = {
+        ...snapshot,
+        notes: [...snapshot.notes],
+      };
+    }
     renderReleaseState();
     console.error("Failed to load latest release metadata:", error);
   }
@@ -454,7 +538,7 @@ async function loadLatestRelease() {
 
 async function loadRoadmap() {
   try {
-    const response = await fetch(ROADMAP_RAW_URL, { cache: "no-store" });
+    const response = await fetchWithTimeout(ROADMAP_RAW_URL, { cache: "no-store" }, RELEASE_FETCH_TIMEOUT_MS);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const markdown = await response.text();
     roadmapState = extractRoadmapItems(markdown);
@@ -490,6 +574,8 @@ releaseState = {
   notes: [],
 };
 renderLanguage();
-await Promise.all([loadLatestRelease(), loadRoadmap()]);
+await loadEmbeddedRelease();
+await loadLatestRelease();
+await loadRoadmap();
 setDevice(selectEl.value);
 
