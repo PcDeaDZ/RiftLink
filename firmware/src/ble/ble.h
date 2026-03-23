@@ -46,7 +46,10 @@ void notifyGroups();    // evt "groups" — список групп
 void notifyWifi(bool connected, const char* ssid, const char* ip);
 void notifyRegion(const char* code, float freq, int power, int channel = -1, uint32_t cmdId = 0);
 void notifyGps(bool present, bool enabled, bool hasFix, int rx, int tx, int en);
-void notifyPong(const uint8_t* from, int rssi = 0);
+/** evt:pong; pingPktId — эхо pktId из OP_PING в эфире (0 если пинг был без pktId). */
+void notifyPong(const uint8_t* from, int rssi = 0, uint16_t pingPktId = 0);
+/** Сбросить таймер ретраев OP_PING по эфиру при получении PONG от узла `from` (отправитель pong). */
+void clearPingRetryForPeer(const uint8_t* from);
 /** Результат самотестирования: radioOk, displayOk, batteryMv, heapFree */
 void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t heapFree, uint32_t cmdId = 0);
 /** Голосовое сообщение: from, data (Opus), dataLen. Отправляется чанками base64 */

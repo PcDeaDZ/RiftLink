@@ -16,7 +16,7 @@
 #include "protocol/packet.h"
 #include <string.h>
 
-#define HELLO_INTERVAL_MS  30000
+#define HELLO_INTERVAL_MS  36000
 #define HELLO_JITTER_MS    3000
 
 static uint32_t lastHello = 0;

@@ -95,7 +95,11 @@ class _DebugScreenState extends State<DebugScreen> {
     if (evt is RiftLinkDeliveredEvent) return 'delivered from=${_displayNodeLabel(evt.from)} msgId=${evt.msgId}';
     if (evt is RiftLinkUndeliveredEvent) return 'undelivered to=${_displayNodeLabel(evt.to)} msgId=${evt.msgId}';
     if (evt is RiftLinkInfoEvent) return 'info id=${_displayNodeLabel(evt.id)} neighbors=${evt.neighbors.length} mode=${evt.radioMode}';
-    if (evt is RiftLinkPongEvent) return 'pong from=${_displayNodeLabel(evt.from)} rssi=${evt.rssi ?? 0}';
+    if (evt is RiftLinkPongEvent) {
+      final pk = evt.pingPktId;
+      return 'pong from=${_displayNodeLabel(evt.from)} rssi=${evt.rssi ?? 0}'
+          '${pk != null ? ' pingPktId=$pk' : ''}';
+    }
     if (evt is RiftLinkRoutesEvent) return 'routes count=${evt.routes.length}';
     if (evt is RiftLinkRelayProofEvent) return 'relayProof by=${_displayNodeLabel(evt.relayedBy)} from=${_displayNodeLabel(evt.from)} to=${_displayNodeLabel(evt.to)} pkt=${evt.pktId} op=${evt.opcode}';
     if (evt is RiftLinkTimeCapsuleQueuedEvent) return 'timeCapsuleQueued to=${evt.to == null ? "-" : _displayNodeLabel(evt.to!)} trigger=${evt.trigger} at=${evt.triggerAtMs ?? 0}';

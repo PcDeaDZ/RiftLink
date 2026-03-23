@@ -55,6 +55,10 @@ class _MeshScreenState extends State<MeshScreen> {
 
   String _normalizeNodeId(String raw) => raw.trim().toUpperCase();
 
+  /// Только hex-символы, верхний регистр — для сопоставления с `evt:pong` / соседями.
+  String _hexIdOnly(String raw) =>
+      raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+
   void _applyLiveRssiOverrides() {
     final now = DateTime.now().millisecondsSinceEpoch;
     for (var i = 0; i < _neighbors.length; i++) {
@@ -71,10 +75,11 @@ class _MeshScreenState extends State<MeshScreen> {
 
   /// Сопоставление id из [RiftLinkPongEvent] со списком соседей (полный 16 hex vs префикс).
   String? _matchNeighborKeyForPong(String rawFrom) {
-    final n = _normalizeNodeId(rawFrom);
+    final n = _hexIdOnly(rawFrom);
     if (n.isEmpty) return null;
     for (final nb in _neighbors) {
-      final b = _normalizeNodeId(nb);
+      final b = _hexIdOnly(nb);
+      if (b.isEmpty) continue;
       if (b == n) return b;
       if (n.length >= 8 && b.length >= 8 && (b.startsWith(n) || n.startsWith(b))) return b;
     }
@@ -211,6 +216,9 @@ class _MeshScreenState extends State<MeshScreen> {
             _recordLiveRssi(key, rssi);
           }
         });
+      } else if (evt is RiftLinkErrorEvent && evt.code == 'signal_test_no_neighbors') {
+        if (!mounted) return;
+        _snack(context.l10n.tr('mesh_signal_no_neighbors'));
       }
     });
   }
@@ -261,9 +269,22 @@ class _MeshScreenState extends State<MeshScreen> {
 
   Future<void> _runSignalTest() async {
     if (_signalTestRunning) return;
-    // До await: signalTest() только подтверждает TX; ответы — отдельные evt:pong.
-    // Если сначала await, а потом clear(), быстрые pong успевают попасть в [_signalRssiByNode]
-    // и затем затираются — в UI «нет данных».
+    // Синхронизируем список соседей с узлом: signalTest на прошивке шлёт OP_PING только по neighbors::getCount().
+    // Без свежего getInfo UI мог показывать соседей из кэша, а на устройстве — 0 соседей → «тишина».
+    await widget.ble.getInfo(force: true);
+    if (!mounted) return;
+    if (_neighbors.isEmpty) {
+      await Future<void>.delayed(const Duration(milliseconds: 1000));
+      if (!mounted) return;
+      await widget.ble.getInfo(force: true);
+      if (!mounted) return;
+    }
+    if (_neighbors.isEmpty) {
+      _snack(context.l10n.tr('mesh_signal_no_neighbors'));
+      return;
+    }
+    // До await signalTest: ответы — отдельные evt:pong. Если сначала await, а потом clear(),
+    // быстрые pong успевают попасть в [_signalRssiByNode] и затем затираются — в UI «нет данных».
     setState(() {
       _signalTestRunning = true;
       _signalTestAttempted = true;

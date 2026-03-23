@@ -174,6 +174,19 @@ static volatile bool s_pendingGroupSend = false;
 static uint32_t s_pendingGroupId = 0;
 static char s_pendingGroupText[256] = {0};
 static uint16_t s_diagPktIdCounter = 0;  // pktId for BLE diagnostic traffic (ping/signalTest)
+/**
+ * Доп. кадры OP_PING без PONG (таймаут как ACK в msg_queue). Только `ping` из приложения, не signalTest.
+ * Меньше дублей в эфире, чем у MSG: ping — диагностика, не доставка с ACK. 1 + kPingRetryMaxExtra кадров.
+ */
+static constexpr uint8_t kPingRetryMaxExtra = 2;
+struct PingRetryState {
+  bool active = false;
+  uint8_t to[protocol::NODE_ID_LEN]{};
+  uint8_t txSf = 7;
+  uint32_t deadlineMs = 0;
+  uint8_t retriesLeft = 0;
+};
+static PingRetryState s_pingRetry{};
 static volatile bool s_pendingMsg = false;
 static uint8_t s_pendingMsgFrom[8] = {0};
 static char s_pendingMsgText[BLE_PENDING_MSG_TEXT_MAX + 1] = {0};
@@ -184,6 +197,10 @@ static char s_pendingMsgLane[10] = "normal";
 static char s_pendingMsgType[10] = "text";
 static uint32_t s_pendingMsgGroupId = 0;
 static char s_pendingMsgGroupUid[groups::GROUP_UID_MAX_LEN + 1] = {0};
+static volatile bool s_pendingPong = false;
+static uint8_t s_pendingPongFrom[8] = {0};
+static int s_pendingPongRssi = 0;
+static uint16_t s_pendingPongPktId = 0;
 static volatile bool s_pendingOversizeCmdError = false;
 static uint16_t s_pendingOversizeCmdLen = 0;
 static volatile bool s_pendingNickname = false;
@@ -326,6 +343,19 @@ static void rememberPingCmdId(const uint8_t to[protocol::NODE_ID_LEN], uint32_t 
   dst.expiresAtMs = now + 30000UL;
 }
 
+/** cmdId для pong JSON без снятия слота — чтобы при повторе notify после mutex-drop не потерять сопоставление. */
+static uint32_t peekPingCmdIdForFrom(const uint8_t from[protocol::NODE_ID_LEN]) {
+  if (!from) return 0;
+  const uint32_t now = millis();
+  for (int i = 0; i < (int)(sizeof(s_pendingPingCmdIds) / sizeof(s_pendingPingCmdIds[0])); i++) {
+    auto& e = s_pendingPingCmdIds[i];
+    if (!e.used) continue;
+    if ((int32_t)(now - e.expiresAtMs) >= 0) continue;
+    if (memcmp(e.to, from, protocol::NODE_ID_LEN) == 0) return e.cmdId;
+  }
+  return 0;
+}
+
 static uint32_t takePingCmdIdForFrom(const uint8_t from[protocol::NODE_ID_LEN]) {
   if (!from) return 0;
   const uint32_t now = millis();
@@ -343,6 +373,20 @@ static uint32_t takePingCmdIdForFrom(const uint8_t from[protocol::NODE_ID_LEN]) 
     }
   }
   return 0;
+}
+
+/**
+ * Ожидание PONG / ретрай PING: как msg_queue ACK, но SF подсказки с соседа могут
+ * расходиться с фактическим TX — в queueTxPacket подставляется radio::getSpreadingFactor().
+ * Берём max(модем, подсказка), иначе таймаут занижается и ретраи шлются «вхолостую».
+ */
+static uint32_t pingAckWaitMs(uint8_t neighborSfHint) {
+  uint8_t modemSf = radio::getSpreadingFactor();
+  if (modemSf < 7 || modemSf > 12) modemSf = 12;
+  uint8_t hint = neighborSfHint;
+  if (hint < 7 || hint > 12) hint = modemSf;
+  const uint8_t sf = modemSf > hint ? modemSf : hint;
+  return 2000 + (uint32_t)(sf - 6) * 500;
 }
 
 #define VOICE_BUF_MAX (voice_frag::MAX_VOICE_PLAIN + 1024)
@@ -496,8 +540,9 @@ static size_t bleNotifyMtu() {
   return (mtu > 3) ? (mtu - 3) : BLE_ATT_MAX_JSON_BYTES;
 }
 
-static void notifyJsonToApp(const char* payload, size_t len) {
-  if (!payload || len == 0) return;
+/** false = mutex / нет транспорта (payload не отправлен). */
+static bool notifyJsonToApp(const char* payload, size_t len) {
+  if (!payload || len == 0) return false;
   bool locked = false;
   for (uint8_t attempt = 0; attempt < kNotifyMutexMaxAttempts; attempt++) {
     if (s_notifyMutex && xSemaphoreTake(s_notifyMutex, kNotifyMutexTryTicks) == pdTRUE) {
@@ -510,7 +555,7 @@ static void notifyJsonToApp(const char* payload, size_t len) {
     s_bleDiag.notifyMutexBusyDrop++;
     Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=drop reason=notify_mutex_busy len=%u\n", (unsigned)len);
     bleDiagMaybeSnapshot("notify_mutex_drop", 1500);
-    return;
+    return false;
   }
   char evtTag[24];
   extractEvtForLog(payload, len, evtTag, sizeof(evtTag));
@@ -533,7 +578,7 @@ static void notifyJsonToApp(const char* payload, size_t len) {
         evt, (unsigned)len);
     bleDiagMaybeSnapshot("notify_wifi", 8000);
     xSemaphoreGive(s_notifyMutex);
-    return;
+    return true;
   }
 
   if (!pRxChar || !s_connected) {
@@ -542,7 +587,7 @@ static void notifyJsonToApp(const char* payload, size_t len) {
         transportModeTag(), evt, (unsigned)len);
     bleDiagMaybeSnapshot("notify_skip", 1500);
     xSemaphoreGive(s_notifyMutex);
-    return;
+    return false;
   }
 
 #if BLE_LOG_TX_JSON
@@ -588,6 +633,7 @@ static void notifyJsonToApp(const char* payload, size_t len) {
       evt, (unsigned)len, (unsigned)chunks);
   bleDiagMaybeSnapshot("notify_ble", 8000);
   xSemaphoreGive(s_notifyMutex);
+  return true;
 }
 
 #if !defined(RIFTLINK_DISABLE_BLS_N)
@@ -1705,6 +1751,10 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
 
     if (strcmp(cmd, "signalTest") == 0) {
       int n = neighbors::getCount();
+      if (n == 0) {
+        ble::notifyError("signal_test_no_neighbors", "no neighbors on device");
+        return;
+      }
       for (int i = 0; i < n && i < 8; i++) {
         uint8_t peerId[protocol::NODE_ID_LEN];
         if (!neighbors::getId(i, peerId)) continue;
@@ -1783,6 +1833,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
           false, false, false, protocol::CHANNEL_DEFAULT, pktId);
       if (len > 0) {
         if (cmdId != 0) rememberPingCmdId(to, cmdId);
+        // RSSI→SF только для pingAckWaitMs и логов; в queueTxPacket подставляется SF модема.
         uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(to));
         char reasonBuf[40];
         if (!queueTxPacket(pkt, len, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
@@ -1793,6 +1844,11 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
           RIFTLINK_DIAG("PING", "event=PING_TX_QUEUED to=%02X%02X pktId=%u sf=%u",
               to[0], to[1], (unsigned)pktId, (unsigned)txSf);
         }
+        s_pingRetry.active = true;
+        memcpy(s_pingRetry.to, to, protocol::NODE_ID_LEN);
+        s_pingRetry.txSf = txSf;
+        s_pingRetry.retriesLeft = kPingRetryMaxExtra;
+        s_pingRetry.deadlineMs = millis() + pingAckWaitMs(txSf);
       }
       return;
     }
@@ -2591,21 +2647,59 @@ void notifyError(const char* code, const char* msg) {
   notifyJsonToApp(buf, len);
 }
 
-void notifyPong(const uint8_t* from, int rssi) {
-  if (!hasActiveTransport()) return;
-
+/** Сериализация и notify. cmdId снимаем только после успешного notify — иначе повтор как у msg.
+ *  Ping/PONG — не уровень надёжности MSG+ACK; буфер с границей serializeJson (без обрезки JSON). */
+static bool emitPongToApp(const uint8_t* from, int rssi, uint16_t pingPktId) {
+  if (!from || !hasActiveTransport()) return false;
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "pong";
   char fromHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(fromHex + i*2, 3, "%02X", from[i]);
   doc["from"] = fromHex;
   if (rssi != 0) doc["rssi"] = rssi;
-  const uint32_t cmdId = takePingCmdIdForFrom(from);
+  if (pingPktId != 0) doc["pingPktId"] = pingPktId;
+  const uint32_t cmdId = peekPingCmdIdForFrom(from);
   if (cmdId != 0) doc["cmdId"] = cmdId;
 
-  char buf[80];
-  size_t len = serializeJson(doc, buf);
-  notifyJsonToApp(buf, len);
+  char buf[128];
+  const size_t cap = sizeof(buf);
+  const size_t n = serializeJson(doc, buf, cap);
+  if (n == 0 || n >= cap) {
+    RIFTLINK_DIAG("BLE", "event=PONG_JSON_SERIAL_FAIL n=%u cap=%u measured=%u",
+        (unsigned)n, (unsigned)cap, (unsigned)measureJson(doc));
+    return false;
+  }
+  if (!notifyJsonToApp(buf, n)) return false;
+  (void)takePingCmdIdForFrom(from);
+  return true;
+}
+
+void notifyPong(const uint8_t* from, int rssi, uint16_t pingPktId) {
+  if (!from || !hasActiveTransport()) return;
+  // Как notifyDelivered(OP_ACK): сразу notifyJsonToApp — без ожидания ble::update(), иначе pong
+  // ощущается «медленным» при том что delivered приходит мгновенно. При занятом мьютексе — отложено.
+  if (emitPongToApp(from, rssi, pingPktId)) {
+    Serial.printf("[BLE_CHAIN] stage=fw_pong action=emit evt=pong from=%02X%02X rssi=%d pingPktId=%u mode=%s\n",
+        from[0], from[1], rssi, (unsigned)pingPktId, transportModeTag());
+    return;
+  }
+  if (s_pendingPong) {
+    Serial.printf("[BLE_CHAIN] stage=fw_request_pong action=overwrite prevFrom=%02X%02X\n",
+        s_pendingPongFrom[0], s_pendingPongFrom[1]);
+  }
+  memcpy(s_pendingPongFrom, from, 8);
+  s_pendingPongRssi = rssi;
+  s_pendingPongPktId = pingPktId;
+  s_pendingPong = true;
+  Serial.printf("[BLE_CHAIN] stage=fw_request_pong action=enqueue from=%02X%02X rssi=%d mode=%s\n",
+      from[0], from[1], rssi, transportModeTag());
+}
+
+void clearPingRetryForPeer(const uint8_t* from) {
+  if (!from || !s_pingRetry.active) return;
+  if (memcmp(s_pingRetry.to, from, protocol::NODE_ID_LEN) != 0) return;
+  s_pingRetry.active = false;
+  RIFTLINK_DIAG("PING", "event=PING_RETRY_CLEAR reason=pong from=%02X%02X", from[0], from[1]);
 }
 
 void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t heapFree, uint32_t cmdId) {
@@ -2662,6 +2756,42 @@ void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen) {
   }
 }
 
+static void pingRetryTick() {
+  if (!s_pingRetry.active) return;
+  const uint32_t now = millis();
+  if ((int32_t)(now - s_pingRetry.deadlineMs) < 0) return;
+  if (s_pingRetry.retriesLeft == 0) {
+    s_pingRetry.active = false;
+    return;
+  }
+  uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN_PKTID];
+  uint16_t pktId = ++s_diagPktIdCounter;
+  size_t len = protocol::buildPacket(pkt, sizeof(pkt),
+      node::getId(), s_pingRetry.to, 31, protocol::OP_PING, nullptr, 0,
+      false, false, false, protocol::CHANNEL_DEFAULT, pktId);
+  if (len == 0) {
+    s_pingRetry.deadlineMs = now + 400;
+    return;
+  }
+  char reasonBuf[40];
+  if (!queueTxPacket(pkt, len, s_pingRetry.txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
+    queueDeferredSend(pkt, len, s_pingRetry.txSf, 60 + (esp_random() % 40), true);
+    RIFTLINK_DIAG("PING", "event=PING_RETRY_DEFER to=%02X%02X pktId=%u left=%u cause=%s",
+        s_pingRetry.to[0], s_pingRetry.to[1], (unsigned)pktId, (unsigned)s_pingRetry.retriesLeft,
+        reasonBuf[0] ? reasonBuf : "?");
+  } else {
+    RIFTLINK_DIAG("PING", "event=PING_RETRY_QUEUED to=%02X%02X pktId=%u left=%u sf=%u",
+        s_pingRetry.to[0], s_pingRetry.to[1], (unsigned)pktId, (unsigned)s_pingRetry.retriesLeft,
+        (unsigned)s_pingRetry.txSf);
+  }
+  s_pingRetry.retriesLeft--;
+  if (s_pingRetry.retriesLeft == 0) {
+    s_pingRetry.active = false;
+  } else {
+    s_pingRetry.deadlineMs = now + pingAckWaitMs(s_pingRetry.txSf);
+  }
+}
+
 void update() {
   bleDiagMaybeSnapshot("tick", 15000);
   if (s_pendingOversizeCmdError && hasActiveTransport()) {
@@ -2685,6 +2815,7 @@ void update() {
       bleHandleTxJson(cmdItem.data, cmdItem.len);
     }
   }
+  pingRetryTick();
   // GPS: применить в main loop (thread-safe: setPins удаляет s_serial, main читает в gps::update)
   if (s_pendingGps) {
     s_pendingGps = false;
@@ -2703,10 +2834,10 @@ void update() {
     return;
   }
   if (hasActiveTransport()) {
-    if (s_pendingMsg || s_pendingInfo || s_pendingGroups || s_pendingRoutes || s_pendingNeighbors || s_pendingInvite) {
-      Serial.printf("[BLE_CHAIN] stage=fw_update action=pending mode=%s msg=%u info=%u groups=%u routes=%u neighbors=%u invite=%u\n",
+    if (s_pendingMsg || s_pendingInfo || s_pendingPong || s_pendingGroups || s_pendingRoutes || s_pendingNeighbors || s_pendingInvite) {
+      Serial.printf("[BLE_CHAIN] stage=fw_update action=pending mode=%s msg=%u info=%u pong=%u groups=%u routes=%u neighbors=%u invite=%u\n",
           transportModeTag(),
-          (unsigned)s_pendingMsg, (unsigned)s_pendingInfo, (unsigned)s_pendingGroups,
+          (unsigned)s_pendingMsg, (unsigned)s_pendingInfo, (unsigned)s_pendingPong, (unsigned)s_pendingGroups,
           (unsigned)s_pendingRoutes, (unsigned)s_pendingNeighbors, (unsigned)s_pendingInvite);
     }
     // Сначала применить nickname (thread-safe: main loop пишет в node)
@@ -2721,6 +2852,21 @@ void update() {
       s_pendingInfoCmdId = 0;
       notifyInfo();
       vTaskDelay(pdMS_TO_TICKS(2));  // дать BLE отправить большой payload
+      return;
+    }
+    // Pong — маленький JSON, проверка связи; раньше тяжёлого evt:msg, чтобы не копиться в очереди.
+    if (s_pendingPong) {
+      if (emitPongToApp(s_pendingPongFrom, s_pendingPongRssi, s_pendingPongPktId)) {
+        s_pendingPong = false;
+      } else {
+        static uint32_t s_lastPongRetryLogMs = 0;
+        const uint32_t nowMs = millis();
+        if (nowMs - s_lastPongRetryLogMs >= 500) {
+          s_lastPongRetryLogMs = nowMs;
+          Serial.printf("[BLE_CHAIN] stage=fw_pong_flush action=retry_next_tick from=%02X%02X (notify busy or no transport)\n",
+              s_pendingPongFrom[0], s_pendingPongFrom[1]);
+        }
+      }
       return;
     }
     if (s_pendingMsg) {

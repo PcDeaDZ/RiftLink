@@ -78,13 +78,13 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #define POST_PRESS_DEBOUNCE_MS 400  // игнор дребезга после обработки — против двойного long press
 #define PENDING_REDRAW_RETRY_MS 2500  // retry смены вкладки, если дисплей не принял за 2.5с
 
-#define HELLO_INTERVAL_MS  30000  // 30с — спокойный режим (Meshtastic: position 15мин, telemetry 30мин)
-#define HELLO_INTERVAL_AGGRESSIVE_MS 9000   // 9с — быстрый discovery при 0 соседях
-#define HELLO_INTERVAL_ONE_NEIGH_MS 20000   // 20с при наличии одного соседа
+#define HELLO_INTERVAL_MS  36000  // 36с — спокойный режим (реже лишний beacon в эфире)
+#define HELLO_INTERVAL_AGGRESSIVE_MS 12000  // 12с — discovery при 0 соседях (раньше 9с — слишком плотно)
+#define HELLO_INTERVAL_ONE_NEIGH_MS 24000   // 24с при одном соседе
 #define HELLO_JITTER_MS    3000   // ±3с — при 1+ соседях
 #define HELLO_JITTER_ZERO_MS 500  // ±0.5с при 0 соседях — меньше разброс для быстрого discovery
-/** Жёсткий rate-limit HELLO: даже при баге дедлайна не шумим чаще, чем раз в 8с. */
-#define HELLO_HARD_MIN_INTERVAL_MS 8000
+/** Жёсткий rate-limit HELLO: даже при баге дедлайна не шумим чаще, чем раз в 10с. */
+#define HELLO_HARD_MIN_INTERVAL_MS 10000
 /** После drop (очередь/CAD) не долбить sendHello каждые ~10 ms */
 #define HELLO_DROP_RETRY_MS 350
 #define HELLO_QUIET_AFTER_KEY_MS 2500  // после KEY дать эфиру окно под ответный KEY
@@ -640,8 +640,8 @@ static HelloPlan computeHelloPlan() {
   int nNeigh = neighbors::getCount();
   if (nNeigh == 0) {
     uint32_t zeroElapsed = (s_zeroNeighSince == 0) ? 0 : (millis() - s_zeroNeighSince);
-    if (zeroElapsed >= 300000) p.intervalMs = 15000;
-    else if (zeroElapsed >= 120000) p.intervalMs = 12000;
+    if (zeroElapsed >= 300000) p.intervalMs = 18000;
+    else if (zeroElapsed >= 120000) p.intervalMs = 15000;
     else p.intervalMs = HELLO_INTERVAL_AGGRESSIVE_MS;
     p.jitterMs = HELLO_JITTER_ZERO_MS;
     p.phaseOffset = beacon_sync::getSlotFor(node::getId()) * 400u;
@@ -649,7 +649,7 @@ static HelloPlan computeHelloPlan() {
     p.intervalMs = HELLO_INTERVAL_ONE_NEIGH_MS;
     p.phaseOffset = beacon_sync::getSlotFor(node::getId()) * 240u;
   } else if (nNeigh >= 6) {
-    p.intervalMs = 24000;
+    p.intervalMs = 30000;
     p.phaseOffset = beacon_sync::getSlotFor(node::getId()) * 140u;
   } else {
     p.phaseOffset = beacon_sync::getSlotFor(node::getId()) * 180u;
@@ -1621,9 +1621,11 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           break;
         }
         pingReplyMarkSeen(hdr.from, pingKey, nowMs);
-        uint8_t pongPkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
+        // Эхо pktId из OP_PING в OP_PONG — на приёмнике совпадение с исходным пингом по эфиру.
+        uint8_t pongPkt[protocol::SYNC_LEN + protocol::HEADER_LEN_PKTID];
         size_t pongLen = protocol::buildPacket(pongPkt, sizeof(pongPkt),
-            node::getId(), hdr.from, 31, protocol::OP_PONG, nullptr, 0);
+            node::getId(), hdr.from, 31, protocol::OP_PONG, nullptr, 0,
+            false, false, false, protocol::CHANNEL_DEFAULT, hdr.pktId);
         if (pongLen > 0) {
           uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(hdr.from));
           if (txSf == 0) txSf = 12;
@@ -1648,7 +1650,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       break;
 
     case protocol::OP_PONG:
-      ble::notifyPong(hdr.from, rssi);
+      ble::clearPingRetryForPeer(hdr.from);
+      ble::notifyPong(hdr.from, rssi, hdr.pktId);
       break;
 
     case protocol::OP_NACK:

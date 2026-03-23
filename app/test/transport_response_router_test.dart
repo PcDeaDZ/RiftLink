@@ -90,5 +90,39 @@ void main() {
       await router.dispose();
       await responses.close();
     });
+
+    test('pong without cmdId completes pending ping matched by from vs to', () async {
+      final responses = StreamController<Map<String, dynamic>>.broadcast();
+      final sentPayloads = <Map<String, dynamic>>[];
+      final router = TransportResponseRouter(
+        sendCommand: (payload) async {
+          sentPayloads.add(Map<String, dynamic>.from(payload));
+          return true;
+        },
+        responses: responses.stream,
+      );
+
+      final ticket = router.sendTrackedRequest(
+        cmd: 'ping',
+        payload: <String, dynamic>{'to': '0011223344556677'},
+        expectedEvents: const {'pong'},
+        timeout: const Duration(milliseconds: 400),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      final cmdId = sentPayloads.single['cmdId'] as int;
+      responses.add(<String, dynamic>{
+        'evt': 'pong',
+        'from': '0011223344556677',
+        'rssi': -70,
+      });
+
+      final result = await ticket.response;
+      expect(result['evt'], 'pong');
+      expect(result['cmdId'], cmdId);
+      expect(result['from'], '0011223344556677');
+
+      await router.dispose();
+      await responses.close();
+    });
   });
 }

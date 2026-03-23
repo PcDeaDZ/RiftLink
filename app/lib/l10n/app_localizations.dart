@@ -466,6 +466,10 @@ final Map<String, Map<String, String>> _strings = {
   'mesh_signal_test': {'en': 'Signal test', 'ru': 'Signal Test'},
   'mesh_signal_waiting': {'en': 'Collecting responses for 10 seconds…', 'ru': 'Собираем ответы 10 секунд…'},
   'mesh_signal_no_data': {'en': 'No responses yet', 'ru': 'Пока нет ответов'},
+  'mesh_signal_no_neighbors': {
+    'en': 'No neighbors on the node — refresh mesh or wait for HELLO',
+    'ru': 'На узле нет соседей — обновите топологию или дождитесь HELLO',
+  },
   'mesh_signal_test_failed': {'en': 'Failed to start signal test', 'ru': 'Не удалось запустить Signal Test'},
   'mesh_traceroute': {'en': 'Traceroute', 'ru': 'Traceroute'},
   'mesh_traceroute_failed': {'en': 'Failed to run traceroute', 'ru': 'Не удалось запустить traceroute'},

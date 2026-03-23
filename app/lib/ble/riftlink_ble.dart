@@ -1096,9 +1096,14 @@ class RiftLinkBle {
   /// Отправить PING на узел (проверка связи)
   Future<bool> sendPing(String to) async => (await sendPingTracked(to)) != null;
 
-  /// Отправка ping с возвратом [cmdId] для сопоставления с [RiftLinkPongEvent.cmdId].
+  /// Отправка ping с возвратом [cmdId] для сопоставления с [RiftLinkPongEvent.cmdId];
+  /// в [RiftLinkPongEvent.pingPktId] — эхо `pktId` кадра OP_PING в эфире (если не 0).
   /// Ждёт короткое окно, чтобы отловить [request_send_failed] (BLE не принял команду);
   /// иначе считаем, что TX ушёл и ждём pong по радио (до таймаута роутера).
+  ///
+  /// **Не путать с доставкой сообщения:** у личного MSG — очередь, повторы по таймауту ACK,
+  /// ACK/NACK; у PING/PONG — два лёгких кадра без того же уровня подтверждения — статистика
+  /// «дошло / не дошло» может отличаться.
   Future<int?> sendPingTracked(String to) async {
     if (!isValidFullNodeId(to)) return null;
     final ticket = _responseRouter.sendTrackedRequest(
@@ -1825,6 +1830,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       from: json['from'] as String? ?? '',
       rssi: _jsonIntNullable(json['rssi']),
       cmdId: _jsonIntNullable(json['cmdId']),
+      pingPktId: _jsonIntNullable(json['pingPktId']),
     );
   }
   if (evt == 'error') {
@@ -2329,7 +2335,9 @@ class RiftLinkPongEvent extends RiftLinkEvent {
   final String from;
   final int? rssi;
   final int? cmdId;
-  RiftLinkPongEvent({required this.from, this.rssi, this.cmdId});
+  /// Эхо `pktId` из OP_PING в эфире (связка ответа с конкретным пингом).
+  final int? pingPktId;
+  RiftLinkPongEvent({required this.from, this.rssi, this.cmdId, this.pingPktId});
 }
 
 class RiftLinkErrorEvent extends RiftLinkEvent {

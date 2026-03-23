@@ -1,5 +1,7 @@
 import 'dart:async';
 
+/// Сопоставление ответов по `cmdId` в JSON. Исключение: `evt:pong` без `cmdId` (прошивка)
+/// сопоставляется с pending `ping` по полю `from` и аргументу `to` команды.
 typedef RouterTrace = void Function(String message);
 typedef RouterSendCommand = Future<bool> Function(Map<String, dynamic> payload);
 typedef RouterCommandIdFactory = int Function();
@@ -119,9 +121,16 @@ class TransportResponseRouter {
   }
 
   void _onResponse(Map<String, dynamic> json) {
-    final cmdId = _readCmdId(json);
-    if (cmdId == null || cmdId <= 0) return;
     final evt = json['evt']?.toString() ?? 'unknown';
+    final cmdId = _readCmdId(json);
+
+    // evt:pong с эфира часто без cmdId (прошивка не всегда вложила в JSON), а sendTrackedRequest(ping)
+    // ждёт pong — иначе событие отбрасывалось здесь и тикет никогда не завершался.
+    if (evt == 'pong' && (cmdId == null || cmdId <= 0)) {
+      if (_tryCompletePongWithoutCmdId(json)) return;
+    }
+
+    if (cmdId == null || cmdId <= 0) return;
     final req = _pending[cmdId];
     if (req == null) {
       final completedAt = _recentlyCompleted[cmdId];
@@ -132,6 +141,75 @@ class TransportResponseRouter {
       }
       return;
     }
+    _dispatchMatchedRequest(req, json, evt, cmdId);
+  }
+
+  /// Pong без cmdId: сопоставить с ожидающим `ping` по полю `from` ↔ payload `to`.
+  bool _tryCompletePongWithoutCmdId(Map<String, dynamic> json) {
+    final pongFrom = json['from']?.toString();
+    final candidates =
+        _pending.values.where((r) => r.cmd == 'ping' && r.expectedEvents.contains('pong')).toList();
+    if (candidates.isEmpty) {
+      _trace?.call('stage=router action=pong_no_cmdId skip reason=no_pending_ping');
+      return false;
+    }
+    _PendingRequest? req;
+    if (candidates.length == 1) {
+      final r = candidates.single;
+      final pingTo = r.payload['to']?.toString();
+      if (pingTo != null &&
+          pingTo.isNotEmpty &&
+          pongFrom != null &&
+          pongFrom.isNotEmpty &&
+          !_pingTargetMatchesFrom(pingTo, pongFrom)) {
+        _trace?.call('stage=router action=pong_no_cmdId skip reason=peer_mismatch');
+        return false;
+      }
+      req = r;
+    } else {
+      final matching = candidates
+          .where((r) => _pingTargetMatchesFrom(r.payload['to']?.toString(), pongFrom))
+          .toList();
+      if (matching.isEmpty) {
+        _trace?.call(
+            'stage=router action=pong_no_cmdId skip reason=no_peer_match pending=${candidates.length}');
+        return false;
+      }
+      if (matching.length == 1) {
+        req = matching.single;
+      } else {
+        matching.sort((a, b) => b.startedAt.compareTo(a.startedAt));
+        req = matching.first;
+        _trace?.call(
+            'stage=router action=pong_no_cmdId pick_latest among=${matching.length}');
+      }
+    }
+
+    final merged = Map<String, dynamic>.from(json);
+    merged['cmdId'] = req.cmdId;
+    _trace?.call('stage=router action=pong_no_cmdId matched cmdId=${req.cmdId}');
+    _dispatchMatchedRequest(req, merged, 'pong', req.cmdId);
+    return true;
+  }
+
+  static String _normPingHex(String? s) {
+    if (s == null) return '';
+    return s.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+  }
+
+  /// Полный 16 hex vs префикс — как в списке чатов / mesh.
+  static bool _pingTargetMatchesFrom(String? pingTo, String? pongFrom) {
+    final a = _normPingHex(pingTo);
+    final b = _normPingHex(pongFrom);
+    if (a.isEmpty || b.isEmpty) return false;
+    if (a == b) return true;
+    if (a.length >= 8 && b.length >= 8) {
+      return a.startsWith(b) || b.startsWith(a);
+    }
+    return false;
+  }
+
+  void _dispatchMatchedRequest(_PendingRequest req, Map<String, dynamic> json, String evt, int cmdId) {
     final isError = evt == 'error';
     final matched = isError || req.expectedEvents.contains(evt);
     if (!matched) return;
