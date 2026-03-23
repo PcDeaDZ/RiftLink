@@ -15,6 +15,7 @@
 #include "log.h"
 #include <string.h>
 #include <Arduino.h>
+#include <freertos/semphr.h>
 
 #define ACK_COALESCE_ENTRIES 4
 #define ACK_MSGIDS_MAX 8
@@ -31,12 +32,25 @@ struct AckEntry {
 
 static AckEntry s_entries[ACK_COALESCE_ENTRIES];
 static bool s_inited = false;
+static SemaphoreHandle_t s_mutex = nullptr;
 
 namespace ack_coalesce {
 
 void init() {
   memset(s_entries, 0, sizeof(s_entries));
+  if (!s_mutex) {
+    s_mutex = xSemaphoreCreateMutex();
+  }
   s_inited = true;
+}
+
+static bool lockState() {
+  if (!s_mutex) return true;
+  return xSemaphoreTake(s_mutex, pdMS_TO_TICKS(20)) == pdTRUE;
+}
+
+static void unlockState() {
+  if (s_mutex) xSemaphoreGive(s_mutex);
 }
 
 static AckEntry* findOrCreate(const uint8_t* from) {
@@ -58,13 +72,19 @@ static AckEntry* findOrCreate(const uint8_t* from) {
 
 void add(const uint8_t* from, uint32_t msgId, uint8_t txSf) {
   if (!s_inited || !from) return;
+  if (!lockState()) return;
   AckEntry* e = findOrCreate(from);
-  if (!e || e->count >= ACK_MSGIDS_MAX) return;
-  e->msgIds[e->count++] = msgId;
-  e->txSf = (txSf >= 7 && txSf <= 12) ? txSf : 12;
+  if (e && e->count < ACK_MSGIDS_MAX) {
+    e->msgIds[e->count++] = msgId;
+    e->txSf = (txSf >= 7 && txSf <= 12) ? txSf : 12;
+  }
+  unlockState();
 }
 
 static uint8_t currentTxFree() {
+  if (asyncIsRadioFsmV2Enabled()) {
+    return asyncTxQueueFree();
+  }
   if (!radioCmdQueue) return 0;
   return (uint8_t)uxQueueSpacesAvailable(radioCmdQueue);
 }
@@ -199,6 +219,7 @@ static void flushEntry(AckEntry* e) {
 
 void flush() {
   if (!s_inited) return;
+  if (!lockState()) return;
   uint32_t now = millis();
   for (int i = 0; i < ACK_COALESCE_ENTRIES; i++) {
     if (!s_entries[i].inUse || s_entries[i].count == 0) continue;
@@ -213,6 +234,7 @@ void flush() {
     if (s_entries[i].count >= maxIds || (now - s_entries[i].firstAddTime) >= wndMs)
       flushEntry(&s_entries[i]);
   }
+  unlockState();
 }
 
 }  // namespace ack_coalesce

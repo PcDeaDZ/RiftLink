@@ -1363,16 +1363,17 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             uint16_t encLen = (uint16_t)payload[off] | ((uint16_t)payload[off + 1] << 8);
             off += 2;
             if (encLen == 0 || off + encLen > payloadLen) break;
+            const uint8_t* encPtr = payload + off;
+            off += encLen;
             size_t decLen = 0;
-            if (!crypto::decryptFrom(hdr.from, payload + off, encLen, decBuf, &decLen) || decLen >= 256) {
+            if (!crypto::decryptFrom(hdr.from, encPtr, encLen, decBuf, &decLen) || decLen >= 256) {
               bool hasKeyNow = x25519_keys::hasKeyFor(hdr.from);
               RIFTLINK_DIAG("KEY", "event=KEY_DECRYPT_FAIL type=op_msg_batch from=%02X%02X has_key=%u len=%u pktId=%u",
                   hdr.from[0], hdr.from[1], (unsigned)hasKeyNow, (unsigned)encLen, (unsigned)hdr.pktId);
               x25519_keys::sendKeyExchange(hdr.from, true, hasKeyNow,
                   hasKeyNow ? "decrypt_fail_batch" : "msg_batch_no_key");
-              break;
+              continue;
             }
-            off += encLen;
             size_t d = compress::decompress(decBuf, decLen, tmpBuf, sizeof(tmpBuf));
             if (d > 0 && d < 256) {
               memcpy(decBuf, tmpBuf, d);

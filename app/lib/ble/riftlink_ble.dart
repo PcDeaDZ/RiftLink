@@ -31,7 +31,7 @@ class RiftLinkBle {
   /// и сливаются в поток при первом подписчике — иначе Dart broadcast **теряет** add без слушателей.
   int _eventsStreamListeners = 0;
   final List<RiftLinkEvent> _preListenBuffer = [];
-  static const int _maxPreListenBuffer = 64;
+  static const int _maxPreListenBuffer = 256;
   final Map<String, int> _diagCounters = <String, int>{};
   int _diagEventsSinceDump = 0;
   DateTime _diagLastDumpAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -222,6 +222,18 @@ class RiftLinkBle {
       return false;
     }
 
+    return _writeBleBytesSerialized(
+      bytes,
+      traceOnSuccess: 'stage=app_tx action=send mode=ble cmd=$cmd cmdId=$cmdId len=${json.length} ok=true',
+      traceOnFailure: (e) => 'stage=app_tx action=send mode=ble cmd=$cmd cmdId=$cmdId len=${json.length} ok=false err=$e',
+    );
+  }
+
+  Future<bool> _writeBleBytesSerialized(
+    List<int> bytes, {
+    required String traceOnSuccess,
+    required String Function(Object error) traceOnFailure,
+  }) async {
     while (_txLock != null) {
       await _txLock!.future;
     }
@@ -229,14 +241,14 @@ class RiftLinkBle {
     try {
       await _txChar!.write(bytes, withoutResponse: true);
       _diagInc('tx_ok');
-      _trace('stage=app_tx action=send mode=ble cmd=$cmd cmdId=$cmdId len=${json.length} ok=true');
+      _trace(traceOnSuccess);
       _diagMaybeDump('tx_ok');
       return true;
     } catch (e) {
       _diagInc('tx_fail');
-      _trace('stage=app_tx action=send mode=ble cmd=$cmd cmdId=$cmdId len=${json.length} ok=false err=$e');
+      _trace(traceOnFailure(e));
       _diagMaybeDump('tx_fail');
-      debugPrint('RiftLinkBle: _sendCmd error: $e');
+      debugPrint('RiftLinkBle: BLE write error: $e');
       return false;
     } finally {
       final c = _txLock;
@@ -1072,12 +1084,11 @@ class RiftLinkBle {
       );
     }
     if (_txChar == null || !isConnected) return false;
-    try {
-      await _txChar!.write(data, withoutResponse: true);
-      return true;
-    } catch (_) {
-      return false;
-    }
+    return _writeBleBytesSerialized(
+      data,
+      traceOnSuccess: 'stage=app_tx action=send mode=ble cmd=bleOtaChunk len=${data.length} ok=true',
+      traceOnFailure: (e) => 'stage=app_tx action=send mode=ble cmd=bleOtaChunk len=${data.length} ok=false err=$e',
+    );
   }
 
   /// BLE OTA: завершить OTA

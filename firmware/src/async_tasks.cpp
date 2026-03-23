@@ -812,7 +812,8 @@ static void deliverRxToPacketQueue(uint8_t* rxBuf, int n, int rssi, uint8_t sf) 
         if (isHello) {
           added = (xQueueSendToFront(packetQueue, &pitem, 0) == pdTRUE);
         } else if (frontWasHello) {
-          added = (xQueueSend(packetQueue, &pitem, 0) == pdTRUE);
+          // Preserve HELLO in queue: do not spill it out for non-HELLO frames.
+          added = false;
         }
         if (!added) (void)xQueueSendToFront(packetQueue, &discarded, 0);
         return added;

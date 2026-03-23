@@ -408,6 +408,11 @@ static bool bleAdvGetMfgData(const uint8_t* pl, size_t plLen, uint8_t index,
 #endif /* !RIFTLINK_DISABLE_BLS_N */
 
 static uint8_t s_notifyTxBuf[BLE_ATT_MAX_JSON_BYTES];
+static constexpr UBaseType_t kBleCmdQueueDepth = 12;
+static constexpr TickType_t kBleCmdEnqueueTimeoutTicks = pdMS_TO_TICKS(5);
+static constexpr uint8_t kBleCmdConsumePerTick = 6;
+static constexpr TickType_t kNotifyMutexTryTicks = pdMS_TO_TICKS(20);
+static constexpr uint8_t kNotifyMutexMaxAttempts = 3;
 struct BleCmdQueueItem {
   uint16_t len;
   uint8_t data[BLE_ATT_MAX_JSON_BYTES];
@@ -421,6 +426,7 @@ struct BleDiagCounters {
   uint32_t cmdQueueHighWater = 0;
   uint32_t notifySent = 0;
   uint32_t notifySkipNoTransport = 0;
+  uint32_t notifyMutexBusyDrop = 0;
   uint32_t notifyBytes = 0;
   uint32_t notifyChunks = 0;
   uint32_t statusSent = 0;
@@ -437,7 +443,7 @@ static void bleDiagMaybeSnapshot(const char* reason, uint32_t minIntervalMs = 10
   if (now - s_bleDiagLastSnapshotMs < minIntervalMs) return;
   s_bleDiagLastSnapshotMs = now;
   const uint32_t waiting = s_bleCmdQueue ? (uint32_t)uxQueueMessagesWaiting(s_bleCmdQueue) : 0;
-  Serial.printf("[BLE_CHAIN] stage=fw_diag action=snapshot reason=%s cmd_enq=%u cmd_drop=%u cmd_consume=%u cmdq_wait=%u cmdq_hwm=%u notify_sent=%u notify_skip=%u notify_bytes=%u notify_chunks=%u st_sent=%u st_delivered=%u st_read=%u st_undelivered=%u st_broadcast=%u\n",
+  Serial.printf("[BLE_CHAIN] stage=fw_diag action=snapshot reason=%s cmd_enq=%u cmd_drop=%u cmd_consume=%u cmdq_wait=%u cmdq_hwm=%u notify_sent=%u notify_skip=%u notify_mutex_drop=%u notify_bytes=%u notify_chunks=%u st_sent=%u st_delivered=%u st_read=%u st_undelivered=%u st_broadcast=%u\n",
       reason ? reason : "-",
       (unsigned)s_bleDiag.cmdEnqueued,
       (unsigned)s_bleDiag.cmdDroppedQueueFull,
@@ -446,6 +452,7 @@ static void bleDiagMaybeSnapshot(const char* reason, uint32_t minIntervalMs = 10
       (unsigned)s_bleDiag.cmdQueueHighWater,
       (unsigned)s_bleDiag.notifySent,
       (unsigned)s_bleDiag.notifySkipNoTransport,
+      (unsigned)s_bleDiag.notifyMutexBusyDrop,
       (unsigned)s_bleDiag.notifyBytes,
       (unsigned)s_bleDiag.notifyChunks,
       (unsigned)s_bleDiag.statusSent,
@@ -490,8 +497,18 @@ static size_t bleNotifyMtu() {
 
 static void notifyJsonToApp(const char* payload, size_t len) {
   if (!payload || len == 0) return;
-  if (!s_notifyMutex || xSemaphoreTake(s_notifyMutex, pdMS_TO_TICKS(60)) != pdTRUE) {
+  bool locked = false;
+  for (uint8_t attempt = 0; attempt < kNotifyMutexMaxAttempts; attempt++) {
+    if (s_notifyMutex && xSemaphoreTake(s_notifyMutex, kNotifyMutexTryTicks) == pdTRUE) {
+      locked = true;
+      break;
+    }
+    vTaskDelay(1);
+  }
+  if (!locked) {
+    s_bleDiag.notifyMutexBusyDrop++;
     Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=drop reason=notify_mutex_busy len=%u\n", (unsigned)len);
+    bleDiagMaybeSnapshot("notify_mutex_drop", 1500);
     return;
   }
   char evtTag[24];
@@ -665,7 +682,7 @@ class RiftTxCharacteristic : public NimBLECharacteristic {
     BleCmdQueueItem item{};
     item.len = len;
     memcpy(item.data, val, len);
-    if (xQueueSend(s_bleCmdQueue, &item, 0) != pdTRUE) {
+    if (xQueueSend(s_bleCmdQueue, &item, kBleCmdEnqueueTimeoutTicks) != pdTRUE) {
       s_bleDiag.cmdDroppedQueueFull++;
       static uint32_t s_lastCmdDropLogMs = 0;
       uint32_t now = millis();
@@ -684,7 +701,7 @@ class RiftTxCharacteristic : public NimBLECharacteristic {
 
 static void notifyGroupStatusV2(const char* groupUid) {
   if (!groupUid || !groupUid[0]) return;
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
   uint32_t channelId32 = 0;
   char groupTag[groups::GROUP_TAG_MAX_LEN + 1] = {0};
   char canonicalName[groups::GROUP_CANONICAL_NAME_MAX_LEN + 1] = {0};
@@ -714,7 +731,7 @@ static void notifyGroupStatusV2(const char* groupUid) {
 
 static void notifyGroupRekeyProgressV2(const char* groupUid, const char* rekeyOpId, uint16_t keyVersion) {
   if (!groupUid || !groupUid[0]) return;
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
   JsonDocument ev(&s_bleJsonAllocator);
   ev["evt"] = "groupRekeyProgress";
   ev["groupUid"] = groupUid;
@@ -731,7 +748,7 @@ static void notifyGroupRekeyProgressV2(const char* groupUid, const char* rekeyOp
 
 static void notifyGroupMemberKeyStateV2(const char* groupUid, const char* memberId, const char* state, uint32_t ackAt) {
   if (!groupUid || !groupUid[0] || !memberId || !memberId[0] || !state || !state[0]) return;
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
   JsonDocument ev(&s_bleJsonAllocator);
   ev["evt"] = "groupMemberKeyState";
   ev["groupUid"] = groupUid;
@@ -744,7 +761,7 @@ static void notifyGroupMemberKeyStateV2(const char* groupUid, const char* member
 }
 
 static void notifyGroupSecurityErrorV2(const char* groupUid, const char* code, const char* msg) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
   JsonDocument ev(&s_bleJsonAllocator);
   ev["evt"] = "groupSecurityError";
   if (groupUid && groupUid[0]) ev["groupUid"] = groupUid;
@@ -1828,7 +1845,7 @@ bool init() {
   NimBLEDevice::setSecurityPasskey(s_passkey);
   Serial.printf("[BLE] Passkey: %06u\n", (unsigned)s_passkey);
   if (!s_bleCmdQueue) {
-    s_bleCmdQueue = xQueueCreate(6, sizeof(BleCmdQueueItem));
+    s_bleCmdQueue = xQueueCreate(kBleCmdQueueDepth, sizeof(BleCmdQueueItem));
     if (!s_bleCmdQueue) {
       Serial.println("[BLE] cmd queue alloc FAILED");
       NimBLEDevice::deinit(true);
@@ -1970,7 +1987,7 @@ void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId, int
 
 void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes,
     const char* lane, const char* type, uint32_t groupId, const char* groupUid) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "msg";
@@ -1998,7 +2015,7 @@ void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, 
 }
 
 void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
   s_bleDiag.statusDelivered++;
 
   JsonDocument doc(&s_bleJsonAllocator);
@@ -2017,7 +2034,7 @@ void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi) {
 }
 
 void notifyRead(const uint8_t* from, uint32_t msgId, int rssi) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
   s_bleDiag.statusRead++;
 
   JsonDocument doc(&s_bleJsonAllocator);
@@ -2036,7 +2053,7 @@ void notifyRead(const uint8_t* from, uint32_t msgId, int rssi) {
 }
 
 void notifySent(const uint8_t* to, uint32_t msgId) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
   s_bleDiag.statusSent++;
 
   JsonDocument doc(&s_bleJsonAllocator);
@@ -2068,7 +2085,7 @@ void notifyWaitingKey(const uint8_t* to) {
 }
 
 void notifyUndelivered(const uint8_t* to, uint32_t msgId) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
   s_bleDiag.statusUndelivered++;
 
   JsonDocument doc(&s_bleJsonAllocator);
@@ -2086,7 +2103,7 @@ void notifyUndelivered(const uint8_t* to, uint32_t msgId) {
 }
 
 void notifyBroadcastDelivery(uint32_t msgId, int delivered, int total) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
   s_bleDiag.statusBroadcastDelivery++;
 
   JsonDocument doc(&s_bleJsonAllocator);
@@ -2108,7 +2125,7 @@ void notifyBroadcastDelivery(uint32_t msgId, int delivered, int total) {
 }
 
 void notifyLocation(const uint8_t* from, float lat, float lon, int16_t alt, int rssi) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "location";
@@ -2126,7 +2143,7 @@ void notifyLocation(const uint8_t* from, float lat, float lon, int16_t alt, int 
 }
 
 void notifyTelemetry(const uint8_t* from, uint16_t batteryMv, uint16_t heapKb, int rssi) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "telemetry";
   char fromHex[17] = {0};
@@ -2141,7 +2158,7 @@ void notifyTelemetry(const uint8_t* from, uint16_t batteryMv, uint16_t heapKb, i
 }
 
 void notifyRelayProof(const uint8_t* relayedBy, const uint8_t* from, const uint8_t* to, uint16_t pktId, uint8_t opcode) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "relayProof";
   char byHex[17] = {0};
@@ -2163,7 +2180,7 @@ void notifyRelayProof(const uint8_t* relayedBy, const uint8_t* from, const uint8
 }
 
 void notifyTimeCapsuleReleased(const uint8_t* to, uint32_t msgId, uint8_t triggerType) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "timeCapsuleReleased";
   char toHex[17] = {0};
@@ -2322,7 +2339,7 @@ void notifyInfo() {
 void notifyInvite() {
   const uint32_t cmdId = s_emitInviteCmdId;
   s_emitInviteCmdId = 0;
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
 
   uint8_t pubKey[32];
   if (!x25519_keys::getOurPublicKey(pubKey)) return;
@@ -2367,7 +2384,7 @@ void notifyInvite() {
 void notifyRoutes() {
   const uint32_t cmdId = s_emitRoutesCmdId;
   s_emitRoutesCmdId = 0;
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "routes";
@@ -2402,7 +2419,7 @@ void notifyRoutes() {
 void notifyGroups() {
   const uint32_t cmdId = s_emitGroupsCmdId;
   s_emitGroupsCmdId = 0;
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "groups";
@@ -2459,7 +2476,7 @@ void requestNeighborsNotify() {
 void notifyNeighbors() {
   const uint32_t cmdId = s_emitNeighborsCmdId;
   s_emitNeighborsCmdId = 0;
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "neighbors";
@@ -2484,7 +2501,7 @@ void notifyNeighbors() {
 }
 
 void notifyWifi(bool connected, const char* ssid, const char* ip) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "wifi";
@@ -2498,7 +2515,7 @@ void notifyWifi(bool connected, const char* ssid, const char* ip) {
 }
 
 void notifyRegion(const char* code, float freq, int power, int channel) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "region";
@@ -2515,7 +2532,7 @@ void notifyRegion(const char* code, float freq, int power, int channel) {
 void notifyGps(bool present, bool enabled, bool hasFix, int rx, int tx, int en) {
   const uint32_t cmdId = s_emitGpsCmdId;
   s_emitGpsCmdId = 0;
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "gps";
@@ -2533,7 +2550,7 @@ void notifyGps(bool present, bool enabled, bool hasFix, int rx, int tx, int en) 
 }
 
 void notifyError(const char* code, const char* msg) {
-  if (!pRxChar || !s_connected || !code || !msg) return;
+  if (!hasActiveTransport() || !code || !msg) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "error";
@@ -2547,7 +2564,7 @@ void notifyError(const char* code, const char* msg) {
 }
 
 void notifyPong(const uint8_t* from, int rssi) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "pong";
@@ -2564,7 +2581,7 @@ void notifyPong(const uint8_t* from, int rssi) {
 }
 
 void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t heapFree) {
-  if (!pRxChar || !s_connected) return;
+  if (!hasActiveTransport()) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "selftest";
@@ -2583,7 +2600,7 @@ void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t h
 }
 
 void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen) {
-  if (!pRxChar || !s_connected || !data) return;
+  if (!hasActiveTransport() || !data) return;
 
   const size_t CHUNK_RAW = BLE_VOICE_CHUNK_RAW_MAX;
   size_t totalChunks = (dataLen + CHUNK_RAW - 1) / CHUNK_RAW;
@@ -2633,7 +2650,7 @@ void update() {
   if (s_bleCmdQueue) {
     BleCmdQueueItem cmdItem{};
     // Parse commands outside nimble_host context to avoid stack canary under heavy app traffic.
-    for (int i = 0; i < 3; i++) {
+    for (uint8_t i = 0; i < kBleCmdConsumePerTick; i++) {
       if (xQueueReceive(s_bleCmdQueue, &cmdItem, 0) != pdTRUE) break;
       s_bleDiag.cmdConsumed++;
       bleHandleTxJson(cmdItem.data, cmdItem.len);
