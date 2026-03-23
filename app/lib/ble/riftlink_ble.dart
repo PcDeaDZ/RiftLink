@@ -347,9 +347,16 @@ class RiftLinkBle {
     }
     await _startRxDispatcher();
     _lastBleRemoteId = dev.remoteId.toString();
-    getInfo(force: true);
-    getGroups();
-    getRoutes();
+    // Параллельный залп tracked-команд переполняет очередь BLE на узле; серийно снижает cmd_drop / потерю ответов.
+    unawaited(() async {
+      try {
+        await getInfo(force: true);
+        await Future<void>.delayed(const Duration(milliseconds: 60));
+        await getGroups();
+        await Future<void>.delayed(const Duration(milliseconds: 40));
+        await getRoutes();
+      } catch (_) {}
+    }());
     return true;
   }
 
@@ -1072,6 +1079,9 @@ class RiftLinkBle {
   /// Отправить PING на узел (проверка связи)
   Future<bool> sendPing(String to) async => (await sendPingTracked(to)) != null;
 
+  /// Отправка ping с возвратом [cmdId] для сопоставления с [RiftLinkPongEvent.cmdId].
+  /// Ждёт короткое окно, чтобы отловить [request_send_failed] (BLE не принял команду);
+  /// иначе считаем, что TX ушёл и ждём pong по радио (до таймаута роутера).
   Future<int?> sendPingTracked(String to) async {
     if (!isValidFullNodeId(to)) return null;
     final ticket = _responseRouter.sendTrackedRequest(
@@ -1080,7 +1090,17 @@ class RiftLinkBle {
       expectedEvents: const {'pong'},
       timeout: const Duration(seconds: 20),
     );
-    unawaited(ticket.response.catchError((_) => <String, dynamic>{}));
+    try {
+      // Достаточно для ответа «команда не записалась»; при занятой очереди BLE подождём дольше, чем мгновенный fail.
+      await ticket.response.timeout(const Duration(milliseconds: 650));
+    } on TimeoutException {
+      return ticket.cmdId;
+    } catch (e) {
+      final s = e.toString();
+      if (s.contains('request_send_failed')) return null;
+      unawaited(ticket.response.catchError((_) => <String, dynamic>{}));
+      return ticket.cmdId;
+    }
     return ticket.cmdId;
   }
 
@@ -1195,7 +1215,7 @@ class RiftLinkBle {
               cmd: 'traceroute',
               payload: {'to': to},
               expectedEvents: const {'routes'},
-              timeout: const Duration(seconds: 8),
+              timeout: const Duration(seconds: 18),
             );
 
   /// ESP-NOW: канал 1..13 (для WiFi-режима)
@@ -1274,7 +1294,7 @@ class RiftLinkBle {
 
   /// Selftest (evt "selftest")
   Future<bool> selftest() async =>
-      _requestCommand(cmd: 'selftest', expectedEvents: const {'selftest'}, timeout: const Duration(seconds: 8));
+      _requestCommand(cmd: 'selftest', expectedEvents: const {'selftest'}, timeout: const Duration(seconds: 15));
 
   /// Отправка сообщения (broadcast, unicast или в группу).
   Future<bool> send({

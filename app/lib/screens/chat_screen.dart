@@ -414,7 +414,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     _lastAutoPingKey = peerKey;
     _lastAutoPingAt = now;
     _setDirectPeerOnline(false);
-    Future<void>.delayed(const Duration(milliseconds: 180), () async {
+    Future<void>.delayed(const Duration(milliseconds: 520), () async {
       if (!mounted) return;
       final current = _activeDirectPeerId();
       if (current == null || !_pingKeyMatches(_pingKey(current), peerKey)) return;

@@ -81,6 +81,16 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   String _normNodeId(String raw) =>
       raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
 
+  /// Совпадение id в [RiftLinkPongEvent] с ожидаемым (полный 16 hex vs короткий префикс).
+  bool _pongFromMatchesPending(String pendingNorm, String fromNorm) {
+    if (pendingNorm.isEmpty || fromNorm.isEmpty) return false;
+    if (pendingNorm == fromNorm) return true;
+    if (pendingNorm.length >= 8 && fromNorm.length >= 8) {
+      return pendingNorm.startsWith(fromNorm) || fromNorm.startsWith(pendingNorm);
+    }
+    return false;
+  }
+
   void _clearPingTimeout(String id) {
     final norm = _normNodeId(id);
     _pingTimeouts.remove(norm)?.cancel();
@@ -91,7 +101,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     if (norm.length != 16) return;
     _pendingPings.add(norm);
     _clearPingTimeout(norm);
-    _pingTimeouts[norm] = Timer(const Duration(seconds: 6), () {
+    _pingTimeouts[norm] = Timer(const Duration(seconds: 20), () {
       _pendingPings.remove(norm);
       _pingTimeouts.remove(norm);
       if (!mounted) return;
@@ -177,9 +187,17 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         _load();
       } else if (evt is RiftLinkPongEvent) {
         final from = _normNodeId(evt.from);
-        if (_pendingPings.remove(from)) {
-          _clearPingTimeout(from);
-          _showPingOnlineToast(from, evt.rssi);
+        String? matched;
+        for (final p in _pendingPings) {
+          if (_pongFromMatchesPending(p, from)) {
+            matched = p;
+            break;
+          }
+        }
+        if (matched != null) {
+          _pendingPings.remove(matched);
+          _clearPingTimeout(matched);
+          _showPingOnlineToast(matched, evt.rssi);
           if (mounted) setState(() {});
         }
       } else if (evt is RiftLinkSelftestEvent) {
