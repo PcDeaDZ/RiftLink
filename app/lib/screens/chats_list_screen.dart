@@ -180,6 +180,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         if (_pendingPings.remove(from)) {
           _clearPingTimeout(from);
           _showPingOnlineToast(from, evt.rssi);
+          if (mounted) setState(() {});
         }
       } else if (evt is RiftLinkSelftestEvent) {
         _showSelftestDialog(evt);
@@ -1172,25 +1173,18 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     if (!widget.ble.isConnected) return;
     final v2 = _groupV2ById(groupId);
     if (v2 != null && v2.groupUid.trim().isNotEmpty) {
-      final ok = await widget.ble.groupInviteCreate(groupUid: v2.groupUid, role: 'member');
-      if (!ok) {
+      final invite = await widget.ble.groupInviteCreateInvite(
+        groupUid: v2.groupUid,
+        role: 'member',
+      );
+      if (invite == null || invite.isEmpty) {
         _snack(l.tr('error'));
         return;
       }
-      try {
-        final evt = await widget.ble.events
-            .where((e) => e is RiftLinkGroupInviteEvent && (e as RiftLinkGroupInviteEvent).groupUid == v2.groupUid)
-            .cast<RiftLinkGroupInviteEvent>()
-            .first
-            .timeout(const Duration(seconds: 3));
-        await Clipboard.setData(ClipboardData(text: evt.invite));
-        if (!mounted) return;
-        _snack(l.tr('group_invite_copied', {'id': '$groupId'}));
-        return;
-      } catch (_) {
-        _snack(l.tr('error'));
-        return;
-      }
+      await Clipboard.setData(ClipboardData(text: invite));
+      if (!mounted) return;
+      _snack(l.tr('group_invite_copied', {'id': '$groupId'}));
+      return;
     }
     _snack(l.tr('error'));
   }

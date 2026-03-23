@@ -169,6 +169,7 @@ static uint32_t s_pendingNeighborsCmdId = 0;
 static volatile bool s_pendingInvite = false;
 static uint32_t s_pendingInviteCmdId = 0;
 static volatile bool s_pendingSelftest = false;
+static uint32_t s_pendingSelftestCmdId = 0;
 static volatile bool s_pendingGroupSend = false;
 static uint32_t s_pendingGroupId = 0;
 static char s_pendingGroupText[256] = {0};
@@ -724,6 +725,7 @@ static void notifyGroupStatusV2(const char* groupUid) {
   ev["ackApplied"] = ackApplied;
   ev["status"] = "ok";
   ev["rekeyRequired"] = !ackApplied;
+  if (s_activeCmdId != 0) ev["cmdId"] = s_activeCmdId;
   char buf[360];
   size_t n = serializeJson(ev, buf);
   notifyJsonToApp(buf, n);
@@ -741,6 +743,7 @@ static void notifyGroupRekeyProgressV2(const char* groupUid, const char* rekeyOp
   ev["delivered"] = 0;
   ev["applied"] = 1;
   ev["failed"] = 0;
+  if (s_activeCmdId != 0) ev["cmdId"] = s_activeCmdId;
   char buf[220];
   size_t n = serializeJson(ev, buf);
   notifyJsonToApp(buf, n);
@@ -767,7 +770,8 @@ static void notifyGroupSecurityErrorV2(const char* groupUid, const char* code, c
   if (groupUid && groupUid[0]) ev["groupUid"] = groupUid;
   ev["code"] = code ? code : "group_v2_unknown";
   ev["msg"] = msg ? msg : "";
-  char buf[240];
+  if (s_activeCmdId != 0) ev["cmdId"] = s_activeCmdId;
+  char buf[280];
   size_t n = serializeJson(ev, buf);
   notifyJsonToApp(buf, n);
 }
@@ -912,7 +916,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         uint8_t key[32];
         if (mbedtls_base64_decode(key, 32, &decLen, (const unsigned char*)keyB64, strlen(keyB64)) == 0 && decLen == 32) {
           if (crypto::setChannelKey(key)) {
-            scheduleInfoNotify();
+            scheduleInfoNotify(0, cmdId);
           }
         }
       }
@@ -966,7 +970,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
               s_inviteExpiryMs = 0;
             }
           }
-          scheduleInfoNotify();
+          scheduleInfoNotify(0, cmdId);
         }
       }
       return;
@@ -1083,7 +1087,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     if (strcmp(cmd, "region") == 0) {
       const char* r = doc["region"];
       if (r && region::setRegion(r)) {
-        ble::notifyRegion(region::getCode(), region::getFreq(), region::getPower(), region::getChannel());
+        ble::notifyRegion(region::getCode(), region::getFreq(), region::getPower(), region::getChannel(), cmdId);
       }
       return;
     }
@@ -1091,7 +1095,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     if (strcmp(cmd, "channel") == 0) {
       int ch = doc["channel"] | -1;
       if (ch >= 0 && ch <= 2 && region::setChannel(ch)) {
-        ble::notifyRegion(region::getCode(), region::getFreq(), region::getPower(), region::getChannel());
+        ble::notifyRegion(region::getCode(), region::getFreq(), region::getPower(), region::getChannel(), cmdId);
       }
       return;
     }
@@ -1101,7 +1105,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         if (!radio::requestSpreadingFactor((uint8_t)sf)) {
           ble::notifyError("sf", "Queue busy, retry");
         } else {
-          scheduleInfoNotify(450);
+          scheduleInfoNotify(450, cmdId);
         }
       }
       return;
@@ -1118,8 +1122,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
           ble::notifyError("modemPreset", "Queue busy, retry");
         } else {
           Serial.printf("[BLE_CHAIN] stage=fw_cmd action=modem_preset_queued preset=%d\n", p);
-          // Даем планировщику применить пресет до отправки info.
-          scheduleInfoNotify(450);
+          scheduleInfoNotify(450, cmdId);
         }
       } else {
         Serial.println("[BLE_CHAIN] stage=fw_cmd action=modem_preset_invalid");
@@ -1135,7 +1138,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         if (!radio::requestCustomModem((uint8_t)sf, bw, (uint8_t)cr)) {
           ble::notifyError("modemCustom", "Queue busy, retry");
         } else {
-          scheduleInfoNotify(450);
+          scheduleInfoNotify(450, cmdId);
         }
       }
       return;
@@ -1148,7 +1151,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       int ch = doc["channel"] | doc["espnowChannel"] | -1;
       if (ch >= 1 && ch <= 13 && esp_now_slots::setChannel((uint8_t)ch)) {
         esp_now_slots::setAdaptive(false);
-        scheduleInfoNotify();
+        scheduleInfoNotify(0, cmdId);
       }
       return;
     }
@@ -1158,7 +1161,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         return;
       }
       bool on = doc["enabled"] | doc["adaptive"] | false;
-      if (esp_now_slots::setAdaptive(on)) scheduleInfoNotify();
+      if (esp_now_slots::setAdaptive(on)) scheduleInfoNotify(0, cmdId);
       return;
     }
 
@@ -1169,7 +1172,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         s_pendingNicknameBuf[32] = '\0';
         __sync_synchronize();
         s_pendingNickname = true;
-        scheduleInfoNotify();
+        scheduleInfoNotify(0, cmdId);
         queueDisplayRequestInfoRedraw();
       }
       return;
@@ -1224,7 +1227,8 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       }
       notifyGroupStatusV2(groupUid);
       s_pendingGroups = true;
-      scheduleInfoNotify();
+      if (cmdId != 0) s_pendingGroupsCmdId = cmdId;
+      scheduleInfoNotify(0, cmdId);
       return;
     }
     if (strcmp(cmd, "groupStatus") == 0) {
@@ -1262,7 +1266,8 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       }
       notifyGroupStatusV2(groupUid);
       s_pendingGroups = true;
-      scheduleInfoNotify();
+      if (cmdId != 0) s_pendingGroupsCmdId = cmdId;
+      scheduleInfoNotify(0, cmdId);
       return;
     }
     if (strcmp(cmd, "groupInviteCreate") == 0) {
@@ -1375,6 +1380,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       ev["expiresAt"] = expiresAt;
       ev["channelId32"] = channelId32;
       ev["canonicalName"] = canonicalName;
+      if (s_activeCmdId != 0) ev["cmdId"] = s_activeCmdId;
       char out[720];
       size_t outLen = serializeJson(ev, out);
       notifyJsonToApp(out, outLen);
@@ -1530,7 +1536,8 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         return;
       }
       s_pendingGroups = true;
-      scheduleInfoNotify();
+      if (cmdId != 0) s_pendingGroupsCmdId = cmdId;
+      scheduleInfoNotify(0, cmdId);
       return;
     }
     if (strcmp(cmd, "groupRekey") == 0) {
@@ -1541,6 +1548,19 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       if (!groupUid || !groupUid[0]) {
         notifyGroupSecurityErrorV2(groupUid, "group_v2_rekey_bad", "Missing groupUid");
         return;
+      }
+      if (keyVersion == 0) {
+        uint16_t curVer = 0;
+        if (groups::getGroupV2(groupUid, nullptr, nullptr, 0, nullptr, 0, &curVer, nullptr, nullptr, nullptr)) {
+          uint32_t next = (uint32_t)curVer + 1u;
+          if (next == 0 || next > 0xFFFFu) {
+            keyVersion = 0xFFFFu;
+          } else {
+            keyVersion = (uint16_t)next;
+          }
+        } else {
+          keyVersion = 1;
+        }
       }
       uint8_t key[32];
       if (keyB64 && keyB64[0]) {
@@ -1617,7 +1637,8 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         if (g["ackApplied"] == true) groups::ackKeyAppliedV2(groupUid, keyVersion);
       }
       s_pendingGroups = true;
-      scheduleInfoNotify();
+      if (cmdId != 0) s_pendingGroupsCmdId = cmdId;
+      scheduleInfoNotify(0, cmdId);
       return;
     }
     if (strcmp(cmd, "routes") == 0 || strcmp(cmd, "mesh") == 0) {
@@ -1633,7 +1654,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     }
     if (strcmp(cmd, "regeneratePin") == 0) {
       ble::regeneratePasskey();
-      scheduleInfoNotify();
+      scheduleInfoNotify(0, cmdId);
       return;
     }
     if (strcmp(cmd, "addGroup") == 0 || strcmp(cmd, "removeGroup") == 0 ||
@@ -1673,6 +1694,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
 
     if (strcmp(cmd, "selftest") == 0 || strcmp(cmd, "test") == 0) {
       s_pendingSelftest = true;
+      if (cmdId != 0) s_pendingSelftestCmdId = cmdId;
       return;
     }
 
@@ -1682,7 +1704,6 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     }
 
     if (strcmp(cmd, "signalTest") == 0) {
-      // Ping all neighbors and report RSSI
       int n = neighbors::getCount();
       for (int i = 0; i < n && i < 8; i++) {
         uint8_t peerId[protocol::NODE_ID_LEN];
@@ -1693,6 +1714,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
             node::getId(), peerId, 31, protocol::OP_PING, nullptr, 0,
             false, false, false, protocol::CHANNEL_DEFAULT, pktId);
         if (len > 0) {
+          if (cmdId != 0) rememberPingCmdId(peerId, cmdId);
           uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(peerId));
           uint32_t delayMs = 35u + (uint32_t)(i * 45u) + (uint32_t)(esp_random() % 25u);
           queueDeferredSend(pkt, len, txSf, delayMs, true);
@@ -1713,6 +1735,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         }
         routing::requestRoute(target);
         s_pendingRoutes = true;
+        if (cmdId != 0) s_pendingRoutesCmdId = cmdId;
       }
       return;
     }
@@ -2514,11 +2537,12 @@ void notifyWifi(bool connected, const char* ssid, const char* ip) {
   notifyJsonToApp(buf, len);
 }
 
-void notifyRegion(const char* code, float freq, int power, int channel) {
+void notifyRegion(const char* code, float freq, int power, int channel, uint32_t cmdId) {
   if (!hasActiveTransport()) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "region";
+  if (cmdId != 0) doc["cmdId"] = cmdId;
   doc["region"] = code;
   doc["freq"] = freq;
   doc["power"] = power;
@@ -2580,11 +2604,12 @@ void notifyPong(const uint8_t* from, int rssi) {
   notifyJsonToApp(buf, len);
 }
 
-void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t heapFree) {
+void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t heapFree, uint32_t cmdId) {
   if (!hasActiveTransport()) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "selftest";
+  if (cmdId != 0) doc["cmdId"] = cmdId;
   doc["radioOk"] = radioOk;
   doc["displayOk"] = displayOk;
   doc["antennaOk"] = radioOk;
@@ -2730,9 +2755,11 @@ void update() {
     }
     if (s_pendingSelftest) {
       s_pendingSelftest = false;
+      const uint32_t stCmdId = s_pendingSelftestCmdId;
+      s_pendingSelftestCmdId = 0;
       selftest::Result r;
       selftest::run(&r);
-      notifySelftest(r.radioOk, r.displayOk, r.batteryMv, r.heapFree);
+      notifySelftest(r.radioOk, r.displayOk, r.batteryMv, r.heapFree, stCmdId);
       return;
     }
     if (s_pendingGroupSend) {

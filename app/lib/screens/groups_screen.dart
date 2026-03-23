@@ -188,13 +188,31 @@ class _GroupsScreenState extends State<GroupsScreen> {
               );
             }
           });
+          final verLabel = nextVersion > 0 ? '$nextVersion' : '?';
           _snack(
-            '${context.l10n.tr('group_rotate_key')}: v${evt.keyVersion} (${evt.applied}/${evt.applied + evt.pending + evt.failed})',
+            '${context.l10n.tr('group_rotate_key')}: v$verLabel (${evt.applied}/${evt.applied + evt.pending + evt.failed})',
           );
         }
       } else if (evt is RiftLinkGroupMemberKeyStateEvent) {
         final gid = _channelByUid(evt.groupUid);
         if (gid != null && mounted) {
+          if (evt.status == 'applied') {
+            setState(() {
+              final prev = _groupV2ByChannel[gid];
+              if (prev != null && !prev.ackApplied) {
+                _groupV2ByChannel[gid] = RiftLinkGroupV2Info(
+                  groupUid: prev.groupUid,
+                  groupTag: prev.groupTag,
+                  canonicalName: prev.canonicalName,
+                  channelId32: prev.channelId32,
+                  keyVersion: prev.keyVersion,
+                  myRole: prev.myRole,
+                  revocationEpoch: prev.revocationEpoch,
+                  ackApplied: true,
+                );
+              }
+            });
+          }
           _snack('${context.l10n.tr('group')} $gid: ${evt.memberId} -> ${evt.status}');
         }
       } else if (evt is RiftLinkGroupSecurityErrorEvent) {
@@ -454,27 +472,17 @@ class _GroupsScreenState extends State<GroupsScreen> {
     if (!widget.ble.isConnected) return;
     final v2 = _groupV2ByChannel[gid];
     if (v2 != null && v2.groupUid.trim().isNotEmpty) {
-      final ok = await widget.ble.groupInviteCreate(
+      final invite = await widget.ble.groupInviteCreateInvite(
         groupUid: v2.groupUid,
         role: 'member',
       );
-      if (!ok) {
+      if (invite == null || invite.isEmpty) {
         _snack(l.tr('error'), backgroundColor: context.palette.error);
         return;
       }
-      try {
-        final evt = await widget.ble.events
-            .where((e) => e is RiftLinkGroupInviteEvent && (e as RiftLinkGroupInviteEvent).groupUid == v2.groupUid)
-            .cast<RiftLinkGroupInviteEvent>()
-            .first
-            .timeout(const Duration(seconds: 3));
-        await Clipboard.setData(ClipboardData(text: evt.invite));
-        if (mounted) _snack(l.tr('group_invite_copied', {'id': '$gid'}));
-        return;
-      } catch (_) {
-        _snack(l.tr('error'), backgroundColor: context.palette.error);
-        return;
-      }
+      await Clipboard.setData(ClipboardData(text: invite));
+      if (mounted) _snack(l.tr('group_invite_copied', {'id': '$gid'}));
+      return;
     }
     _snack(l.tr('error'), backgroundColor: context.palette.error);
   }

@@ -171,16 +171,21 @@ class TransportResponseRouter {
     }
   }
 
-  Future<void> dispose() async {
-    await _rxSub.cancel();
+  void cancelAll() {
     for (final req in _pending.values) {
       req.timer?.cancel();
       if (!req.completer.isCompleted) {
-        req.completer.completeError(StateError('router_disposed:${req.cmd}:${req.cmdId}'));
+        _trace?.call('stage=router action=cancel_all cmd=${req.cmd} cmdId=${req.cmdId}');
+        req.completer.completeError(StateError('router_cancelled:${req.cmd}:${req.cmdId}'));
       }
     }
     _pending.clear();
     _recentlyCompleted.clear();
+  }
+
+  Future<void> dispose() async {
+    await _rxSub.cancel();
+    cancelAll();
   }
 }
 

@@ -44,11 +44,11 @@ void requestNeighborsNotify();  // отложить в update() — снизит
 void notifyRoutes();    // evt "routes" — маршруты (dest, nextHop, hops, rssi) для mesh-визуализации
 void notifyGroups();    // evt "groups" — список групп
 void notifyWifi(bool connected, const char* ssid, const char* ip);
-void notifyRegion(const char* code, float freq, int power, int channel = -1);
+void notifyRegion(const char* code, float freq, int power, int channel = -1, uint32_t cmdId = 0);
 void notifyGps(bool present, bool enabled, bool hasFix, int rx, int tx, int en);
 void notifyPong(const uint8_t* from, int rssi = 0);
 /** Результат самотестирования: radioOk, displayOk, batteryMv, heapFree */
-void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t heapFree);
+void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t heapFree, uint32_t cmdId = 0);
 /** Голосовое сообщение: from, data (Opus), dataLen. Отправляется чанками base64 */
 void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen);
 /** evt "error" — уведомить приложение о сбое (code, msg) */

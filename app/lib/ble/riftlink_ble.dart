@@ -118,6 +118,20 @@ class RiftLinkBle {
 
   RiftLinkInfoEvent? get lastInfo => _lastInfo;
 
+  void _replayLastInfo() {
+    final info = _lastInfo;
+    if (info == null) return;
+    if (_eventBus.isClosed) return;
+    if (_eventsStreamListeners > 0) {
+      _trace('stage=app_event_bus action=replay_last_info');
+      scheduleMicrotask(() {
+        if (!_eventBus.isClosed && _eventsStreamListeners > 0) {
+          _eventBus.add(info);
+        }
+      });
+    }
+  }
+
   BluetoothDevice? get device => _device;
   String? get lastBleRemoteId => _lastBleRemoteId;
   bool get isConnected => _device?.isConnected ?? false;
@@ -380,6 +394,7 @@ class RiftLinkBle {
     const freshInfoSkip = Duration(milliseconds: 1800);
     final lastInfoEvt = _lastInfoEventAt;
     if (lastInfoEvt != null && now.difference(lastInfoEvt) < freshInfoSkip) {
+      _replayLastInfo();
       return true;
     }
     final last = _lastInfoRequestAt;
@@ -410,6 +425,7 @@ class RiftLinkBle {
   }
 
   Future<void> disconnect() async {
+    _responseRouter.cancelAll();
     _lastInfo = null;
     _lastInfoEventAt = null;
     _preListenBuffer.clear();
@@ -867,13 +883,43 @@ class RiftLinkBle {
     if (!_isValidGroupUid(groupUid) || displayName.trim().isEmpty || channelId32 <= 1 || groupTag.trim().isEmpty) {
       return false;
     }
-    return _sendCmd({
-      'cmd': 'groupCreate',
-      'groupUid': groupUid.trim(),
-      'displayName': displayName.trim(),
-      'channelId32': channelId32,
-      'groupTag': groupTag.trim(),
-    });
+    return _requestCommand(
+      cmd: 'groupCreate',
+      payload: {
+        'groupUid': groupUid.trim(),
+        'displayName': displayName.trim(),
+        'channelId32': channelId32,
+        'groupTag': groupTag.trim(),
+      },
+      expectedEvents: const {'groupStatus'},
+      timeout: const Duration(seconds: 6),
+    );
+  }
+
+  /// Создать инвайт и вернуть строку для буфера обмена (тело ответа `evt: groupInvite`).
+  Future<String?> groupInviteCreateInvite({
+    required String groupUid,
+    required String role,
+    int ttlSec = 600,
+  }) async {
+    if (!_isValidGroupUid(groupUid) || role.trim().isEmpty || ttlSec <= 0) return null;
+    try {
+      final resp = await _responseRouter.sendRequest(
+        cmd: 'groupInviteCreate',
+        payload: {
+          'groupUid': groupUid.trim(),
+          'role': role.trim(),
+          'ttlSec': ttlSec,
+        },
+        expectedEvents: const {'groupInvite'},
+        timeout: const Duration(seconds: 6),
+      );
+      final s = resp['invite']?.toString() ?? '';
+      return s.isEmpty ? null : s;
+    } catch (e) {
+      _trace('stage=app_rr action=group_invite_payload_fail err=$e');
+      return null;
+    }
   }
 
   Future<bool> groupInviteCreate({
@@ -881,22 +927,18 @@ class RiftLinkBle {
     required String role,
     int ttlSec = 600,
   }) async {
-    if (!_isValidGroupUid(groupUid) || role.trim().isEmpty || ttlSec <= 0) return false;
-    return _requestCommand(
-      cmd: 'groupInviteCreate',
-      payload: {
-        'groupUid': groupUid.trim(),
-        'role': role.trim(),
-        'ttlSec': ttlSec,
-      },
-      expectedEvents: const {'groupInvite'},
-      timeout: const Duration(seconds: 6),
-    );
+    final invite = await groupInviteCreateInvite(groupUid: groupUid, role: role, ttlSec: ttlSec);
+    return invite != null;
   }
 
   Future<bool> groupInviteAccept(String invitePayload) async {
     if (invitePayload.trim().isEmpty) return false;
-    return _sendCmd({'cmd': 'groupInviteAccept', 'invite': invitePayload.trim()});
+    return _requestCommand(
+      cmd: 'groupInviteAccept',
+      payload: {'invite': invitePayload.trim()},
+      expectedEvents: const {'groupStatus'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   Future<bool> groupGrantIssue({
@@ -906,13 +948,17 @@ class RiftLinkBle {
     int? expiresAt,
   }) async {
     if (!_isValidGroupUid(groupUid) || !isValidFullNodeId(subjectId) || role.trim().isEmpty) return false;
-    return _sendCmd({
-      'cmd': 'groupGrantIssue',
-      'groupUid': groupUid.trim(),
-      'subjectId': subjectId.toUpperCase(),
-      'role': role.trim(),
-      if (expiresAt != null && expiresAt > 0) 'expiresAt': expiresAt,
-    });
+    return _requestCommand(
+      cmd: 'groupGrantIssue',
+      payload: {
+        'groupUid': groupUid.trim(),
+        'subjectId': subjectId.toUpperCase(),
+        'role': role.trim(),
+        if (expiresAt != null && expiresAt > 0) 'expiresAt': expiresAt,
+      },
+      expectedEvents: const {'groupStatus'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   Future<bool> groupRevoke({
@@ -921,12 +967,16 @@ class RiftLinkBle {
     String? reason,
   }) async {
     if (!_isValidGroupUid(groupUid) || !isValidFullNodeId(subjectId)) return false;
-    return _sendCmd({
-      'cmd': 'groupRevoke',
-      'groupUid': groupUid.trim(),
-      'subjectId': subjectId.toUpperCase(),
-      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
-    });
+    return _requestCommand(
+      cmd: 'groupRevoke',
+      payload: {
+        'groupUid': groupUid.trim(),
+        'subjectId': subjectId.toUpperCase(),
+        if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+      },
+      expectedEvents: const {'groupStatus'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   Future<bool> groupRekey({
@@ -934,11 +984,15 @@ class RiftLinkBle {
     String? reason,
   }) async {
     if (!_isValidGroupUid(groupUid)) return false;
-    return _sendCmd({
-      'cmd': 'groupRekey',
-      'groupUid': groupUid.trim(),
-      if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
-    });
+    return _requestCommand(
+      cmd: 'groupRekey',
+      payload: {
+        'groupUid': groupUid.trim(),
+        if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+      },
+      expectedEvents: const {'groupRekeyProgress'},
+      timeout: const Duration(seconds: 8),
+    );
   }
 
   Future<bool> groupAckKeyApplied({
@@ -946,11 +1000,15 @@ class RiftLinkBle {
     required int keyVersion,
   }) async {
     if (!_isValidGroupUid(groupUid) || keyVersion <= 0) return false;
-    return _sendCmd({
-      'cmd': 'groupAckKeyApplied',
-      'groupUid': groupUid.trim(),
-      'keyVersion': keyVersion,
-    });
+    return _requestCommand(
+      cmd: 'groupAckKeyApplied',
+      payload: {
+        'groupUid': groupUid.trim(),
+        'keyVersion': keyVersion,
+      },
+      expectedEvents: const {'groupMemberKeyState', 'groupStatus'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   Future<bool> groupStatus(String groupUid) async {
@@ -968,21 +1026,35 @@ class RiftLinkBle {
     required String canonicalName,
   }) async {
     if (!_isValidGroupUid(groupUid) || canonicalName.trim().isEmpty) return false;
-    return _sendCmd({
-      'cmd': 'groupCanonicalRename',
-      'groupUid': groupUid.trim(),
-      'canonicalName': canonicalName.trim(),
-    });
+    return _requestCommand(
+      cmd: 'groupCanonicalRename',
+      payload: {
+        'groupUid': groupUid.trim(),
+        'canonicalName': canonicalName.trim(),
+      },
+      expectedEvents: const {'groupStatus'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   Future<bool> groupSyncSnapshot(List<Map<String, dynamic>> groups) async {
     if (groups.isEmpty) return false;
-    return _sendCmd({'cmd': 'groupSyncSnapshot', 'groups': groups});
+    return _requestCommand(
+      cmd: 'groupSyncSnapshot',
+      payload: {'groups': groups},
+      expectedEvents: const {'groups'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   Future<bool> groupLeave({required String groupUid}) async {
     if (!_isValidGroupUid(groupUid)) return false;
-    return _sendCmd({'cmd': 'groupLeave', 'groupUid': groupUid.trim()});
+    return _requestCommand(
+      cmd: 'groupLeave',
+      payload: {'groupUid': groupUid.trim()},
+      expectedEvents: const {'groups'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   /// Отправить PING на узел (проверка связи)
@@ -1170,14 +1242,23 @@ class RiftLinkBle {
     String? inviteToken,
   }) async {
     if (!isValidFullNodeId(id) || pubKey.trim().isEmpty) return false;
-    final payload = <String, dynamic>{'cmd': 'acceptInvite', 'id': id, 'pubKey': pubKey};
+    final payload = <String, dynamic>{'id': id, 'pubKey': pubKey};
     if (channelKey != null && channelKey.isNotEmpty) payload['channelKey'] = channelKey;
     if (inviteToken != null && inviteToken.isNotEmpty) payload['inviteToken'] = inviteToken;
-    return _sendCmd(payload);
+    return _requestCommand(
+      cmd: 'acceptInvite',
+      payload: payload,
+      expectedEvents: const {'info'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   /// Перегенерировать BLE PIN (passkey) — устройство покажет новый PIN на экране
-  Future<bool> regeneratePin() async => _sendCmd({'cmd': 'regeneratePin'});
+  Future<bool> regeneratePin() async => _requestCommand(
+    cmd: 'regeneratePin',
+    expectedEvents: const {'info'},
+    timeout: const Duration(seconds: 5),
+  );
 
   /// Selftest (evt "selftest")
   Future<bool> selftest() async =>

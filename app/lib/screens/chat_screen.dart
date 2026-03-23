@@ -606,6 +606,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           _neighborsHasKey.length != _neighbors.length ||
           _neighborsHasKey.any((k) => !k);
       if (needRefresh) widget.ble.getInfo();
+      _scheduleDirectPeerAutoPing();
     });
     // GPS sync от телефона: UTC + координаты для beacon-sync (устройство без GPS)
     _gpsSyncTimer = Timer.periodic(const Duration(seconds: 15), (_) => _sendGpsSyncFromPhone());
@@ -1575,16 +1576,19 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           _pendingPingByCmdId.removeWhere((_, v) => _pingKeyMatches(v, resolvedKey));
         }
         final activePeer = _activeDirectPeerId();
-        if (activePeer != null && _pingKeyMatches(_pingKey(activePeer), resolvedKey)) {
-          _setDirectPeerOnline(true);
-          _directOnlineTtlTimer?.cancel();
-          _directOnlineTtlTimer = Timer(const Duration(seconds: 45), () {
-            if (!mounted) return;
-            final current = _activeDirectPeerId();
-            if (current != null && _pingKeyMatches(_pingKey(current), resolvedKey)) {
-              _setDirectPeerOnline(false);
-            }
-          });
+        if (activePeer != null) {
+          final activePeerKey = _pingKey(activePeer);
+          if (_pingKeyMatches(activePeerKey, resolvedKey) || _pingKeyMatches(activePeerKey, fromKey)) {
+            _setDirectPeerOnline(true);
+            _directOnlineTtlTimer?.cancel();
+            _directOnlineTtlTimer = Timer(const Duration(seconds: 45), () {
+              if (!mounted) return;
+              final current = _activeDirectPeerId();
+              if (current != null && (_pingKeyMatches(_pingKey(current), resolvedKey) || _pingKeyMatches(_pingKey(current), fromKey))) {
+                _setDirectPeerOnline(false);
+              }
+            });
+          }
         }
         if (hadPendingPing && !wasSilentPing) {
           _showSnack(
