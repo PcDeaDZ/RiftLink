@@ -136,8 +136,10 @@ class TransportReconnectManager {
         return;
       }
 
-      const idleThreshold = Duration(seconds: 9);
-      const probeTimeout = Duration(seconds: 5);
+      // Долгая тишина на BLE-событиях: LoRa в UART может идти, а в телефон ничего не приходит — не спешим.
+      const idleThreshold = Duration(seconds: 25);
+      // Ждём завершения getInfo дольше, чем timeout запроса (5s): длинный multi-chunk notify блокирует ответ.
+      const probeTimeout = Duration(seconds: 12);
       final idleFor = now.difference(_lastTransportActivityAt);
       if (idleFor < idleThreshold) return;
 
@@ -145,11 +147,18 @@ class TransportReconnectManager {
         _probePending = true;
         _probeAt = now;
         unawaited(_ble.getInfo(force: true).then((ok) {
-          if (!ok) {
-            _probePending = false;
-            _probeAt = null;
-            unawaited(triggerReconnect(reason: 'probe_send_failed'));
+          _probePending = false;
+          _probeAt = null;
+          if (ok) {
+            _lastTransportActivityAt = DateTime.now();
+            return;
           }
+          // Таймаут/ошибка getInfo ≠ разрыв GATT: при занятом notify ответ может не уложиться.
+          if (_ble.isTransportConnected) {
+            _lastTransportActivityAt = DateTime.now();
+            return;
+          }
+          unawaited(triggerReconnect(reason: 'probe_send_failed'));
         }));
         return;
       }
@@ -158,6 +167,10 @@ class TransportReconnectManager {
       if (probeAt != null && now.difference(probeAt) >= probeTimeout) {
         _probePending = false;
         _probeAt = null;
+        if (_ble.isTransportConnected) {
+          _lastTransportActivityAt = DateTime.now();
+          return;
+        }
         unawaited(triggerReconnect(reason: 'probe_timeout'));
       }
     });

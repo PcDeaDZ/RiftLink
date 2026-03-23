@@ -799,8 +799,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       return;
     }
 
-    const idleThreshold = Duration(seconds: 9);
-    const probeTimeout = Duration(seconds: 5);
+    // Если активен TransportReconnectManager — idle/probe/getInfo делает только он,
+    // иначе два таймера (~1.2 с) параллельно дергают getInfo и перегружают BLE.
+    if (transportReconnectManager != null) return;
+
+    const idleThreshold = Duration(seconds: 25);
+    const probeTimeout = Duration(seconds: 12);
     final idleFor = now.difference(_lastTransportActivityAt);
     if (idleFor < idleThreshold) return;
 
@@ -808,12 +812,24 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _transportProbePending = true;
       _transportProbeAt = now;
       unawaited(widget.ble.getInfo(force: true).then((ok) {
-        if (!mounted || _intentionalDisconnect || (transportReconnectManager?.uiState.value.reconnecting ?? false)) return;
-        if (!ok) {
-          _transportProbePending = false;
-          _transportProbeAt = null;
-          unawaited(_onConnectionLost());
+        if (!mounted || _intentionalDisconnect || (transportReconnectManager?.uiState.value.reconnecting ?? false)) {
+          if (mounted) {
+            _transportProbePending = false;
+            _transportProbeAt = null;
+          }
+          return;
         }
+        _transportProbePending = false;
+        _transportProbeAt = null;
+        if (ok) {
+          _markTransportActivity();
+          return;
+        }
+        if (widget.ble.isTransportConnected) {
+          _markTransportActivity();
+          return;
+        }
+        unawaited(_onConnectionLost());
       }));
       return;
     }
@@ -822,6 +838,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     if (probeAt != null && now.difference(probeAt) >= probeTimeout) {
       _transportProbePending = false;
       _transportProbeAt = null;
+      if (widget.ble.isTransportConnected) {
+        _markTransportActivity();
+        return;
+      }
       unawaited(_onConnectionLost());
     }
   }
