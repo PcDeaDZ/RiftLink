@@ -920,7 +920,7 @@ class RiftTxCharacteristic : public NimBLECharacteristic {
   }
 };
 
-static void notifyGroupStatusV2(const char* groupUid) {
+static void notifyGroupStatusV2(const char* groupUid, bool inviteAcceptNoop = false) {
   if (!groupUid || !groupUid[0]) return;
   if (!hasActiveTransport()) return;
   uint32_t channelId32 = 0;
@@ -945,9 +945,10 @@ static void notifyGroupStatusV2(const char* groupUid) {
   ev["ackApplied"] = ackApplied;
   ev["status"] = "ok";
   ev["rekeyRequired"] = !ackApplied;
+  if (inviteAcceptNoop) ev["inviteNoop"] = true;
   if (s_activeCmdId != 0) ev["cmdId"] = s_activeCmdId;
-  char buf[360];
-  size_t n = serializeJson(ev, buf);
+  char buf[380];
+  size_t n = serializeJson(ev, buf, sizeof(buf));
   notifyJsonToApp(buf, n);
 }
 
@@ -1463,6 +1464,11 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
           return;
         }
       }
+      // Ключ сгенерирован/задан на этом узле — отдельный шаг «применить» не нужен; без ACK UI показывает rekeyRequired.
+      {
+        const uint16_t appliedKv = keyVersion > 0 ? keyVersion : 1;
+        (void)groups::ackKeyAppliedV2(groupUid, appliedKv);
+      }
       notifyGroupStatusV2(groupUid);
       pendSet(PEND_GROUPS);
       if (cmdId != 0) s_pendingGroupsCmdId = cmdId;
@@ -1716,6 +1722,13 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       if (groups::getOwnerSignPubKeyV2(groupUid, pinnedOwnerSignPubKey) &&
           memcmp(pinnedOwnerSignPubKey, ownerSignPubKey, sizeof(ownerSignPubKey)) != 0) {
         notifyGroupSecurityErrorV2(groupUid, "group_v31_invite_bad", "Owner signing key mismatch");
+        return;
+      }
+      // Группа уже есть на этом узле (например тест: свой инвайт «сам себе») — не перезаписывать роль/ключ из payload инвайта.
+      if (groups::getGroupV2(groupUid, nullptr, nullptr, 0, nullptr, 0, nullptr, nullptr, nullptr, nullptr)) {
+        pendSet(PEND_GROUPS);
+        scheduleInfoNotify();
+        notifyGroupStatusV2(groupUid, true);
         return;
       }
       if (!groups::upsertGroupV2(groupUid, channelId32, groupTag, canonicalName, key, keyVersion > 0 ? keyVersion : 1, role, 0)) {

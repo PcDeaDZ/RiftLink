@@ -56,6 +56,7 @@ const I18N = {
     footerIssues: "Сообщить о проблеме",
     footerReleases: "Все релизы",
     footerRepo: "Главная страница проекта",
+    footerTelegram: "RiftLink в Telegram — присоединиться",
     tipsTitle: "Перед прошивкой",
     tip1: "Используйте Chrome/Edge/Opera (нужен Web Serial).",
     tip2: "Подключайте USB-кабель с поддержкой передачи данных.",
@@ -118,6 +119,7 @@ const I18N = {
     footerIssues: "Report an issue",
     footerReleases: "All releases",
     footerRepo: "Project homepage",
+    footerTelegram: "RiftLink on Telegram — join",
     tipsTitle: "Before flashing",
     tip1: "Use Chrome/Edge/Opera (Web Serial is required).",
     tip2: "Use a USB cable with data support.",
@@ -179,6 +181,7 @@ const footerTitleEl = document.getElementById("footerTitle");
 const footerLinkIssuesEl = document.getElementById("footerLinkIssues");
 const footerLinkReleasesEl = document.getElementById("footerLinkReleases");
 const footerLinkRepoEl = document.getElementById("footerLinkRepo");
+const footerLinkTelegramEl = document.getElementById("footerLinkTelegram");
 const releaseTagEl = document.getElementById("releaseTag");
 const firmwareVersionEl = document.getElementById("firmwareVersion");
 const appVersionEl = document.getElementById("appVersion");
@@ -367,6 +370,7 @@ function renderLanguage() {
   if (footerLinkIssuesEl) footerLinkIssuesEl.textContent = t("footerIssues");
   if (footerLinkReleasesEl) footerLinkReleasesEl.textContent = t("footerReleases");
   if (footerLinkRepoEl) footerLinkRepoEl.textContent = t("footerRepo");
+  if (footerLinkTelegramEl) footerLinkTelegramEl.textContent = t("footerTelegram");
   if (langRuBtn) langRuBtn.classList.toggle("active", currentLang === "ru");
   if (langEnBtn) langEnBtn.classList.toggle("active", currentLang === "en");
   renderDeviceOptions();

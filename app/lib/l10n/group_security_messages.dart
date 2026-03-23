@@ -5,6 +5,12 @@ import '../ble/riftlink_ble.dart';
 String localizedGroupSecurityError(AppLocalizations l, RiftLinkGroupSecurityErrorEvent evt) {
   final code = evt.code;
   final msg = evt.msg;
+  if (code == 'group_v3_store_failed' || code == 'group_v2_store_failed') {
+    if (msg.contains('owner signing') || msg.contains('persist')) {
+      return l.tr('group_security_error_store_owner_key');
+    }
+    return l.tr('group_security_error_store_group');
+  }
   if (code == 'group_v3_bad') {
     if (msg.contains('Missing')) {
       return l.tr('group_security_error_missing_fields');

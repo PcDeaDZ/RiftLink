@@ -63,6 +63,14 @@ final Map<String, Map<String, String>> _strings = {
     'en': 'Group security error: {code}',
     'ru': 'Ошибка безопасности группы: {code}',
   },
+  'group_security_error_store_group': {
+    'en': 'Could not save the group on the device (storage full or NVS error). Free flash or reboot the node.',
+    'ru': 'Не удалось сохранить группу на устройстве (память NVS заполнена или ошибка записи). Освободите место или перезагрузите узел.',
+  },
+  'group_security_error_store_owner_key': {
+    'en': 'Could not save the group owner signing key on the device.',
+    'ru': 'Не удалось сохранить ключ подписи владельца группы на устройстве (ошибка NVS).',
+  },
   'group_create_error_timeout': {
     'en': 'No response from device while creating group. Check the link.',
     'ru': 'Нет ответа узла при создании группы. Проверьте связь.',
@@ -294,6 +302,10 @@ final Map<String, Map<String, String>> _strings = {
     'ru': 'Нет ответа узла при приёме инвайта. Проверьте связь.',
   },
   'group_invite_joined_v2': {'en': 'Joined protected group', 'ru': 'Присоединились к защищенной группе'},
+  'group_invite_noop_already_have': {
+    'en': 'Group is already on this device — role and invite were not changed.',
+    'ru': 'Группа уже есть на этом устройстве — роль и инвайт не менялись.',
+  },
   'group_rekey_required': {
     'en': 'Key not acknowledged on this device (menu → ACK), or wait for owner rekey if rotation is in progress.',
     'ru': 'Ключ ещё не подтверждён на этом устройстве (меню группы → ACK). Если владелец менял ключ — дождитесь доставки новой версии.',

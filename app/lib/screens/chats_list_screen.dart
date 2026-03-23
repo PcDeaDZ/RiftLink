@@ -1337,7 +1337,11 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     final acceptedV2 = await widget.ble.groupInviteAccept(trimmed);
     if (acceptedV2) {
       await _load();
-      _snack(l.tr('group_invite_joined_v2'));
+      if (widget.ble.takeGroupInviteAcceptWasNoop()) {
+        _snack(l.tr('group_invite_noop_already_have'));
+      } else {
+        _snack(l.tr('group_invite_joined_v2'));
+      }
       return;
     }
     if (widget.ble.takeLastGroupSecurityRouterError() == null) {

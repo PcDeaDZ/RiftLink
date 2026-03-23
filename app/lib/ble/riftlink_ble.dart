@@ -120,6 +120,8 @@ class RiftLinkBle {
   );
   /// Последняя ошибка `evt: groupSecurityError`, сопоставленная роутером с tracked-командой ([GroupSecurityResponseError]).
   GroupSecurityResponseError? _lastGroupSecurityError;
+  /// Последний `evt: groupStatus` с `inviteNoop` после `groupInviteAccept` (группа уже была — не перезаписывали роль).
+  bool _groupInviteAcceptNoop = false;
   Timer? _queuedInfoTimer;
   bool _hasQueuedInfoRequest = false;
 
@@ -339,6 +341,13 @@ class RiftLinkBle {
   /// Сбрасывает сохранённую ошибку.
   bool consumePendingGroupSecurityRouterError() => takeLastGroupSecurityRouterError() != null;
 
+  /// После успешного [groupInviteAccept]: `true`, если узел ответил `groupStatus` с `inviteNoop` (группа уже была на устройстве).
+  bool takeGroupInviteAcceptWasNoop() {
+    final v = _groupInviteAcceptNoop;
+    _groupInviteAcceptNoop = false;
+    return v;
+  }
+
   /// Подключение к устройству.
   ///
   /// При смене узла вызывается [disconnect] — без подавления это даёт ложный
@@ -501,6 +510,7 @@ class RiftLinkBle {
     _responseRouter.cancelAll();
     _lastInfo = null;
     _compositeInfo = null;
+    _groupInviteAcceptNoop = false;
     _lastInfoEventAt = null;
     _preListenBuffer.clear();
     _queuedInfoTimer?.cancel();
@@ -753,8 +763,41 @@ class RiftLinkBle {
     );
   }
 
-  RiftLinkInfoEvent _mergeFromGroups(RiftLinkGroupsEvent g) {
+  /// Склеивает `evt:groupStatus` в [composite] (и [lastInfo]), пока не пришёл полный `evt:groups`.
+  /// Иначе после `groupCreate` сначала приходит `groupStatus` (группа есть в UI), затем
+  /// волна `evt:node` с пустым `groups:` — без этого слёта в [lastInfo] список остаётся пустым
+  /// и [RiftLinkInfoEvent] затирает экран групп.
+  RiftLinkInfoEvent _mergeFromGroupStatus(RiftLinkGroupStatusEvent s) {
     final p = _compositeInfo ?? RiftLinkInfoEvent(id: '');
+    final gid = s.channelId32;
+    if (gid == null || gid <= 1 || s.groupUid.trim().isEmpty) return p;
+
+    final idx = p.groups.indexWhere(
+      (g) => g.groupUid == s.groupUid || g.channelId32 == gid,
+    );
+    final prev = idx >= 0 ? p.groups[idx] : null;
+    final keyVer =
+        s.keyVersion > 0 ? s.keyVersion : (prev?.keyVersion ?? 0);
+    final merged = RiftLinkGroupInfo(
+      groupUid: s.groupUid,
+      groupTag: (s.groupTag != null && s.groupTag!.isNotEmpty)
+          ? s.groupTag!
+          : (prev?.groupTag ?? ''),
+      canonicalName: s.canonicalName.trim().isNotEmpty
+          ? s.canonicalName
+          : (prev?.canonicalName ?? ''),
+      channelId32: gid,
+      keyVersion: keyVer,
+      myRole: s.myRole,
+      revocationEpoch: prev?.revocationEpoch ?? 0,
+      ackApplied: !s.rekeyRequired,
+    );
+    final nextGroups = List<RiftLinkGroupInfo>.from(p.groups);
+    if (idx >= 0) {
+      nextGroups[idx] = merged;
+    } else {
+      nextGroups.add(merged);
+    }
     return RiftLinkInfoEvent(
       cmdId: p.cmdId,
       id: p.id,
@@ -777,7 +820,63 @@ class RiftLinkBle {
       neighbors: p.neighbors,
       neighborsRssi: p.neighborsRssi,
       neighborsHasKey: p.neighborsHasKey,
-      groups: g.groups,
+      groups: nextGroups,
+      routes: p.routes,
+      sf: p.sf,
+      bw: p.bw,
+      cr: p.cr,
+      modemPreset: p.modemPreset,
+      offlinePending: p.offlinePending,
+      offlineCourierPending: p.offlineCourierPending,
+      offlineDirectPending: p.offlineDirectPending,
+      batteryMv: p.batteryMv,
+      batteryPercent: p.batteryPercent,
+      charging: p.charging,
+      timeHour: p.timeHour,
+      timeMinute: p.timeMinute,
+      gpsPresent: p.gpsPresent,
+      gpsEnabled: p.gpsEnabled,
+      gpsFix: p.gpsFix,
+      powersave: p.powersave,
+      blePin: p.blePin,
+      espNowChannel: p.espNowChannel,
+      espNowAdaptive: p.espNowAdaptive,
+    );
+  }
+
+  RiftLinkInfoEvent _mergeFromGroups(RiftLinkGroupsEvent g) {
+    final p = _compositeInfo ?? RiftLinkInfoEvent(id: '');
+    // Пустой `groups: []` на узле возможен из‑за гонки (два PEND_INFO/PEND_GROUPS,
+    // порядок getGroups vs волна node/…/groups) или кратковременного снимка до NVS.
+    // Замена непустого склеенного списка на пустой даёт «мигание» и исчезновение всех групп в UI.
+    final mergedGroups =
+        (g.groups.isEmpty && p.groups.isNotEmpty) ? p.groups : g.groups;
+    if (g.groups.isEmpty && p.groups.isNotEmpty) {
+      _trace('stage=app_merge action=groups_keep_nonempty reason=ignore_empty_snapshot');
+    }
+    return RiftLinkInfoEvent(
+      cmdId: p.cmdId,
+      id: p.id,
+      nickname: p.nickname,
+      hasNicknameField: p.hasNicknameField,
+      hasChannelField: p.hasChannelField,
+      hasOfflinePendingField: p.hasOfflinePendingField,
+      hasOfflineCourierPendingField: p.hasOfflineCourierPendingField,
+      hasOfflineDirectPendingField: p.hasOfflineDirectPendingField,
+      region: p.region,
+      freq: p.freq,
+      power: p.power,
+      channel: p.channel,
+      version: p.version,
+      radioMode: p.radioMode,
+      radioVariant: p.radioVariant,
+      wifiConnected: p.wifiConnected,
+      wifiSsid: p.wifiSsid,
+      wifiIp: p.wifiIp,
+      neighbors: p.neighbors,
+      neighborsRssi: p.neighborsRssi,
+      neighborsHasKey: p.neighborsHasKey,
+      groups: mergedGroups,
       routes: p.routes,
       sf: p.sf,
       bw: p.bw,
@@ -854,11 +953,21 @@ class RiftLinkBle {
     } else if (evt is RiftLinkGroupsEvent) {
       _compositeInfo = _mergeFromGroups(evt);
       evt = _compositeInfo!;
+    } else if (evt is RiftLinkGroupStatusEvent) {
+      _compositeInfo = _mergeFromGroupStatus(evt);
     }
 
     if (evt is RiftLinkInfoEvent) {
       _lastInfo = evt;
       _lastInfoEventAt = DateTime.now();
+    } else if (evt is RiftLinkGroupStatusEvent) {
+      if (_compositeInfo != null) {
+        _lastInfo = _compositeInfo;
+        _lastInfoEventAt = DateTime.now();
+      }
+    }
+    if (evt is RiftLinkGroupStatusEvent && evt.inviteNoop) {
+      _groupInviteAcceptNoop = true;
     }
 
     if (!_eventBus.isClosed) {
@@ -1240,6 +1349,7 @@ class RiftLinkBle {
   }
 
   Future<bool> groupInviteAccept(String invitePayload) async {
+    _groupInviteAcceptNoop = false;
     final normalized = normalizeGroupInvitePayload(invitePayload);
     if (normalized.isEmpty) return false;
     return _requestCommand(
@@ -2039,14 +2149,17 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     return RiftLinkGroupsEvent(groups: _parseGroupInfoList(json['groups']));
   }
   if (evt == 'groupStatus') {
+    final tagRaw = json['groupTag']?.toString();
     return RiftLinkGroupStatusEvent(
       groupUid: json['groupUid']?.toString() ?? '',
       channelId32: _jsonIntNullable(json['channelId32']),
       canonicalName: json['canonicalName']?.toString() ?? '',
+      groupTag: tagRaw != null && tagRaw.isNotEmpty ? tagRaw : null,
       myRole: json['myRole']?.toString() ?? 'none',
       keyVersion: _jsonIntDefault(json['keyVersion'], 0),
       status: json['status']?.toString() ?? 'unknown',
       rekeyRequired: json['rekeyRequired'] == true,
+      inviteNoop: json['inviteNoop'] == true || json['inviteNoop'] == 1,
     );
   }
   if (evt == 'groupRekeyProgress') {
@@ -2511,18 +2624,24 @@ class RiftLinkGroupStatusEvent extends RiftLinkEvent {
   final String groupUid;
   final int? channelId32;
   final String canonicalName;
+  /// Опционально: приходит с прошивки вместе с группой.
+  final String? groupTag;
   final String myRole;
   final int keyVersion;
   final String status;
   final bool rekeyRequired;
+  /// Прошивка: приём инвайта не менял запись — группа уже была (свой инвайт и т.п.).
+  final bool inviteNoop;
   RiftLinkGroupStatusEvent({
     required this.groupUid,
     this.channelId32,
     this.canonicalName = '',
+    this.groupTag,
     required this.myRole,
     required this.keyVersion,
     required this.status,
     this.rekeyRequired = false,
+    this.inviteNoop = false,
   });
 }
 

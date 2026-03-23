@@ -503,7 +503,13 @@ class _GroupsScreenState extends State<GroupsScreen> {
     final acceptedV2 = await widget.ble.groupInviteAccept(inviteCode);
     if (acceptedV2) {
       await _refresh();
-      if (mounted) _snack(l.tr('group_invite_joined_v2'));
+      if (mounted) {
+        if (widget.ble.takeGroupInviteAcceptWasNoop()) {
+          _snack(l.tr('group_invite_noop_already_have'));
+        } else {
+          _snack(l.tr('group_invite_joined_v2'));
+        }
+      }
       return;
     }
     if (mounted) {
