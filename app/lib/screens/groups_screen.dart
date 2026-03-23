@@ -145,7 +145,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
           myRole: evt.myRole,
           revocationEpoch: prev?.revocationEpoch ?? 0,
           ackApplied: !evt.rekeyRequired,
-        );
+        ).mergedWithPrevious(prev);
         setState(() {
           _groupInfoByChannel[gid] = next;
           if (nextVersion > 0) {

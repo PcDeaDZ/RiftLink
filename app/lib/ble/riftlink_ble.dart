@@ -848,14 +848,21 @@ class RiftLinkBle {
 
   RiftLinkInfoEvent _mergeFromGroups(RiftLinkGroupsEvent g) {
     final p = _compositeInfo ?? RiftLinkInfoEvent(id: '');
-    // Пустой `groups: []` на узле возможен из‑за гонки (два PEND_INFO/PEND_GROUPS,
-    // порядок getGroups vs волна node/…/groups) или кратковременного снимка до NVS.
-    // Замена непустого склеенного списка на пустой даёт «мигание» и исчезновение всех групп в UI.
+    // Узел: notifyInfo() шлёт подряд evt:node → neighbors → routes → groups; у первого
+    // evt:groups поле cmdId часто отсутствует (ответ на волну info, не на cmd: groups).
+    // Пустой массив без cmdId — подозрительный снимок (гонка/NVS) → не затираем кэш.
+    // Пустой массив с cmdId > 0 — ответ на явный cmd: groups → принимаем «0 групп».
     // Неполный `myRole`/имена в очередном `evt:groups` не должны затирать кэш.
     final List<RiftLinkGroupInfo> mergedGroups;
     if (g.groups.isEmpty && p.groups.isNotEmpty) {
-      mergedGroups = p.groups;
-      _trace('stage=app_merge action=groups_keep_nonempty reason=ignore_empty_snapshot');
+      final authoritativeEmpty = g.cmdId != null && g.cmdId! > 0;
+      if (authoritativeEmpty) {
+        mergedGroups = const [];
+        _trace('stage=app_merge action=groups_accept_empty reason=cmd_id');
+      } else {
+        mergedGroups = p.groups;
+        _trace('stage=app_merge action=groups_keep_nonempty reason=ignore_empty_snapshot');
+      }
     } else if (g.groups.isNotEmpty && p.groups.isNotEmpty) {
       mergedGroups = _mergeGroupListWithPrevious(g.groups, p.groups);
     } else {
@@ -948,10 +955,12 @@ class RiftLinkBle {
       if (evtName == 'info' && hasTopology) {
         final p = _compositeInfo;
         if (p != null && p.groups.isNotEmpty) {
-          if (evt.groups.isEmpty) {
+          final infoAuthoritativeEmpty =
+              evt.groups.isEmpty && evt.cmdId != null && evt.cmdId! > 0;
+          if (evt.groups.isEmpty && !infoAuthoritativeEmpty) {
             _trace('stage=app_merge action=info_keep_groups reason=ignore_empty_groups_on_info');
             evt = _copyInfoReplacingGroups(evt, p.groups);
-          } else {
+          } else if (evt.groups.isNotEmpty) {
             evt = _copyInfoReplacingGroups(
               evt,
               _mergeGroupListWithPrevious(evt.groups, p.groups),
@@ -2177,7 +2186,10 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     return RiftLinkRoutesEvent(routes: routes);
   }
   if (evt == 'groups') {
-    return RiftLinkGroupsEvent(groups: _parseGroupInfoList(json['groups']));
+    return RiftLinkGroupsEvent(
+      groups: _parseGroupInfoList(json['groups']),
+      cmdId: _jsonIntNullable(json['cmdId']),
+    );
   }
   if (evt == 'groupStatus') {
     final tagRaw = json['groupTag']?.toString();
@@ -2405,21 +2417,31 @@ class RiftLinkGroupInfo {
     this.ackApplied = false,
   });
 
+  /// Только поле `myRole`: «пусто»/`none` в новом снимке не затирает известную роль
+  /// (частичный `groupStatus`, гонки после ребута узла).
+  static String mergeMyRoleWithPrevious(String incoming, String? previous) {
+    final inc = incoming.trim().toLowerCase();
+    final prev = (previous ?? '').trim().toLowerCase();
+    if ((inc.isEmpty || inc == 'none') && prev.isNotEmpty && prev != 'none') {
+      return previous!.trim();
+    }
+    if (incoming.trim().isEmpty) {
+      return (previous != null && previous.trim().isNotEmpty) ? previous.trim() : 'none';
+    }
+    return incoming.trim();
+  }
+
   /// Слияние с прошлым снимком: пустой/`none` [myRole] и пустые строки не затирают
   /// известную роль и метаданные (частичные JSON при `info` / гонки notify).
   RiftLinkGroupInfo mergedWithPrevious(RiftLinkGroupInfo? previous) {
     if (previous == null) return this;
-    final incRole = myRole.trim().toLowerCase();
-    final prevRole = previous.myRole.trim().toLowerCase();
-    final usePrevRole =
-        (incRole.isEmpty || incRole == 'none') && prevRole.isNotEmpty && prevRole != 'none';
     return RiftLinkGroupInfo(
       groupUid: groupUid.trim().isNotEmpty ? groupUid : previous.groupUid,
       groupTag: groupTag.trim().isNotEmpty ? groupTag : previous.groupTag,
       canonicalName: canonicalName.trim().isNotEmpty ? canonicalName : previous.canonicalName,
       channelId32: channelId32,
       keyVersion: keyVersion > 0 ? keyVersion : previous.keyVersion,
-      myRole: usePrevRole ? previous.myRole : myRole,
+      myRole: mergeMyRoleWithPrevious(myRole, previous.myRole),
       revocationEpoch: revocationEpoch != 0 ? revocationEpoch : previous.revocationEpoch,
       ackApplied: ackApplied || previous.ackApplied,
     );
@@ -2668,7 +2690,9 @@ class RiftLinkRoutesEvent extends RiftLinkEvent {
 
 class RiftLinkGroupsEvent extends RiftLinkEvent {
   final List<RiftLinkGroupInfo> groups;
-  RiftLinkGroupsEvent({this.groups = const []});
+  /// Ответ на `cmd: groups` с `cmdId` с узла; в волне notifyInfo() часто отсутствует.
+  final int? cmdId;
+  RiftLinkGroupsEvent({this.groups = const [], this.cmdId});
 }
 
 class RiftLinkGroupStatusEvent extends RiftLinkEvent {

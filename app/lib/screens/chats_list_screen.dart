@@ -170,13 +170,18 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       if (evt is RiftLinkInfoEvent) {
         setState(() {
           _neighborIds = evt.neighbors.map((e) => e.toUpperCase()).toSet();
+          // Полный снимок после склейки в [RiftLinkBle] — источник истины; оверрайды
+          // только для короткого окна до прихода info / частичного groupStatus.
+          _groupRoleOverrides.clear();
+          _groupAckOverrides.clear();
         });
         _load();
       } else if (evt is RiftLinkGroupStatusEvent) {
         final gid = evt.channelId32 ?? _groupIdByUid(evt.groupUid);
         if (gid != null && gid > 1) {
           setState(() {
-            _groupRoleOverrides[gid] = evt.myRole;
+            final prevRole = _groupRoleOverrides[gid] ?? _groupInfoById(gid)?.myRole;
+            _groupRoleOverrides[gid] = RiftLinkGroupInfo.mergeMyRoleWithPrevious(evt.myRole, prevRole);
             _groupAckOverrides[gid] = !evt.rekeyRequired;
           });
         }
