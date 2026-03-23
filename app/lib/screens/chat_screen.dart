@@ -407,11 +407,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       if (!mounted) return;
       var removed = false;
       setState(() {
-        if (_pendingPings.remove(peerKey)) {
-          _silentPendingPings.remove(peerKey);
-          _pendingPingByCmdId.removeWhere((_, v) => _pingKeyMatches(v, peerKey));
-          removed = true;
+        // Как в onPongEvent: снять все ключи, совпадающие по префиксу 8/16 hex (не только точное peerKey).
+        final matched = _pendingPings.where((k) => _pingKeyMatches(k, peerKey)).toList();
+        for (final k in matched) {
+          if (_pendingPings.remove(k)) removed = true;
+          _silentPendingPings.removeWhere((s) => _pingKeyMatches(s, k));
         }
+        _pendingPingByCmdId.removeWhere((_, v) => _pingKeyMatches(v, peerKey));
       });
       if (!removed) return;
       if (_pingKeyMatches(_pingKey(_activeDirectPeerId() ?? ''), peerKey)) {

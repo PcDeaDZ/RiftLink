@@ -1036,6 +1036,7 @@ class ChatScreenController {
     if (idNorm.isEmpty) return;
     // До await: иначе быстрый pong обрабатывается до add в pending (как в списке чатов / direct ping).
     deps.pendingPings.add(idNorm);
+    deps.showSnack(deps.tr('ping_checking'));
     final ok = await deps.ble.sendPing(id);
     if (!deps.isMounted()) {
       deps.pendingPings.remove(idNorm);
@@ -1046,7 +1047,7 @@ class ChatScreenController {
       deps.showSnack(deps.tr('error'));
       return;
     }
-    deps.showSnack(deps.tr('ping_sent', {'id': id}));
+    // Успех BLE TX: итог показывает onPongEvent (ping_online) или таймер ниже (ping_timeout), без дубля «отправлено».
     Future.delayed(const Duration(seconds: 20), () {
       if (!deps.isMounted()) return;
       if (deps.pendingPings.remove(idNorm)) {

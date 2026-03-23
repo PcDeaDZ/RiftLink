@@ -1,5 +1,17 @@
 import 'dart:async';
 
+/// Ошибка групповой безопасности с узла (`evt: groupSecurityError`), с тем же `cmdId`, что и tracked-команда.
+class GroupSecurityResponseError implements Exception {
+  GroupSecurityResponseError(this.cmd, this.cmdId, this.code, this.msg);
+  final String cmd;
+  final int cmdId;
+  final String code;
+  final String msg;
+
+  @override
+  String toString() => 'GroupSecurityResponseError($cmd, cmdId=$cmdId, $code: $msg)';
+}
+
 /// Сопоставление ответов по `cmdId` в JSON. Исключение: `evt:pong` без `cmdId` (прошивка)
 /// сопоставляется с pending `ping` по полю `from` и аргументу `to` команды.
 typedef RouterTrace = void Function(String message);
@@ -210,6 +222,27 @@ class TransportResponseRouter {
   }
 
   void _dispatchMatchedRequest(_PendingRequest req, Map<String, dynamic> json, String evt, int cmdId) {
+    if (evt == 'groupSecurityError') {
+      _pending.remove(cmdId);
+      req.timer?.cancel();
+      _recentlyCompleted[cmdId] = DateTime.now();
+      _pruneCompleted();
+      final elapsed = DateTime.now().difference(req.startedAt).inMilliseconds;
+      _trace?.call(
+        'stage=router action=response_group_security_error cmd=${req.cmd} cmdId=$cmdId elapsed_ms=$elapsed',
+      );
+      if (!req.completer.isCompleted) {
+        req.completer.completeError(
+          GroupSecurityResponseError(
+            req.cmd,
+            cmdId,
+            json['code']?.toString() ?? 'unknown',
+            json['msg']?.toString() ?? '',
+          ),
+        );
+      }
+      return;
+    }
     final isError = evt == 'error';
     final matched = isError || req.expectedEvents.contains(evt);
     if (!matched) return;

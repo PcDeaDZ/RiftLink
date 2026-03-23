@@ -44,7 +44,29 @@ final Map<String, Map<String, String>> _strings = {
   'map': {'en': 'Map', 'ru': 'Карта узлов'},
   'contacts': {'en': 'Contacts', 'ru': 'Контакты'},
   'contacts_groups_title': {'en': 'Contacts & groups', 'ru': 'Контакты и группы'},
-  'groups_add_sheet_hint': {'en': 'Enter a number from 2 to 4294967295. ID 1 is reserved for mesh broadcast.', 'ru': 'Число от 2 до 4294967295. ID 1 зарезервирован под широковещание mesh.'},
+  'groups_add_sheet_hint': {
+    'en': 'Enter a display name. A unique numeric channel ID is picked automatically (collision‑unlikely).',
+    'ru': 'Введите название группы. Уникальный числовой ID канала подбирается автоматически (почти без совпадений с другими).',
+  },
+  'group_display_name_hint': {'en': 'Group name', 'ru': 'Название группы'},
+  'group_name_empty': {'en': 'Enter a group name', 'ru': 'Введите название группы'},
+  'group_created_ok': {'en': 'Group «{name}» created', 'ru': 'Группа «{name}» создана'},
+  'group_security_error_missing_fields': {
+    'en': 'Cannot create group: missing UID, tag, name or channel ID on the device.',
+    'ru': 'Не удалось создать группу: на устройстве не приняты UID, тег, название или ID канала. Обновите прошивку или повторите попытку.',
+  },
+  'group_security_error_bad_name': {
+    'en': 'Invalid character in group name (\"|\" is not allowed).',
+    'ru': 'Недопустимый символ в названии группы (символ «|» запрещён).',
+  },
+  'group_security_error_code': {
+    'en': 'Group security error: {code}',
+    'ru': 'Ошибка безопасности группы: {code}',
+  },
+  'group_create_error_timeout': {
+    'en': 'No response from device while creating group. Check the link.',
+    'ru': 'Нет ответа узла при создании группы. Проверьте связь.',
+  },
   'ping': {'en': 'Check link', 'ru': 'Проверить связь'},
   'menu_tools': {'en': 'Tools', 'ru': 'Инструменты'},
   
@@ -224,8 +246,8 @@ final Map<String, Map<String, String>> _strings = {
   'group_join_by_code': {'en': 'Join by code', 'ru': 'Вступить по коду'},
   'group_join_short': {'en': 'Join', 'ru': 'Вступить'},
   'group_invite_code_hint': {
-    'en': 'Paste pure BASE64 invite code generated in a private group.',
-    'ru': 'Вставьте чистый BASE64 invite-код, созданный в приватной группе.'
+    'en': 'Paste the BASE64 invite from «Copy invite». Line breaks and spaces are removed automatically.',
+    'ru': 'Вставьте BASE64 из «Скопировать инвайт». Переносы строк и лишние пробелы убираются автоматически.',
   },
   'group_id_hint': {'en': 'Group ID (2–4294967295; 1 is reserved)', 'ru': 'ID группы (2–4294967295; 1 зарезервирован)'},
   'group_id_reserved': {'en': 'ID 1 is reserved for mesh broadcast', 'ru': 'ID 1 зарезервирован под широковещание mesh'},
@@ -239,13 +261,43 @@ final Map<String, Map<String, String>> _strings = {
   'group_role_owner': {'en': 'Owner', 'ru': 'Владелец'},
   'group_role_member': {'en': 'Member', 'ru': 'Участник'},
   'group_key_actual': {'en': 'Key is actual', 'ru': 'Ключ актуален'},
-  'group_key_rekey_required_short': {'en': 'Rekey required', 'ru': 'Требуется rekey'},
+  'group_key_rekey_required_short': {
+    'en': 'Confirm key (ACK)',
+    'ru': 'Подтвердите ключ',
+  },
   'group_key_unknown': {'en': 'Key unknown', 'ru': 'Версия ключа неизвестна'},
   'group_copy_invite': {'en': 'Copy invite', 'ru': 'Скопировать инвайт'},
   'group_invite_copied': {'en': 'Group {id} invite copied', 'ru': 'Инвайт группы {id} скопирован'},
   'group_invite_bad': {'en': 'Bad group invite payload', 'ru': 'Некорректный payload инвайта группы'},
+  'group_invite_error_bad_base64': {
+    'en': 'Invalid BASE64 invite. Remove spaces and line breaks; paste one continuous line.',
+    'ru': 'Неверный BASE64 инвайта. Уберите пробелы и переносы строк, вставьте одну непрерывную строку.',
+  },
+  'group_invite_error_malformed': {
+    'en': 'Invite is corrupted or incomplete. Copy the full code from «Copy invite».',
+    'ru': 'Инвайт повреждён или обрезан. Скопируйте полный код через «Скопировать инвайт».',
+  },
+  'group_invite_error_expired': {
+    'en': 'Invite has expired. Ask the owner for a new code.',
+    'ru': 'Срок действия инвайта истёк. Запросите новый код у владельца группы.',
+  },
+  'group_invite_error_invalid_key': {
+    'en': 'Invalid group key or channel ID in invite.',
+    'ru': 'Неверный ключ или ID канала в инвайте.',
+  },
+  'group_invite_error_signature': {
+    'en': 'Invite signature check failed (code was altered?).',
+    'ru': 'Проверка подписи инвайта не прошла (код мог быть изменён).',
+  },
+  'group_invite_error_timeout': {
+    'en': 'No response from device while accepting invite. Check the link.',
+    'ru': 'Нет ответа узла при приёме инвайта. Проверьте связь.',
+  },
   'group_invite_joined_v2': {'en': 'Joined protected group', 'ru': 'Присоединились к защищенной группе'},
-  'group_rekey_required': {'en': 'Key is stale: owner/admin rekey required', 'ru': 'Ключ устарел: нужен rekey от owner/admin'},
+  'group_rekey_required': {
+    'en': 'Key not acknowledged on this device (menu → ACK), or wait for owner rekey if rotation is in progress.',
+    'ru': 'Ключ ещё не подтверждён на этом устройстве (меню группы → ACK). Если владелец менял ключ — дождитесь доставки новой версии.',
+  },
   'group_search_hint': {'en': 'Search groups by name, ID or UID', 'ru': 'Поиск групп по имени, ID или UID'},
   'group_search_empty': {'en': 'No matching groups', 'ru': 'Нет подходящих групп'},
   'group_open_chat': {'en': 'Open chat', 'ru': 'Открыть чат'},
@@ -258,6 +310,10 @@ final Map<String, Map<String, String>> _strings = {
   'group_action_revoke': {'en': 'Revoke member', 'ru': 'Отозвать участника'},
   'group_action_leave': {'en': 'Leave group', 'ru': 'Покинуть группу'},
   'group_leave_title': {'en': 'Leave group?', 'ru': 'Покинуть группу?'},
+  'group_leave_need_uid': {
+    'en': 'Could not resolve group UID. Connect to the node, wait for sync, then try again.',
+    'ru': 'Не удалось определить UID группы. Подключитесь к узлу, дождитесь синхронизации списка групп и повторите.',
+  },
   'group_leave_confirm': {
     'en': 'You will leave group {id} and clear this chat history on this device.',
     'ru': 'Вы покинете группу {id} и очистите историю этого чата на этом устройстве.'

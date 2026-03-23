@@ -10,7 +10,9 @@ import '../ble/riftlink_ble.dart';
 import '../chat/chat_models.dart';
 import '../chat/chat_repository.dart';
 import '../l10n/app_localizations.dart';
+import '../l10n/group_security_messages.dart';
 import '../mesh_constants.dart';
+import '../utils/group_invite_normalize.dart';
 import '../theme/app_theme.dart';
 import '../theme/design_tokens.dart';
 import '../widgets/app_primitives.dart';
@@ -205,7 +207,10 @@ class _GroupsScreenState extends State<GroupsScreen> {
           _snack('${context.l10n.tr('group')} $gid: ${evt.memberId} -> ${evt.status}');
         }
       } else if (evt is RiftLinkGroupSecurityErrorEvent) {
-        _snack('${evt.code}: ${evt.msg}', backgroundColor: context.palette.error);
+        _snack(
+          localizedGroupSecurityError(context.l10n, evt),
+          backgroundColor: context.palette.error,
+        );
       }
     });
     _refresh();
@@ -236,7 +241,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
   }
 
   Future<void> _refresh() async {
-    if (!widget.ble.isConnected) return;
+    if (!widget.ble.isTransportConnected) return;
     setState(() => _loading = true);
     await widget.ble.getGroups();
     if (mounted) setState(() => _loading = false);
@@ -458,7 +463,10 @@ class _GroupsScreenState extends State<GroupsScreen> {
 
   Future<void> _copyInvite(int gid) async {
     final l = context.l10n;
-    if (!widget.ble.isConnected) return;
+    if (!widget.ble.isTransportConnected) {
+      _snack(l.tr('connect_first'), backgroundColor: context.palette.error);
+      return;
+    }
     final v2 = _groupInfoByChannel[gid];
     if (v2 != null && v2.groupUid.trim().isNotEmpty) {
       final invite = await widget.ble.groupInviteCreateInvite(
@@ -469,7 +477,12 @@ class _GroupsScreenState extends State<GroupsScreen> {
         _snack(l.tr('error'), backgroundColor: context.palette.error);
         return;
       }
-      await Clipboard.setData(ClipboardData(text: invite));
+      final clean = normalizeGroupInvitePayload(invite);
+      if (clean.isEmpty) {
+        _snack(l.tr('group_invite_error_malformed'), backgroundColor: context.palette.error);
+        return;
+      }
+      await Clipboard.setData(ClipboardData(text: clean));
       if (mounted) _snack(l.tr('group_invite_copied', {'id': '$gid'}));
       return;
     }
@@ -483,13 +496,21 @@ class _GroupsScreenState extends State<GroupsScreen> {
       _snack(l.tr('group_invite_bad'), backgroundColor: context.palette.error);
       return;
     }
+    if (normalizeGroupInvitePayload(inviteCode).isEmpty) {
+      _snack(l.tr('group_invite_error_bad_base64'), backgroundColor: context.palette.error);
+      return;
+    }
     final acceptedV2 = await widget.ble.groupInviteAccept(inviteCode);
     if (acceptedV2) {
       await _refresh();
       if (mounted) _snack(l.tr('group_invite_joined_v2'));
       return;
     }
-    _snack(l.tr('group_invite_bad'), backgroundColor: context.palette.error);
+    if (mounted) {
+      if (widget.ble.takeLastGroupSecurityRouterError() == null) {
+        _snack(l.tr('group_invite_error_timeout'), backgroundColor: context.palette.error);
+      }
+    }
   }
 
   Future<void> _pasteInviteAndJoin() async {
@@ -499,7 +520,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
   }
 
   void _showJoinByCodeDialog() {
-    if (!widget.ble.isConnected) return;
+    if (!widget.ble.isTransportConnected) return;
     final c = TextEditingController();
     final l = context.l10n;
     final p = context.palette;
@@ -584,9 +605,31 @@ class _GroupsScreenState extends State<GroupsScreen> {
     );
   }
 
+  Set<int> _occupiedGroupChannelIds() {
+    final s = <int>{kMeshBroadcastGroupId};
+    for (final g in _groups) {
+      if (g > 1) s.add(g);
+    }
+    final li = widget.ble.lastInfo;
+    if (li != null) {
+      for (final gi in li.groups) {
+        if (gi.channelId32 > 1) s.add(gi.channelId32);
+      }
+    }
+    return s;
+  }
+
+  String _sanitizeGroupDisplayName(String raw) {
+    var s = raw.trim();
+    if (s.isEmpty) return '';
+    s = s.replaceAll('|', ' ');
+    if (s.length > 64) s = s.substring(0, 64);
+    return s;
+  }
+
   void _showAddSheet() {
-    if (!widget.ble.isConnected) return;
-    final c = TextEditingController();
+    if (!widget.ble.isTransportConnected) return;
+    final nameController = TextEditingController();
     final l = context.l10n;
     FocusScope.of(context).unfocus();
     HapticFeedback.mediumImpact();
@@ -676,13 +719,13 @@ class _GroupsScreenState extends State<GroupsScreen> {
                       ),
                       const SizedBox(height: AppSpacing.md),
                       TextField(
-                        controller: c,
-                        keyboardType: TextInputType.number,
+                        controller: nameController,
+                        keyboardType: TextInputType.text,
+                        textCapitalization: TextCapitalization.sentences,
                         autofocus: true,
                         style: TextStyle(color: p.onSurface, fontSize: 16),
                         decoration: InputDecoration(
-                          labelText: l.tr('group_id_hint'),
-                          hintText: '42',
+                          labelText: l.tr('group_display_name_hint'),
                           filled: true,
                           fillColor: p.surfaceVariant.withOpacity(0.55),
                           border: OutlineInputBorder(
@@ -698,25 +741,29 @@ class _GroupsScreenState extends State<GroupsScreen> {
                       const SizedBox(height: AppSpacing.md + 2),
                       AppPrimaryButton(
                         onPressed: () async {
-                          final val = int.tryParse(c.text.trim());
-                          if (val == null || val <= 0 || val > 0xFFFFFFFF) {
-                            _snack(l.tr('invalid_group_id'), backgroundColor: context.palette.error);
+                          final displayName = _sanitizeGroupDisplayName(nameController.text);
+                          if (displayName.isEmpty) {
+                            _snack(l.tr('group_name_empty'), backgroundColor: context.palette.error);
                             return;
                           }
-                          if (val == kMeshBroadcastGroupId) {
-                            _snack(l.tr('group_id_reserved'), backgroundColor: context.palette.error);
-                            return;
-                          }
+                          final channelId32 = pickRandomGroupChannelId32(_occupiedGroupChannelIds());
                           Navigator.pop(ctx);
                           final ok = await widget.ble.groupCreate(
                             groupUid: _generateBase64Token(16),
-                            displayName: '${l.tr('group')} $val',
-                            channelId32: val,
+                            displayName: displayName,
+                            channelId32: channelId32,
                             groupTag: _generateBase64Token(8),
                           );
                           await _refresh();
                           if (mounted) {
-                            _snack('${l.tr('group')} $val ${l.tr('added')}');
+                            if (ok) {
+                              _snack(l.tr('group_created_ok', {'name': displayName}));
+                            } else if (!widget.ble.consumePendingGroupSecurityRouterError()) {
+                              _snack(
+                                l.tr('group_create_error_timeout'),
+                                backgroundColor: context.palette.error,
+                              );
+                            }
                           }
                         },
                         child: Text(
@@ -761,7 +808,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
             ),
             const SizedBox(height: AppSpacing.xl),
             FilledButton.icon(
-              onPressed: widget.ble.isConnected ? _showAddSheet : null,
+              onPressed: widget.ble.isTransportConnected ? _showAddSheet : null,
               icon: const Icon(Icons.group_add_rounded, size: 18),
               label: Text(
                 l.tr('add_group'),
@@ -1026,7 +1073,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
                 minimumSize: Size.zero,
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
-              onPressed: widget.ble.isConnected && !_loading ? _refresh : null,
+              onPressed: widget.ble.isTransportConnected && !_loading ? _refresh : null,
               icon: _loading
                   ? SizedBox(
                       width: 16,
@@ -1079,7 +1126,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
                   textStyle: buttonLabelStyle,
                   visualDensity: VisualDensity.standard,
                 ),
-                onPressed: widget.ble.isConnected ? _showAddSheet : null,
+                onPressed: widget.ble.isTransportConnected ? _showAddSheet : null,
                 icon: const Icon(Icons.group_add_rounded, size: 18),
                 label: Text(
                   l.tr('group_create'),
@@ -1100,7 +1147,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
                   textStyle: buttonLabelStyle,
                   visualDensity: VisualDensity.standard,
                 ),
-                onPressed: widget.ble.isConnected ? _showJoinByCodeDialog : null,
+                onPressed: widget.ble.isTransportConnected ? _showJoinByCodeDialog : null,
                 icon: const Icon(Icons.vpn_key_outlined, size: 18),
                 label: Text(
                   l.tr('group_join_short'),

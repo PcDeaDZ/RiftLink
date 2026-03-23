@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import '../ble/riftlink_ble.dart';
 import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
+import '../l10n/group_security_messages.dart';
 import '../app_navigator.dart';
 import '../app_lifecycle_bridge.dart';
 import '../theme/app_theme.dart';
@@ -19,6 +20,7 @@ import '../widgets/rift_dialogs.dart';
 import '../chat/chat_models.dart';
 import '../chat/chat_repository.dart';
 import '../mesh_constants.dart';
+import '../utils/group_invite_normalize.dart';
 import '../connection/transport_reconnect_manager.dart';
 import 'contacts_screen.dart';
 import 'chat_screen.dart';
@@ -205,8 +207,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       } else if (evt is RiftLinkSelftestEvent) {
         _showSelftestDialog(evt);
       } else if (evt is RiftLinkGroupSecurityErrorEvent) {
-        final msg = evt.msg.trim().isEmpty ? evt.code : evt.msg;
-        _snack('${context.l10n.tr('error')}: $msg');
+        _snack(localizedGroupSecurityError(context.l10n, evt));
       }
     });
     widget.ble.getInfo();
@@ -467,7 +468,19 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
 
   String? _groupUidFromPeerRef(String peerRef) {
     final uidFromRef = ChatRepository.groupUidFromPeerRef(peerRef);
-    if (uidFromRef != null) return uidFromRef;
+    if (uidFromRef != null) {
+      // Сообщения без groupUid в evt создают peer_ref `uid:UNRESOLVED_<channelId>` — это не настоящий UID группы.
+      final um = RegExp(r'^UNRESOLVED_(\d+)$').firstMatch(uidFromRef);
+      if (um != null) {
+        final g = int.tryParse(um.group(1) ?? '');
+        if (g != null && g > 1) {
+          final resolved = _groupUidById(g);
+          if (resolved != null && resolved.isNotEmpty) return resolved;
+        }
+        return null;
+      }
+      return uidFromRef;
+    }
     final gid = int.tryParse(peerRef);
     if (gid == null) return null;
     return _groupUidById(gid);
@@ -875,17 +888,27 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         ),
       );
       if (confirmed != true) return;
-      if (uid != null && uid.isNotEmpty) {
-        final ok = await widget.ble.groupLeave(groupUid: uid);
+      var leaveUid = uid;
+      if ((leaveUid == null || leaveUid.isEmpty) &&
+          gid != null &&
+          gid > 1 &&
+          widget.ble.isTransportConnected) {
+        await widget.ble.getGroups();
+        if (mounted) leaveUid = _groupUidById(gid);
+      }
+      if (leaveUid != null && leaveUid.isNotEmpty) {
+        final ok = await widget.ble.groupLeave(groupUid: leaveUid);
         if (!ok) {
           _snack(l.tr('error'));
           return;
         }
+      } else if (gid != null && gid > 1) {
+        _snack(l.tr('group_leave_need_uid'));
       }
       if (_activeConversationId == c.id && mounted) {
         setState(() => _activeConversationId = null);
       }
-      await _repo.removeGroupConversation(groupUid: uid, channelId32: gid);
+      await _repo.removeGroupConversation(groupUid: leaveUid ?? uid, channelId32: gid);
       await _load();
       _snack(l.tr('group_left', {'id': gid != null ? '$gid' : title}));
       return;
@@ -1196,7 +1219,10 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
 
   Future<void> _copyGroupInvite(int groupId) async {
     final l = context.l10n;
-    if (!widget.ble.isConnected) return;
+    if (!widget.ble.isTransportConnected) {
+      _snack(l.tr('connect_first'));
+      return;
+    }
     final v2 = _groupInfoById(groupId);
     if (v2 != null && v2.groupUid.trim().isNotEmpty) {
       final invite = await widget.ble.groupInviteCreateInvite(
@@ -1207,7 +1233,12 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         _snack(l.tr('error'));
         return;
       }
-      await Clipboard.setData(ClipboardData(text: invite));
+      final clean = normalizeGroupInvitePayload(invite);
+      if (clean.isEmpty) {
+        _snack(l.tr('group_invite_error_malformed'));
+        return;
+      }
+      await Clipboard.setData(ClipboardData(text: clean));
       if (!mounted) return;
       _snack(l.tr('group_invite_copied', {'id': '$groupId'}));
       return;
@@ -1224,18 +1255,44 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     await _copyGroupInvite(groupId);
   }
 
+  Set<int> _occupiedGroupChannelIdsForCreate() {
+    final s = <int>{kMeshBroadcastGroupId};
+    for (final id in _knownGroupIds()) {
+      if (id > 1) s.add(id);
+    }
+    final li = widget.ble.lastInfo;
+    if (li != null) {
+      for (final g in li.groups) {
+        if (g.channelId32 > 1) s.add(g.channelId32);
+      }
+    }
+    return s;
+  }
+
+  String _sanitizeNewGroupDisplayName(String raw) {
+    var s = raw.trim();
+    if (s.isEmpty) return '';
+    s = s.replaceAll('|', ' ');
+    if (s.length > 64) s = s.substring(0, 64);
+    return s;
+  }
+
   Future<void> _createGroupFromFab() async {
     final l = context.l10n;
-    final c = TextEditingController();
+    final nameController = TextEditingController();
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(l.tr('group_create')),
         content: TextField(
-          controller: c,
+          controller: nameController,
           autofocus: true,
-          keyboardType: TextInputType.number,
-          decoration: InputDecoration(hintText: l.tr('group_id_hint')),
+          keyboardType: TextInputType.text,
+          textCapitalization: TextCapitalization.sentences,
+          decoration: InputDecoration(
+            labelText: l.tr('group_display_name_hint'),
+            hintText: l.tr('group_display_name_hint'),
+          ),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(l.tr('cancel'))),
@@ -1244,38 +1301,48 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       ),
     );
     if (ok != true) return;
-    final groupId = int.tryParse(c.text.trim());
-    if (groupId == null || groupId <= 1 || groupId > 0xFFFFFFFF) {
-      _snack(l.tr('invalid_group_id'));
+    final displayName = _sanitizeNewGroupDisplayName(nameController.text);
+    if (displayName.isEmpty) {
+      _snack(l.tr('group_name_empty'));
       return;
     }
-    if (groupId == kMeshBroadcastGroupId) {
-      _snack(l.tr('group_id_reserved'));
-      return;
-    }
+    final channelId32 = pickRandomGroupChannelId32(_occupiedGroupChannelIdsForCreate());
     final groupUid = _generateBase64Token(16);
     final created = await widget.ble.groupCreate(
       groupUid: groupUid,
-      displayName: '${l.tr('group')} $groupId',
-      channelId32: groupId,
+      displayName: displayName,
+      channelId32: channelId32,
       groupTag: _generateBase64Token(8),
     );
     if (!created) {
-      _snack(l.tr('error'));
+      if (!widget.ble.consumePendingGroupSecurityRouterError()) {
+        _snack(l.tr('group_create_error_timeout'));
+      }
       return;
     }
-    await _openGroup(groupId, groupUid: groupUid);
+    await _openGroup(channelId32, groupUid: groupUid);
   }
 
   Future<void> _joinGroupByInviteCode(String inviteCodeRaw) async {
     final l = context.l10n;
-    final acceptedV2 = await widget.ble.groupInviteAccept(inviteCodeRaw.trim());
+    final trimmed = inviteCodeRaw.trim();
+    if (trimmed.isEmpty) {
+      _snack(l.tr('group_invite_bad'));
+      return;
+    }
+    if (normalizeGroupInvitePayload(trimmed).isEmpty) {
+      _snack(l.tr('group_invite_error_bad_base64'));
+      return;
+    }
+    final acceptedV2 = await widget.ble.groupInviteAccept(trimmed);
     if (acceptedV2) {
       await _load();
       _snack(l.tr('group_invite_joined_v2'));
       return;
     }
-    _snack(l.tr('group_invite_bad'));
+    if (widget.ble.takeLastGroupSecurityRouterError() == null) {
+      _snack(l.tr('group_invite_error_timeout'));
+    }
   }
 
   Future<void> _joinGroupByCodeDialog() async {
@@ -1695,7 +1762,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                     style: FilledButton.styleFrom(
                       minimumSize: const Size(220, 44),
                     ),
-                    onPressed: widget.ble.isConnected ? _createGroupFromFab : null,
+                    onPressed: widget.ble.isTransportConnected ? _createGroupFromFab : null,
                     icon: const Icon(Icons.group_add_rounded, size: 18),
                     label: Text(l.tr('group_create')),
                   ),
@@ -1703,7 +1770,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                     style: OutlinedButton.styleFrom(
                       minimumSize: const Size(220, 44),
                     ),
-                    onPressed: widget.ble.isConnected ? _joinGroupByCodeDialog : null,
+                    onPressed: widget.ble.isTransportConnected ? _joinGroupByCodeDialog : null,
                     icon: const Icon(Icons.vpn_key_outlined, size: 18),
                     label: Text(l.tr('group_join_by_code')),
                   ),

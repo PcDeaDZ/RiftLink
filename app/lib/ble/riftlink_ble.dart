@@ -9,8 +9,10 @@ import 'package:flutter/foundation.dart' show debugPrint, kDebugMode, kIsWeb;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import '../connection/transport_reconnect_manager.dart';
-import '../transport/transport_response_router.dart';
+import '../transport/transport_response_router.dart'
+    show GroupSecurityResponseError, TransportResponseRouter;
 import '../transport/wifi_transport.dart';
+import '../utils/group_invite_normalize.dart';
 
 class RiftLinkBle {
   static const serviceUuid = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
@@ -116,6 +118,8 @@ class RiftLinkBle {
     commandIdFactory: _allocateCmdId,
     trace: (message) => _trace(message),
   );
+  /// Последняя ошибка `evt: groupSecurityError`, сопоставленная роутером с tracked-командой ([GroupSecurityResponseError]).
+  GroupSecurityResponseError? _lastGroupSecurityError;
   Timer? _queuedInfoTimer;
   bool _hasQueuedInfoRequest = false;
 
@@ -305,6 +309,7 @@ class RiftLinkBle {
     Duration timeout = const Duration(seconds: 4),
     int retries = 0,
   }) async {
+    _lastGroupSecurityError = null;
     try {
       await _responseRouter.sendRequest(
         cmd: cmd,
@@ -316,9 +321,23 @@ class RiftLinkBle {
       return true;
     } catch (e) {
       _trace('stage=app_rr action=request_fail cmd=$cmd err=$e');
+      if (e is GroupSecurityResponseError) {
+        _lastGroupSecurityError = e;
+      }
       return false;
     }
   }
+
+  /// Последняя ошибка роутера по `groupSecurityError` (тот же `cmdId`, что у команды). Сбрасывает буфер.
+  GroupSecurityResponseError? takeLastGroupSecurityRouterError() {
+    final e = _lastGroupSecurityError;
+    _lastGroupSecurityError = null;
+    return e;
+  }
+
+  /// После `groupCreate` / другой tracked-команды: `true`, если узел уже ответил `groupSecurityError` (не показывать таймаут).
+  /// Сбрасывает сохранённую ошибку.
+  bool consumePendingGroupSecurityRouterError() => takeLastGroupSecurityRouterError() != null;
 
   /// Подключение к устройству.
   ///
@@ -1168,6 +1187,7 @@ class RiftLinkBle {
     required int channelId32,
     required String groupTag,
   }) async {
+    _lastGroupSecurityError = null;
     if (!_isValidGroupUid(groupUid) || displayName.trim().isEmpty || channelId32 <= 1 || groupTag.trim().isEmpty) {
       return false;
     }
@@ -1220,10 +1240,11 @@ class RiftLinkBle {
   }
 
   Future<bool> groupInviteAccept(String invitePayload) async {
-    if (invitePayload.trim().isEmpty) return false;
+    final normalized = normalizeGroupInvitePayload(invitePayload);
+    if (normalized.isEmpty) return false;
     return _requestCommand(
       cmd: 'groupInviteAccept',
-      payload: {'invite': invitePayload.trim()},
+      payload: {'invite': normalized},
       expectedEvents: const {'groupStatus'},
       timeout: const Duration(seconds: 6),
     );
@@ -1336,10 +1357,13 @@ class RiftLinkBle {
   }
 
   Future<bool> groupLeave({required String groupUid}) async {
-    if (!_isValidGroupUid(groupUid)) return false;
+    final u = groupUid.trim();
+    if (!_isValidGroupUid(u)) return false;
+    // Плейсхолдер из локальной БД (сообщения без groupUid в evt) — не отправлять на узел.
+    if (u.startsWith('UNRESOLVED_')) return false;
     return _requestCommand(
       cmd: 'groupLeave',
-      payload: {'groupUid': groupUid.trim()},
+      payload: {'groupUid': u},
       expectedEvents: const {'groups'},
       timeout: const Duration(seconds: 6),
     );
@@ -1368,6 +1392,9 @@ class RiftLinkBle {
       // Достаточно для ответа «команда не записалась»; при занятой очереди BLE подождём дольше, чем мгновенный fail.
       await ticket.response.timeout(const Duration(milliseconds: 650));
     } on TimeoutException {
+      // Ранний выход: ответ по эфиру может прийти через секунды; роутер всё ещё ждёт до [timeout].
+      // Иначе через ~20 с completer завершится с TimeoutException без слушателя → необработанная ошибка в Zone.
+      unawaited(ticket.response.catchError((_) {}));
       return ticket.cmdId;
     } catch (e) {
       final s = e.toString();
@@ -2046,6 +2073,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       groupUid: json['groupUid']?.toString() ?? '',
       code: json['code']?.toString() ?? 'unknown',
       msg: json['msg']?.toString() ?? '',
+      cmdId: _jsonIntNullable(json['cmdId']),
     );
   }
   if (evt == 'groupInvite') {
@@ -2116,6 +2144,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
         groupUid: json['groupUid']?.toString() ?? '',
         code: code,
         msg: msg,
+        cmdId: _jsonIntNullable(json['cmdId']),
       );
     }
     return RiftLinkErrorEvent(code: code, msg: msg);
@@ -2533,10 +2562,13 @@ class RiftLinkGroupSecurityErrorEvent extends RiftLinkEvent {
   final String groupUid;
   final String code;
   final String msg;
+  /// Совпадает с `cmdId` tracked-команды, если прошивка его вложила.
+  final int? cmdId;
   RiftLinkGroupSecurityErrorEvent({
     required this.groupUid,
     required this.code,
     required this.msg,
+    this.cmdId,
   });
 }
 

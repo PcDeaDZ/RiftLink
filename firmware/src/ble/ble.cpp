@@ -47,6 +47,7 @@
 #include <nvs.h>
 #include <esp_random.h>
 #include <atomic>
+#include <cstdint>
 #include <esp_wifi.h>
 #include <esp_log.h>
 #include <sodium.h>
@@ -982,6 +983,24 @@ static void notifyGroupMemberKeyStateV2(const char* groupUid, const char* member
   notifyJsonToApp(buf, n);
 }
 
+/// Парсинг `channelId32` из JSON: значения 2…4294967295 (Dart выбирает случайный id во всём uint32).
+/// Нельзя использовать `variant | 0`: для больших целых ArduinoJson держит double/int64, битовая маска даёт 0.
+static uint32_t parseJsonChannelId32(JsonVariant v) {
+  if (v.isNull()) return 0;
+  if (v.is<const char*>()) {
+    const char* s = v.as<const char*>();
+    if (!s || !s[0]) return 0;
+    char* end = nullptr;
+    unsigned long ul = strtoul(s, &end, 10);
+    if (end == s) return 0;
+    if (ul > 4294967295UL) return 0;
+    return static_cast<uint32_t>(ul);
+  }
+  const double d = v.as<double>();
+  if (d < 2.0 || d > 4294967295.0) return 0;
+  return static_cast<uint32_t>(static_cast<uint64_t>(d + 0.5));
+}
+
 static void notifyGroupSecurityErrorV2(const char* groupUid, const char* code, const char* msg) {
   if (!hasActiveTransport()) return;
   JsonDocument ev(&s_bleJsonAllocator);
@@ -1406,7 +1425,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       const char* groupUid = doc["groupUid"];
       const char* groupTag = doc["groupTag"];
       const char* canonicalName = doc["displayName"];
-      uint32_t channelId32 = doc["channelId32"] | 0;
+      uint32_t channelId32 = parseJsonChannelId32(doc["channelId32"]);
       const char* keyB64 = doc["groupKey"];
       uint16_t keyVersion = (uint16_t)(doc["keyVersion"] | 1);
       const char* roleStr = doc["myRole"];
@@ -1600,8 +1619,14 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       ev["channelId32"] = channelId32;
       ev["canonicalName"] = canonicalName;
       if (s_activeCmdId != 0) ev["cmdId"] = s_activeCmdId;
-      char out[720];
-      size_t outLen = serializeJson(ev, out);
+      // invite BASE64 до ~640 символов + groupUid/canonicalName/обёртка JSON — 720 байт обрезали JSON,
+      // в приложение и в «копировать инвайт» уходила усечённая строка (невалидный payload).
+      char out[2048];
+      const size_t outLen = serializeJson(ev, out, sizeof(out));
+      if (outLen == 0) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Invite JSON serialize failed");
+        return;
+      }
       notifyJsonToApp(out, outLen);
       return;
     }
@@ -1700,6 +1725,12 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       if (!groups::setOwnerSignPubKeyV2(groupUid, ownerSignPubKey)) {
         notifyGroupSecurityErrorV2(groupUid, "group_v31_invite_bad", "Cannot persist owner signing key");
         return;
+      }
+      // Key was just written from a verified invite on this device — no separate "apply" step needed.
+      // Without this, upsertGroupV2 leaves ackApplied=0 until groupAckKeyApplied (confusing UX after join).
+      {
+        const uint16_t appliedKv = keyVersion > 0 ? keyVersion : 1;
+        (void)groups::ackKeyAppliedV2(groupUid, appliedKv);
       }
       pendSet(PEND_GROUPS);
       scheduleInfoNotify();
@@ -1840,7 +1871,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         const char* canonicalName = g["canonicalName"];
         const char* keyB64 = g["groupKey"];
         const char* roleStr = g["myRole"];
-        uint32_t channelId32 = g["channelId32"] | 0;
+        uint32_t channelId32 = parseJsonChannelId32(g["channelId32"]);
         uint16_t keyVersion = (uint16_t)(g["keyVersion"] | 1);
         uint32_t revEpoch = g["revocationEpoch"] | 0;
         if (!groupUid || !groupUid[0] || !groupTag || !groupTag[0] || !canonicalName || !canonicalName[0] ||
