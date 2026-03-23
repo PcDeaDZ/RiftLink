@@ -22,6 +22,7 @@
 - Обновлены манифесты и образы `*_full.bin` для Heltec V3, V3 Paper и V4.
 - **`docs/flasher/embedded-release.json`** — версия и заметки сразу с деплоя; опционально **`apkDownloadUrl`**.
 - **`docs/flasher/release-github.json`** — при необходимости ссылка на APK и **`releaseBody`** (тот же origin при открытии с GitHub Pages или `raw.githubusercontent.com`), **без** запросов к **`api.github.com`** из браузера (нет CORS preflight и лимитов API).
+- Загрузка **`embedded-release.json`**: если same-origin на GitHub Pages даёт 404, повтор с **`raw.githubusercontent.com/.../docs/flasher/embedded-release.json`** (блок «Последний релиз» не остаётся в «latest недоступен»).
 
 ---
 

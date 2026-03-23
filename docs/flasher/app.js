@@ -2,6 +2,7 @@ const REPO_OWNER = "PcDeaDZ";
 const REPO_NAME = "RiftLink";
 const ROADMAP_RAW_URL = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/master/docs/CUSTOM_PROTOCOL_PLAN.md`;
 const EMBEDDED_RELEASE_URL = "./embedded-release.json";
+const EMBEDDED_RELEASE_RAW = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/master/docs/flasher/embedded-release.json`;
 /** То же содержимое, что в репо: без запроса к api.github.com (CORS / preflight). Сначала same-origin, затем raw. */
 const RELEASE_MIRROR_RELATIVE = "./release-github.json";
 const RELEASE_MIRROR_RAW = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/master/docs/flasher/release-github.json`;
@@ -374,11 +375,21 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = RELEASE_FETCH_TIM
   }
 }
 
+async function fetchEmbeddedReleaseJson() {
+  let res = await fetchWithTimeout(EMBEDDED_RELEASE_URL, { cache: "no-store" });
+  if (res.ok) return res.json();
+  res = await fetchWithTimeout(EMBEDDED_RELEASE_RAW, { cache: "no-store" });
+  if (!res.ok) return null;
+  return res.json();
+}
+
 async function loadEmbeddedRelease() {
   try {
-    const response = await fetchWithTimeout(EMBEDDED_RELEASE_URL, { cache: "no-store" });
-    if (!response.ok) return null;
-    const data = await response.json();
+    const data = await fetchEmbeddedReleaseJson();
+    if (!data || typeof data !== "object") {
+      console.warn("embedded-release.json: same-origin and raw both failed or empty");
+      return null;
+    }
     embeddedReleaseRaw = data;
     applyReleaseStateFromEmbedded(data);
     renderReleaseState();
