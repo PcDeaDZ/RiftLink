@@ -348,17 +348,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       if (showSuccessSnack) _showSnack(context.l10n.tr('connect_first'));
       return;
     }
-    final cmdId = await widget.ble.sendPingTracked(peerId);
-    if (!mounted) return;
-    if (cmdId == null) {
-      if (showSuccessSnack) _showSnack(context.l10n.tr('error'));
-      return;
-    }
     final peerKey = _pingKey(peerId);
     if (peerKey.length < 8) return;
+    // Важно: регистрировать ожидание до await — иначе pong приходит и обрабатывается
+    // в onPongEvent раньше, чем сюда попадёт cmdId, и hadPendingPing остаётся false (нет snack / UX).
     setState(() {
       _pendingPings.add(peerKey);
-      _pendingPingByCmdId[cmdId] = peerKey;
       if (!showSuccessSnack && !showTimeoutSnack) {
         _silentPendingPings.add(peerKey);
       } else {
@@ -371,6 +366,22 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     if (showSuccessSnack) {
       _showSnack(context.l10n.tr('ping_checking'));
     }
+    final cmdId = await widget.ble.sendPingTracked(peerId);
+    if (!mounted) return;
+    if (cmdId == null) {
+      setState(() {
+        _pendingPings.removeWhere((k) => _pingKeyMatches(k, peerKey));
+        _silentPendingPings.removeWhere((k) => _pingKeyMatches(k, peerKey));
+        _pendingPingByCmdId.removeWhere((_, v) => _pingKeyMatches(v, peerKey));
+      });
+      if (showSuccessSnack) _showSnack(context.l10n.tr('error'));
+      return;
+    }
+    setState(() {
+      if (_pendingPings.any((k) => _pingKeyMatches(k, peerKey))) {
+        _pendingPingByCmdId[cmdId] = peerKey;
+      }
+    });
     Future.delayed(const Duration(seconds: 20), () {
       if (!mounted) return;
       var removed = false;

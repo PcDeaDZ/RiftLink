@@ -261,11 +261,9 @@ class _MeshScreenState extends State<MeshScreen> {
 
   Future<void> _runSignalTest() async {
     if (_signalTestRunning) return;
-    final ok = await widget.ble.signalTest();
-    if (!ok || !mounted) {
-      _snack(context.l10n.tr('mesh_signal_test_failed'));
-      return;
-    }
+    // До await: signalTest() только подтверждает TX; ответы — отдельные evt:pong.
+    // Если сначала await, а потом clear(), быстрые pong успевают попасть в [_signalRssiByNode]
+    // и затем затираются — в UI «нет данных».
     setState(() {
       _signalTestRunning = true;
       _signalTestAttempted = true;
@@ -276,6 +274,15 @@ class _MeshScreenState extends State<MeshScreen> {
       if (!mounted) return;
       setState(() => _signalTestRunning = false);
     });
+    final ok = await widget.ble.signalTest();
+    if (!ok || !mounted) {
+      _signalTimer?.cancel();
+      setState(() {
+        _signalTestRunning = false;
+      });
+      _snack(context.l10n.tr('mesh_signal_test_failed'));
+      return;
+    }
   }
 
   Future<void> _runTraceroute() async {

@@ -109,6 +109,12 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     });
   }
 
+  void _cancelPingPending(String id) {
+    final norm = _normNodeId(id);
+    _pendingPings.remove(norm);
+    _clearPingTimeout(norm);
+  }
+
   void _showPingPendingToast(String id) {
     if (!mounted) return;
     final l = context.l10n;
@@ -1166,13 +1172,16 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       _snack(l.tr('ping_invalid'));
       return;
     }
+    // До await: иначе быстрый pong приходит до _markPingPending и toast «онлайн» не сработает.
+    _markPingPending(id);
+    _showPingPendingToast(id);
     final sent = await widget.ble.sendPing(id);
+    if (!mounted) return;
     if (!sent) {
+      _cancelPingPending(id);
       _snack(l.tr('error'));
       return;
     }
-    _markPingPending(id);
-    _showPingPendingToast(id);
   }
 
   void _snack(String text) {

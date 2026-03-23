@@ -1050,15 +1050,20 @@ class ChatScreenController {
   }
 
   Future<void> sendPingAndTrack(ChatPingDeps deps, String id) async {
+    final idNorm = deps.normalizeNodeId(id);
+    if (idNorm.isEmpty) return;
+    // До await: иначе быстрый pong обрабатывается до add в pending (как в списке чатов / direct ping).
+    deps.pendingPings.add(idNorm);
     final ok = await deps.ble.sendPing(id);
-    if (!deps.isMounted()) return;
+    if (!deps.isMounted()) {
+      deps.pendingPings.remove(idNorm);
+      return;
+    }
     if (!ok) {
+      deps.pendingPings.remove(idNorm);
       deps.showSnack(deps.tr('error'));
       return;
     }
-    final idNorm = deps.normalizeNodeId(id);
-    if (idNorm.isEmpty) return;
-    deps.pendingPings.add(idNorm);
     deps.showSnack(deps.tr('ping_sent', {'id': id}));
     Future.delayed(const Duration(seconds: 20), () {
       if (!deps.isMounted()) return;

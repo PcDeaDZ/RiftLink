@@ -555,9 +555,9 @@ class RiftLinkBle {
 
   void _emitParsedJson(Map<String, dynamic> json) {
     _trace('stage=app_parse action=json evt=${json['evt']} keys=${json.keys.length}');
-    if (!_rawEventBus.isClosed) {
-      _rawEventBus.add(Map<String, dynamic>.from(json));
-    }
+    // Сначала UI/prelisten, потом raw → TransportResponseRouter: иначе Completer tracked-команд
+    // завершается до onPongEvent/onInfo и любые «ожидания» в виджетах гоняют с ответом.
+    final copy = Map<String, dynamic>.from(json);
     RiftLinkEvent? evt;
     try {
       evt = _jsonToEvent(json);
@@ -566,13 +566,15 @@ class RiftLinkBle {
       _trace('stage=app_parse action=parse_error evt=${json['evt']} reason=json_to_event err=$e');
       _diagInc('drop_json_to_event');
       _diagMaybeDump('drop_json_to_event');
+      if (!_rawEventBus.isClosed) {
+        _rawEventBus.add(copy);
+      }
       return;
     }
     if (evt is RiftLinkInfoEvent) {
       _lastInfo = evt;
       _lastInfoEventAt = DateTime.now();
     }
-    if (_eventBus.isClosed) return;
     if (evt == null) {
       if (kDebugMode) {
         debugPrint(
@@ -582,21 +584,29 @@ class RiftLinkBle {
       _trace('stage=app_parse action=drop reason=unknown_evt evt=${json['evt']}');
       _diagInc('drop_unknown_evt');
       _diagMaybeDump('drop_unknown_evt');
+      if (!_rawEventBus.isClosed) {
+        _rawEventBus.add(copy);
+      }
       return;
     }
 
-    if (_eventsStreamListeners == 0) {
-      _preListenBuffer.add(evt);
-      _trace('stage=app_event_bus action=prelisten_add evt=${evt.runtimeType} size=${_preListenBuffer.length}');
-      if (_preListenBuffer.length > _maxPreListenBuffer) {
-        _preListenBuffer.removeAt(0);
-        _trace('stage=app_event_bus action=prelisten_drop reason=overflow limit=$_maxPreListenBuffer');
-        _diagInc('prelisten_drop');
-        _diagMaybeDump('prelisten_drop');
+    if (!_eventBus.isClosed) {
+      if (_eventsStreamListeners == 0) {
+        _preListenBuffer.add(evt);
+        _trace('stage=app_event_bus action=prelisten_add evt=${evt.runtimeType} size=${_preListenBuffer.length}');
+        if (_preListenBuffer.length > _maxPreListenBuffer) {
+          _preListenBuffer.removeAt(0);
+          _trace('stage=app_event_bus action=prelisten_drop reason=overflow limit=$_maxPreListenBuffer');
+          _diagInc('prelisten_drop');
+          _diagMaybeDump('prelisten_drop');
+        }
+      } else {
+        _trace('stage=app_event_bus action=emit evt=${evt.runtimeType} listeners=$_eventsStreamListeners');
+        _eventBus.add(evt);
       }
-    } else {
-      _trace('stage=app_event_bus action=emit evt=${evt.runtimeType} listeners=$_eventsStreamListeners');
-      _eventBus.add(evt);
+    }
+    if (!_rawEventBus.isClosed) {
+      _rawEventBus.add(copy);
     }
   }
 
