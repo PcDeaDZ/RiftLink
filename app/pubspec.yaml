@@ -1,7 +1,7 @@
 name: riftlink_app
 description: RiftLink (RL) — приложение для mesh-сети (Heltec LoRa). Android, iOS, Web/PWA.
 publish_to: none
-version: 1.5.19+5
+version: 1.5.20+6
 
 environment:
   sdk: ^3.11.0
