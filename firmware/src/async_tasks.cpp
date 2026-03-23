@@ -656,6 +656,10 @@ TaskHandle_t asyncGetRadioSchedulerTaskHandle(void) {
   return s_radioSchedulerTaskHandle;
 }
 
+bool asyncHasPacketTask(void) {
+  return s_packetTaskHandle != nullptr;
+}
+
 void asyncMemoryDiagLogStacks(void) {
   // uxTaskGetStackHighWaterMark: минимум неиспользованного стека за всё время. На ESP32-Arduino размер в xTaskCreate — байты;
   // возвращаемое значение на практике сопоставимо с байтами неиспользованного хвоста (см. alloc ниже). 0 = нет задачи / overflow.

@@ -22,6 +22,7 @@
 #include "x25519_keys/x25519_keys.h"
 #include "msg_queue/msg_queue.h"
 #include "offline_queue/offline_queue.h"
+#include "frag/frag.h"
 #include "voice_frag/voice_frag.h"
 #include "gps/gps.h"
 #include "telemetry/telemetry.h"
@@ -120,6 +121,7 @@ static constexpr size_t BLE_ATT_MAX_JSON_BYTES = 512;
 static constexpr size_t BLE_VOICE_CHUNK_RAW_MAX = 300;
 static constexpr size_t BLE_VOICE_CHUNK_B64_BUF = 400;  // ceil(300/3)*4
 static constexpr size_t kBleJsonProtocolMaxBytes = BLE_ATT_MAX_JSON_BYTES;
+static constexpr size_t BLE_PENDING_MSG_TEXT_MAX = frag::MAX_MSG_PLAIN;
 static_assert(kBleJsonProtocolMaxBytes == 512, "согласовано с BLE_ATT_ATTR_MAX_LEN");
 
 namespace {
@@ -173,7 +175,7 @@ static char s_pendingGroupText[256] = {0};
 static uint16_t s_diagPktIdCounter = 0;  // pktId for BLE diagnostic traffic (ping/signalTest)
 static volatile bool s_pendingMsg = false;
 static uint8_t s_pendingMsgFrom[8] = {0};
-static char s_pendingMsgText[256] = {0};
+static char s_pendingMsgText[BLE_PENDING_MSG_TEXT_MAX + 1] = {0};
 static uint32_t s_pendingMsgId = 0;
 static int s_pendingMsgRssi = 0;
 static uint8_t s_pendingMsgTtl = 0;
@@ -181,6 +183,8 @@ static char s_pendingMsgLane[10] = "normal";
 static char s_pendingMsgType[10] = "text";
 static uint32_t s_pendingMsgGroupId = 0;
 static char s_pendingMsgGroupUid[groups::GROUP_UID_MAX_LEN + 1] = {0};
+static volatile bool s_pendingOversizeCmdError = false;
+static uint16_t s_pendingOversizeCmdLen = 0;
 static volatile bool s_pendingNickname = false;
 static char s_pendingNicknameBuf[33] = {0};
 static volatile bool s_pendingGps = false;
@@ -651,7 +655,12 @@ class RiftTxCharacteristic : public NimBLECharacteristic {
  protected:
   void writeEvent(const uint8_t* val, uint16_t len, NimBLEConnInfo& connInfo) override {
     (void)connInfo;
-    if (!val || len == 0 || len > BLE_ATT_MAX_JSON_BYTES) return;
+    if (!val || len == 0) return;
+    if (len > BLE_ATT_MAX_JSON_BYTES) {
+      s_pendingOversizeCmdLen = len;
+      s_pendingOversizeCmdError = true;
+      return;
+    }
     if (!s_bleCmdQueue) return;
     BleCmdQueueItem item{};
     item.len = len;
@@ -1910,6 +1919,8 @@ void deinit() {
   }
   s_bleInited = false;
   s_bleDeinitInProgress = false;
+  s_pendingOversizeCmdError = false;
+  s_pendingOversizeCmdLen = 0;
   Serial.printf("[BLE] Deinit done, heap free=%u\n",
       (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
@@ -1930,7 +1941,7 @@ void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId, int
     Serial.printf("[BLE_CHAIN] stage=fw_request_msg action=overwrite prevMsgId=%u prevFrom=%02X%02X\n",
         (unsigned)s_pendingMsgId, s_pendingMsgFrom[0], s_pendingMsgFrom[1]);
   }
-  size_t textLen = strnlen(text, 255);
+  const size_t textLen = strnlen(text, BLE_PENDING_MSG_TEXT_MAX);
   Serial.printf("[BLE_CHAIN] stage=fw_request_msg action=enqueue from=%02X%02X msgId=%u len=%u rssi=%d ttl=%u lane=%s type=%s group=%lu uid=%s mode=%s\n",
       from[0], from[1], (unsigned)msgId, (unsigned)textLen, rssi, (unsigned)ttlMinutes,
       lane ? lane : "normal", type ? type : "text",
@@ -1938,8 +1949,8 @@ void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId, int
       (groupUid && groupUid[0]) ? groupUid : "-",
       transportModeTag());
   memcpy(s_pendingMsgFrom, from, 8);
-  strncpy(s_pendingMsgText, text, 255);
-  s_pendingMsgText[255] = '\0';
+  strncpy(s_pendingMsgText, text, BLE_PENDING_MSG_TEXT_MAX);
+  s_pendingMsgText[BLE_PENDING_MSG_TEXT_MAX] = '\0';
   s_pendingMsgId = msgId;
   s_pendingMsgRssi = rssi;
   s_pendingMsgTtl = ttlMinutes;
@@ -1975,9 +1986,15 @@ void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, 
   if (groupId > 0) doc["group"] = groupId;
   if (groupUid && groupUid[0]) doc["groupUid"] = groupUid;
 
-  char buf[400];
-  size_t len = serializeJson(doc, buf);
+  const size_t jsonLen = measureJson(doc);
+  char* buf = static_cast<char*>(s_bleJsonAllocator.allocate(jsonLen + 1));
+  if (!buf) {
+    ble::notifyError("notify_oom", "Failed to allocate msg notify buffer");
+    return;
+  }
+  size_t len = serializeJson(doc, buf, jsonLen + 1);
   notifyJsonToApp(buf, len);
+  s_bleJsonAllocator.deallocate(buf);
 }
 
 void notifyDelivered(const uint8_t* from, uint32_t msgId, int rssi) {
@@ -2601,6 +2618,18 @@ void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen) {
 
 void update() {
   bleDiagMaybeSnapshot("tick", 15000);
+  if (s_pendingOversizeCmdError && hasActiveTransport()) {
+    const uint16_t droppedLen = s_pendingOversizeCmdLen;
+    s_pendingOversizeCmdError = false;
+    s_pendingOversizeCmdLen = 0;
+    char buf[180];
+    const int n = snprintf(
+        buf, sizeof(buf),
+        "{\"evt\":\"error\",\"code\":\"payload_too_long\",\"msg\":\"JSON exceeds 512 bytes\",\"len\":%u,\"limit\":%u}",
+        (unsigned)droppedLen, (unsigned)BLE_ATT_MAX_JSON_BYTES);
+    if (n > 0) notifyJsonToApp(buf, (size_t)n);
+    return;
+  }
   if (s_bleCmdQueue) {
     BleCmdQueueItem cmdItem{};
     // Parse commands outside nimble_host context to avoid stack canary under heavy app traffic.

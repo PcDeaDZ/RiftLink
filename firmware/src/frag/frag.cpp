@@ -24,8 +24,11 @@ struct ReassembleSlot {
   uint8_t from[protocol::NODE_ID_LEN];
   uint8_t to[protocol::NODE_ID_LEN];
   uint8_t storage[FRAG_SLOT_BUF];
-  uint8_t partsReceived;
+  uint8_t partsReceivedUnique;
   uint8_t partsTotal;
+  uint16_t lastPartLen;
+  bool hasLastPart;
+  uint32_t partsMask;
   uint32_t lastTime;
   bool compressed;
   bool inUse;
@@ -90,8 +93,8 @@ bool send(const uint8_t* to, const uint8_t* plain, size_t plainLen, bool compres
   if (!crypto::encryptFor(to, toEncrypt, toEncryptLen, encBuf, &encLen)) return false;
 
   uint32_t msgId = ++s_msgIdCounter;
-  uint8_t nFrags = (encLen + FRAG_DATA_MAX - 1) / FRAG_DATA_MAX;
-  if (nFrags > 255) return false;
+  uint8_t nFrags = (uint8_t)((encLen + FRAG_DATA_MAX - 1) / FRAG_DATA_MAX);
+  if (nFrags == 0 || nFrags > MAX_FRAGMENTS) return false;
 
   for (uint8_t part = 1; part <= nFrags; part++) {
     size_t offset = (part - 1) * FRAG_DATA_MAX;
@@ -134,7 +137,7 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
   if (msgId == 0) return false;  // strict: MSG_FRAG без msgId не поддерживаем
   uint8_t part = payload[4];
   uint8_t total = payload[5];
-  if (part == 0 || total == 0 || part > total) return false;
+  if (part == 0 || total == 0 || part > total || total > MAX_FRAGMENTS) return false;
 
   ReassembleSlot* slot = findSlot(msgId, from);
   if (!slot) {
@@ -144,24 +147,45 @@ bool onFragment(const uint8_t* from, const uint8_t* to, const uint8_t* payload, 
     memcpy(slot->from, from, protocol::NODE_ID_LEN);
     memcpy(slot->to, to, protocol::NODE_ID_LEN);
     slot->partsTotal = total;
-    slot->partsReceived = 0;
+    slot->partsReceivedUnique = 0;
+    slot->lastPartLen = 0;
+    slot->hasLastPart = false;
+    slot->partsMask = 0;
     slot->compressed = compressed;
     slot->inUse = true;
-    memset(slot->storage, 0, (size_t)total * FRAG_DATA_MAX);
+    const size_t reserve = (size_t)total * FRAG_DATA_MAX;
+    if (reserve > sizeof(slot->storage)) {
+      slot->inUse = false;
+      return false;
+    }
+    memset(slot->storage, 0, reserve);
   }
   if (slot->partsTotal != total) return false;
 
   size_t offset = (part - 1) * FRAG_DATA_MAX;
   size_t chunkLen = payloadLen - FRAG_HEADER_LEN;
   if (offset + chunkLen > sizeof(slot->storage)) return false;
+  if (part < total && chunkLen != FRAG_DATA_MAX) return false;
+  if (part == total && (chunkLen == 0 || chunkLen > FRAG_DATA_MAX)) return false;
+
+  const uint32_t partBit = (uint32_t)1u << (part - 1);
+  if ((slot->partsMask & partBit) != 0) {
+    slot->lastTime = millis();
+    return false;  // duplicate part: ignore without affecting completion counters
+  }
 
   memcpy(slot->storage + offset, payload + FRAG_HEADER_LEN, chunkLen);
-  slot->partsReceived++;
+  slot->partsMask |= partBit;
+  slot->partsReceivedUnique++;
+  if (part == total) {
+    slot->lastPartLen = (uint16_t)chunkLen;
+    slot->hasLastPart = true;
+  }
   slot->lastTime = millis();
 
-  if (slot->partsReceived < slot->partsTotal) return false;
+  if (slot->partsReceivedUnique < slot->partsTotal || !slot->hasLastPart) return false;
 
-  size_t encLen = (slot->partsTotal - 1) * FRAG_DATA_MAX + chunkLen;
+  size_t encLen = (slot->partsTotal - 1) * FRAG_DATA_MAX + slot->lastPartLen;
   static uint8_t decBuf[MAX_MSG_PLAIN + 512];
   size_t decLen = 0;
   if (!crypto::decryptFrom(slot->from, slot->storage, encLen, decBuf, &decLen)) {

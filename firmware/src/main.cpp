@@ -2237,10 +2237,9 @@ void loop() {
 
   pollButtonAndQueue();  // drain в radioSchedulerTask — loop не блокируется
 
-  // Fallback: loop помогает drain packetQueue если packetTask не успевает (V3/V4/Paper).
-  // Раньше: до 8× handlePacket подряд — при burst (HELLO/KEY) итерация loop занимала сотни мс,
-  // кнопки и Serial не опрашивались; RX alive в radioSchedulerTask шёл отдельной задачей → «зависание UI».
-  if (packetQueue && uxQueueMessagesWaiting(packetQueue) > 8) {
+  // Fallback: loop помогает drain packetQueue только если packetTask не создан.
+  // Иначе получаем два параллельных исполнителя handlePacket() и гонки по shared-буферам.
+  if (!asyncHasPacketTask() && packetQueue && uxQueueMessagesWaiting(packetQueue) > 8) {
     PacketQueueItem pitem;
     constexpr int kLoopDrainMax = 2;
     for (int i = 0; i < kLoopDrainMax && xQueueReceive(packetQueue, &pitem, 0) == pdTRUE; i++) {

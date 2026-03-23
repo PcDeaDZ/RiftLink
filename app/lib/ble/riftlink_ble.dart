@@ -16,6 +16,10 @@ class RiftLinkBle {
   static const charTxUuid = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
   static const charRxUuid = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
   static const deviceName = 'RiftLink';
+  static const int bleAttMaxJsonBytes = 512;
+
+  static bool exceedsBleAttLimit(String json) =>
+      utf8.encode(json).length > bleAttMaxJsonBytes;
 
   BluetoothDevice? _device;
   String? _lastBleRemoteId;
@@ -185,6 +189,7 @@ class RiftLinkBle {
     final cmd = payload['cmd']?.toString() ?? 'unknown';
     final cmdId = _extractOrAttachCmdId(payload);
     final json = jsonEncode(payload);
+    final bytes = utf8.encode(json);
     _diagInc('tx_attempt');
     // WiFi mode: route through WebSocket (no MTU limit)
     if (_isWifiMode && _wifiTransport != null && _wifiTransport!.isConnected) {
@@ -201,13 +206,28 @@ class RiftLinkBle {
       _diagMaybeDump('tx_fail_no_transport');
       return false;
     }
+    if (exceedsBleAttLimit(json)) {
+      _diagInc('tx_fail');
+      _trace(
+        'stage=app_tx action=drop reason=payload_too_long mode=ble cmd=$cmd cmdId=$cmdId len=${bytes.length} limit=$bleAttMaxJsonBytes',
+      );
+      _diagMaybeDump('tx_fail_payload_too_long');
+      _emitParsedJson({
+        'evt': 'error',
+        'code': 'payload_too_long',
+        'msg': 'JSON exceeds $bleAttMaxJsonBytes bytes',
+        'cmdId': cmdId,
+        'len': bytes.length,
+      });
+      return false;
+    }
 
     while (_txLock != null) {
       await _txLock!.future;
     }
     _txLock = Completer<void>();
     try {
-      await _txChar!.write(utf8.encode(json), withoutResponse: true);
+      await _txChar!.write(bytes, withoutResponse: true);
       _diagInc('tx_ok');
       _trace('stage=app_tx action=send mode=ble cmd=$cmd cmdId=$cmdId len=${json.length} ok=true');
       _diagMaybeDump('tx_ok');

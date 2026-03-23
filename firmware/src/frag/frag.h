@@ -15,7 +15,8 @@ namespace frag {
 constexpr size_t FRAG_HEADER_LEN = 6;  // MsgID 4 + Part 1 + Total 1
 constexpr size_t FRAG_DATA_MAX = protocol::MAX_PAYLOAD - FRAG_HEADER_LEN;  // ~194
 constexpr size_t MAX_MSG_PLAIN = 2048;   // макс. plaintext до сжатия
-constexpr size_t MAX_FRAGMENTS = 32;     // макс. фрагментов на сообщение
+// Must fit into FRAG_SLOT_BUF (see frag.cpp), otherwise hostile payload can overflow bookkeeping.
+constexpr size_t MAX_FRAGMENTS = 21;
 
 // Отправка длинного сообщения (фрагментация)
 bool send(const uint8_t* to, const uint8_t* plain, size_t plainLen, bool compressed);

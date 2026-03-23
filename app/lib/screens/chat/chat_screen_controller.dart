@@ -150,7 +150,7 @@ class ChatScreenController {
   }
 
   void sendReadForUnread(ChatReadDeps deps) {
-    if (!deps.ble.isConnected) return;
+    if (!deps.ble.isTransportConnected) return;
     for (final m in deps.messages) {
       if (m.isIncoming && m.msgId != null) {
         final key = '${m.from}_${m.msgId}';
@@ -229,7 +229,14 @@ class ChatScreenController {
                   ? ChatRepository.groupConversationIdByUid('UNRESOLVED_$groupId')
                   : ChatRepository.directConversationId(fromNorm)));
       final active = deps.conversationId;
-      if (active != null && active != incomingConv) {
+      if (active == null || active.isEmpty) {
+        // Guard early init window: do not paint events into an unbound chat UI.
+        if (deps.appLifecycle != AppLifecycleState.resumed) {
+          deps.showIncomingNotification(evt.from, evt.text);
+        }
+        return;
+      }
+      if (active != incomingConv) {
         if (deps.appLifecycle != AppLifecycleState.resumed) {
           deps.showIncomingNotification(evt.from, evt.text);
         }
@@ -248,15 +255,11 @@ class ChatScreenController {
           deleteAt: ttl > 0 ? DateTime.now().add(Duration(minutes: ttl)) : null,
         ));
       });
-      if (active != null) {
-        if (active == incomingConv) {
-          deps.markConversationRead(active);
-        }
-      }
+      deps.markConversationRead(active);
       if (deps.appLifecycle != AppLifecycleState.resumed) {
         deps.showIncomingNotification(evt.from, evt.text);
       }
-      if (active != null && active == incomingConv && incomingConv.startsWith('direct:')) {
+      if (incomingConv.startsWith('direct:')) {
         deps.sendReadForUnread();
       }
       deps.scrollToBottom();
@@ -781,7 +784,7 @@ class ChatScreenController {
   }
 
   Future<void> sendLocation(ChatActionDeps deps) async {
-    if (!deps.ble.isConnected) return;
+    if (!deps.ble.isTransportConnected) return;
     deps.onLocationLoading(true);
     try {
       var perm = await Geolocator.checkPermission();
@@ -815,7 +818,7 @@ class ChatScreenController {
   }
 
   Future<void> sendGpsSyncFromPhone(ChatActionDeps deps) async {
-    if (!deps.isMounted() || !deps.ble.isConnected) return;
+    if (!deps.isMounted() || !deps.ble.isTransportConnected) return;
     try {
       final perm = await Geolocator.checkPermission();
       if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) return;
