@@ -184,9 +184,9 @@ class RiftSegmentedBar extends StatelessWidget {
     this.leadingIcon,
   });
 
-  static const _slide = Duration(milliseconds: 320);
-  static const _text = Duration(milliseconds: 220);
-  static const _curve = Curves.easeOutCubic;
+  static const _slide = AppMotion.segmentSlide;
+  static const _text = AppMotion.segmentCross;
+  static const _curve = AppMotion.easeOutCubic;
 
   @override
   Widget build(BuildContext context) {
@@ -211,7 +211,7 @@ class RiftSegmentedBar extends StatelessWidget {
                 switchInCurve: Curves.easeOut,
                 switchOutCurve: Curves.easeIn,
                 transitionBuilder: (child, anim) => ScaleTransition(scale: anim, child: FadeTransition(opacity: anim, child: child)),
-                child: Icon(leadingIcon, key: ValueKey(leadingIcon), size: 20, color: pal.primary.withOpacity(enabled ? 1 : 0.4)),
+                child: Icon(leadingIcon, key: ValueKey(leadingIcon), size: AppIconSize.md, color: pal.primary.withOpacity(enabled ? 1 : 0.4)),
               ),
             ),
           ],
@@ -229,13 +229,13 @@ class RiftSegmentedBar extends StatelessWidget {
                         AnimatedPositioned(
                           duration: _slide, curve: _curve, left: left, width: show ? segW : 0, top: 0, bottom: 0,
                           child: AnimatedOpacity(
-                            duration: const Duration(milliseconds: 200), opacity: show ? 1 : 0,
+                            duration: AppMotion.standard, opacity: show ? 1 : 0,
                             child: DecoratedBox(
                               decoration: BoxDecoration(
                                 borderRadius: BorderRadius.circular(AppRadius.md),
                                 color: pal.primary.withOpacity(enabled ? 0.22 : 0.12),
                                 border: Border.all(color: pal.primary.withOpacity(enabled ? 1 : 0.45), width: 1.5),
-                                boxShadow: [BoxShadow(color: pal.primary.withOpacity(0.2), blurRadius: 12, offset: const Offset(0, 2))],
+                                boxShadow: AppShadow.primarySegment(pal.primary),
                               ),
                             ),
                           ),
@@ -249,12 +249,12 @@ class RiftSegmentedBar extends StatelessWidget {
                                 borderRadius: BorderRadius.circular(AppRadius.md),
                                 onTap: enabled ? () { HapticFeedback.selectionClick(); onSelected(i); } : null,
                                 child: Padding(
-                                  padding: const EdgeInsets.symmetric(vertical: AppSpacing.md, horizontal: 2),
+                                  padding: const EdgeInsets.symmetric(vertical: AppSpacing.md, horizontal: AppSpacing.segmentInnerH),
                                   child: Center(
                                     child: AnimatedDefaultTextStyle(
                                       duration: _slide, curve: _curve,
-                                      style: TextStyle(
-                                        fontSize: 13, letterSpacing: 0.3,
+                                      style: AppTypography.labelBase().copyWith(
+                                        letterSpacing: 0.3,
                                         fontWeight: sel ? FontWeight.w800 : FontWeight.w500,
                                         color: sel ? pal.primary : inactive,
                                       ),
@@ -287,15 +287,21 @@ AppBar riftAppBar(
 }) {
   final pal = context.palette;
   return AppBar(
-    toolbarHeight: 48,
+    toolbarHeight: AppBarMetrics.toolbarHeight,
     backgroundColor: pal.surface,
     foregroundColor: pal.onSurface,
     elevation: 0,
     scrolledUnderElevation: 0,
     surfaceTintColor: Colors.transparent,
-    leading: showBack ? IconButton(icon: const Icon(Icons.arrow_back_rounded), onPressed: () => Navigator.pop(context)) : null,
+    leading: showBack
+        ? IconButton(
+            icon: const Icon(Icons.arrow_back_rounded),
+            iconSize: AppIconSize.md,
+            onPressed: () => Navigator.pop(context),
+          )
+        : null,
     automaticallyImplyLeading: false,
-    title: titleWidget ?? Text(title, style: AppTypography.screenTitleBase().copyWith(fontSize: 18, color: pal.onSurface)),
+    title: titleWidget ?? Text(title, style: AppTypography.navTitleBase().copyWith(color: pal.onSurface)),
     centerTitle: false,
     titleSpacing: showBack ? 0 : AppSpacing.lg,
     actions: actions,
@@ -310,7 +316,7 @@ class RiftSwitch extends StatelessWidget {
 
   const RiftSwitch({super.key, required this.value, this.onChanged});
 
-  static const _dur = Duration(milliseconds: 220);
+  static const _dur = AppMotion.segmentCross;
 
   @override
   Widget build(BuildContext context) {
@@ -319,11 +325,11 @@ class RiftSwitch extends StatelessWidget {
     return GestureDetector(
       onTap: active ? () { HapticFeedback.selectionClick(); onChanged!(!value); } : null,
       child: AnimatedContainer(
-        duration: _dur, curve: Curves.easeOutCubic,
-        width: 48, height: 28,
-        padding: const EdgeInsets.all(3),
+        duration: _dur, curve: AppMotion.easeOutCubic,
+        width: AppSwitchMetrics.trackWidth, height: AppSwitchMetrics.trackHeight,
+        padding: const EdgeInsets.all(AppSwitchMetrics.padding),
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(AppRadius.switchTrack),
           color: value
               ? pal.primary.withOpacity(active ? 1 : 0.5)
               : pal.surfaceVariant.withOpacity(active ? 1 : 0.5),
@@ -333,14 +339,14 @@ class RiftSwitch extends StatelessWidget {
           ),
         ),
         child: AnimatedAlign(
-          duration: _dur, curve: Curves.easeOutCubic,
+          duration: _dur, curve: AppMotion.easeOutCubic,
           alignment: value ? Alignment.centerRight : Alignment.centerLeft,
           child: Container(
-            width: 22, height: 22,
+            width: AppSwitchMetrics.knobSize, height: AppSwitchMetrics.knobSize,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: value ? Colors.white : pal.onSurfaceVariant.withOpacity(0.7),
-              boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 4, offset: const Offset(0, 1))],
+              boxShadow: AppShadow.switchKnob,
             ),
           ),
         ),

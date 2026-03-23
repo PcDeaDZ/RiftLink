@@ -561,7 +561,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
               minLines: 1,
               autofocus: true,
               textInputAction: TextInputAction.done,
-              style: TextStyle(color: p.onSurface, fontSize: 15),
+              style: AppTypography.bodyBase().copyWith(color: p.onSurface),
               decoration: InputDecoration(
                 labelText: l.tr('group_join_by_code'),
                 hintText: 'BASE64...',
@@ -652,7 +652,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
           child: Container(
             decoration: BoxDecoration(
               color: p.card,
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(AppRadius.overlay)),
             ),
             child: SafeArea(
               top: false,
@@ -681,15 +681,12 @@ class _GroupsScreenState extends State<GroupsScreen> {
                       const SizedBox(height: AppSpacing.md),
                       Row(
                         children: [
-                          Icon(Icons.group_add_rounded, color: p.primary, size: 22),
+                          Icon(Icons.group_add_rounded, color: p.primary, size: AppIconSize.lg),
                           const SizedBox(width: AppSpacing.sm + 2),
                           Expanded(
                             child: Text(
                               l.tr('add_group'),
-                              style: AppTypography.screenTitleBase().copyWith(
-                                fontSize: 17,
-                                color: p.onSurface,
-                              ),
+                              style: AppTypography.navTitleBase().copyWith(color: p.onSurface),
                             ),
                           ),
                           IconButton(
@@ -717,8 +714,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
                         l.tr('groups_add_sheet_hint'),
                         maxLines: 3,
                         overflow: TextOverflow.ellipsis,
-                        style: AppTypography.labelBase().copyWith(
-                          fontSize: 12,
+                        style: AppTypography.chipBase().copyWith(
                           height: 1.32,
                           fontWeight: FontWeight.w400,
                           color: p.onSurfaceVariant.withOpacity(0.92),
@@ -730,7 +726,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
                         keyboardType: TextInputType.text,
                         textCapitalization: TextCapitalization.sentences,
                         autofocus: true,
-                        style: TextStyle(color: p.onSurface, fontSize: 16),
+                        style: AppTypography.bodyLargeBase().copyWith(color: p.onSurface),
                         decoration: InputDecoration(
                           labelText: l.tr('group_display_name_hint'),
                           filled: true,
@@ -775,7 +771,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
                         },
                         child: Text(
                           l.tr('add'),
-                          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+                          style: AppTypography.bodyBase().copyWith(fontWeight: FontWeight.w600),
                         ),
                       ),
                     ],
@@ -801,14 +797,13 @@ class _GroupsScreenState extends State<GroupsScreen> {
               duration: const Duration(milliseconds: 600),
               curve: Curves.easeOut,
               builder: (_, opacity, child) => Opacity(opacity: opacity, child: child),
-              child: Icon(Icons.groups_outlined, size: 72, color: p.onSurfaceVariant.withOpacity(0.38)),
+              child: Icon(Icons.groups_outlined, size: AppIconSize.emptyStateXLarge, color: p.onSurfaceVariant.withOpacity(0.38)),
             ),
             const SizedBox(height: AppSpacing.lg),
             Text(
               l.tr('no_groups'),
               textAlign: TextAlign.center,
               style: AppTypography.bodyBase().copyWith(
-                fontSize: 16,
                 fontWeight: FontWeight.w600,
                 color: p.onSurface,
               ),
@@ -816,10 +811,10 @@ class _GroupsScreenState extends State<GroupsScreen> {
             const SizedBox(height: AppSpacing.xl),
             FilledButton.icon(
               onPressed: widget.ble.isTransportConnected ? _showAddSheet : null,
-              icon: const Icon(Icons.group_add_rounded, size: 18),
+              icon: const Icon(Icons.group_add_rounded, size: AppIconSize.sm),
               label: Text(
                 l.tr('add_group'),
-                style: const TextStyle(fontWeight: FontWeight.w600),
+                style: AppTypography.bodyBase().copyWith(fontWeight: FontWeight.w600, color: Colors.white),
               ),
               style: FilledButton.styleFrom(
                 backgroundColor: p.primary,
@@ -842,8 +837,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
       height: 30,
       child: Text(
         title.toUpperCase(),
-        style: AppTypography.labelBase().copyWith(
-          fontSize: 11,
+        style: AppTypography.captionBase().copyWith(
           fontWeight: FontWeight.w700,
           color: p.onSurfaceVariant.withOpacity(0.8),
           letterSpacing: 0.35,
@@ -865,15 +859,12 @@ class _GroupsScreenState extends State<GroupsScreen> {
       height: 40,
       child: Row(
         children: [
-          Icon(icon, size: 18, color: color),
+          Icon(icon, size: AppIconSize.sm, color: color),
           const SizedBox(width: AppSpacing.sm),
           Expanded(
             child: Text(
               title,
-              style: AppTypography.bodyBase().copyWith(
-                fontSize: 14,
-                color: color,
-              ),
+              style: AppTypography.bodyLargeBase().copyWith(color: color),
             ),
           ),
         ],
@@ -913,7 +904,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
           backgroundColor: p.primary.withOpacity(0.13),
           child: Text(
             '$gid',
-            style: TextStyle(color: p.primary, fontWeight: FontWeight.w700, fontSize: 11),
+            style: AppTypography.captionBase().copyWith(color: p.primary, fontWeight: FontWeight.w700),
           ),
         ),
         title: Row(
@@ -927,7 +918,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
                 ),
               ),
             ),
-            if (v2 != null) Icon(Icons.lock_rounded, size: 16, color: p.primary),
+            if (v2 != null) Icon(Icons.lock_rounded, size: AppIconSize.compact, color: p.primary),
           ],
         ),
         subtitle: Column(
@@ -946,8 +937,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
                     if (roleLabel != null) roleLabel,
                     if (keyStateLabel != null) keyStateLabel,
                   ].join(' · '),
-                  style: AppTypography.labelBase().copyWith(
-                    fontSize: 11.5,
+                  style: AppTypography.captionBase().copyWith(
                     fontWeight: FontWeight.w600,
                     color: v2.ackApplied ? p.onSurfaceVariant : p.error,
                   ),
@@ -1070,7 +1060,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
                 l.tr('groups_hint'),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: hintStyle.copyWith(fontSize: 12),
+                style: hintStyle.copyWith(fontSize: AppTypography.chipSize),
               ),
             ),
             TextButton.icon(
@@ -1087,10 +1077,10 @@ class _GroupsScreenState extends State<GroupsScreen> {
                       height: 16,
                       child: CircularProgressIndicator(strokeWidth: 2, color: p.primary),
                     )
-                  : Icon(Icons.refresh_rounded, size: 18, color: p.primary),
+                  : Icon(Icons.refresh_rounded, size: AppIconSize.sm, color: p.primary),
               label: Text(
                 l.tr('refresh'),
-                style: TextStyle(fontSize: 13, color: p.primary, fontWeight: FontWeight.w600),
+                style: AppTypography.labelBase().copyWith(color: p.primary, fontWeight: FontWeight.w600),
               ),
             ),
           ],
@@ -1103,7 +1093,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
         l.tr('groups_hint'),
         maxLines: 2,
         overflow: TextOverflow.ellipsis,
-        style: hintStyle.copyWith(fontSize: 12),
+        style: hintStyle.copyWith(fontSize: AppTypography.chipSize),
       ),
     );
   }
@@ -1134,7 +1124,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
                   visualDensity: VisualDensity.standard,
                 ),
                 onPressed: widget.ble.isTransportConnected ? _showAddSheet : null,
-                icon: const Icon(Icons.group_add_rounded, size: 18),
+                icon: const Icon(Icons.group_add_rounded, size: AppIconSize.sm),
                 label: Text(
                   l.tr('group_create'),
                   style: buttonLabelStyle,
@@ -1193,7 +1183,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
                 child: TextField(
                   controller: _searchController,
                   textInputAction: TextInputAction.search,
-                  style: TextStyle(color: p.onSurface, fontSize: 14.5),
+                  style: AppTypography.bodyBase().copyWith(color: p.onSurface),
                   decoration: InputDecoration(
                     hintText: l.tr('group_search_hint'),
                     prefixIcon: Icon(Icons.search_rounded, color: p.onSurfaceVariant),
@@ -1287,7 +1277,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
                   focusNode: _searchFocusNode,
                   autofocus: true,
                   textInputAction: TextInputAction.search,
-                  style: TextStyle(color: p.onSurface, fontSize: 15.5),
+                  style: AppTypography.bodyBase().copyWith(color: p.onSurface),
                   decoration: InputDecoration(
                     hintText: l.tr('group_search_hint'),
                     border: InputBorder.none,

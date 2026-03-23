@@ -147,8 +147,7 @@ class _SegmentedPickBar extends StatelessWidget {
                                             child: AnimatedDefaultTextStyle(
                                               duration: _anim,
                                               curve: _curve,
-                                              style: TextStyle(
-                                                fontSize: 13,
+                                              style: AppTypography.labelBase().copyWith(
                                                 letterSpacing: 0.3,
                                                 fontWeight: sel ? FontWeight.w800 : FontWeight.w500,
                                                 color: sel ? context.palette.primary : inactive,
@@ -310,8 +309,7 @@ class _SfCell extends StatelessWidget {
               children: [
                 AnimatedDefaultTextStyle(
                   duration: const Duration(milliseconds: 260),
-                  style: TextStyle(
-                    fontSize: 10,
+                  style: AppTypography.captionDenseBase().copyWith(
                     height: 1,
                     fontWeight: FontWeight.w500,
                     color: inactiveColor,
@@ -322,8 +320,7 @@ class _SfCell extends StatelessWidget {
                 const SizedBox(height: 2),
                 AnimatedDefaultTextStyle(
                   duration: const Duration(milliseconds: 260),
-                  style: TextStyle(
-                    fontSize: 16,
+                  style: AppTypography.bodyLargeBase().copyWith(
                     height: 1,
                     fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
                     color: selected ? context.palette.primary : inactiveColor,
@@ -439,13 +436,13 @@ class _ModemSectionState extends State<_ModemSection> {
             padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
             child: Text(
               presetDesc[_sel],
-              style: TextStyle(fontSize: 12, height: 1.4, color: pal.onSurfaceVariant.withOpacity(0.85)),
+              style: AppTypography.chipBase().copyWith(height: 1.4, color: pal.onSurfaceVariant.withOpacity(0.85)),
             ),
           ),
         ),
         if (isCustom) ...[
           const SizedBox(height: AppSpacing.sm + 2),
-          Text('SF', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+          Text('SF', style: AppTypography.chipBase().copyWith(fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
           const SizedBox(height: AppSpacing.xs),
           _SfPickGrid(
             selectedSf: _cSf,
@@ -455,7 +452,7 @@ class _ModemSectionState extends State<_ModemSection> {
             },
           ),
           const SizedBox(height: AppSpacing.sm + 2),
-          Text('BW (kHz)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+          Text('BW (kHz)', style: AppTypography.chipBase().copyWith(fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
           const SizedBox(height: AppSpacing.xs),
           _optionRow<double>(
             context,
@@ -468,7 +465,7 @@ class _ModemSectionState extends State<_ModemSection> {
             },
           ),
           const SizedBox(height: AppSpacing.sm + 2),
-          Text('CR', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+          Text('CR', style: AppTypography.chipBase().copyWith(fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
           const SizedBox(height: AppSpacing.xs),
           _optionRow<int>(
             context,
@@ -523,8 +520,7 @@ class _ModemSectionState extends State<_ModemSection> {
         child: Text(
           label,
           textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: 12.5,
+          style: AppTypography.chipBase().copyWith(
             fontWeight: sel ? FontWeight.w700 : FontWeight.w500,
             color: sel ? pal.primary : pal.onSurfaceVariant.withOpacity(enabled ? 1.0 : 0.5),
           ),
@@ -566,8 +562,7 @@ class _ModemSectionState extends State<_ModemSection> {
                 ),
                 child: Text(
                   label(options[i]),
-                  style: TextStyle(
-                    fontSize: 11.5,
+                  style: AppTypography.captionBase().copyWith(
                     fontWeight: options[i] == selected ? FontWeight.w700 : FontWeight.w500,
                     color: options[i] == selected ? pal.primary : pal.onSurfaceVariant.withOpacity(enabled ? 1.0 : 0.5),
                   ),
@@ -1099,16 +1094,14 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                   children: [
                     Text(
                       l.tr('settings_node_id'),
-                      style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 13),
+                      style: AppTypography.labelBase().copyWith(color: context.palette.onSurfaceVariant),
                     ),
                     const SizedBox(height: AppSpacing.sm),
                     SelectableText(
                       nodeLabel.isNotEmpty ? nodeLabel : idShown,
-                      style: TextStyle(
+                      style: (isNicknameLabel ? AppTypography.bodyBase() : AppTypography.monoBase()).copyWith(
                         color: context.palette.onSurface,
-                        fontSize: 15,
                         height: 1.35,
-                        fontFamily: isNicknameLabel ? null : 'monospace',
                         letterSpacing: 0.5,
                       ),
                     ),
@@ -1125,7 +1118,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         mainAxisAlignment: MainAxisAlignment.center,
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.copy, size: 18),
+                          const Icon(Icons.copy, size: AppIconSize.sm),
                           SizedBox(width: AppSpacing.sm),
                           Text(l.tr('copy')),
                         ],
@@ -1175,7 +1168,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                   children: [
                     Text(
                       l.tr('region_warning'),
-                      style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 12, height: 1.35),
+                      style: AppTypography.chipBase().copyWith(color: context.palette.onSurfaceVariant, height: 1.35),
                     ),
                     const SizedBox(height: AppSpacing.md + AppSpacing.xs),
                     _SegmentedPickBar(
@@ -1195,13 +1188,12 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       const SizedBox(height: AppSpacing.lg + AppSpacing.xs),
                       Row(
                         children: [
-                          Icon(Icons.radio_button_checked, size: 18, color: context.palette.primary.withOpacity(0.9)),
+                          Icon(Icons.radio_button_checked, size: AppIconSize.sm, color: context.palette.primary.withOpacity(0.9)),
                           const SizedBox(width: AppSpacing.sm),
                           Text(
                             l.tr('channel_eu'),
-                            style: TextStyle(
+                            style: AppTypography.bodyLargeBase().copyWith(
                               color: context.palette.onSurface,
-                              fontSize: 14,
                               fontWeight: FontWeight.w600,
                               letterSpacing: 0.2,
                             ),
@@ -1299,7 +1291,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                   children: [
                     Text(
                       l.tr('ble_pin'),
-                      style: TextStyle(fontSize: 13, color: context.palette.onSurfaceVariant),
+                      style: AppTypography.labelBase().copyWith(color: context.palette.onSurfaceVariant),
                     ),
                     const SizedBox(height: AppSpacing.sm - 2),
                     Container(
@@ -1403,14 +1395,14 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                               const SizedBox(height: AppSpacing.xs),
                               Text(
                                 'SSID: $_wifiSsid',
-                                style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 12),
+                                style: AppTypography.chipBase().copyWith(color: context.palette.onSurfaceVariant),
                               ),
                             ],
                             if (_wifiIp != null && _wifiIp!.isNotEmpty) ...[
                               const SizedBox(height: AppSpacing.xs / 2),
                               Text(
                                 'IP: $_wifiIp',
-                                style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 12),
+                                style: AppTypography.chipBase().copyWith(color: context.palette.onSurfaceVariant),
                               ),
                             ],
                           ],
@@ -1514,22 +1506,19 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       const SizedBox(height: AppSpacing.sm + 2),
                       Text(
                         l.tr('firmware_update_where_hint'),
-                        style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                        style: AppTypography.chipBase().copyWith(color: context.palette.onSurfaceVariant),
                       ),
                       const SizedBox(height: AppSpacing.sm - 2),
                       Text(
                         l.tr('firmware_update_path'),
-                        style: TextStyle(
-                          fontFamily: 'monospace',
+                        style: AppTypography.monoBase().copyWith(
                           color: context.palette.onSurfaceVariant.withOpacity(0.95),
-                          fontSize: 12,
                         ),
                       ),
                     ] else ...[
                       Text(
                         l.tr('firmware_update_wifi'),
-                        style: TextStyle(
-                          fontSize: 13,
+                        style: AppTypography.labelBase().copyWith(
                           fontWeight: FontWeight.w600,
                           color: context.palette.onSurface,
                         ),
@@ -1537,15 +1526,13 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       const SizedBox(height: AppSpacing.sm),
                       Text(
                         l.tr('firmware_update_where_hint'),
-                        style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                        style: AppTypography.chipBase().copyWith(color: context.palette.onSurfaceVariant),
                       ),
                       const SizedBox(height: AppSpacing.sm - 2),
                       Text(
                         l.tr('firmware_update_path'),
-                        style: TextStyle(
-                          fontFamily: 'monospace',
+                        style: AppTypography.monoBase().copyWith(
                           color: context.palette.onSurfaceVariant.withOpacity(0.95),
-                          fontSize: 12,
                         ),
                       ),
                     ],
@@ -1553,12 +1540,12 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       const SizedBox(height: AppSpacing.md),
                       Row(
                         children: [
-                          Icon(Icons.info_outline_rounded, size: 16, color: context.palette.onSurfaceVariant),
+                          Icon(Icons.info_outline_rounded, size: AppIconSize.compact, color: context.palette.onSurfaceVariant),
                           const SizedBox(width: AppSpacing.sm - 2),
                           Expanded(
                             child: Text(
                               l.tr('firmware_update_wifi_requires_wifi_mode'),
-                              style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                              style: AppTypography.chipBase().copyWith(color: context.palette.onSurfaceVariant),
                             ),
                           ),
                         ],
@@ -1573,7 +1560,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                           Expanded(
                             child: Text(
                               l.tr('firmware_update_wifi_mode_ready'),
-                              style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant),
+                              style: AppTypography.chipBase().copyWith(color: context.palette.onSurfaceVariant),
                             ),
                           ),
                         ],
@@ -1607,7 +1594,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                     title: Text(l.tr('gps_enable'), style: TextStyle(color: context.palette.onSurface)),
                     subtitle: Text(
                       _gpsFix ? l.tr('gps_fix_yes') : l.tr('gps_fix_no'),
-                      style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 13),
+                      style: AppTypography.labelBase().copyWith(color: context.palette.onSurfaceVariant),
                     ),
                     value: _gpsEnabled,
                     activeThumbColor: context.palette.primary,
@@ -1661,7 +1648,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       title: Text(l.tr('theme'), style: TextStyle(color: context.palette.onSurface, fontWeight: FontWeight.w500)),
                       subtitle: Text(
                         l.tr('theme_hint'),
-                        style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 12, height: 1.35),
+                        style: AppTypography.chipBase().copyWith(color: context.palette.onSurfaceVariant, height: 1.35),
                       ),
                       trailing: Icon(Icons.chevron_right, color: context.palette.onSurfaceVariant),
                       onTap: () {
@@ -1678,7 +1665,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       ),
                       subtitle: Text(
                         l.tr('mesh_animation_hint'),
-                        style: TextStyle(color: context.palette.onSurfaceVariant, fontSize: 12, height: 1.35),
+                        style: AppTypography.chipBase().copyWith(color: context.palette.onSurfaceVariant, height: 1.35),
                       ),
                       secondary: Icon(Icons.animation_rounded, color: context.palette.primary),
                       value: _meshAnimationEnabled,
@@ -1740,7 +1727,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         children: [
                           TextField(
                             controller: _inviteIdController,
-                            style: TextStyle(color: context.palette.onSurface, fontFamily: 'monospace', fontSize: 13),
+                            style: AppTypography.monoBase().copyWith(color: context.palette.onSurface),
                             decoration: InputDecoration(
                               isDense: true,
                               labelText: l.tr('inviter_id'),
@@ -1777,7 +1764,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                           const SizedBox(height: AppSpacing.md),
                           TextField(
                             controller: _inviteKeyController,
-                            style: TextStyle(color: context.palette.onSurface, fontSize: 13, height: 1.35),
+                            style: AppTypography.labelBase().copyWith(color: context.palette.onSurface, height: 1.35),
                             decoration: InputDecoration(
                               isDense: true,
                               labelText: l.tr('invite_pubkey'),
@@ -1789,7 +1776,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                           const SizedBox(height: AppSpacing.md),
                           TextField(
                             controller: _inviteChannelKeyController,
-                            style: TextStyle(color: context.palette.onSurface, fontSize: 13, height: 1.35),
+                            style: AppTypography.labelBase().copyWith(color: context.palette.onSurface, height: 1.35),
                             decoration: InputDecoration(
                               isDense: true,
                               labelText: l.tr('invite_channel_key'),
@@ -1801,7 +1788,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                           const SizedBox(height: AppSpacing.md),
                           TextField(
                             controller: _inviteTokenController,
-                            style: TextStyle(color: context.palette.onSurface, fontFamily: 'monospace', fontSize: 13),
+                            style: AppTypography.monoBase().copyWith(color: context.palette.onSurface),
                             decoration: InputDecoration(
                               isDense: true,
                               labelText: l.tr('invite_token_optional'),
@@ -1889,10 +1876,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                     const SizedBox(height: AppSpacing.sm - 2),
                     Text(
                       l.tr('voice_acceptance_hint'),
-                      style: TextStyle(
-                        color: context.palette.onSurfaceVariant,
-                        fontSize: 12,
-                      ),
+                      style: AppTypography.chipBase().copyWith(color: context.palette.onSurfaceVariant),
                     ),
                     const SizedBox(height: AppSpacing.sm + 2),
                     TextField(
@@ -2052,8 +2036,7 @@ class _SectionAccentHeader extends StatelessWidget {
         Expanded(
           child: Text(
             text,
-            style: TextStyle(
-              fontSize: 14,
+            style: AppTypography.bodyLargeBase().copyWith(
               fontWeight: FontWeight.w600,
               letterSpacing: 0.2,
               color: p.onSurface,
@@ -2061,7 +2044,7 @@ class _SectionAccentHeader extends StatelessWidget {
           ),
         ),
         if (trailingIcon != null)
-          Icon(trailingIcon, size: 18, color: p.onSurfaceVariant),
+          Icon(trailingIcon, size: AppIconSize.sm, color: p.onSurfaceVariant),
       ],
     );
   }
@@ -2087,8 +2070,7 @@ class _SettingsCard extends StatelessWidget {
         children: [
           Text(
             title,
-            style: TextStyle(
-              fontSize: 17,
+            style: AppTypography.navTitleBase().copyWith(
               fontWeight: FontWeight.w600,
               color: context.palette.onSurface,
               letterSpacing: 0.2,
@@ -2098,8 +2080,7 @@ class _SettingsCard extends StatelessWidget {
             const SizedBox(height: AppSpacing.xs),
             Text(
               subtitle!,
-              style: TextStyle(
-                fontSize: 12,
+              style: AppTypography.chipBase().copyWith(
                 color: context.palette.onSurfaceVariant,
                 height: 1.3,
               ),

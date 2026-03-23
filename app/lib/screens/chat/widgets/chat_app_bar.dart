@@ -28,7 +28,7 @@ class ChatAppBarTitle extends StatelessWidget {
       children: [
         Icon(
           chatIcon,
-          size: 18,
+          size: AppIconSize.sm,
           color: chatIconColor ?? titleColor,
         ),
         const SizedBox(width: AppSpacing.sm),
@@ -39,7 +39,7 @@ class ChatAppBarTitle extends StatelessWidget {
             children: [
               Text(
                 label,
-                style: AppTypography.bodyBase().copyWith(
+                style: AppTypography.navTitleBase().copyWith(
                   fontWeight: FontWeight.w600,
                   color: titleColor,
                 ),
@@ -48,8 +48,7 @@ class ChatAppBarTitle extends StatelessWidget {
               if (subtitle != null && subtitle!.trim().isNotEmpty)
                 Text(
                   subtitle!,
-                  style: AppTypography.chipBase().copyWith(
-                    fontSize: 11,
+                  style: AppTypography.captionBase().copyWith(
                     color: statusColor,
                   ),
                   overflow: TextOverflow.ellipsis,

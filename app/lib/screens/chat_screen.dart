@@ -880,10 +880,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
               padding: const EdgeInsets.all(AppSpacing.lg),
               child: Text(
                 l.tr('switch_node'),
-                style: AppTypography.screenTitleBase().copyWith(
-                  fontSize: 18,
-                  color: context.palette.onSurface,
-                ),
+                style: AppTypography.navTitleBase().copyWith(color: context.palette.onSurface),
               ),
             ),
             ...others.map((d) => _buildSwitchItem(ctx, d)),
@@ -915,9 +912,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           subtitle: nick == null && d.displayName != d.nodeId
               ? Text(
                   d.nodeId,
-                  style: AppTypography.labelBase().copyWith(
-                    fontSize: 12,
-                    fontFamily: 'monospace',
+                  style: AppTypography.monoSmallBase().copyWith(
                     color: context.palette.onSurfaceVariant,
                   ),
                 )
@@ -926,7 +921,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             mainAxisSize: MainAxisSize.min,
             children: [
               IconButton(
-                icon: Icon(Icons.delete_outline, size: 20, color: context.palette.onSurfaceVariant),
+                icon: Icon(Icons.delete_outline, size: AppIconSize.md, color: context.palette.onSurfaceVariant),
                 tooltip: l.tr('forget_device'),
                 onPressed: () => _confirmForgetAndPop(ctx, d),
               ),
@@ -1104,7 +1099,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                 ListTile(
                   leading: Icon(Icons.group, color: sel ? context.palette.primary : context.palette.onSurfaceVariant),
                   title: Text(title, style: TextStyle(fontWeight: sel ? FontWeight.w600 : FontWeight.normal, color: context.palette.onSurface)),
-                  trailing: sel ? Icon(Icons.check, color: context.palette.primary, size: 20) : null,
+                  trailing: sel ? Icon(Icons.check, color: context.palette.primary, size: AppIconSize.md) : null,
                   onTap: () {
                     Navigator.pop(ctx);
                     setState(() {
@@ -1137,12 +1132,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                   ),
                   subtitle: null,
                   trailing: sel
-                      ? Icon(Icons.check, color: context.palette.primary, size: 20)
+                      ? Icon(Icons.check, color: context.palette.primary, size: AppIconSize.md)
                       : (rssi != 0
                           ? Text(
                               '$rssi dBm',
-                              style: AppTypography.labelBase().copyWith(
-                                fontSize: 11,
+                              style: AppTypography.captionBase().copyWith(
                                 color: context.palette.onSurfaceVariant,
                               ),
                             )
@@ -1176,7 +1170,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                   leading: Icon(Icons.bookmark_outline, color: sel ? context.palette.primary : context.palette.onSurfaceVariant),
                   title: Text(nick ?? id, style: TextStyle(fontWeight: sel ? FontWeight.w600 : FontWeight.normal, color: context.palette.onSurface)),
                   subtitle: null,
-                  trailing: sel ? Icon(Icons.check, color: context.palette.primary, size: 20) : null,
+                  trailing: sel ? Icon(Icons.check, color: context.palette.primary, size: AppIconSize.md) : null,
                   onTap: () {
                     Navigator.pop(ctx);
                     setState(() {
@@ -1207,10 +1201,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                         Expanded(
                           child: Text(
                             l.tr('recipient_title'),
-                            style: AppTypography.screenTitleBase().copyWith(
-                              fontSize: 18,
-                              color: context.palette.onSurface,
-                            ),
+                            style: AppTypography.navTitleBase().copyWith(color: context.palette.onSurface),
                           ),
                         ),
                         IconButton(icon: Icon(Icons.close), onPressed: () => Navigator.pop(ctx), color: context.palette.onSurfaceVariant),
@@ -1222,12 +1213,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                     child: TextField(
                       controller: searchCtrl,
                       onChanged: (v) => apply(() => query = v),
-                      style: TextStyle(color: context.palette.onSurface),
+                      style: AppTypography.bodyBase().copyWith(color: context.palette.onSurface),
                       decoration: InputDecoration(
                         isDense: true,
-                        prefixIcon: Icon(Icons.search, color: context.palette.onSurfaceVariant, size: 22),
+                        prefixIcon: Icon(Icons.search, color: context.palette.onSurfaceVariant, size: AppIconSize.lg),
                         hintText: l.tr('recipient_search_hint'),
-                        hintStyle: TextStyle(color: context.palette.onSurfaceVariant),
+                        hintStyle: AppTypography.bodyBase().copyWith(color: context.palette.onSurfaceVariant),
                         filled: true,
                         fillColor: context.palette.surfaceVariant.withOpacity(0.5),
                         border: OutlineInputBorder(
@@ -1245,7 +1236,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                           ListTile(
                             leading: Icon(Icons.public, color: _unicastTo == null && _group == 0 ? context.palette.primary : context.palette.onSurfaceVariant),
                             title: Text(bcLabel, style: TextStyle(fontWeight: _unicastTo == null && _group == 0 ? FontWeight.w600 : FontWeight.normal, color: context.palette.onSurface)),
-                            trailing: _unicastTo == null && _group == 0 ? Icon(Icons.check, color: context.palette.primary, size: 20) : null,
+                            trailing: _unicastTo == null && _group == 0 ? Icon(Icons.check, color: context.palette.primary, size: AppIconSize.md) : null,
                             onTap: () {
                               Navigator.pop(ctx);
                               setState(() {
@@ -1260,8 +1251,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                             padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xs),
                             child: Text(
                               l.tr('groups').toUpperCase(),
-                              style: AppTypography.chipBase().copyWith(
-                                fontSize: 11,
+                              style: AppTypography.captionBase().copyWith(
                                 color: context.palette.onSurfaceVariant,
                               ),
                             ),
@@ -1273,8 +1263,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                             padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xs),
                             child: Text(
                               l.tr('neighbors').toUpperCase(),
-                              style: AppTypography.chipBase().copyWith(
-                                fontSize: 11,
+                              style: AppTypography.captionBase().copyWith(
                                 color: context.palette.onSurfaceVariant,
                               ),
                             ),
@@ -1286,8 +1275,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                             padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.sm, AppSpacing.lg, AppSpacing.xs),
                             child: Text(
                               l.tr('saved_contacts').toUpperCase(),
-                              style: AppTypography.chipBase().copyWith(
-                                fontSize: 11,
+                              style: AppTypography.captionBase().copyWith(
                                 color: context.palette.onSurfaceVariant,
                               ),
                             ),
@@ -1352,14 +1340,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Icon(icon, size: 15, color: color),
+        Icon(icon, size: AppIconSize.compact, color: color),
         if (relay != null)
           Padding(
             padding: const EdgeInsets.only(left: 3),
             child: Text(
               relay,
-              style: AppTypography.chipBase().copyWith(
-                fontSize: 10,
+              style: AppTypography.captionDenseBase().copyWith(
                 color: context.palette.onSurfaceVariant,
               ),
             ),
@@ -2196,25 +2183,25 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('ID: $id', style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: p.onSurface)),
+                    Text('ID: $id', style: AppTypography.monoBase().copyWith(color: p.onSurface)),
                     const SizedBox(height: AppSpacing.sm),
                     Text('PubKey: ${pubKey.length > 40 ? '${pubKey.substring(0, 40)}…' : pubKey}',
-                        style: TextStyle(fontFamily: 'monospace', fontSize: 11, color: p.onSurface)),
+                        style: AppTypography.monoSmallBase().copyWith(color: p.onSurface)),
                     if (inviteToken != null && inviteToken.isNotEmpty) ...[
                       const SizedBox(height: AppSpacing.sm),
                       Text('Token: $inviteToken',
-                          style: TextStyle(fontFamily: 'monospace', fontSize: 11, color: p.onSurface)),
+                          style: AppTypography.monoSmallBase().copyWith(color: p.onSurface)),
                     ],
                     if (inviteTtlMs != null && inviteTtlMs > 0) ...[
                       const SizedBox(height: 8),
                       Text(
                         'TTL: ${(inviteTtlMs / 1000).round()} sec',
-                        style: TextStyle(fontSize: 11, color: p.onSurfaceVariant),
+                        style: AppTypography.captionBase().copyWith(color: p.onSurfaceVariant),
                       ),
                     ] else if (inviteExpiresMs != null) ...[
                       const SizedBox(height: AppSpacing.sm),
                       Text('ExpiresAt(raw): $inviteExpiresMs',
-                          style: TextStyle(fontSize: 11, color: p.onSurfaceVariant)),
+                          style: AppTypography.captionBase().copyWith(color: p.onSurfaceVariant)),
                     ],
                   ],
                 ),
@@ -2231,7 +2218,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                 Clipboard.setData(ClipboardData(text: data));
                 _showSnack(l.tr('copied'));
               },
-              icon: const Icon(Icons.copy_rounded, size: 20),
+              icon: const Icon(Icons.copy_rounded, size: AppIconSize.md),
               label: Text(l.tr('copy')),
             ),
             Align(
@@ -2330,8 +2317,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.xs),
       child: Text(
         text,
-        style: AppTypography.chipBase().copyWith(
-          fontSize: 11,
+        style: AppTypography.captionBase().copyWith(
           color: context.palette.onSurfaceVariant,
         ),
       ),
@@ -2359,9 +2345,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                 ? null
                 : Text(
                     item.subtitle!,
-                    style: AppTypography.labelBase().copyWith(
+                    style: AppTypography.captionBase().copyWith(
                       color: pal.onSurfaceVariant,
-                      fontSize: 11.5,
                     ),
                   ),
             onTap: () {
@@ -2738,9 +2723,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                         maxLines: 6,
                         minLines: 1,
                         maxLength: _group > 1 ? 160 : 200,
-                        style: AppTypography.bodyBase().copyWith(color: context.palette.onSurface, fontSize: 16),
+                        style: AppTypography.bodyLargeBase().copyWith(color: context.palette.onSurface),
                         placeholder: l.tr('message_hint'),
-                        placeholderStyle: TextStyle(color: context.palette.onSurfaceVariant),
+                        placeholderStyle: AppTypography.bodyBase().copyWith(color: context.palette.onSurfaceVariant),
                         padding: EdgeInsets.fromLTRB(
                           AppSpacing.md + 2,
                           AppSpacing.sm + 2,
@@ -2777,7 +2762,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                                 onLongPress: null,
                                 icon: Icons.mic,
                                 size: 36,
-                                iconSize: 20,
+                                iconSize: AppIconSize.md,
                               ),
                             )
                           : _hasText
@@ -2787,7 +2772,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                                     onLongPress: null,
                                     icon: Icons.send,
                                     size: 36,
-                                    iconSize: 18,
+                                    iconSize: AppIconSize.sm,
                                   )
                                 : !canSendPrivate
                                     ? const SizedBox(width: 36, height: 36)
@@ -2796,7 +2781,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                                         onLongPress: _showTtlSendMenu,
                                         icon: Icons.send,
                                         size: 36,
-                                        iconSize: 18,
+                                        iconSize: AppIconSize.sm,
                                       )
                             : _TtlTapButton(
                                 onTap: connected
@@ -2809,7 +2794,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                                     : null,
                                 icon: Icons.mic,
                                 size: 36,
-                                iconSize: 20,
+                                iconSize: AppIconSize.md,
                               ),
                     ),
                   ),
@@ -2844,8 +2829,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
               padding: const EdgeInsets.only(bottom: AppSpacing.xs / 2),
               child: Text(
                 _nicknameForId(m.from) ?? m.from,
-                style: AppTypography.chipBase().copyWith(
-                  fontSize: 11,
+                style: AppTypography.captionBase().copyWith(
                   color: context.palette.primary,
                 ),
               ),
@@ -2861,8 +2845,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                 ),
                 child: Text(
                   m.type == 'sos' ? 'SOS' : 'CRITICAL',
-                  style: AppTypography.chipBase().copyWith(
-                    fontSize: 10,
+                  style: AppTypography.captionDenseBase().copyWith(
                     fontWeight: FontWeight.w700,
                     color: m.type == 'sos' ? context.palette.error : context.palette.primary,
                   ),
@@ -2873,7 +2856,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             Flexible(
               child: Text(
                 m.text,
-                style: AppTypography.bodyBase().copyWith(color: context.palette.onSurface, fontSize: 14),
+                style: AppTypography.bodyLargeBase().copyWith(color: context.palette.onSurface),
               ),
             ),
             if (!m.isIncoming)
@@ -2886,14 +2869,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                 padding: const EdgeInsets.only(left: AppSpacing.sm),
                 child: Text(
                   '${m.rssi}dBm',
-                  style: AppTypography.chipBase().copyWith(
-                    fontSize: 9,
+                  style: AppTypography.microBase().copyWith(
                     color: context.palette.onSurfaceVariant,
                   ),
                 ),
               ),
             if (m.isVoice && m.voiceData != null) IconButton(
-              icon: Icon(Icons.play_circle_outline, color: context.palette.primary, size: 22),
+              icon: Icon(Icons.play_circle_outline, color: context.palette.primary, size: AppIconSize.lg),
               onPressed: () async { if (m.voiceData != null && m.voiceData!.isNotEmpty) await VoiceService.play(m.voiceData!); },
               tooltip: context.l10n.tr('play'), padding: EdgeInsets.zero, constraints: const BoxConstraints(),
             ),
@@ -2903,8 +2885,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             m.isIncoming
                 ? l.tr('chat_received_at', {'time': _hhmm(m.at)})
                 : l.tr('chat_sent_at', {'time': _hhmm(m.at)}),
-            style: AppTypography.chipBase().copyWith(
-              fontSize: 9.5,
+            style: AppTypography.microBase().copyWith(
               color: context.palette.onSurfaceVariant,
             ),
           ),
@@ -2936,7 +2917,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           if (loading)
             SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2, color: context.palette.primary))
           else
-            Icon(icon, size: 22, color: resolvedColor),
+            Icon(icon, size: AppIconSize.lg, color: resolvedColor),
           if (badge != null && badge.isNotEmpty)
             Positioned(
               right: 0,
@@ -2946,8 +2927,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                 decoration: BoxDecoration(color: context.palette.primary, borderRadius: BorderRadius.circular(8)),
                 child: Text(
                   badge,
-                  style: TextStyle(
-                    fontSize: 9,
+                  style: AppTypography.microBase().copyWith(
                     color: Theme.of(context).colorScheme.onPrimary,
                     fontWeight: FontWeight.w600,
                   ),
@@ -3260,7 +3240,7 @@ class _TtlPickerSheet extends StatelessWidget {
                       color: context.palette.primary.withOpacity(0.12),
                       borderRadius: BorderRadius.circular(AppRadius.lg),
                     ),
-                    child: Icon(Icons.auto_delete_outlined, color: context.palette.primary, size: 26),
+                      child: Icon(Icons.auto_delete_outlined, color: context.palette.primary, size: AppIconSize.xxl),
                   ),
                   const SizedBox(width: AppSpacing.sm + 2),
                   Expanded(
@@ -3269,8 +3249,7 @@ class _TtlPickerSheet extends StatelessWidget {
                       children: [
                         Text(
                           l.tr('ttl_title'),
-                          style: AppTypography.screenTitleBase().copyWith(
-                            fontSize: 18,
+                          style: AppTypography.navTitleBase().copyWith(
                             fontWeight: FontWeight.w700,
                             color: context.palette.onSurface,
                             letterSpacing: -0.3,
@@ -3280,7 +3259,6 @@ class _TtlPickerSheet extends StatelessWidget {
                         Text(
                           l.tr('ttl_sheet_hint'),
                           style: AppTypography.labelBase().copyWith(
-                            fontSize: 13,
                             height: 1.4,
                             color: context.palette.onSurfaceVariant.withOpacity(0.95),
                           ),

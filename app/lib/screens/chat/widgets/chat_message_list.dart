@@ -31,14 +31,13 @@ class ChatMessageList<T> extends StatelessWidget {
                     children: [
                       Icon(
                         Icons.chat_bubble_outline,
-                        size: 48,
+                        size: AppIconSize.emptyStateHero,
                         color: context.palette.onSurfaceVariant.withOpacity(0.4),
                       ),
                       const SizedBox(height: AppSpacing.md),
                       Text(
                         l10n.tr('no_messages'),
-                        style: AppTypography.bodyBase().copyWith(
-                          fontSize: 14,
+                        style: AppTypography.bodyLargeBase().copyWith(
                           color: context.palette.onSurfaceVariant.withOpacity(0.7),
                         ),
                       ),

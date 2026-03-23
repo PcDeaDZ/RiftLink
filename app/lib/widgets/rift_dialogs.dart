@@ -4,19 +4,20 @@ import '../app_navigator.dart';
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
+import '../theme/design_tokens.dart';
 
-// Те же числа, что и в app_snackbar / app_popover_menu (единый overlay-слой).
-const double _kDialogSurfaceRadius = 16;
-const double _kDialogInsetRadius = 12;
-const EdgeInsets _kDialogInsetPadding =
-    EdgeInsets.symmetric(horizontal: 24, vertical: 24);
+// Согласовано с app_snackbar / app_popover_menu (единый overlay-слой).
+final EdgeInsets _kDialogInsetPadding = EdgeInsets.symmetric(
+  horizontal: AppSpacing.xxl,
+  vertical: AppSpacing.xxl,
+);
 
 /// Общая оболочка: без «тяжёлого» AlertDialog, тонкая рамка, ограниченная ширина.
 class RiftDialogFrame extends StatelessWidget {
   const RiftDialogFrame({
     super.key,
     required this.child,
-    this.padding = const EdgeInsets.fromLTRB(20, 20, 20, 16),
+    this.padding = const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.xl, AppSpacing.xl, AppSpacing.lg),
     this.maxWidth = 332,
   });
 
@@ -34,10 +35,10 @@ class RiftDialogFrame extends StatelessWidget {
         constraints: BoxConstraints(maxWidth: maxWidth),
         child: Material(
           color: p.card,
-          elevation: 6,
+          elevation: AppElevation.dialog,
           shadowColor: Colors.black.withOpacity(0.14),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(_kDialogSurfaceRadius),
+            borderRadius: BorderRadius.circular(AppRadius.overlay),
             side: BorderSide(color: p.divider.withOpacity(0.5)),
           ),
           clipBehavior: Clip.antiAlias,
@@ -72,10 +73,10 @@ Future<bool?> showRiftConfirmDialog({
               children: [
                 if (icon != null) ...[
                   Padding(
-                    padding: const EdgeInsets.only(top: 1, right: 12),
+                    padding: const EdgeInsets.only(top: 1, right: AppSpacing.md),
                     child: Icon(
                       icon,
-                      size: 22,
+                      size: AppIconSize.lg,
                       color: danger ? p.error : p.onSurfaceVariant,
                     ),
                   ),
@@ -92,34 +93,33 @@ Future<bool?> showRiftConfirmDialog({
                 ),
               ],
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.md),
             Text(
               message,
-              style: TextStyle(
-                fontSize: 14,
-                height: 1.35,
+              style: AppTypography.bodyBase().copyWith(
+                fontSize: AppTypography.bodyLargeSize,
                 color: p.onSurfaceVariant,
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
                 TextButton(
                   style: TextButton.styleFrom(
                     foregroundColor: p.onSurfaceVariant,
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
                     minimumSize: Size.zero,
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
                   onPressed: () => Navigator.pop(ctx, false),
                   child: Text(cancelText),
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: AppSpacing.sm),
                 TextButton(
                   style: TextButton.styleFrom(
                     foregroundColor: danger ? p.error : p.primary,
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
                     minimumSize: Size.zero,
                     tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     textStyle: const TextStyle(fontWeight: FontWeight.w600),
@@ -153,7 +153,7 @@ Future<void> showRiftSelftestDialog(
       final vStr = evt.batteryMv > 0 ? (evt.batteryMv / 1000).toStringAsFixed(2) : '';
 
       return RiftDialogFrame(
-        padding: const EdgeInsets.fromLTRB(20, 20, 20, 14),
+        padding: const EdgeInsets.fromLTRB(AppSpacing.xl, AppSpacing.xl, AppSpacing.xl, AppSpacing.buttonPrimaryV),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,
@@ -162,10 +162,10 @@ Future<void> showRiftSelftestDialog(
               children: [
                 Icon(
                   ok ? Icons.check_circle_outline_rounded : Icons.error_outline_rounded,
-                  size: 26,
+                  size: AppIconSize.xxl,
                   color: accent,
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: AppSpacing.md),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -181,8 +181,7 @@ Future<void> showRiftSelftestDialog(
                       const SizedBox(height: 2),
                       Text(
                         ok ? l.tr('selftest_summary_ok') : l.tr('selftest_summary_fail'),
-                        style: TextStyle(
-                          fontSize: 13,
+                        style: AppTypography.labelBase().copyWith(
                           height: 1.3,
                           color: p.onSurfaceVariant,
                         ),
@@ -192,12 +191,12 @@ Future<void> showRiftSelftestDialog(
                 ),
               ],
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             Container(
-              padding: const EdgeInsets.symmetric(vertical: 4),
+              padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
               decoration: BoxDecoration(
                 color: p.surfaceVariant.withOpacity(0.4),
-                borderRadius: BorderRadius.circular(_kDialogInsetRadius),
+                borderRadius: BorderRadius.circular(AppRadius.md),
               ),
               child: Column(
                 children: [
@@ -235,13 +234,13 @@ Future<void> showRiftSelftestDialog(
                 ],
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: AppSpacing.sm),
             Align(
               alignment: Alignment.centerRight,
               child: TextButton(
                 style: TextButton.styleFrom(
                   foregroundColor: p.primary,
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
                   minimumSize: Size.zero,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
@@ -259,14 +258,14 @@ Future<void> showRiftSelftestDialog(
 Widget _selftestRow(BuildContext context, String label, bool passed) {
   final p = context.palette;
   return Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
     child: Row(
       children: [
         Expanded(
           child: Text(
             label,
-            style: TextStyle(
-              fontSize: 14,
+            style: AppTypography.bodyBase().copyWith(
+              fontSize: AppTypography.bodyLargeSize,
               fontWeight: FontWeight.w600,
               color: p.onSurface,
             ),
@@ -274,7 +273,7 @@ Widget _selftestRow(BuildContext context, String label, bool passed) {
         ),
         Icon(
           passed ? Icons.check_rounded : Icons.close_rounded,
-          size: 20,
+          size: AppIconSize.md,
           color: passed ? p.success : p.error,
         ),
       ],
@@ -285,15 +284,15 @@ Widget _selftestRow(BuildContext context, String label, bool passed) {
 Widget _selftestMetric(BuildContext context, IconData icon, String text) {
   final p = context.palette;
   return Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+    padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
     child: Row(
       children: [
-        Icon(icon, size: 18, color: p.onSurfaceVariant),
-        const SizedBox(width: 8),
+        Icon(icon, size: AppIconSize.sm, color: p.onSurfaceVariant),
+        const SizedBox(width: AppSpacing.sm),
         Expanded(
           child: Text(
             text,
-            style: TextStyle(fontSize: 13, color: p.onSurface),
+            style: AppTypography.labelBase().copyWith(color: p.onSurface),
           ),
         ),
       ],

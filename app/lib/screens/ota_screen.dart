@@ -9,12 +9,12 @@ import '../app_navigator.dart';
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
+import '../theme/design_tokens.dart';
+import '../widgets/app_primitives.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/rift_dialogs.dart';
 
 enum _OtaState { idle, picking, starting, uploading, verifying, done, error }
-
-const double _kOtaScreenOuterPadding = 24;
 
 /// Показывает OTA в модальном диалоге (корневая оболочка — [RiftDialogFrame]).
 Future<void> showOtaDialog(BuildContext context, RiftLinkBle ble) {
@@ -24,7 +24,7 @@ Future<void> showOtaDialog(BuildContext context, RiftLinkBle ble) {
     builder: (ctx) {
       return RiftDialogFrame(
         maxWidth: 400,
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+        padding: const EdgeInsets.fromLTRB(AppSpacing.md, AppSpacing.sm, AppSpacing.md, AppSpacing.md),
         child: SingleChildScrollView(
           child: _OtaFlow(ble: ble, embeddedInDialog: true),
         ),
@@ -48,16 +48,15 @@ class _OtaScreenState extends State<OtaScreen> {
     final l = context.l10n;
     return Scaffold(
       backgroundColor: palette.surface,
-      appBar: AppBar(
-        title: Text(l.tr('firmware_update_title')),
-        backgroundColor: palette.surface,
-        foregroundColor: palette.onSurface,
-        elevation: 0,
+      appBar: riftAppBar(
+        context,
+        title: l.tr('firmware_update_title'),
+        showBack: Navigator.canPop(context),
       ),
       body: MeshBackgroundWrapper(
         child: Center(
           child: Padding(
-            padding: const EdgeInsets.all(_kOtaScreenOuterPadding),
+            padding: const EdgeInsets.all(AppSpacing.xxl),
             child: _OtaFlow(ble: widget.ble),
           ),
         ),
@@ -80,17 +79,11 @@ class _OtaFlow extends StatefulWidget {
 }
 
 class _OtaFlowState extends State<_OtaFlow> {
-  static const double _kRadius = 12;
-  static const double _kIconSize = 64;
-  static const double _kRingSize = 120;
-  static const double _kIndeterminateSpinner = 40;
-  static const double _kUploadStroke = 6;
-  static const double _kIndeterminateStroke = 3;
-  static const double _kGapSm = 8;
-  static const double _kGapMd = 16;
-  static const double _kGapLg = 24;
   static const double _kPanelMaxWidth = 400;
-  static const EdgeInsets _kPanelPadding = EdgeInsets.symmetric(horizontal: 24, vertical: 28);
+  static final EdgeInsets _kPanelPadding = EdgeInsets.symmetric(
+    horizontal: AppSpacing.xxl,
+    vertical: AppSpacing.xxl + AppSpacing.xs,
+  );
 
   _OtaState _state = _OtaState.idle;
   String? _fileName;
@@ -244,41 +237,17 @@ class _OtaFlowState extends State<_OtaFlow> {
 
   double get _progress => _fileSize > 0 ? _bytesWritten / _fileSize : 0;
 
-  TextStyle _titleStyle(AppPalette p) => TextStyle(
-        fontSize: 20,
-        fontWeight: FontWeight.w600,
-        color: p.onSurface,
-      );
+  TextStyle _titleStyle(AppPalette p) => AppTypography.panelTitleBase().copyWith(color: p.onSurface);
 
-  TextStyle _titleStyleAccent(AppPalette p, Color accent) => TextStyle(
-        fontSize: 20,
-        fontWeight: FontWeight.w600,
-        color: accent,
-      );
+  TextStyle _titleStyleAccent(AppPalette p, Color accent) => AppTypography.panelTitleBase().copyWith(color: accent);
 
-  TextStyle _bodyStyle(AppPalette p) => TextStyle(
-        color: p.onSurfaceVariant,
-        fontSize: 14,
-        height: 1.35,
-      );
+  TextStyle _bodyStyle(AppPalette p) => AppTypography.bodyLargeBase().copyWith(color: p.onSurfaceVariant);
 
-  TextStyle _captionStyle(AppPalette p) => TextStyle(
-        color: p.onSurfaceVariant,
-        fontSize: 13,
-        height: 1.3,
-      );
+  TextStyle _captionStyle(AppPalette p) => AppTypography.labelBase().copyWith(color: p.onSurfaceVariant, height: 1.3);
 
-  TextStyle _statusStyle(AppPalette p) => TextStyle(
-        fontSize: 16,
-        color: p.onSurface,
-        height: 1.3,
-      );
+  TextStyle _statusStyle(AppPalette p) => AppTypography.bodyLargeBase().copyWith(color: p.onSurface, height: 1.3);
 
-  TextStyle _progressPercentStyle(AppPalette p) => TextStyle(
-        fontSize: 24,
-        fontWeight: FontWeight.bold,
-        color: p.onSurface,
-      );
+  TextStyle _progressPercentStyle(AppPalette p) => AppTypography.statDisplayBase().copyWith(color: p.onSurface);
 
   Widget _otaPanel(AppPalette p, {required Widget child}) {
     return ConstrainedBox(
@@ -286,7 +255,7 @@ class _OtaFlowState extends State<_OtaFlow> {
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: p.card,
-          borderRadius: BorderRadius.circular(_kRadius),
+          borderRadius: BorderRadius.circular(AppRadius.card),
           border: Border.all(color: p.divider.withOpacity(0.55)),
         ),
         child: Padding(
@@ -299,10 +268,10 @@ class _OtaFlowState extends State<_OtaFlow> {
 
   Widget _indeterminateProgress(AppPalette p) {
     return SizedBox(
-      width: _kIndeterminateSpinner,
-      height: _kIndeterminateSpinner,
+      width: AppOtaLayout.indeterminateSpinner,
+      height: AppOtaLayout.indeterminateSpinner,
       child: CircularProgressIndicator(
-        strokeWidth: _kIndeterminateStroke,
+        strokeWidth: AppOtaLayout.indeterminateStroke,
         color: p.primary,
       ),
     );
@@ -323,7 +292,7 @@ class _OtaFlowState extends State<_OtaFlow> {
             Align(
               alignment: Alignment.centerRight,
               child: IconButton(
-                icon: Icon(Icons.close, color: palette.onSurfaceVariant),
+                icon: Icon(Icons.close, color: palette.onSurfaceVariant, size: AppIconSize.md),
                 tooltip: MaterialLocalizations.of(context).closeButtonTooltip,
                 onPressed: () => Navigator.of(context).pop(),
               ),
@@ -345,21 +314,21 @@ class _OtaFlowState extends State<_OtaFlow> {
             children: [
               Align(
                 alignment: Alignment.center,
-                child: Icon(Icons.system_update_alt, size: _kIconSize, color: palette.primary),
+                child: Icon(Icons.system_update_alt, size: AppOtaLayout.heroIcon, color: palette.primary),
               ),
-              SizedBox(height: _kGapMd),
+              SizedBox(height: AppSpacing.lg),
               Text(
                 l.tr('firmware_update_title'),
                 style: _titleStyle(palette),
                 textAlign: TextAlign.center,
               ),
-              SizedBox(height: _kGapSm),
+              SizedBox(height: AppSpacing.sm),
               Text(
                 l.tr('ota_ble_intro_desc'),
                 style: _bodyStyle(palette),
                 textAlign: TextAlign.center,
               ),
-              SizedBox(height: _kGapLg),
+              SizedBox(height: AppSpacing.xxl),
               FilledButton.icon(
                 onPressed: _pickAndStart,
                 icon: const Icon(Icons.file_open),
@@ -386,14 +355,14 @@ class _OtaFlowState extends State<_OtaFlow> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Align(alignment: Alignment.center, child: _indeterminateProgress(palette)),
-              SizedBox(height: _kGapMd),
+              SizedBox(height: AppSpacing.lg),
               Text(
                 l.tr('ota_state_starting'),
                 style: _statusStyle(palette),
                 textAlign: TextAlign.center,
               ),
               if (_fileName != null) ...[
-                SizedBox(height: _kGapSm),
+                SizedBox(height: AppSpacing.sm),
                 Text(
                   '$_fileName (${(_fileSize / 1024).toStringAsFixed(0)} KB)',
                   style: _captionStyle(palette),
@@ -414,17 +383,17 @@ class _OtaFlowState extends State<_OtaFlow> {
               Align(
                 alignment: Alignment.center,
                 child: SizedBox(
-                  width: _kRingSize,
-                  height: _kRingSize,
+                  width: AppOtaLayout.ring,
+                  height: AppOtaLayout.ring,
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
                       SizedBox(
-                        width: _kRingSize,
-                        height: _kRingSize,
+                        width: AppOtaLayout.ring,
+                        height: AppOtaLayout.ring,
                         child: CircularProgressIndicator(
                           value: _progress,
-                          strokeWidth: _kUploadStroke,
+                          strokeWidth: AppOtaLayout.ringStroke,
                           backgroundColor: palette.divider,
                           color: palette.primary,
                         ),
@@ -437,19 +406,19 @@ class _OtaFlowState extends State<_OtaFlow> {
                   ),
                 ),
               ),
-              SizedBox(height: _kGapMd),
+              SizedBox(height: AppSpacing.lg),
               Text(
                 l.tr('ota_state_uploading'),
                 style: _statusStyle(palette),
                 textAlign: TextAlign.center,
               ),
-              SizedBox(height: _kGapSm),
+              SizedBox(height: AppSpacing.sm),
               Text(
                 '${(_bytesWritten / 1024).toStringAsFixed(0)} / ${(_fileSize / 1024).toStringAsFixed(0)} KB',
                 style: _captionStyle(palette),
                 textAlign: TextAlign.center,
               ),
-              SizedBox(height: _kGapLg),
+              SizedBox(height: AppSpacing.xxl),
               OutlinedButton(
                 onPressed: _abort,
                 child: Text(l.tr('ota_cancel')),
@@ -466,7 +435,7 @@ class _OtaFlowState extends State<_OtaFlow> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Align(alignment: Alignment.center, child: _indeterminateProgress(palette)),
-              SizedBox(height: _kGapMd),
+              SizedBox(height: AppSpacing.lg),
               Text(
                 l.tr('ota_state_verifying'),
                 style: _statusStyle(palette),
@@ -485,21 +454,21 @@ class _OtaFlowState extends State<_OtaFlow> {
             children: [
               Align(
                 alignment: Alignment.center,
-                child: Icon(Icons.check_circle, size: _kIconSize, color: palette.success),
+                child: Icon(Icons.check_circle, size: AppOtaLayout.heroIcon, color: palette.success),
               ),
-              SizedBox(height: _kGapMd),
+              SizedBox(height: AppSpacing.lg),
               Text(
                 l.tr('ota_done_title'),
                 style: _titleStyleAccent(palette, palette.success),
                 textAlign: TextAlign.center,
               ),
-              SizedBox(height: _kGapSm),
+              SizedBox(height: AppSpacing.sm),
               Text(
                 l.tr('ota_done_desc'),
                 style: _bodyStyle(palette),
                 textAlign: TextAlign.center,
               ),
-              SizedBox(height: _kGapLg),
+              SizedBox(height: AppSpacing.xxl),
               FilledButton(
                 onPressed: () => Navigator.of(context).pop(),
                 child: Text(l.tr('ota_done_button')),
@@ -517,21 +486,21 @@ class _OtaFlowState extends State<_OtaFlow> {
             children: [
               Align(
                 alignment: Alignment.center,
-                child: Icon(Icons.error_outline, size: _kIconSize, color: palette.error),
+                child: Icon(Icons.error_outline, size: AppOtaLayout.heroIcon, color: palette.error),
               ),
-              SizedBox(height: _kGapMd),
+              SizedBox(height: AppSpacing.lg),
               Text(
                 l.tr('ota_error_title'),
                 style: _titleStyleAccent(palette, palette.error),
                 textAlign: TextAlign.center,
               ),
-              SizedBox(height: _kGapSm),
+              SizedBox(height: AppSpacing.sm),
               Text(
                 _errorMsg ?? l.tr('ota_unknown_error'),
                 style: _bodyStyle(palette),
                 textAlign: TextAlign.center,
               ),
-              SizedBox(height: _kGapLg),
+              SizedBox(height: AppSpacing.xxl),
               FilledButton(
                 onPressed: () {
                   setState(() {

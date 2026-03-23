@@ -68,13 +68,12 @@ class _StatusChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(chip.icon, size: 13, color: chip.color.withOpacity(0.95)),
+          Icon(chip.icon, size: AppIconSize.compact, color: chip.color.withOpacity(0.95)),
           const SizedBox(width: AppSpacing.xs),
           Text(
             chip.text,
-            style: AppTypography.chipBase().copyWith(
+            style: AppTypography.captionBase().copyWith(
               color: context.palette.onSurfaceVariant,
-              fontSize: 11,
               fontWeight: FontWeight.w500,
             ),
           ),

@@ -32,9 +32,6 @@ import 'settings_hub_screen.dart';
 
 enum _ChatsTab { all, personal, groups, neighbors, archived }
 
-const double _kMenuItemIconSize = 18;
-const double _kMenuItemTitleSize = 14.5;
-const double _kMenuItemSubtitleSize = 12.5;
 const FontWeight _kMenuItemTitleWeight = FontWeight.w600;
 const double _kMenuItemLineHeight = 1.2;
 const double _kMenuItemMinHeight = 38;
@@ -699,11 +696,11 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
           title,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: TextStyle(color: p.onSurface, fontWeight: FontWeight.w600, fontSize: 14.5),
+          style: AppTypography.bodyBase().copyWith(color: p.onSurface, fontWeight: FontWeight.w600),
         ),
         subtitle: Text(
           metric,
-          style: TextStyle(color: p.onSurfaceVariant, fontSize: 12.5, fontWeight: FontWeight.w500),
+          style: AppTypography.chipBase().copyWith(color: p.onSurfaceVariant, fontWeight: FontWeight.w500),
         ),
         trailing: Icon(
           item.hasKey ? Icons.key_rounded : Icons.key_off_rounded,
@@ -1042,10 +1039,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                   padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.sm),
                   child: Text(
                     l.tr('node_status_title'),
-                    style: AppTypography.screenTitleBase().copyWith(
-                      fontSize: 18,
-                      color: p.onSurface,
-                    ),
+                    style: AppTypography.navTitleBase().copyWith(color: p.onSurface),
                   ),
                 ),
                 ...rows.map((r) => ListTile(
@@ -1391,15 +1385,14 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 children: [
                   Row(
                     children: [
-                      Icon(Icons.login_rounded, color: p.primary, size: 20),
+                      Icon(Icons.login_rounded, color: p.primary, size: AppIconSize.md),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
                           l.tr('group_join_by_code'),
-                          style: TextStyle(
+                          style: AppTypography.navTitleBase().copyWith(
                             color: p.onSurface,
                             fontWeight: FontWeight.w700,
-                            fontSize: 17,
                           ),
                         ),
                       ),
@@ -1408,7 +1401,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                   const SizedBox(height: AppSpacing.sm),
                   Text(
                     l.tr('group_invite_code_hint'),
-                    style: TextStyle(color: p.onSurfaceVariant, fontSize: 13),
+                    style: AppTypography.labelBase().copyWith(color: p.onSurfaceVariant),
                   ),
                   const SizedBox(height: AppSpacing.md),
                   TextField(
@@ -1416,7 +1409,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                     autofocus: true,
                     maxLines: 2,
                     minLines: 1,
-                    style: TextStyle(color: p.onSurface),
+                    style: AppTypography.bodyBase().copyWith(color: p.onSurface),
                     decoration: InputDecoration(
                       hintText: 'BASE64...',
                       hintStyle: TextStyle(color: p.onSurfaceVariant.withOpacity(0.8)),
@@ -1448,7 +1441,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                           final data = await Clipboard.getData(Clipboard.kTextPlain);
                           c.text = data?.text?.trim() ?? '';
                         },
-                        icon: const Icon(Icons.content_paste_rounded, size: 18),
+                        icon: const Icon(Icons.content_paste_rounded, size: AppIconSize.sm),
                         label: Text(l.tr('paste')),
                       ),
                       const Spacer(),
@@ -1459,7 +1452,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                       const SizedBox(width: AppSpacing.xs),
                       FilledButton.icon(
                         onPressed: () => Navigator.pop(ctx, true),
-                        icon: const Icon(Icons.check_rounded, size: 18),
+                        icon: const Icon(Icons.check_rounded, size: AppIconSize.sm),
                         label: Text(l.tr('ok')),
                       ),
                     ],
@@ -1506,9 +1499,8 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 const SizedBox(height: AppSpacing.md),
                 Text(
                   l.tr('groups'),
-                  style: TextStyle(
+                  style: AppTypography.navTitleBase().copyWith(
                     color: p.onSurface,
-                    fontSize: 17,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
@@ -1522,7 +1514,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                   title: Text(
                     l.tr('group_create'),
                     style: const TextStyle(
-                      fontSize: _kMenuItemTitleSize,
+                      fontSize: AppTypography.bodySize,
                       fontWeight: _kMenuItemTitleWeight,
                       height: _kMenuItemLineHeight,
                     ),
@@ -1541,7 +1533,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                   title: Text(
                     l.tr('group_join_by_code'),
                     style: const TextStyle(
-                      fontSize: _kMenuItemTitleSize,
+                      fontSize: AppTypography.bodySize,
                       fontWeight: _kMenuItemTitleWeight,
                       height: _kMenuItemLineHeight,
                     ),
@@ -1560,7 +1552,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                   title: Text(
                     l.tr('groups'),
                     style: const TextStyle(
-                      fontSize: _kMenuItemTitleSize,
+                      fontSize: AppTypography.bodySize,
                       fontWeight: _kMenuItemTitleWeight,
                       height: _kMenuItemLineHeight,
                     ),
@@ -1599,7 +1591,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
               controller: controller,
               padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.lg),
               children: [
-                Text(l.tr('compose_message'), style: TextStyle(color: p.onSurface, fontWeight: FontWeight.w700, fontSize: 17)),
+                Text(l.tr('compose_message'), style: AppTypography.bodyLargeBase().copyWith(color: p.onSurface, fontWeight: FontWeight.w700)),
                 const SizedBox(height: AppSpacing.md),
                 _sheetSectionTitle(ctx, l.tr('new_chat_contacts')),
                 ...contacts.map((c) => _sheetActionTile(
@@ -1676,10 +1668,9 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       padding: const EdgeInsets.fromLTRB(8, AppSpacing.xs, 8, AppSpacing.xs),
       child: Text(
         text,
-        style: TextStyle(
+        style: AppTypography.chipBase().copyWith(
           color: context.palette.onSurfaceVariant,
           fontWeight: FontWeight.w600,
-          fontSize: 12,
         ),
       ),
     );
@@ -1696,7 +1687,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         text,
         style: TextStyle(
           color: p.onSurfaceVariant,
-          fontSize: _kMenuItemSubtitleSize,
+          fontSize: AppTypography.chipSize,
           fontWeight: _kMenuItemTitleWeight,
         ),
       ),
@@ -1716,12 +1707,12 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
       minTileHeight: _kMenuItemMinHeight,
       visualDensity: _kMenuItemDensity,
       contentPadding: _kMenuItemPadding,
-      leading: Icon(icon, size: _kMenuItemIconSize, color: p.onSurfaceVariant),
+      leading: Icon(icon, size: AppIconSize.sm, color: p.onSurfaceVariant),
       title: Text(
         title,
         style: TextStyle(
           color: p.onSurface,
-          fontSize: _kMenuItemTitleSize,
+          fontSize: AppTypography.bodySize,
           fontWeight: _kMenuItemTitleWeight,
           height: _kMenuItemLineHeight,
         ),
@@ -1732,7 +1723,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
               subtitle,
               style: TextStyle(
                 color: p.onSurfaceVariant,
-                fontSize: _kMenuItemSubtitleSize,
+                fontSize: AppTypography.chipSize,
                 fontFamily: 'monospace',
                 height: _kMenuItemLineHeight,
               ),
@@ -1750,14 +1741,13 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.group_outlined, size: 56, color: p.onSurfaceVariant.withOpacity(0.38)),
+              Icon(Icons.group_outlined, size: AppIconSize.emptyStateLarge, color: p.onSurfaceVariant.withOpacity(0.38)),
               const SizedBox(height: AppSpacing.sm),
               Text(
                 l.tr('no_groups'),
                 textAlign: TextAlign.center,
-                style: TextStyle(
+                style: AppTypography.bodyBase().copyWith(
                   color: p.onSurfaceVariant.withOpacity(0.95),
-                  fontSize: 15,
                   fontWeight: FontWeight.w500,
                 ),
               ),
@@ -1772,7 +1762,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                       minimumSize: const Size(220, 44),
                     ),
                     onPressed: widget.ble.isTransportConnected ? _createGroupFromFab : null,
-                    icon: const Icon(Icons.group_add_rounded, size: 18),
+                    icon: const Icon(Icons.group_add_rounded, size: AppIconSize.sm),
                     label: Text(l.tr('group_create')),
                   ),
                   OutlinedButton.icon(
@@ -1864,15 +1854,14 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 padding: const EdgeInsets.fromLTRB(AppSpacing.md, AppSpacing.md, AppSpacing.md, AppSpacing.sm),
                 child: Row(
                   children: [
-                    Icon(Icons.forum_outlined, color: p.primary, size: 20),
+                    Icon(Icons.forum_outlined, color: p.primary, size: AppIconSize.md),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
                         l.tr('chats_list_title'),
-                        style: TextStyle(
+                        style: AppTypography.navTitleBase().copyWith(
                           color: p.onSurface,
                           fontWeight: FontWeight.w700,
-                          fontSize: 17,
                         ),
                       ),
                     ),
@@ -1884,10 +1873,9 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                       ),
                       child: Text(
                         '${allChatsForDrawer.length}',
-                        style: TextStyle(
+                        style: AppTypography.chipBase().copyWith(
                           color: p.primary,
                           fontWeight: FontWeight.w700,
-                          fontSize: 12,
                         ),
                       ),
                     ),
@@ -1995,15 +1983,14 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
             children: [
               Row(
                 children: [
-                  Icon(Icons.tune_rounded, color: p.primary, size: 20),
+                  Icon(Icons.tune_rounded, color: p.primary, size: AppIconSize.md),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
                       l.tr('menu_title'),
-                      style: TextStyle(
+                      style: AppTypography.navTitleBase().copyWith(
                         color: p.onSurface,
                         fontWeight: FontWeight.w700,
-                        fontSize: 17,
                       ),
                     ),
                   ),
@@ -2015,11 +2002,11 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 minTileHeight: _kMenuItemMinHeight,
                 visualDensity: _kMenuItemDensity,
                 contentPadding: _kMenuItemPadding,
-                leading: const Icon(_kContactsPageIcon, size: 18),
+                leading: const Icon(_kContactsPageIcon, size: AppIconSize.sm),
                 title: Text(
                   l.tr('contacts'),
                   style: const TextStyle(
-                    fontSize: _kMenuItemTitleSize,
+                    fontSize: AppTypography.bodySize,
                     fontWeight: _kMenuItemTitleWeight,
                     height: _kMenuItemLineHeight,
                   ),
@@ -2038,7 +2025,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 title: Text(
                   l.tr('groups'),
                   style: const TextStyle(
-                    fontSize: _kMenuItemTitleSize,
+                    fontSize: AppTypography.bodySize,
                     fontWeight: _kMenuItemTitleWeight,
                     height: _kMenuItemLineHeight,
                   ),
@@ -2057,7 +2044,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 title: Text(
                   l.tr('tools'),
                   style: const TextStyle(
-                    fontSize: _kMenuItemTitleSize,
+                    fontSize: AppTypography.bodySize,
                     fontWeight: _kMenuItemTitleWeight,
                     height: _kMenuItemLineHeight,
                   ),
@@ -2106,7 +2093,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 title: Text(
                   l.tr('chat_menu_node_status'),
                   style: const TextStyle(
-                    fontSize: _kMenuItemTitleSize,
+                    fontSize: AppTypography.bodySize,
                     fontWeight: _kMenuItemTitleWeight,
                     height: _kMenuItemLineHeight,
                   ),
@@ -2125,7 +2112,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 title: Text(
                   l.tr('settings'),
                   style: const TextStyle(
-                    fontSize: _kMenuItemTitleSize,
+                    fontSize: AppTypography.bodySize,
                     fontWeight: _kMenuItemTitleWeight,
                     height: _kMenuItemLineHeight,
                   ),
@@ -2145,7 +2132,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                 title: Text(
                   l.tr('disconnect'),
                   style: TextStyle(
-                    fontSize: _kMenuItemTitleSize,
+                    fontSize: AppTypography.bodySize,
                     fontWeight: _kMenuItemTitleWeight,
                     height: _kMenuItemLineHeight,
                     color: p.error,
@@ -2184,7 +2171,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                   controller: _searchController,
                   focusNode: _searchFocusNode,
                   autofocus: true,
-                  style: TextStyle(color: p.onSurface, fontSize: 15.5),
+                  style: AppTypography.bodyBase().copyWith(color: p.onSurface),
                   decoration: InputDecoration(
                     hintText: l.tr('search_chats'),
                     border: InputBorder.none,
@@ -2206,19 +2193,18 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(tabMeta.icon, size: 21, color: p.primary),
+                      Icon(tabMeta.icon, size: AppIconSize.lg, color: p.primary),
                       const SizedBox(width: 10),
                       Text(
                         tabMeta.title,
-                        style: TextStyle(
+                        style: AppTypography.navTitleBase().copyWith(
                           color: p.onSurface,
-                          fontSize: 17,
                           fontWeight: FontWeight.w700,
                           letterSpacing: 0.1,
                         ),
                       ),
                       const SizedBox(width: 2),
-                      Icon(Icons.expand_more_rounded, size: 21, color: p.onSurfaceVariant),
+                      Icon(Icons.expand_more_rounded, size: AppIconSize.lg, color: p.onSurfaceVariant),
                     ],
                   ),
                 ),
@@ -2228,7 +2214,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
             padding: const EdgeInsets.only(right: 2),
             child: IconButton(
               visualDensity: VisualDensity.compact,
-              iconSize: 23,
+              iconSize: AppIconSize.lg,
               tooltip: l.tr('search_chats'),
               icon: Icon(_searchMode ? Icons.close : Icons.search_rounded),
               onPressed: _toggleSearch,
@@ -2238,7 +2224,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
             padding: const EdgeInsets.only(right: 8),
             child: IconButton(
               visualDensity: VisualDensity.compact,
-              iconSize: 23,
+              iconSize: AppIconSize.lg,
               tooltip: l.tr('menu_title'),
               icon: const Icon(Icons.tune_rounded),
               onPressed: _showTopMenu,
@@ -2283,16 +2269,15 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                               children: [
                                 Icon(
                                   Icons.radar_rounded,
-                                  size: 52,
+                                  size: AppIconSize.emptyStateMedium,
                                   color: p.onSurfaceVariant.withOpacity(0.38),
                                 ),
                                 const SizedBox(height: AppSpacing.sm),
                                 Text(
                                   l.tr('chat_preview_empty'),
                                   textAlign: TextAlign.center,
-                                  style: TextStyle(
+                                  style: AppTypography.bodyBase().copyWith(
                                     color: p.onSurfaceVariant.withOpacity(0.95),
-                                    fontSize: 15,
                                     fontWeight: FontWeight.w500,
                                   ),
                                 ),
@@ -2313,16 +2298,15 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
                                 children: [
                                   Icon(
                                     Icons.chat_outlined,
-                                    size: 56,
+                                    size: AppIconSize.emptyStateLarge,
                                     color: p.onSurfaceVariant.withOpacity(0.38),
                                   ),
                                   const SizedBox(height: AppSpacing.sm),
                                   Text(
                                     l.tr('chat_preview_empty'),
                                     textAlign: TextAlign.center,
-                                    style: TextStyle(
+                                    style: AppTypography.bodyBase().copyWith(
                                       color: p.onSurfaceVariant.withOpacity(0.95),
-                                      fontSize: 15,
                                       fontWeight: FontWeight.w500,
                                     ),
                                   ),
@@ -2572,7 +2556,7 @@ class _ConversationTile extends StatelessWidget {
                   groupRole == 'owner'
                       ? Icons.workspace_premium_rounded
                       : (groupRole == 'admin' ? Icons.admin_panel_settings_rounded : Icons.shield_outlined),
-                  size: 14,
+                  size: AppIconSize.compact,
                   color: (groupRole == 'owner' || groupRole == 'admin') ? p.primary : p.onSurfaceVariant,
                 ),
                 const SizedBox(width: 6),
@@ -2583,10 +2567,9 @@ class _ConversationTile extends StatelessWidget {
             subtitleText,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(
+            style: AppTypography.labelBase().copyWith(
               color: hasUnread ? p.onSurfaceVariant.withOpacity(0.98) : p.onSurfaceVariant.withOpacity(0.92),
               fontWeight: hasUnread ? FontWeight.w500 : FontWeight.w400,
-              fontSize: 13,
             ),
           ),
           trailing: Row(
@@ -2595,9 +2578,8 @@ class _ConversationTile extends StatelessWidget {
               if (timeText.isNotEmpty)
                 Text(
                   timeText,
-                  style: TextStyle(
+                  style: AppTypography.captionDenseBase().copyWith(
                     color: hasUnread ? kindTint.withOpacity(0.95) : p.onSurfaceVariant,
-                    fontSize: 10.5,
                     fontWeight: hasUnread ? FontWeight.w600 : FontWeight.w500,
                   ),
                 ),
@@ -2605,10 +2587,10 @@ class _ConversationTile extends StatelessWidget {
                   (isPinned || conversation.muted || hasUnread))
                 const SizedBox(width: 7),
               if (isPinned)
-                Icon(Icons.push_pin_rounded, size: 15, color: p.primary.withOpacity(0.9)),
+                Icon(Icons.push_pin_rounded, size: AppIconSize.compact, color: p.primary.withOpacity(0.9)),
               if (conversation.muted) const SizedBox(width: 4),
               if (conversation.muted)
-                Icon(Icons.notifications_off_rounded, size: 15, color: p.onSurfaceVariant),
+                Icon(Icons.notifications_off_rounded, size: AppIconSize.compact, color: p.onSurfaceVariant),
               if (hasUnread) const SizedBox(width: 7),
               if (hasUnread)
                 Container(
@@ -2622,10 +2604,9 @@ class _ConversationTile extends StatelessWidget {
                   child: Text(
                     '${conversation.unreadCount}',
                     textAlign: TextAlign.center,
-                    style: TextStyle(
+                    style: AppTypography.captionBase().copyWith(
                       color: kindTint.withOpacity(0.98),
                       fontWeight: FontWeight.w700,
-                      fontSize: 11,
                     ),
                   ),
                 ),
@@ -2775,15 +2756,14 @@ class _DrawerSectionLabel extends StatelessWidget {
       child: Row(
         children: [
           if (icon != null) ...[
-            Icon(icon, size: 14, color: context.palette.onSurfaceVariant),
+            Icon(icon, size: AppIconSize.compact, color: context.palette.onSurfaceVariant),
             const SizedBox(width: 6),
           ],
           Text(
             label,
-            style: TextStyle(
+            style: AppTypography.chipBase().copyWith(
               color: context.palette.onSurfaceVariant,
               fontWeight: FontWeight.w600,
-              fontSize: 12,
               letterSpacing: 0.25,
             ),
           ),
@@ -2823,7 +2803,7 @@ class _DrawerNavItem extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
             child: Row(
               children: [
-                Icon(icon, size: _kMenuItemIconSize, color: selected ? p.primary : p.onSurfaceVariant),
+                Icon(icon, size: AppIconSize.sm, color: selected ? p.primary : p.onSurfaceVariant),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
@@ -2831,7 +2811,7 @@ class _DrawerNavItem extends StatelessWidget {
                     style: TextStyle(
                       color: p.onSurface,
                       fontWeight: selected ? FontWeight.w700 : _kMenuItemTitleWeight,
-                      fontSize: _kMenuItemTitleSize,
+                      fontSize: AppTypography.bodySize,
                       height: _kMenuItemLineHeight,
                     ),
                   ),
@@ -2881,16 +2861,15 @@ class _DrawerConversationTile extends StatelessWidget {
               ConversationKind.broadcast => Icons.campaign_rounded,
             },
             color: selected ? p.primary : p.onSurfaceVariant,
-            size: 18,
+            size: AppIconSize.sm,
           ),
           title: Text(
             title,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: TextStyle(
+            style: AppTypography.bodyLargeBase().copyWith(
               color: selected ? p.onSurface : null,
               fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-              fontSize: 14,
             ),
           ),
           subtitle: conversation.lastMessagePreview == null || conversation.lastMessagePreview!.isEmpty
@@ -2899,7 +2878,7 @@ class _DrawerConversationTile extends StatelessWidget {
                   conversation.lastMessagePreview!,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(color: p.onSurfaceVariant, fontSize: 12.5),
+                  style: AppTypography.chipBase().copyWith(color: p.onSurfaceVariant),
                 ),
           trailing: conversation.unreadCount > 0
               ? Container(
@@ -2910,8 +2889,7 @@ class _DrawerConversationTile extends StatelessWidget {
                   ),
                   child: Text(
                     '${conversation.unreadCount}',
-                    style: TextStyle(
-                      fontSize: 12,
+                    style: AppTypography.chipBase().copyWith(
                       fontWeight: FontWeight.w600,
                       color: p.primary.withOpacity(0.92),
                     ),
@@ -2943,11 +2921,11 @@ class _RightDrawerActionTile extends StatelessWidget {
       minTileHeight: _kMenuItemMinHeight,
       visualDensity: _kMenuItemDensity,
       contentPadding: _kMenuItemPadding,
-      leading: Icon(icon, size: _kMenuItemIconSize),
+      leading: Icon(icon, size: AppIconSize.sm),
       title: Text(
         label,
         style: const TextStyle(
-          fontSize: _kMenuItemTitleSize,
+          fontSize: AppTypography.bodySize,
           fontWeight: _kMenuItemTitleWeight,
           height: _kMenuItemLineHeight,
         ),

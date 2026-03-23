@@ -8,6 +8,7 @@ import 'package:latlong2/latlong.dart';
 import '../ble/riftlink_ble.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
+import '../theme/design_tokens.dart';
 import '../widgets/app_primitives.dart';
 
 class MapScreen extends StatefulWidget {
@@ -64,6 +65,7 @@ class _MapScreenState extends State<MapScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.radar),
+            iconSize: AppIconSize.md,
             tooltip: context.l10n.tr('geofence_send'),
             onPressed: () async {
               try {
@@ -83,7 +85,11 @@ class _MapScreenState extends State<MapScreen> {
               } catch (_) {}
             },
           ),
-          IconButton(icon: const Icon(Icons.my_location), tooltip: context.l10n.tr('map_my_location'), onPressed: () async {
+          IconButton(
+            icon: const Icon(Icons.my_location),
+            iconSize: AppIconSize.md,
+            tooltip: context.l10n.tr('map_my_location'),
+            onPressed: () async {
             try {
               final pos = await Geolocator.getCurrentPosition();
               setState(() {
@@ -92,7 +98,8 @@ class _MapScreenState extends State<MapScreen> {
                 _mapRecenterEpoch++;
               });
             } catch (_) {}
-          }),
+            },
+          ),
         ],
       ),
       body: MeshBackgroundWrapper(
@@ -108,11 +115,21 @@ class _MapScreenState extends State<MapScreen> {
             ..._nodes.entries.map((e) => Marker(
               point: LatLng(e.value.lat, e.value.lon), width: 80, height: 44,
               child: Tooltip(message: e.key, child: Column(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.radio_button_checked, color: p.primary, size: 32),
-                Text(e.key, style: TextStyle(fontSize: 10, fontFamily: 'monospace', color: p.onSurface), overflow: TextOverflow.ellipsis),
+                Icon(Icons.radio_button_checked, color: p.primary, size: AppIconSize.mapMarker),
+                Text(
+                  e.key,
+                  style: AppTypography.captionDenseBase().copyWith(fontFamily: 'monospace', color: p.onSurface),
+                  overflow: TextOverflow.ellipsis,
+                ),
               ])),
             )),
-            if (_myLocation != null) Marker(point: _myLocation!, width: 40, height: 40, child: Icon(Icons.person_pin_circle, color: p.success, size: 40)),
+            if (_myLocation != null)
+              Marker(
+                point: _myLocation!,
+                width: AppIconSize.mapUserPin,
+                height: AppIconSize.mapUserPin,
+                child: Icon(Icons.person_pin_circle, color: p.success, size: AppIconSize.mapUserPin),
+              ),
           ]),
         ],
       ),
@@ -125,11 +142,15 @@ class _MapScreenState extends State<MapScreen> {
               color: p.card,
               border: Border(top: BorderSide(color: p.divider)),
             ),
-            padding: const EdgeInsets.all(24),
+            padding: const EdgeInsets.all(AppSpacing.xxl),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Icon(Icons.location_off, size: 48, color: p.onSurfaceVariant.withOpacity(0.45)),
-              const SizedBox(height: 12),
-              Text(context.l10n.tr('map_waiting'), textAlign: TextAlign.center, style: TextStyle(color: p.onSurfaceVariant, fontSize: 14, height: 1.4)),
+              Icon(Icons.location_off, size: AppIconSize.emptyStateHero, color: p.onSurfaceVariant.withOpacity(0.45)),
+              const SizedBox(height: AppSpacing.md),
+              Text(
+                context.l10n.tr('map_waiting'),
+                textAlign: TextAlign.center,
+                style: AppTypography.bodyLargeBase().copyWith(color: p.onSurfaceVariant, height: 1.4),
+              ),
             ]),
           )
         : null,

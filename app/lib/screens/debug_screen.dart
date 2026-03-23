@@ -10,6 +10,8 @@ import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
 import '../prefs/mesh_prefs.dart';
 import '../theme/app_theme.dart';
+import '../theme/design_tokens.dart';
+import '../widgets/app_primitives.dart';
 
 class DebugScreen extends StatefulWidget {
   const DebugScreen({super.key});
@@ -19,13 +21,6 @@ class DebugScreen extends StatefulWidget {
 }
 
 class _DebugScreenState extends State<DebugScreen> {
-  static const double _kScreenPadH = 16;
-  static const double _kScreenPadV = 12;
-  static const double _kScreenPadBottom = 24;
-  static const double _kSectionGap = 20;
-  static const double _kRowGap = 8;
-  static const double _kCardRadius = 12;
-
   int _voiceAcceptMaxAvgLossPercent = 20;
   int _voiceAcceptMaxHardLossPercent = 15;
   int _voiceAcceptMinSessions = 5;
@@ -346,26 +341,25 @@ class _DebugScreenState extends State<DebugScreen> {
   Widget _sectionTitle(BuildContext context, String title) {
     final p = context.palette;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.only(bottom: AppSpacing.sm),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Container(
             width: 3,
-            height: 18,
+            height: AppIconSize.sm,
             decoration: BoxDecoration(
               color: p.primary,
               borderRadius: BorderRadius.circular(2),
             ),
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: AppSpacing.md),
           Expanded(
             child: Text(
               title,
-              style: TextStyle(
+              style: AppTypography.bodyLargeBase().copyWith(
                 color: p.onSurface,
                 fontWeight: FontWeight.w700,
-                fontSize: 14,
                 height: 1.25,
               ),
             ),
@@ -379,21 +373,16 @@ class _DebugScreenState extends State<DebugScreen> {
     final p = context.palette;
     final o = _dividerOpacity(context);
     return Container(
-      margin: const EdgeInsets.only(bottom: _kRowGap),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      margin: const EdgeInsets.only(bottom: AppSpacing.sm),
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.md),
       decoration: BoxDecoration(
         color: p.card,
-        borderRadius: BorderRadius.circular(_kCardRadius),
+        borderRadius: BorderRadius.circular(AppRadius.card),
         border: Border.all(color: p.divider.withOpacity(o)),
       ),
       child: Text(
         text,
-        style: TextStyle(
-          color: p.onSurface,
-          fontFamily: 'monospace',
-          fontSize: 12,
-          height: 1.35,
-        ),
+        style: AppTypography.monoBase().copyWith(color: p.onSurface),
       ),
     );
   }
@@ -406,11 +395,11 @@ class _DebugScreenState extends State<DebugScreen> {
     final p = context.palette;
     final o = _dividerOpacity(context);
     return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      margin: const EdgeInsets.only(bottom: AppSpacing.sm),
+      padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.md),
       decoration: BoxDecoration(
         color: p.surfaceVariant,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(AppRadius.md),
         border: Border.all(color: p.divider.withOpacity(o)),
       ),
       child: Column(
@@ -418,22 +407,12 @@ class _DebugScreenState extends State<DebugScreen> {
         children: [
           Text(
             thresholdsLine,
-            style: TextStyle(
-              color: p.onSurfaceVariant,
-              fontSize: 11,
-              fontFamily: 'monospace',
-              height: 1.35,
-            ),
+            style: AppTypography.monoSmallBase().copyWith(color: p.onSurfaceVariant),
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: AppSpacing.xs),
           Text(
             summaryLine,
-            style: TextStyle(
-              color: p.onSurfaceVariant,
-              fontSize: 11,
-              fontFamily: 'monospace',
-              height: 1.35,
-            ),
+            style: AppTypography.monoSmallBase().copyWith(color: p.onSurfaceVariant),
           ),
         ],
       ),
@@ -445,20 +424,16 @@ class _DebugScreenState extends State<DebugScreen> {
     final o = _dividerOpacity(context);
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 16),
+      padding: const EdgeInsets.symmetric(vertical: AppSpacing.xxl + AppSpacing.xs, horizontal: AppSpacing.lg),
       decoration: BoxDecoration(
         color: p.surfaceVariant,
-        borderRadius: BorderRadius.circular(_kCardRadius),
+        borderRadius: BorderRadius.circular(AppRadius.card),
         border: Border.all(color: p.divider.withOpacity(o)),
       ),
       child: Text(
         context.l10n.tr('debug_waiting_events'),
         textAlign: TextAlign.center,
-        style: TextStyle(
-          color: p.onSurfaceVariant,
-          fontSize: 14,
-          height: 1.35,
-        ),
+        style: AppTypography.bodyLargeBase().copyWith(color: p.onSurfaceVariant),
       ),
     );
   }
@@ -492,15 +467,14 @@ class _DebugScreenState extends State<DebugScreen> {
 
     return Scaffold(
       backgroundColor: p.surface,
-      appBar: AppBar(
-        backgroundColor: p.surface,
-        foregroundColor: p.onSurface,
-        elevation: 0,
-        iconTheme: IconThemeData(color: p.onSurface),
-        title: Text(context.l10n.tr('debug_log_title')),
+      appBar: riftAppBar(
+        context,
+        title: context.l10n.tr('debug_log_title'),
+        showBack: Navigator.canPop(context),
         actions: [
           IconButton(
             tooltip: context.l10n.tr('copy'),
+            iconSize: AppIconSize.md,
             onPressed: () async {
               final text = _exportSnapshot();
               await Clipboard.setData(ClipboardData(text: text));
@@ -513,6 +487,7 @@ class _DebugScreenState extends State<DebugScreen> {
           ),
           IconButton(
             tooltip: 'Clear',
+            iconSize: AppIconSize.md,
             onPressed: () => setState(() {
               _lines.clear();
               _traceByMsgId.clear();
@@ -524,12 +499,12 @@ class _DebugScreenState extends State<DebugScreen> {
         ],
       ),
       body: ListView(
-        padding: const EdgeInsets.fromLTRB(_kScreenPadH, _kScreenPadV, _kScreenPadH, _kScreenPadBottom),
+        padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.xxl),
         children: [
           if (traceRows.isNotEmpty) ...[
             _sectionTitle(context, 'Proof-of-Relay table (msgId)'),
             ...traceRows.take(60).map((row) => _buildTraceRow(context, row)),
-            const SizedBox(height: _kSectionGap),
+            const SizedBox(height: AppSpacing.xl),
           ],
           if (voiceRows.isNotEmpty) ...[
             _sectionTitle(context, 'Voice RX diagnostics'),
@@ -541,11 +516,11 @@ class _DebugScreenState extends State<DebugScreen> {
                   'summary PASS=${voiceVerdicts['PASS']} WARN=${voiceVerdicts['WARN']} FAIL=${voiceVerdicts['FAIL']} WARMUP=${voiceVerdicts['WARMUP']}',
             ),
             ...voiceRows.take(40).map((row) => _buildVoiceDiagRow(context, row)),
-            const SizedBox(height: _kSectionGap),
+            const SizedBox(height: AppSpacing.xl),
           ],
           if (_lines.isEmpty)
             Padding(
-              padding: const EdgeInsets.only(top: 20),
+              padding: const EdgeInsets.only(top: AppSpacing.xl),
               child: _emptyEventsPlaceholder(context),
             )
           else

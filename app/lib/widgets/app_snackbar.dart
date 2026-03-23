@@ -2,11 +2,12 @@ import 'package:flutter/material.dart';
 
 import '../app_navigator.dart';
 import '../theme/app_theme.dart';
+import '../theme/design_tokens.dart';
 
-// Единые токены overlay-слоёв (см. app_popover_menu, rift_dialogs).
-const double _kOverlayRadius = 16;
-const EdgeInsets _kSnackContentPadding =
-    EdgeInsets.symmetric(horizontal: 16, vertical: 14);
+final EdgeInsets _kSnackContentPadding = EdgeInsets.symmetric(
+  horizontal: AppSpacing.lg,
+  vertical: AppSpacing.buttonPrimaryV,
+);
 
 /// Тип тоста — единая палитра по всему приложению.
 enum AppSnackKind {
@@ -19,7 +20,11 @@ enum AppSnackKind {
 }
 
 /// Отступ для тоста над плавающей панелью ввода в чате / полноэкранными оверлеями.
-const EdgeInsets kSnackBarMarginChat = EdgeInsets.only(left: 16, right: 16, bottom: 100);
+final EdgeInsets kSnackBarMarginChat = EdgeInsets.only(
+  left: AppSpacing.lg,
+  right: AppSpacing.lg,
+  bottom: 100,
+);
 
 /// Единый стиль SnackBar: скругление, отступы, тени, палитра.
 void showAppSnackBar(
@@ -27,7 +32,7 @@ void showAppSnackBar(
   String message, {
   AppSnackKind kind = AppSnackKind.neutral,
   Duration duration = const Duration(seconds: 3),
-  EdgeInsetsGeometry margin = const EdgeInsets.fromLTRB(16, 0, 16, 20),
+  EdgeInsetsGeometry margin = const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xl),
 }) {
   if (!context.mounted) return;
   final messenger = ScaffoldMessenger.of(context);
@@ -55,16 +60,16 @@ void showAppSnackBar(
     SnackBar(
       content: Text(
         message,
-        style: TextStyle(color: fg, fontSize: 15, height: 1.35),
+        style: AppTypography.bodyBase().copyWith(color: fg),
       ),
       backgroundColor: bg,
       behavior: SnackBarBehavior.floating,
       margin: margin,
       padding: _kSnackContentPadding,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(_kOverlayRadius),
+        borderRadius: BorderRadius.circular(AppRadius.overlay),
       ),
-      elevation: 8,
+      elevation: AppElevation.snackBar,
       duration: duration,
     ),
   );
@@ -74,7 +79,7 @@ void showGlobalAppSnackBar(
   String message, {
   AppSnackKind kind = AppSnackKind.neutral,
   Duration duration = const Duration(seconds: 3),
-  EdgeInsetsGeometry margin = const EdgeInsets.fromLTRB(16, 0, 16, 20),
+  EdgeInsetsGeometry margin = const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xl),
 }) {
   final messenger = scaffoldMessengerKey.currentState;
   final context = navigatorKey.currentContext;
@@ -103,16 +108,16 @@ void showGlobalAppSnackBar(
     SnackBar(
       content: Text(
         message,
-        style: TextStyle(color: fg, fontSize: 15, height: 1.35),
+        style: AppTypography.bodyBase().copyWith(color: fg),
       ),
       backgroundColor: bg,
       behavior: SnackBarBehavior.floating,
       margin: margin,
       padding: _kSnackContentPadding,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(_kOverlayRadius),
+        borderRadius: BorderRadius.circular(AppRadius.overlay),
       ),
-      elevation: 8,
+      elevation: AppElevation.snackBar,
       duration: duration,
     ),
   );

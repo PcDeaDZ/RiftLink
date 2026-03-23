@@ -128,37 +128,36 @@ class _RiftLinkAppState extends State<RiftLinkApp> {
                         constraints: const BoxConstraints(maxWidth: 420),
                         child: Card(
                           color: p.card,
-                          margin: const EdgeInsets.symmetric(horizontal: 20),
+                          margin: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
                           child: Padding(
-                            padding: const EdgeInsets.all(24),
+                            padding: const EdgeInsets.all(AppSpacing.xxl),
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Icon(
                                   Icons.portable_wifi_off_rounded,
-                                  size: 38,
+                                  size: AppIconSize.mapUserPin,
                                   color: p.error,
                                 ),
-                                const SizedBox(height: 12),
+                                const SizedBox(height: AppSpacing.md),
                                 Text(
                                   l.tr('reconnect_failed_modal_title'),
                                   textAlign: TextAlign.center,
-                                  style: TextStyle(
+                                  style: AppTypography.navTitleBase().copyWith(
                                     color: p.onSurface,
-                                    fontSize: 18,
                                     fontWeight: FontWeight.w700,
                                   ),
                                 ),
-                                const SizedBox(height: 8),
+                                const SizedBox(height: AppSpacing.sm),
                                 Text(
                                   l.tr('reconnect_failed_modal_subtitle'),
                                   textAlign: TextAlign.center,
-                                  style: TextStyle(
+                                  style: AppTypography.bodyBase().copyWith(
                                     color: p.onSurfaceVariant,
                                     height: 1.35,
                                   ),
                                 ),
-                                const SizedBox(height: 16),
+                                const SizedBox(height: AppSpacing.lg),
                                 SizedBox(
                                   width: double.infinity,
                                   child: FilledButton.icon(
@@ -169,7 +168,7 @@ class _RiftLinkAppState extends State<RiftLinkApp> {
                                     label: Text(l.tr('reconnect_action_retry')),
                                   ),
                                 ),
-                                const SizedBox(height: 8),
+                                const SizedBox(height: AppSpacing.sm),
                                 SizedBox(
                                   width: double.infinity,
                                   child: OutlinedButton.icon(
@@ -219,18 +218,18 @@ class _RiftLinkAppState extends State<RiftLinkApp> {
                         child: ConstrainedBox(
                           constraints: const BoxConstraints(maxWidth: 460),
                           child: Card(
-                            margin: const EdgeInsets.symmetric(horizontal: 18),
+                            margin: const EdgeInsets.symmetric(horizontal: AppSpacing.lg + 2),
                             clipBehavior: Clip.antiAlias,
                             color: p.card.withOpacity(0.97),
                             shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(16),
+                              borderRadius: BorderRadius.circular(AppRadius.overlay),
                               side: BorderSide(color: p.divider),
                             ),
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 Padding(
-                                  padding: const EdgeInsets.fromLTRB(16, 16, 12, 12),
+                                  padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.lg, AppSpacing.md, AppSpacing.md),
                                   child: Row(
                                     children: [
                                       SizedBox(
@@ -251,9 +250,8 @@ class _RiftLinkAppState extends State<RiftLinkApp> {
                                               l.tr('reconnect_failed'),
                                               maxLines: 1,
                                               overflow: TextOverflow.ellipsis,
-                                              style: TextStyle(
+                                              style: AppTypography.bodyBase().copyWith(
                                                 color: p.onSurface,
-                                                fontSize: 15,
                                                 fontWeight: FontWeight.w700,
                                               ),
                                             ),
@@ -262,9 +260,8 @@ class _RiftLinkAppState extends State<RiftLinkApp> {
                                               l.tr('reconnecting_compact'),
                                               maxLines: 1,
                                               overflow: TextOverflow.ellipsis,
-                                              style: TextStyle(
+                                              style: AppTypography.labelBase().copyWith(
                                                 color: p.onSurfaceVariant,
-                                                fontSize: 13.5,
                                                 fontWeight: FontWeight.w500,
                                               ),
                                             ),
@@ -280,9 +277,8 @@ class _RiftLinkAppState extends State<RiftLinkApp> {
                                         ),
                                         child: Text(
                                           '${state.attempt}/3',
-                                          style: TextStyle(
+                                          style: AppTypography.labelBase().copyWith(
                                             color: p.primary,
-                                            fontSize: 13,
                                             fontWeight: FontWeight.w700,
                                           ),
                                         ),
@@ -292,8 +288,8 @@ class _RiftLinkAppState extends State<RiftLinkApp> {
                                 ),
                                 ClipRRect(
                                   borderRadius: const BorderRadius.only(
-                                    bottomLeft: Radius.circular(16),
-                                    bottomRight: Radius.circular(16),
+                                    bottomLeft: Radius.circular(AppRadius.overlay),
+                                    bottomRight: Radius.circular(AppRadius.overlay),
                                   ),
                                   child: LinearProgressIndicator(
                                     minHeight: 4,

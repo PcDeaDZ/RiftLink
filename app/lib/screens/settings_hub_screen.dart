@@ -360,10 +360,10 @@ class _HubCard extends StatelessWidget {
             ),
             const SizedBox(width: AppSpacing.lg),
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(title, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: pal.onSurface)),
+              Text(title, style: AppTypography.bodyBase().copyWith(fontWeight: FontWeight.w600, color: pal.onSurface)),
               const SizedBox(height: 2),
               Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: pal.onSurfaceVariant)),
+                style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant)),
             ])),
             Icon(Icons.chevron_right_rounded, color: pal.onSurfaceVariant),
           ]),
@@ -468,10 +468,10 @@ class _PageCard extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 14, AppSpacing.lg, AppSpacing.lg),
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         if (title != null) ...[
-          Text(title!, style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600, color: context.palette.onSurface, letterSpacing: 0.2)),
+          Text(title!, style: AppTypography.navTitleBase().copyWith(fontWeight: FontWeight.w600, color: context.palette.onSurface, letterSpacing: 0.2)),
           if (subtitle != null) ...[
             const SizedBox(height: AppSpacing.xs),
-            Text(subtitle!, style: TextStyle(fontSize: 12, color: context.palette.onSurfaceVariant, height: 1.3)),
+            Text(subtitle!, style: AppTypography.chipBase().copyWith(color: context.palette.onSurfaceVariant, height: 1.3)),
           ],
           const SizedBox(height: AppSpacing.sm),
         ],
@@ -491,7 +491,7 @@ class _SectionAccentHeader extends StatelessWidget {
     return Row(children: [
       Container(width: 3, height: 14, decoration: BoxDecoration(color: p.primary, borderRadius: BorderRadius.circular(2))),
       const SizedBox(width: AppSpacing.sm + 2),
-      Expanded(child: Text(text, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, letterSpacing: 0.2, color: p.onSurface))),
+      Expanded(child: Text(text, style: AppTypography.bodyLargeBase().copyWith(fontWeight: FontWeight.w600, letterSpacing: 0.2, color: p.onSurface))),
       if (trailingIcon != null) Icon(trailingIcon, size: 18, color: p.onSurfaceVariant),
     ]);
   }
@@ -558,11 +558,9 @@ class _DevicePageState extends State<_DevicePage> {
         children: [
           SelectableText(
             displayLabel,
-            style: TextStyle(
+            style: (displayLabel == shown ? AppTypography.monoBase() : AppTypography.bodyBase()).copyWith(
               color: pal.onSurface,
-              fontSize: 15,
               height: 1.35,
-              fontFamily: displayLabel == shown ? 'monospace' : null,
               letterSpacing: 0.5,
             ),
           ),
@@ -572,7 +570,7 @@ class _DevicePageState extends State<_DevicePage> {
             HapticFeedback.lightImpact();
             if (mounted) setState(() { _copySt = l.tr('copied'); _copyErr = false; });
           }, child: Row(mainAxisAlignment: MainAxisAlignment.center, mainAxisSize: MainAxisSize.min, children: [
-            const Icon(Icons.copy, size: 18), SizedBox(width: AppSpacing.sm), Text(l.tr('copy')),
+            const Icon(Icons.copy, size: AppIconSize.sm), SizedBox(width: AppSpacing.sm), Text(l.tr('copy')),
           ])),
           _AnimatedStatusChip(label: _copySt, isError: _copyErr),
         ],
@@ -693,7 +691,7 @@ class _NetworkModemPageState extends State<_NetworkModemPage> {
       _PageCard(title: l.tr('region'), subtitle: l.tr('settings_region_hint'), child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(l.tr('region_warning'), style: TextStyle(color: pal.onSurfaceVariant, fontSize: 12, height: 1.35)),
+          Text(l.tr('region_warning'), style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant, height: 1.35)),
           const SizedBox(height: AppSpacing.md + AppSpacing.xs),
           _SegmentedPickBar(leadingIcon: Icons.public_rounded, labels: regions,
             selectedIndex: regions.contains(_region) ? regions.indexOf(_region) : null, enabled: conn,
@@ -711,7 +709,7 @@ class _NetworkModemPageState extends State<_NetworkModemPage> {
               Row(children: [
                 Icon(Icons.radio_button_checked, size: 18, color: pal.primary.withOpacity(0.9)),
                 const SizedBox(width: AppSpacing.sm),
-                Text(l.tr('channel_eu'), style: TextStyle(color: pal.onSurface, fontSize: 14, fontWeight: FontWeight.w600, letterSpacing: 0.2)),
+                Text(l.tr('channel_eu'), style: AppTypography.bodyLargeBase().copyWith(color: pal.onSurface, fontWeight: FontWeight.w600, letterSpacing: 0.2)),
               ]),
               const SizedBox(height: AppSpacing.sm + 2),
               _SegmentedPickBar(leadingIcon: Icons.layers_outlined, labels: const ['0', '1', '2'],
@@ -924,8 +922,8 @@ class _ConnectionPageState extends State<_ConnectionPage> {
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Text(_wifiConn ? l.tr('radio_mode_wifi_connected') : l.tr('radio_mode_wifi_not_connected'),
                   style: TextStyle(color: _wifiConn ? pal.success : pal.onSurfaceVariant, fontWeight: FontWeight.w600)),
-                if (_wifiSsid != null && _wifiSsid!.isNotEmpty) ...[const SizedBox(height: AppSpacing.xs), Text('SSID: $_wifiSsid', style: TextStyle(color: pal.onSurfaceVariant, fontSize: 12))],
-                if (_wifiIp != null && _wifiIp!.isNotEmpty) ...[const SizedBox(height: AppSpacing.xs / 2), Text('IP: $_wifiIp', style: TextStyle(color: pal.onSurfaceVariant, fontSize: 12))],
+                if (_wifiSsid != null && _wifiSsid!.isNotEmpty) ...[const SizedBox(height: AppSpacing.xs), Text('SSID: $_wifiSsid', style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant))],
+                if (_wifiIp != null && _wifiIp!.isNotEmpty) ...[const SizedBox(height: AppSpacing.xs / 2), Text('IP: $_wifiIp', style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant))],
               ]),
             )) : const SizedBox.shrink()),
           const SizedBox(height: AppSpacing.md),
@@ -947,26 +945,26 @@ class _ConnectionPageState extends State<_ConnectionPage> {
             FilledButton.icon(onPressed: conn ? () => showOtaDialog(context, widget.ble) : null,
               icon: const Icon(Icons.bluetooth_searching_rounded), label: Text(l.tr('firmware_update_ble'))),
             const SizedBox(height: AppSpacing.sm + 2),
-            Text(l.tr('firmware_update_where_hint'), style: TextStyle(fontSize: 12, color: pal.onSurfaceVariant)),
+            Text(l.tr('firmware_update_where_hint'), style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant)),
             const SizedBox(height: AppSpacing.sm - 2),
-            Text(l.tr('firmware_update_path'), style: TextStyle(fontFamily: 'monospace', color: pal.onSurfaceVariant.withOpacity(0.95), fontSize: 12)),
+            Text(l.tr('firmware_update_path'), style: AppTypography.monoBase().copyWith(color: pal.onSurfaceVariant.withOpacity(0.95))),
           ] else ...[
-            Text(l.tr('firmware_update_wifi'), style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: pal.onSurface)),
+            Text(l.tr('firmware_update_wifi'), style: AppTypography.labelBase().copyWith(fontWeight: FontWeight.w600, color: pal.onSurface)),
             const SizedBox(height: AppSpacing.sm),
-            Text(l.tr('firmware_update_where_hint'), style: TextStyle(fontSize: 12, color: pal.onSurfaceVariant)),
+            Text(l.tr('firmware_update_where_hint'), style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant)),
           ],
           if (!usingWifi && _radioMode != 'wifi') ...[
             const SizedBox(height: AppSpacing.md),
             Row(children: [
               Icon(Icons.info_outline_rounded, size: 16, color: pal.onSurfaceVariant), const SizedBox(width: AppSpacing.sm - 2),
-              Expanded(child: Text(l.tr('firmware_update_wifi_requires_wifi_mode'), style: TextStyle(fontSize: 12, color: pal.onSurfaceVariant))),
+              Expanded(child: Text(l.tr('firmware_update_wifi_requires_wifi_mode'), style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant))),
             ]),
           ],
           if (usingWifi || _radioMode == 'wifi') ...[
             const SizedBox(height: AppSpacing.md),
             Row(children: [
               Icon(Icons.check_circle_outline_rounded, size: 16, color: pal.success), const SizedBox(width: AppSpacing.sm - 2),
-              Expanded(child: Text(l.tr('firmware_update_wifi_mode_ready'), style: TextStyle(fontSize: 12, color: pal.onSurfaceVariant))),
+              Expanded(child: Text(l.tr('firmware_update_wifi_mode_ready'), style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant))),
             ]),
           ],
           const SizedBox(height: AppSpacing.md),
@@ -1072,7 +1070,7 @@ class _SecurityPageState extends State<_SecurityPage> {
             padding: const EdgeInsets.all(AppSpacing.md + AppSpacing.xs),
             decoration: BoxDecoration(color: pal.surfaceVariant.withOpacity(0.65), borderRadius: BorderRadius.circular(AppRadius.md), border: Border.all(color: pal.divider)),
             child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-              TextField(controller: _idCtrl, style: TextStyle(color: pal.onSurface, fontFamily: 'monospace', fontSize: 13),
+              TextField(controller: _idCtrl, style: AppTypography.monoBase().copyWith(color: pal.onSurface),
                 decoration: InputDecoration(isDense: true, labelText: l.tr('inviter_id'),
                   suffixIcon: IconButton(icon: Icon(Icons.content_paste_rounded, color: pal.primary), tooltip: l.tr('paste'),
                     onPressed: () async {
@@ -1094,13 +1092,13 @@ class _SecurityPageState extends State<_SecurityPage> {
                     })),
                 maxLength: 16),
               const SizedBox(height: AppSpacing.md),
-              TextField(controller: _keyCtrl, style: TextStyle(color: pal.onSurface, fontSize: 13, height: 1.35),
+              TextField(controller: _keyCtrl, style: AppTypography.labelBase().copyWith(color: pal.onSurface, height: 1.35),
                 decoration: InputDecoration(isDense: true, labelText: l.tr('invite_pubkey'), alignLabelWithHint: true), maxLines: 3, minLines: 2),
               const SizedBox(height: AppSpacing.md),
-              TextField(controller: _ckCtrl, style: TextStyle(color: pal.onSurface, fontSize: 13, height: 1.35),
+              TextField(controller: _ckCtrl, style: AppTypography.labelBase().copyWith(color: pal.onSurface, height: 1.35),
                 decoration: InputDecoration(isDense: true, labelText: l.tr('invite_channel_key'), alignLabelWithHint: true), maxLines: 2, minLines: 1),
               const SizedBox(height: AppSpacing.md),
-              TextField(controller: _tokCtrl, style: TextStyle(color: pal.onSurface, fontFamily: 'monospace', fontSize: 13),
+              TextField(controller: _tokCtrl, style: AppTypography.monoBase().copyWith(color: pal.onSurface),
                 decoration: InputDecoration(isDense: true, labelText: l.tr('invite_token_optional')), maxLength: 16),
             ]),
           ),
@@ -1208,13 +1206,13 @@ class _EnergyThemePageState extends State<_EnergyThemePage> {
             contentPadding: EdgeInsets.zero,
             leading: Icon(Icons.dark_mode_outlined, color: pal.primary),
             title: Text(l.tr('theme'), style: TextStyle(color: pal.onSurface, fontWeight: FontWeight.w500)),
-            subtitle: Text(l.tr('theme_hint'), style: TextStyle(color: pal.onSurfaceVariant, fontSize: 12, height: 1.35)),
+            subtitle: Text(l.tr('theme_hint'), style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant, height: 1.35)),
             trailing: Icon(Icons.chevron_right, color: pal.onSurfaceVariant),
             onTap: () { HapticFeedback.selectionClick(); showThemeModeSheet(context); }),
           const SizedBox(height: AppSpacing.xs),
           RiftSwitchTile(
             title: Text(l.tr('mesh_animation'), style: TextStyle(color: pal.onSurface, fontWeight: FontWeight.w500)),
-            subtitle: Text(l.tr('mesh_animation_hint'), style: TextStyle(color: pal.onSurfaceVariant, fontSize: 12, height: 1.35)),
+            subtitle: Text(l.tr('mesh_animation_hint'), style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant, height: 1.35)),
             leading: Icon(Icons.animation_rounded, color: pal.primary),
             value: _meshAnim,
             onChanged: (v) { HapticFeedback.selectionClick(); widget.onMeshAnimationChanged(v); setState(() => _meshAnim = v); }),
@@ -1241,7 +1239,7 @@ class _EnergyThemePageState extends State<_EnergyThemePage> {
       if (_gpsPresent)
         _PageCard(title: l.tr('gps_section'), child: RiftSwitchTile(
           title: Text(l.tr('gps_enable'), style: TextStyle(color: pal.onSurface)),
-          subtitle: Text(_gpsFix ? l.tr('gps_fix_yes') : l.tr('gps_fix_no'), style: TextStyle(color: pal.onSurfaceVariant, fontSize: 13)),
+          subtitle: Text(_gpsFix ? l.tr('gps_fix_yes') : l.tr('gps_fix_no'), style: AppTypography.labelBase().copyWith(color: pal.onSurfaceVariant)),
           value: _gpsOn,
           onChanged: conn ? (v) async {
             if (await widget.ble.setGps(v)) { widget.onGpsChanged(v); setState(() => _gpsOn = v); }
@@ -1342,7 +1340,7 @@ class _DiagnosticsPageState extends State<_DiagnosticsPage> {
     return ListTile(
       contentPadding: EdgeInsets.zero, dense: true,
       leading: Icon(ok ? Icons.check_circle_outline : Icons.error_outline, color: ok ? pal.success : pal.error, size: 20),
-      title: Text(label, style: TextStyle(color: pal.onSurface, fontSize: 13)),
+      title: Text(label, style: AppTypography.labelBase().copyWith(color: pal.onSurface)),
     );
   }
 
@@ -1483,8 +1481,8 @@ class _FaqPage extends StatelessWidget {
         child: ExpansionTile(
           tilePadding: EdgeInsets.zero,
           childrenPadding: const EdgeInsets.only(bottom: AppSpacing.sm),
-          title: Text(qa.$1, style: TextStyle(color: pal.onSurface, fontWeight: FontWeight.w600, fontSize: 14)),
-          children: [Text(qa.$2, style: TextStyle(color: pal.onSurfaceVariant, fontSize: 13, height: 1.4))],
+          title: Text(qa.$1, style: AppTypography.bodyLargeBase().copyWith(color: pal.onSurface, fontWeight: FontWeight.w600)),
+          children: [Text(qa.$2, style: AppTypography.labelBase().copyWith(color: pal.onSurfaceVariant, height: 1.4))],
         ),
       )).toList(),
     );
@@ -1544,10 +1542,10 @@ class _ModemSectionState extends State<_ModemSection> {
       Wrap(spacing: AppSpacing.sm - 2, runSpacing: AppSpacing.sm - 2, children: [for (var i = 0; i < 5; i++) _chip(context, i, en)]),
       const SizedBox(height: AppSpacing.sm),
       AnimatedSize(duration: _kDur, curve: _kIn, child: Padding(padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
-        child: Text(desc[_sel], style: TextStyle(fontSize: 12, height: 1.4, color: pal.onSurfaceVariant.withOpacity(0.85))))),
+        child: Text(desc[_sel], style: AppTypography.chipBase().copyWith(height: 1.4, color: pal.onSurfaceVariant.withOpacity(0.85))))),
       if (isCustom) ...[
         const SizedBox(height: AppSpacing.sm + 2),
-        Text(l.tr('modem_sf_label'), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+        Text(l.tr('modem_sf_label'), style: AppTypography.chipBase().copyWith(fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
         const SizedBox(height: AppSpacing.xs),
         _SegmentedPickBar(
           labels: const ['7', '8', '9', '10', '11', '12'],
@@ -1558,7 +1556,7 @@ class _ModemSectionState extends State<_ModemSection> {
         const SizedBox(height: AppSpacing.xs),
         Text(l.tr('modem_sf_desc'), style: descStyle),
         const SizedBox(height: AppSpacing.sm + 2),
-        Text(l.tr('modem_bw_label'), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+        Text(l.tr('modem_bw_label'), style: AppTypography.chipBase().copyWith(fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
         const SizedBox(height: AppSpacing.xs),
         _SegmentedPickBar(
           labels: const ['62.5', '125', '250', '500'],
@@ -1569,7 +1567,7 @@ class _ModemSectionState extends State<_ModemSection> {
         const SizedBox(height: AppSpacing.xs),
         Text(l.tr('modem_bw_desc'), style: descStyle),
         const SizedBox(height: AppSpacing.sm + 2),
-        Text(l.tr('modem_cr_label'), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
+        Text(l.tr('modem_cr_label'), style: AppTypography.chipBase().copyWith(fontWeight: FontWeight.w600, color: pal.onSurfaceVariant)),
         const SizedBox(height: AppSpacing.xs),
         _SegmentedPickBar(
           labels: const ['4/5', '4/6', '4/7', '4/8'],
@@ -1599,6 +1597,6 @@ class _ModemSectionState extends State<_ModemSection> {
           color: sel ? pal.primary.withOpacity(0.15) : pal.surfaceVariant,
           border: Border.all(color: sel ? pal.primary : pal.divider, width: sel ? 1.6 : 1)),
         child: Text(label, textAlign: TextAlign.center,
-          style: TextStyle(fontSize: 12.5, fontWeight: sel ? FontWeight.w700 : FontWeight.w500, color: sel ? pal.primary : pal.onSurfaceVariant.withOpacity(en ? 1.0 : 0.5)))));
+          style: AppTypography.chipBase().copyWith(fontWeight: sel ? FontWeight.w700 : FontWeight.w500, color: sel ? pal.primary : pal.onSurfaceVariant.withOpacity(en ? 1.0 : 0.5)))));
   }
 }

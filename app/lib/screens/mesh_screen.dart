@@ -384,8 +384,8 @@ class _MeshScreenState extends State<MeshScreen> {
             indicatorWeight: 2.5,
             labelStyle: AppTypography.labelBase().copyWith(fontWeight: FontWeight.w600),
             tabs: [
-              Tab(icon: const Icon(Icons.account_tree, size: 20), text: l.tr('mesh_tab_graph')),
-              Tab(icon: const Icon(Icons.view_list_rounded, size: 20), text: l.tr('mesh_tab_list')),
+              Tab(icon: const Icon(Icons.account_tree, size: AppIconSize.md), text: l.tr('mesh_tab_graph')),
+              Tab(icon: const Icon(Icons.view_list_rounded, size: AppIconSize.md), text: l.tr('mesh_tab_list')),
             ],
           ),
         ),
@@ -404,7 +404,7 @@ class _MeshScreenState extends State<MeshScreen> {
                       Expanded(
                         child: FilledButton.tonalIcon(
                           onPressed: _signalTestRunning ? null : _runSignalTest,
-                          icon: const Icon(Icons.network_ping_rounded, size: 18),
+                          icon: const Icon(Icons.network_ping_rounded, size: AppIconSize.sm),
                           label: Text(l.tr('mesh_signal_test')),
                         ),
                       ),
@@ -800,15 +800,14 @@ class _ListTab extends StatelessWidget {
                     children: [
                       Icon(
                         Icons.device_hub_outlined,
-                        size: 56,
+                        size: AppIconSize.emptyStateLarge,
                         color: context.palette.onSurfaceVariant.withOpacity(0.45),
                       ),
                       SizedBox(height: AppSpacing.lg),
                       Text(
                         l.tr('mesh_empty'),
                         textAlign: TextAlign.center,
-                        style: AppTypography.bodyBase().copyWith(
-                          fontSize: 14,
+                        style: AppTypography.bodyLargeBase().copyWith(
                           height: 1.4,
                           color: context.palette.onSurfaceVariant.withOpacity(0.95),
                         ),
@@ -832,12 +831,11 @@ class _ListTab extends StatelessWidget {
                             ListTile(
                               leading: CircleAvatar(
                                 backgroundColor: context.palette.primary.withOpacity(0.2),
-                                child: Icon(Icons.router_outlined, color: context.palette.primary, size: 22),
+                                child: Icon(Icons.router_outlined, color: context.palette.primary, size: AppIconSize.lg),
                               ),
                               title: Text(
                                 nodeLabel(neighbors[i]),
-                                style: TextStyle(
-                                  fontSize: 14,
+                                style: AppTypography.bodyLargeBase().copyWith(
                                   fontWeight: FontWeight.w600,
                                   color: context.palette.onSurface,
                                 ),
@@ -886,12 +884,11 @@ class _ListTab extends StatelessWidget {
                                 return ListTile(
                                   leading: CircleAvatar(
                                     backgroundColor: context.palette.success.withOpacity(0.18),
-                                    child: Icon(Icons.alt_route, color: context.palette.success, size: 22),
+                                    child: Icon(Icons.alt_route, color: context.palette.success, size: AppIconSize.lg),
                                   ),
                                   title: Text(
                                     nodeLabel(dest),
-                                    style: TextStyle(
-                                      fontSize: 14,
+                                    style: AppTypography.bodyLargeBase().copyWith(
                                       fontWeight: FontWeight.w600,
                                       color: context.palette.onSurface,
                                     ),
@@ -1040,16 +1037,22 @@ class _MeshPainter extends CustomPainter {
 
       final label = nodeLabel(id);
       final compact = label.length > 14 ? '${label.substring(0, 13)}…' : label;
-      _drawText(canvas, compact, Offset(pos.dx, pos.dy + r + 10), 11, palette.onSurface);
+      _drawText(canvas, compact, Offset(pos.dx, pos.dy + r + AppSpacing.md), AppTypography.captionSize, palette.onSurface);
       if (n.rssi != 0) {
-        _drawText(canvas, '${n.rssi} dBm', Offset(pos.dx, pos.dy + r + 24), 10, palette.onSurfaceVariant);
+        _drawText(
+          canvas,
+          '${n.rssi} dBm',
+          Offset(pos.dx, pos.dy + r + AppSpacing.xxl),
+          AppTypography.captionDenseSize,
+          palette.onSurfaceVariant,
+        );
       }
       if (n.hops > 0) {
         _drawText(
           canvas,
           '${n.hops}h',
-          Offset(pos.dx, pos.dy + r + (n.rssi != 0 ? 36 : 24)),
-          10,
+          Offset(pos.dx, pos.dy + r + (n.rssi != 0 ? 36 : AppSpacing.xxl)),
+          AppTypography.captionDenseSize,
           palette.primary,
         );
       }

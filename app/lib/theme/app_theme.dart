@@ -100,6 +100,27 @@ extension AppPaletteContext on BuildContext {
 class AppTheme {
   static final BorderRadius _buttonRadius = BorderRadius.circular(AppRadius.sm);
 
+  static TextTheme _textTheme(AppPalette p) {
+    final secondary = TextStyle(color: p.onSurfaceVariant);
+    return TextTheme(
+      displayLarge: TextStyle(color: p.onSurface, fontSize: 57, fontWeight: FontWeight.w400, height: 1.12),
+      displayMedium: TextStyle(color: p.onSurface, fontSize: 45, fontWeight: FontWeight.w400, height: 1.16),
+      displaySmall: TextStyle(color: p.onSurface, fontSize: 36, fontWeight: FontWeight.w400, height: 1.22),
+      headlineLarge: AppTypography.headlineBase().copyWith(color: p.onSurface),
+      headlineMedium: AppTypography.screenTitleBase().copyWith(fontSize: 20, color: p.onSurface),
+      headlineSmall: AppTypography.navTitleBase().copyWith(color: p.onSurface),
+      titleLarge: AppTypography.navTitleBase().copyWith(color: p.onSurface),
+      titleMedium: AppTypography.labelBase().copyWith(fontSize: AppTypography.bodyLargeSize, fontWeight: FontWeight.w500, color: p.onSurface),
+      titleSmall: AppTypography.labelBase().copyWith(color: p.onSurface),
+      bodyLarge: AppTypography.bodyLargeBase().copyWith(color: p.onSurface),
+      bodyMedium: AppTypography.bodyBase().copyWith(color: p.onSurface),
+      bodySmall: AppTypography.captionBase().copyWith(color: p.onSurfaceVariant),
+      labelLarge: AppTypography.labelBase().copyWith(color: p.onSurface),
+      labelMedium: AppTypography.chipBase().copyWith(color: p.onSurfaceVariant),
+      labelSmall: AppTypography.microBase().copyWith(color: secondary.color),
+    );
+  }
+
   static ButtonStyle _primaryFilledStyle(AppPalette p) {
     return FilledButton.styleFrom(
       backgroundColor: p.primary,
@@ -162,6 +183,7 @@ class AppTheme {
 
   static ThemeData _build(AppPalette p, Brightness brightness) {
     final isDark = brightness == Brightness.dark;
+    final textTheme = _textTheme(p);
     return ThemeData(
       useMaterial3: false,
       brightness: brightness,
@@ -171,24 +193,27 @@ class AppTheme {
       canvasColor: p.surface,
       cardColor: p.card,
       dividerColor: p.divider,
+      iconTheme: IconThemeData(color: p.onSurface, size: AppIconSize.md),
+      textTheme: textTheme,
+      primaryTextTheme: textTheme.apply(
+        bodyColor: Colors.white,
+        displayColor: Colors.white,
+      ),
       filledButtonTheme: FilledButtonThemeData(style: _primaryFilledStyle(p)),
       elevatedButtonTheme: ElevatedButtonThemeData(style: _primaryElevatedStyle(p)),
       outlinedButtonTheme: OutlinedButtonThemeData(style: _outlinedSecondaryStyle(p)),
       appBarTheme: AppBarTheme(
         backgroundColor: p.surface,
         foregroundColor: p.onSurface,
-        elevation: 0,
+        toolbarHeight: AppBarMetrics.toolbarHeight,
+        elevation: AppElevation.none,
         centerTitle: false,
-        iconTheme: IconThemeData(color: p.onSurface),
-        titleTextStyle: TextStyle(
-          color: p.onSurface,
-          fontSize: AppTypography.screenTitleSize,
-          fontWeight: AppTypography.screenTitleWeight,
-        ),
+        iconTheme: IconThemeData(color: p.onSurface, size: AppIconSize.md),
+        titleTextStyle: AppTypography.navTitleBase().copyWith(color: p.onSurface),
       ),
       cardTheme: CardThemeData(
         color: p.card,
-        elevation: 0,
+        elevation: AppElevation.none,
         margin: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.xs),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.card)),
       ),
@@ -199,18 +224,14 @@ class AppTheme {
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.sm), borderSide: BorderSide.none),
         enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.sm), borderSide: BorderSide(color: p.divider)),
         focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(AppRadius.sm), borderSide: BorderSide(color: p.primary, width: 2)),
-        hintStyle: TextStyle(color: p.onSurfaceVariant),
-        labelStyle: TextStyle(color: p.onSurfaceVariant),
+        hintStyle: AppTypography.bodyBase().copyWith(color: p.onSurfaceVariant),
+        labelStyle: AppTypography.labelBase().copyWith(color: p.onSurfaceVariant),
       ),
       snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
         backgroundColor: p.card,
-        contentTextStyle: TextStyle(
-          color: p.onSurface,
-          fontSize: AppTypography.bodySize,
-          height: AppTypography.bodyHeight,
-        ),
-        elevation: 8,
+        contentTextStyle: AppTypography.bodyBase().copyWith(color: p.onSurface),
+        elevation: AppElevation.snackBar,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.lg)),
         insetPadding: const EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.xl),
       ),

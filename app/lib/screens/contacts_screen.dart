@@ -175,13 +175,12 @@ class _ContactsScreenState extends State<ContactsScreen> {
     final p = context.palette;
     return Row(
       children: [
-        Icon(icon, size: 20, color: p.primary),
+        Icon(icon, size: AppIconSize.md, color: p.primary),
         const SizedBox(width: AppSpacing.sm),
         Expanded(
           child: Text(
             title,
-            style: AppTypography.labelBase().copyWith(
-              fontSize: 14,
+            style: AppTypography.bodyLargeBase().copyWith(
               fontWeight: FontWeight.w700,
               color: p.onSurface,
               height: 1.2,
@@ -212,7 +211,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           child: Container(
             decoration: BoxDecoration(
               color: p.card,
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(AppRadius.overlay)),
             ),
             child: SafeArea(
               top: false,
@@ -241,15 +240,12 @@ class _ContactsScreenState extends State<ContactsScreen> {
                       const SizedBox(height: AppSpacing.md),
                       Row(
                         children: [
-                          Icon(Icons.person_add_alt_1_rounded, color: p.primary, size: 22),
+                          Icon(Icons.person_add_alt_1_rounded, color: p.primary, size: AppIconSize.lg),
                           const SizedBox(width: AppSpacing.sm + 2),
                           Expanded(
                             child: Text(
                               prefilledId != null ? l.tr('edit_contact') : l.tr('add_contact'),
-                              style: AppTypography.screenTitleBase().copyWith(
-                                fontSize: 17,
-                                color: p.onSurface,
-                              ),
+                              style: AppTypography.navTitleBase().copyWith(color: p.onSurface),
                             ),
                           ),
                           IconButton(
@@ -265,7 +261,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                       TextField(
                         controller: idC,
                         autofocus: prefilledId == null,
-                        style: TextStyle(color: p.onSurface, fontSize: 16),
+                        style: AppTypography.bodyLargeBase().copyWith(color: p.onSurface),
                         maxLength: 16,
                         enabled: prefilledId == null,
                         decoration: InputDecoration(
@@ -287,7 +283,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                       TextField(
                         controller: nickC,
                         autofocus: prefilledId != null,
-                        style: TextStyle(color: p.onSurface, fontSize: 16),
+                        style: AppTypography.bodyLargeBase().copyWith(color: p.onSurface),
                         maxLength: 16,
                         decoration: InputDecoration(
                           labelText: l.tr('contact_nickname'),
@@ -318,7 +314,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                         },
                         child: Text(
                           l.tr('save'),
-                          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+                          style: AppTypography.bodyBase().copyWith(fontWeight: FontWeight.w600),
                         ),
                       ),
                     ],
@@ -356,7 +352,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
             TextField(
               controller: nickC,
               autofocus: true,
-              style: TextStyle(color: p.onSurface, fontSize: AppTypography.bodySize),
+              style: AppTypography.bodyBase().copyWith(color: p.onSurface),
               decoration: InputDecoration(labelText: l.tr('contact_nickname')),
               maxLength: 16,
             ),
@@ -480,10 +476,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
               padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.sm),
               child: Text(
                 id,
-                style: AppTypography.chipBase().copyWith(
-                  fontFamily: 'monospace',
+                style: AppTypography.monoBase().copyWith(
                   fontWeight: FontWeight.w500,
-                  fontSize: 12.5,
                   color: p.onSurface,
                 ),
               ),
@@ -508,16 +502,15 @@ class _ContactsScreenState extends State<ContactsScreen> {
               duration: const Duration(milliseconds: 600),
               curve: Curves.easeOut,
               builder: (_, opacity, child) => Opacity(opacity: opacity, child: child),
-              child: Icon(Icons.people_outline_rounded, size: 72, color: p.onSurfaceVariant.withOpacity(0.38)),
+              child: Icon(Icons.people_outline_rounded, size: AppIconSize.emptyStateXLarge, color: p.onSurfaceVariant.withOpacity(0.38)),
             ),
             const SizedBox(height: AppSpacing.lg),
             Text(
               l.tr('contacts_empty'),
               textAlign: TextAlign.center,
-              style: AppTypography.bodyBase().copyWith(
+              style: AppTypography.bodyLargeBase().copyWith(
                 color: p.onSurface,
                 fontWeight: FontWeight.w600,
-                fontSize: 16,
               ),
             ),
             const SizedBox(height: AppSpacing.sm),
@@ -533,10 +526,10 @@ class _ContactsScreenState extends State<ContactsScreen> {
             const SizedBox(height: AppSpacing.xl),
             FilledButton.icon(
               onPressed: () => _showAddDialog(),
-              icon: const Icon(Icons.person_add_alt_1_rounded, size: 18),
+              icon: const Icon(Icons.person_add_alt_1_rounded, size: AppIconSize.sm),
               label: Text(
                 l.tr('add_contact'),
-                style: const TextStyle(fontWeight: FontWeight.w600),
+                style: AppTypography.bodyBase().copyWith(fontWeight: FontWeight.w600, color: Colors.white),
               ),
               style: FilledButton.styleFrom(
                 backgroundColor: p.primary,
@@ -600,7 +593,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                     backgroundColor: p.primary.withOpacity(0.13),
                     child: Text(
                       (c.nickname.isNotEmpty ? c.nickname[0] : (c.id.isNotEmpty ? c.id[0] : '?')).toUpperCase(),
-                      style: TextStyle(color: p.primary, fontWeight: FontWeight.w700, fontSize: 18),
+                      style: AppTypography.bodyLargeBase().copyWith(color: p.primary, fontWeight: FontWeight.w700),
                     ),
                   ),
                   const SizedBox(width: AppSpacing.md + 2),
@@ -610,18 +603,15 @@ class _ContactsScreenState extends State<ContactsScreen> {
                       children: [
                         Text(
                           c.nickname.isNotEmpty ? c.nickname : c.id,
-                          style: AppTypography.bodyBase().copyWith(
+                          style: AppTypography.bodyLargeBase().copyWith(
                             fontWeight: FontWeight.w600,
-                            fontSize: 16,
                             color: p.onSurface,
                           ),
                         ),
                         const SizedBox(height: AppSpacing.xs),
                         Text(
                           c.id,
-                          style: TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 12.5,
+                          style: AppTypography.monoBase().copyWith(
                             letterSpacing: 0.2,
                             color: p.onSurfaceVariant.withOpacity(0.95),
                           ),
@@ -631,7 +621,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                   ),
                   IconButton(
                     tooltip: l.tr('edit_contact'),
-                    icon: Icon(Icons.edit_outlined, color: p.onSurfaceVariant.withOpacity(0.8)),
+                    icon: Icon(Icons.edit_outlined, color: p.onSurfaceVariant.withOpacity(0.8), size: AppIconSize.md),
                     onPressed: () => _showEditDialog(c),
                   ),
                 ],
@@ -660,7 +650,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           controller: _searchController,
           onChanged: (v) => setState(() => _searchQuery = v),
           textInputAction: TextInputAction.search,
-          style: TextStyle(color: p.onSurface, fontSize: 14.5),
+          style: AppTypography.bodyBase().copyWith(color: p.onSurface),
           decoration: InputDecoration(
             hintText: l.tr('search_contacts_hint'),
             prefixIcon: Icon(Icons.search_rounded, color: p.onSurfaceVariant),
@@ -752,7 +742,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
       heroTag: widget.embedded ? 'contacts_embedded_fab' : 'contacts_screen_fab',
       backgroundColor: p.primary,
       foregroundColor: Colors.white,
-      elevation: 2,
+      elevation: AppElevation.fab,
       onPressed: () => _showAddDialog(),
       tooltip: l.tr('add_contact'),
       child: const Icon(Icons.person_add_alt_1_rounded),
@@ -791,7 +781,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
                   autofocus: true,
                   textInputAction: TextInputAction.search,
                   onChanged: (v) => setState(() => _searchQuery = v),
-                  style: TextStyle(color: p.onSurface, fontSize: 15.5),
+                  style: AppTypography.bodyBase().copyWith(color: p.onSurface),
                   decoration: InputDecoration(
                     hintText: l.tr('search_contacts_hint'),
                     border: InputBorder.none,
@@ -809,6 +799,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
         actions: [
           IconButton(
             tooltip: l.tr('search_contacts_hint'),
+            iconSize: AppIconSize.md,
             icon: Icon(_searchMode ? Icons.close : Icons.search_rounded),
             onPressed: _toggleSearch,
           ),

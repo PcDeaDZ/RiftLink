@@ -35,8 +35,8 @@ class ScanScreen extends StatefulWidget {
 /// Заголовок секции списка (не экрана): 16 / w600.
 TextStyle _sectionHeaderStyle(BuildContext context) {
   final p = context.palette;
-  return AppTypography.screenTitleBase().copyWith(
-    fontSize: 16,
+  return AppTypography.bodyLargeBase().copyWith(
+    fontWeight: FontWeight.w600,
     color: p.onSurface,
   );
 }
@@ -559,7 +559,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                     ListTile(
                       contentPadding: EdgeInsets.zero,
                       leading: Icon(Icons.info_outline_rounded, color: p.onSurfaceVariant),
-                      title: Text(l10n.tr('about'), style: TextStyle(color: p.onSurface)),
+                      title: Text(l10n.tr('about'), style: AppTypography.navTitleBase().copyWith(color: p.onSurface)),
                       trailing: Icon(Icons.chevron_right, color: p.onSurfaceVariant),
                       onTap: () { Navigator.pop(ctx); _showAbout(); },
                     ),
@@ -628,7 +628,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
                   SizedBox(height: AppSpacing.xl),
-                  Icon(_transportTab == 0 ? Icons.bluetooth_searching : Icons.wifi_find_rounded, size: 56, color: context.palette.primary),
+                  Icon(_transportTab == 0 ? Icons.bluetooth_searching : Icons.wifi_find_rounded, size: AppIconSize.emptyStateLarge, color: context.palette.primary),
                   SizedBox(height: AppSpacing.md),
                   AppScreenTitle(
                     _transportTab == 0 ? l10n.tr('find_device') : l10n.tr('wifi_connect_title'),
@@ -698,8 +698,8 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                                 SizedBox(height: AppSpacing.sm),
                                 TextButton.icon(
                                   onPressed: () => openAppSettings(),
-                                  icon: Icon(Icons.settings, size: 18, color: context.palette.primary),
-                                  label: Text(l10n.tr('open_settings'), style: TextStyle(color: context.palette.primary)),
+                                  icon: Icon(Icons.settings, size: AppIconSize.sm, color: context.palette.primary),
+                                  label: Text(l10n.tr('open_settings'), style: AppTypography.labelBase().copyWith(color: context.palette.primary)),
                                 ),
                               ],
                             ],
@@ -726,16 +726,16 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             SizedBox(
-                              width: 20,
-                              height: 20,
+                              width: AppIconSize.md,
+                              height: AppIconSize.md,
                               child: (_scanning || _connectingToRemoteId != null) && _connectingToRemoteId == null
                                   ? CircularProgressIndicator(
                                       strokeWidth: 2,
                                       color: Theme.of(context).colorScheme.onPrimary,
                                     )
                                   : _connectingToRemoteId != null
-                                      ? Icon(Icons.bluetooth_searching, color: Theme.of(context).colorScheme.onPrimary, size: 20)
-                                      : Icon(Icons.search, color: Theme.of(context).colorScheme.onPrimary, size: 20),
+                                      ? Icon(Icons.bluetooth_searching, color: Theme.of(context).colorScheme.onPrimary, size: AppIconSize.md)
+                                      : Icon(Icons.search, color: Theme.of(context).colorScheme.onPrimary, size: AppIconSize.md),
                             ),
                             SizedBox(width: AppSpacing.sm),
                             Flexible(
@@ -843,7 +843,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                                         children: [
                                           Icon(
                                             Icons.history_rounded,
-                                            size: 17,
+                                            size: AppIconSize.sm,
                                             color: (_wifiConnecting || _recentWifiIps.isEmpty)
                                                 ? context.palette.onSurfaceVariant.withOpacity(0.45)
                                                 : context.palette.primary,
@@ -906,7 +906,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                                                 )
                                               : Icon(
                                                   Icons.travel_explore_rounded,
-                                                  size: 17,
+                                                  size: AppIconSize.sm,
                                                   color: _wifiConnecting
                                                       ? context.palette.onSurfaceVariant.withOpacity(0.45)
                                                       : context.palette.primary,
@@ -1196,7 +1196,7 @@ class _DeviceCard extends StatelessWidget {
               decoration: BoxDecoration(color: pal.primary.withOpacity(0.15), borderRadius: BorderRadius.circular(22)),
               child: isLoading
                   ? Padding(padding: const EdgeInsets.all(10), child: CircularProgressIndicator(strokeWidth: 2, color: pal.primary))
-                  : Icon(icon, color: pal.primary, size: 22),
+                  : Icon(icon, color: pal.primary, size: AppIconSize.lg),
             ),
             const SizedBox(width: AppSpacing.sm + 2),
             Expanded(child: Column(
@@ -1211,12 +1211,12 @@ class _DeviceCard extends StatelessWidget {
             )),
             if (showDelete && onDelete != null)
               IconButton(
-                icon: Icon(Icons.close, size: 20, color: pal.onSurfaceVariant),
+                icon: Icon(Icons.close, size: AppIconSize.md, color: pal.onSurfaceVariant),
                 onPressed: onDelete,
                 style: IconButton.styleFrom(padding: const EdgeInsets.all(6), minimumSize: const Size(36, 36)),
               )
             else
-              Icon(Icons.chevron_right, color: pal.onSurfaceVariant, size: 22),
+              Icon(Icons.chevron_right, color: pal.onSurfaceVariant, size: AppIconSize.lg),
           ]),
         ),
       ),
@@ -1266,8 +1266,7 @@ class _AboutDialogState extends State<_AboutDialog> {
           children: [
             Text(
               'RiftLink',
-              style: AppTypography.screenTitleBase().copyWith(
-                fontSize: 22,
+              style: AppTypography.headlineBase().copyWith(
                 fontWeight: FontWeight.w800,
                 color: p.onSurface,
               ),
@@ -1322,8 +1321,7 @@ class _AboutDialogState extends State<_AboutDialog> {
             SizedBox(height: AppSpacing.md),
             Text(
               widget.l10n.tr('about_legal'),
-              style: AppTypography.chipBase().copyWith(
-                fontSize: 10,
+              style: AppTypography.captionDenseBase().copyWith(
                 fontWeight: FontWeight.w400,
                 fontStyle: FontStyle.italic,
                 color: p.onSurfaceVariant,
