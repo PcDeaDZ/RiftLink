@@ -70,12 +70,9 @@ class ChatBleHandlerDeps {
   final void Function() scrollToBottom;
   final Future<void> Function(String conversationId) markConversationRead;
   final void Function(RiftLinkInfoEvent evt) onInfoEvent;
-  final void Function(RiftLinkRoutesEvent evt) onRoutesEvent;
-  final void Function(RiftLinkGroupsEvent evt) onGroupsEvent;
   final void Function(RiftLinkTelemetryEvent evt) onTelemetryEvent;
   final void Function(RiftLinkLocationEvent evt) onLocationEvent;
   final void Function(RiftLinkRegionEvent evt) onRegionEvent;
-  final void Function(RiftLinkNeighborsEvent evt) onNeighborsEvent;
   final void Function(RiftLinkPongEvent evt) onPongEvent;
   final void Function(RiftLinkErrorEvent evt) onErrorEvent;
   final void Function(RiftLinkGroupSecurityErrorEvent evt) onGroupSecurityErrorEvent;
@@ -110,12 +107,9 @@ class ChatBleHandlerDeps {
     required this.scrollToBottom,
     required this.markConversationRead,
     required this.onInfoEvent,
-    required this.onRoutesEvent,
-    required this.onGroupsEvent,
     required this.onTelemetryEvent,
     required this.onLocationEvent,
     required this.onRegionEvent,
-    required this.onNeighborsEvent,
     required this.onPongEvent,
     required this.onErrorEvent,
     required this.onGroupSecurityErrorEvent,
@@ -608,14 +602,6 @@ class ChatScreenController {
       deps.onInfoEvent(evt);
       return;
     }
-    if (evt is RiftLinkRoutesEvent) {
-      deps.onRoutesEvent(evt);
-      return;
-    }
-    if (evt is RiftLinkGroupsEvent) {
-      deps.onGroupsEvent(evt);
-      return;
-    }
     if (evt is RiftLinkTelemetryEvent) {
       deps.onTelemetryEvent(evt);
       return;
@@ -626,10 +612,6 @@ class ChatScreenController {
     }
     if (evt is RiftLinkRegionEvent) {
       deps.onRegionEvent(evt);
-      return;
-    }
-    if (evt is RiftLinkNeighborsEvent) {
-      deps.onNeighborsEvent(evt);
       return;
     }
     if (evt is RiftLinkPongEvent) {

@@ -319,7 +319,10 @@ class TransportReconnectManager {
           if (isWifi) {
             return _ble.connectWifi(wifiIp!);
           }
-          return _ble.connect(BluetoothDevice.fromId(remoteId!));
+          return _ble.connect(
+            BluetoothDevice.fromId(remoteId!),
+            internalReconnect: true,
+          );
         })().timeout(_connectAttemptTimeout, onTimeout: () => false);
         if (ok) {
           final elapsedMs = DateTime.now().difference(attemptStartedAt).inMilliseconds;

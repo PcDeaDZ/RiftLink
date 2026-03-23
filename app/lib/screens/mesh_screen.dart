@@ -198,12 +198,7 @@ class _MeshScreenState extends State<MeshScreen> {
     _sub = widget.ble.events.listen((evt) {
       if (!mounted) return;
       debugPrint('[BLE_CHAIN] stage=app_listener action=mesh_event evt=${evt.runtimeType}');
-      if (evt is RiftLinkRoutesEvent) {
-        setState(() {
-          _routes = evt.routes;
-          _normalizeTraceTarget();
-        });
-      } else if (evt is RiftLinkInfoEvent) {
+      if (evt is RiftLinkInfoEvent) {
         setState(() {
           _applySnapshot(
             nodeId: evt.id,
@@ -211,28 +206,6 @@ class _MeshScreenState extends State<MeshScreen> {
             neighborsRssi: evt.neighborsRssi,
           );
           _routes = evt.routes;
-          _normalizeTraceTarget();
-        });
-      } else if (evt is RiftLinkNeighborsEvent) {
-        if (evt.neighbors.isEmpty) {
-          final li = widget.ble.lastInfo;
-          if (li != null && li.neighbors.isNotEmpty) {
-            setState(() {
-              _applySnapshot(
-                neighbors: li.neighbors,
-                neighborsRssi: li.neighborsRssi,
-              );
-              _normalizeTraceTarget();
-            });
-            unawaited(widget.ble.getInfo(force: true));
-            return;
-          }
-        }
-        setState(() {
-          _applySnapshot(
-            neighbors: evt.neighbors,
-            neighborsRssi: evt.rssi,
-          );
           _normalizeTraceTarget();
         });
       } else if (evt is RiftLinkPongEvent) {

@@ -67,9 +67,10 @@ class TestBLECommands:
 class TestBLEEvents:
     """Проверка формата BLE событий"""
 
-    def test_info_event(self):
+    def test_node_snapshot_event(self):
         evt = {
-            'evt': 'info',
+            'evt': 'node',
+            'seq': 1,
             'id': 'A1B2C3D4E5F60708',
             'region': 'EU',
             'freq': 868.1,
@@ -79,7 +80,7 @@ class TestBLEEvents:
             'neighbors': ['B2C3D4E5F6070819']
         }
         parsed = json.loads(json.dumps(evt))
-        assert parsed['evt'] == 'info'
+        assert parsed['evt'] == 'node'
         assert len(parsed['id']) == 16
         assert parsed['freq'] in (868.1, 868.3, 868.5, 868.8, 915.0)
         assert isinstance(parsed['neighbors'], list)
@@ -102,15 +103,11 @@ class TestBLEEvents:
         assert parsed['group'] >= 2
         assert parsed['groupUid']
 
-    def test_info_event_groups_v2(self):
+    def test_groups_event_snapshot(self):
         evt = {
-            'evt': 'info',
-            'id': 'A1B2C3D4E5F60708',
-            'region': 'EU',
-            'freq': 868.1,
-            'power': 14,
-            'groups': [1, 12345],
-            'groupsV2': [
+            'evt': 'groups',
+            'seq': 1,
+            'groups': [
                 {
                     'groupUid': 'B64_16_or_32B',
                     'groupTag': 'B64_8_or_16B',
@@ -122,9 +119,9 @@ class TestBLEEvents:
             ],
         }
         parsed = json.loads(json.dumps(evt))
-        assert parsed['evt'] == 'info'
-        assert isinstance(parsed['groupsV2'], list)
-        assert parsed['groupsV2'][0]['channelId32'] >= 2
+        assert parsed['evt'] == 'groups'
+        assert isinstance(parsed['groups'], list)
+        assert parsed['groups'][0]['channelId32'] >= 2
 
     def test_neighbors_event(self):
         evt = {'evt': 'neighbors', 'neighbors': ['A1B2C3D4E5F60708']}

@@ -59,7 +59,10 @@ class ReconnectOverlayController extends ChangeNotifier {
       try {
         await ble.disconnect();
         await Future<void>.delayed(const Duration(milliseconds: 500));
-        final ok = await ble.connect(BluetoothDevice.fromId(remoteId));
+        final ok = await ble.connect(
+          BluetoothDevice.fromId(remoteId),
+          internalReconnect: true,
+        );
         if (ok) return true;
       } catch (_) {}
       if (attempt < 3) {

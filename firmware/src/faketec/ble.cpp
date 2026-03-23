@@ -77,7 +77,8 @@ void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, 
 
 void notifyInfo() {
   JsonDocument doc;
-  doc["evt"] = "info";
+  doc["evt"] = "node";
+  doc["seq"] = 1;
   char idHex[17] = {0};
   const uint8_t* id = node::getId();
   for (int i = 0; i < 8; i++) sprintf(idHex + i*2, "%02X", id[i]);

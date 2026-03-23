@@ -182,7 +182,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     if (uid.isEmpty) return 0;
     final info = widget.ble.lastInfo;
     if (info == null) return 0;
-    for (final g in info.groupsV2) {
+    for (final g in info.groups) {
       if (g.groupUid.toUpperCase() == uid) return g.channelId32;
     }
     return 0;
@@ -191,7 +191,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   String? _groupUidByChannel(int channelId32) {
     final info = widget.ble.lastInfo;
     if (info == null) return null;
-    for (final g in info.groupsV2) {
+    for (final g in info.groups) {
       if (g.channelId32 == channelId32 && g.groupUid.trim().isNotEmpty) {
         return g.groupUid.toUpperCase();
       }
@@ -199,17 +199,17 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     return null;
   }
 
-  RiftLinkGroupV2Info? _activeGroupV2Info() {
+  RiftLinkGroupInfo? _activeGroupInfo() {
     final info = widget.ble.lastInfo;
     if (info == null) return null;
     final uid = _groupUid?.trim().toUpperCase();
     if (uid != null && uid.isNotEmpty) {
-      for (final g in info.groupsV2) {
+      for (final g in info.groups) {
         if (g.groupUid.toUpperCase() == uid) return g;
       }
     }
     if (_group > 1) {
-      for (final g in info.groupsV2) {
+      for (final g in info.groups) {
         if (g.channelId32 == _group) return g;
       }
     }
@@ -264,7 +264,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         if (id == null) return l.tr('chat_context_direct_fallback');
         return _nicknameForId(id) ?? id;
       case ChatContextType.group:
-        final gv2 = _activeGroupV2Info();
+        final gv2 = _activeGroupInfo();
         if (gv2 != null && gv2.canonicalName.trim().isNotEmpty) {
           return gv2.canonicalName.trim();
         }
@@ -290,7 +290,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         }
         return id;
       case ChatContextType.group:
-        final gv2 = _activeGroupV2Info();
+        final gv2 = _activeGroupInfo();
         final role = switch (gv2?.myRole) {
           'owner' => l.tr('group_role_owner'),
           'admin' => l.tr('group_role_admin'),
@@ -496,7 +496,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       _groupUid = null;
       final info = widget.ble.lastInfo;
       if (info != null) {
-        for (final g in info.groupsV2) {
+        for (final g in info.groups) {
           if (g.channelId32 == _group && g.groupUid.trim().isNotEmpty) {
             _groupUid = g.groupUid.toUpperCase();
             break;
@@ -532,8 +532,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         title: _conversationId!.startsWith('direct:')
             ? _conversationId!.substring('direct:'.length)
             : _conversationId!.startsWith('groupv2:')
-                ? ((_activeGroupV2Info()?.canonicalName.trim().isNotEmpty ?? false)
-                      ? _activeGroupV2Info()!.canonicalName.trim()
+                ? ((_activeGroupInfo()?.canonicalName.trim().isNotEmpty ?? false)
+                      ? _activeGroupInfo()!.canonicalName.trim()
                       : 'Group ${_group > 1 ? _group : (_groupUid ?? '')}')
                 : 'Broadcast',
       );
@@ -1529,10 +1529,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       if (_batteryPercent != null && _batteryPercent! <= 15) {
         LocalNotificationsService.showLowBattery(percent: _batteryPercent!);
       }
-      final groupsFromV2 = evt.groupsV2
-          .map((g) => g.channelId32)
-          .where((g) => g > 1 && g != kMeshBroadcastGroupId);
-      _groups = _filterUserGroups(<int>[...evt.groups, ...groupsFromV2]);
+      _groups = _filterUserGroups(
+        evt.groups.map((g) => g.channelId32).where((g) => g > 1 && g != kMeshBroadcastGroupId).toList(),
+      );
       if ((_groupUid == null || _group == 0) && _groupUid != null && _groupUid!.isNotEmpty) {
         _group = _resolveGroupIdByUid(_groupUid!);
       }
@@ -1622,21 +1621,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       scrollToBottom: _scrollToBottom,
       markConversationRead: _chatRepo.markConversationRead,
       onInfoEvent: _onInfoEvent,
-      onRoutesEvent: (event) {
-        setState(() => _routes = event.routes);
-      },
-      onGroupsEvent: (event) {
-        setState(() {
-          final groupsFromV2 = event.groupsV2
-              .map((g) => g.channelId32)
-              .where((g) => g > 1 && g != kMeshBroadcastGroupId);
-          _groups = _filterUserGroups(<int>[...event.groups, ...groupsFromV2]);
-          if ((_groupUid == null || _group == 0) && _groupUid != null && _groupUid!.isNotEmpty) {
-            _group = _resolveGroupIdByUid(_groupUid!);
-          }
-          if (_group > 0 && !_groups.contains(_group)) _group = 0;
-        });
-      },
       onTelemetryEvent: (event) {
         setState(() {
           if (event.from == _nodeId && event.batteryMv > 0) _batteryMv = event.batteryMv;
@@ -1661,26 +1645,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         setState(() {
           _region = event.region;
           _channel = event.channel;
-        });
-      },
-      onNeighborsEvent: (event) {
-        // Пустой evt:neighbors после полного evt:info с соседями затирал списки в UI (рассинхрон порядка notify).
-        if (event.neighbors.isEmpty) {
-          final li = widget.ble.lastInfo;
-          if (li != null && li.neighbors.isNotEmpty) {
-            setState(() {
-              _neighbors = List<String>.from(li.neighbors);
-              _neighborsRssi = List<int>.from(li.neighborsRssi);
-              _neighborsHasKey = List<bool>.from(li.neighborsHasKey);
-            });
-            unawaited(widget.ble.getInfo(force: true));
-            return;
-          }
-        }
-        setState(() {
-          _neighbors = event.neighbors;
-          _neighborsRssi = event.rssi;
-          _neighborsHasKey = event.hasKey;
         });
       },
       onPongEvent: (event) {
@@ -1810,7 +1774,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   }
 
   ChatActionDeps _buildActionDeps() {
-    final activeGroup = _activeGroupV2Info();
+    final activeGroup = _activeGroupInfo();
     final groupTitle = activeGroup != null && activeGroup.canonicalName.trim().isNotEmpty
         ? activeGroup.canonicalName.trim()
         : 'Group $_group';
@@ -2634,7 +2598,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   Widget _buildStatusPanel(AppLocalizations l) {
     final chips = <ChatStatusChipData>[];
-    final gv2 = _activeGroupV2Info();
+    final gv2 = _activeGroupInfo();
     if (gv2 != null) {
       final roleText = switch (gv2.myRole) {
         'owner' => l.tr('group_role_owner'),

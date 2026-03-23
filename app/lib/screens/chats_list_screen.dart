@@ -170,10 +170,6 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
           _neighborIds = evt.neighbors.map((e) => e.toUpperCase()).toSet();
         });
         _load();
-      } else if (evt is RiftLinkRoutesEvent || evt is RiftLinkNeighborsEvent) {
-        setState(() {});
-      } else if (evt is RiftLinkGroupsEvent) {
-        _load();
       } else if (evt is RiftLinkGroupStatusEvent) {
         final gid = evt.channelId32 ?? _groupIdByUid(evt.groupUid);
         if (gid != null && gid > 1) {
@@ -238,10 +234,10 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
 
   Future<void> _load() async {
     if (!_groupConversationMigrationDone) {
-      final groupsV2 = widget.ble.lastInfo?.groupsV2 ?? const <RiftLinkGroupV2Info>[];
-      if (groupsV2.isNotEmpty) {
+      final groups = widget.ble.lastInfo?.groups ?? const <RiftLinkGroupInfo>[];
+      if (groups.isNotEmpty) {
         final idToUid = <int, String>{};
-        for (final g in groupsV2) {
+        for (final g in groups) {
           final uid = g.groupUid.trim().toUpperCase();
           if (g.channelId32 > 1 && uid.isNotEmpty) {
             idToUid[g.channelId32] = uid;
@@ -407,28 +403,28 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     };
   }
 
-  RiftLinkGroupV2Info? _groupV2ById(int groupId) {
+  RiftLinkGroupInfo? _groupInfoById(int groupId) {
     final li = widget.ble.lastInfo;
     if (li == null) return null;
-    for (final g in li.groupsV2) {
+    for (final g in li.groups) {
       if (g.channelId32 == groupId) return g;
     }
     return null;
   }
 
-  RiftLinkGroupV2Info? _groupV2ByUid(String groupUid) {
+  RiftLinkGroupInfo? _groupInfoByUid(String groupUid) {
     final uid = groupUid.trim();
     if (uid.isEmpty) return null;
     final li = widget.ble.lastInfo;
     if (li == null) return null;
-    for (final g in li.groupsV2) {
+    for (final g in li.groups) {
       if (g.groupUid.toUpperCase() == uid.toUpperCase()) return g;
     }
     return null;
   }
 
   String _groupDisplayNameById(int groupId) {
-    final name = _groupV2ById(groupId)?.canonicalName.trim();
+    final name = _groupInfoById(groupId)?.canonicalName.trim();
     if (name != null && name.isNotEmpty) return name;
     return 'Group $groupId';
   }
@@ -438,7 +434,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     final li = widget.ble.lastInfo;
     if (li != null) {
       out.addAll(
-        li.groupsV2
+        li.groups
             .map((g) => g.channelId32)
             .where((g) => g > 1 && g != kMeshBroadcastGroupId),
       );
@@ -452,9 +448,9 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     return sorted;
   }
 
-  String? _groupUidById(int groupId) => _groupV2ById(groupId)?.groupUid;
+  String? _groupUidById(int groupId) => _groupInfoById(groupId)?.groupUid;
 
-  int? _groupIdByUid(String groupUid) => _groupV2ByUid(groupUid)?.channelId32;
+  int? _groupIdByUid(String groupUid) => _groupInfoByUid(groupUid)?.channelId32;
 
   int? _groupIdFromPeerRef(String peerRef) {
     final direct = int.tryParse(peerRef);
@@ -463,7 +459,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     if (uid == null) return null;
     final li = widget.ble.lastInfo;
     if (li == null) return null;
-    for (final g in li.groupsV2) {
+    for (final g in li.groups) {
       if (g.groupUid.toUpperCase() == uid.toUpperCase()) return g.channelId32;
     }
     return null;
@@ -480,21 +476,21 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   String? _groupRoleById(int groupId) {
     final override = _groupRoleOverrides[groupId];
     if (override != null && override.trim().isNotEmpty) return override;
-    return _groupV2ById(groupId)?.myRole;
+    return _groupInfoById(groupId)?.myRole;
   }
 
   bool? _groupKeyActualById(int groupId) {
     if (_groupAckOverrides.containsKey(groupId)) return _groupAckOverrides[groupId];
-    return _groupV2ById(groupId)?.ackApplied;
+    return _groupInfoById(groupId)?.ackApplied;
   }
 
   String? _canonicalNameForConversation(ChatConversation c) {
     if (c.kind != ConversationKind.group) return null;
     final uid = _groupUidFromPeerRef(c.peerRef);
-    final byUid = uid == null ? null : _groupV2ByUid(uid)?.canonicalName.trim();
+    final byUid = uid == null ? null : _groupInfoByUid(uid)?.canonicalName.trim();
     if (byUid != null && byUid.isNotEmpty) return byUid;
     final gid = _groupIdFromPeerRef(c.peerRef);
-    final byId = gid == null ? null : _groupV2ById(gid)?.canonicalName.trim();
+    final byId = gid == null ? null : _groupInfoById(gid)?.canonicalName.trim();
     if (byId != null && byId.isNotEmpty) return byId;
     return null;
   }
@@ -537,10 +533,10 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         unresolvedByUid[uid] = c;
       }
     }
-    final groupsFromV2 = (widget.ble.lastInfo?.groupsV2 ?? const <RiftLinkGroupV2Info>[])
+    final groupsFromBle = (widget.ble.lastInfo?.groups ?? const <RiftLinkGroupInfo>[])
         .map((e) => e.channelId32)
         .where((g) => g > 1 && g != kMeshBroadcastGroupId);
-    for (final gid in groupsFromV2) {
+    for (final gid in groupsFromBle) {
       final uid = _groupUidById(gid);
       if (archivedGroupIds.contains(gid)) continue;
       if (uid != null && archivedGroupUids.contains(uid.toUpperCase())) continue;
@@ -1076,7 +1072,10 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         context,
         GroupsScreen(
           ble: widget.ble,
-          initialGroups: li?.groups ?? const <int>[],
+          initialGroups: (li?.groups ?? const <RiftLinkGroupInfo>[])
+              .map((g) => g.channelId32)
+              .where((g) => g > 1 && g != kMeshBroadcastGroupId)
+              .toList(),
         ),
       );
       return;
@@ -1198,7 +1197,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
   Future<void> _copyGroupInvite(int groupId) async {
     final l = context.l10n;
     if (!widget.ble.isConnected) return;
-    final v2 = _groupV2ById(groupId);
+    final v2 = _groupInfoById(groupId);
     if (v2 != null && v2.groupUid.trim().isNotEmpty) {
       final invite = await widget.ble.groupInviteCreateInvite(
         groupUid: v2.groupUid,

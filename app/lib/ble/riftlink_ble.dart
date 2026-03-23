@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show debugPrint, kDebugMode, kIsWeb;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
+import '../connection/transport_reconnect_manager.dart';
 import '../transport/transport_response_router.dart';
 import '../transport/wifi_transport.dart';
 
@@ -118,8 +119,11 @@ class RiftLinkBle {
   Timer? _queuedInfoTimer;
   bool _hasQueuedInfoRequest = false;
 
-  /// Последний успешно распарсенный `evt:info` (до первого кадра экрана / после connect).
+  /// Последний успешно распарсенный снимок узла (склейка `evt:node` + neighbors/routes/groups).
   RiftLinkInfoEvent? _lastInfo;
+
+  /// Частичные evt склеиваются в один снимок (без монолитного `evt:info` на прошивке).
+  RiftLinkInfoEvent? _compositeInfo;
 
   RiftLinkInfoEvent? get lastInfo => _lastInfo;
 
@@ -316,60 +320,82 @@ class RiftLinkBle {
     }
   }
 
-  /// Подключение к устройству
-  Future<bool> connect(BluetoothDevice dev) async {
-    await disconnect();
-    _device = dev;
+  /// Подключение к устройству.
+  ///
+  /// При смене узла вызывается [disconnect] — без подавления это даёт ложный
+  /// `ble_disconnected` в [TransportReconnectManager]. Для пользовательского
+  /// подключения подавляем авто‑reconnect на время операции и снимаем с задержкой,
+  /// чтобы асинхронное событие от стека BLE успело отфильтроваться.
+  ///
+  /// [internalReconnect] — вызов из [TransportReconnectManager] / оверлея:
+  /// не трогать подавление (иначе сбросится FSM во время активного reconnect).
+  Future<bool> connect(BluetoothDevice dev, {bool internalReconnect = false}) async {
+    if (!internalReconnect) {
+      transportReconnectManager?.suppressAutoReconnectUntilNextConnection();
+    }
     try {
-      await dev.connect();
-      await dev.discoverServices();
-    } catch (_) {
-      _device = null;
-      _txChar = null;
-      _rxChar = null;
-      rethrow;
-    }
-
-    final service = dev.servicesList
-        .where((s) => s.uuid.toString().toLowerCase() == serviceUuid)
-        .firstOrNull;
-    if (service == null) {
       await disconnect();
-      return false;
-    }
-
-    _txChar = service.characteristics
-        .where((c) => c.uuid.toString().toLowerCase() == charTxUuid)
-        .firstOrNull;
-    _rxChar = service.characteristics
-        .where((c) => c.uuid.toString().toLowerCase() == charRxUuid)
-        .firstOrNull;
-
-    if (_txChar == null || _rxChar == null) {
-      await disconnect();
-      return false;
-    }
-    if (!kIsWeb) {
+      _device = dev;
       try {
-        await dev.requestMtu(517);
-      } catch (_) {}
+        await dev.connect();
+        await dev.discoverServices();
+      } catch (_) {
+        _device = null;
+        _txChar = null;
+        _rxChar = null;
+        return false;
+      }
+
+      final service = dev.servicesList
+          .where((s) => s.uuid.toString().toLowerCase() == serviceUuid)
+          .firstOrNull;
+      if (service == null) {
+        await disconnect();
+        return false;
+      }
+
+      _txChar = service.characteristics
+          .where((c) => c.uuid.toString().toLowerCase() == charTxUuid)
+          .firstOrNull;
+      _rxChar = service.characteristics
+          .where((c) => c.uuid.toString().toLowerCase() == charRxUuid)
+          .firstOrNull;
+
+      if (_txChar == null || _rxChar == null) {
+        await disconnect();
+        return false;
+      }
+      if (!kIsWeb) {
+        try {
+          await dev.requestMtu(517);
+        } catch (_) {}
+      }
+      await _startRxDispatcher();
+      _lastBleRemoteId = dev.remoteId.toString();
+      // Параллельный залп tracked-команд переполняет очередь BLE на узле; серийно снижает cmd_drop / потерю ответов.
+      unawaited(() async {
+        try {
+          await getInfo(force: true);
+          await Future<void>.delayed(const Duration(milliseconds: 60));
+          await getGroups();
+          await Future<void>.delayed(const Duration(milliseconds: 40));
+          await getRoutes();
+        } catch (_) {}
+      }());
+      return true;
+    } finally {
+      if (!internalReconnect) {
+        unawaited(
+          Future<void>.delayed(const Duration(milliseconds: 450), () {
+            transportReconnectManager?.resumeAutoReconnect();
+          }),
+        );
+      }
     }
-    await _startRxDispatcher();
-    _lastBleRemoteId = dev.remoteId.toString();
-    // Параллельный залп tracked-команд переполняет очередь BLE на узле; серийно снижает cmd_drop / потерю ответов.
-    unawaited(() async {
-      try {
-        await getInfo(force: true);
-        await Future<void>.delayed(const Duration(milliseconds: 60));
-        await getGroups();
-        await Future<void>.delayed(const Duration(milliseconds: 40));
-        await getRoutes();
-      } catch (_) {}
-    }());
-    return true;
   }
 
-  /// Запросить info (evt "info"). Централизованный throttle, чтобы экраны не спамили устройству.
+  /// Запросить снимок узла (`cmd: info` → волна `evt:node` + neighbors/routes/groups с общим `seq`).
+  /// Централизованный throttle, чтобы экраны не спамили устройству.
   Future<bool> getInfo({bool force = false}) async {
     if (!isTransportConnected) {
       // B2: при недоступном транспорте всё равно отдать кэш в шину — UI остаётся согласованным с последним известным состоянием узла.
@@ -395,7 +421,7 @@ class RiftLinkBle {
           _lastInfoRequestAt = DateTime.now();
           await _requestCommand(
             cmd: 'info',
-            expectedEvents: const {'info'},
+            expectedEvents: const {'node'},
             timeout: const Duration(seconds: 5),
           );
         });
@@ -407,7 +433,7 @@ class RiftLinkBle {
       _lastInfoRequestAt = now;
       return _requestCommand(
         cmd: 'info',
-        expectedEvents: const {'info'},
+        expectedEvents: const {'node'},
         timeout: const Duration(seconds: 5),
       );
     }
@@ -426,7 +452,7 @@ class RiftLinkBle {
       _lastInfoRequestAt = now;
       return _requestCommand(
         cmd: 'info',
-        expectedEvents: const {'info'},
+        expectedEvents: const {'node'},
         timeout: const Duration(seconds: 5),
       );
     }
@@ -445,7 +471,7 @@ class RiftLinkBle {
       _lastInfoRequestAt = DateTime.now();
       await _requestCommand(
         cmd: 'info',
-        expectedEvents: const {'info'},
+        expectedEvents: const {'node'},
         timeout: const Duration(seconds: 5),
       );
     });
@@ -455,6 +481,7 @@ class RiftLinkBle {
   Future<void> disconnect() async {
     _responseRouter.cancelAll();
     _lastInfo = null;
+    _compositeInfo = null;
     _lastInfoEventAt = null;
     _preListenBuffer.clear();
     _queuedInfoTimer?.cancel();
@@ -562,6 +589,199 @@ class RiftLinkBle {
     _drainRxAccum();
   }
 
+  /// Склейка `evt:node` с предыдущими кусками (соседи/маршруты/группы остаются из кэша).
+  RiftLinkInfoEvent _mergeFromNode(RiftLinkInfoEvent n) {
+    final p = _compositeInfo ?? RiftLinkInfoEvent(id: n.id.isNotEmpty ? n.id : '');
+    return RiftLinkInfoEvent(
+      cmdId: n.cmdId ?? p.cmdId,
+      id: n.id.isNotEmpty ? n.id : p.id,
+      nickname: n.hasNicknameField ? n.nickname : p.nickname,
+      hasNicknameField: p.hasNicknameField || n.hasNicknameField,
+      hasChannelField: p.hasChannelField || n.hasChannelField,
+      hasOfflinePendingField: p.hasOfflinePendingField || n.hasOfflinePendingField,
+      hasOfflineCourierPendingField: p.hasOfflineCourierPendingField || n.hasOfflineCourierPendingField,
+      hasOfflineDirectPendingField: p.hasOfflineDirectPendingField || n.hasOfflineDirectPendingField,
+      region: n.region,
+      freq: n.freq,
+      power: n.power,
+      channel: n.channel,
+      version: n.version,
+      radioMode: n.radioMode,
+      radioVariant: n.radioVariant,
+      wifiConnected: n.wifiConnected,
+      wifiSsid: n.wifiSsid,
+      wifiIp: n.wifiIp,
+      neighbors: p.neighbors,
+      neighborsRssi: p.neighborsRssi,
+      neighborsHasKey: p.neighborsHasKey,
+      groups: p.groups,
+      routes: p.routes,
+      sf: n.sf,
+      bw: n.bw,
+      cr: n.cr,
+      modemPreset: n.modemPreset,
+      offlinePending: n.offlinePending ?? p.offlinePending,
+      offlineCourierPending: n.offlineCourierPending ?? p.offlineCourierPending,
+      offlineDirectPending: n.offlineDirectPending ?? p.offlineDirectPending,
+      batteryMv: n.batteryMv ?? p.batteryMv,
+      batteryPercent: n.batteryPercent ?? p.batteryPercent,
+      charging: n.charging,
+      timeHour: n.timeHour ?? p.timeHour,
+      timeMinute: n.timeMinute ?? p.timeMinute,
+      gpsPresent: n.gpsPresent,
+      gpsEnabled: n.gpsEnabled,
+      gpsFix: n.gpsFix,
+      powersave: n.powersave,
+      blePin: n.blePin ?? p.blePin,
+      espNowChannel: n.espNowChannel ?? p.espNowChannel,
+      espNowAdaptive: n.espNowAdaptive,
+    );
+  }
+
+  RiftLinkInfoEvent _mergeFromNeighbors(RiftLinkNeighborsEvent n) {
+    final p = _compositeInfo ?? RiftLinkInfoEvent(id: '');
+    return RiftLinkInfoEvent(
+      cmdId: p.cmdId,
+      id: p.id,
+      nickname: p.nickname,
+      hasNicknameField: p.hasNicknameField,
+      hasChannelField: p.hasChannelField,
+      hasOfflinePendingField: p.hasOfflinePendingField,
+      hasOfflineCourierPendingField: p.hasOfflineCourierPendingField,
+      hasOfflineDirectPendingField: p.hasOfflineDirectPendingField,
+      region: p.region,
+      freq: p.freq,
+      power: p.power,
+      channel: p.channel,
+      version: p.version,
+      radioMode: p.radioMode,
+      radioVariant: p.radioVariant,
+      wifiConnected: p.wifiConnected,
+      wifiSsid: p.wifiSsid,
+      wifiIp: p.wifiIp,
+      neighbors: n.neighbors,
+      neighborsRssi: n.rssi,
+      neighborsHasKey: n.hasKey,
+      groups: p.groups,
+      routes: p.routes,
+      sf: p.sf,
+      bw: p.bw,
+      cr: p.cr,
+      modemPreset: p.modemPreset,
+      offlinePending: p.offlinePending,
+      offlineCourierPending: p.offlineCourierPending,
+      offlineDirectPending: p.offlineDirectPending,
+      batteryMv: p.batteryMv,
+      batteryPercent: p.batteryPercent,
+      charging: p.charging,
+      timeHour: p.timeHour,
+      timeMinute: p.timeMinute,
+      gpsPresent: p.gpsPresent,
+      gpsEnabled: p.gpsEnabled,
+      gpsFix: p.gpsFix,
+      powersave: p.powersave,
+      blePin: p.blePin,
+      espNowChannel: p.espNowChannel,
+      espNowAdaptive: p.espNowAdaptive,
+    );
+  }
+
+  RiftLinkInfoEvent _mergeFromRoutes(RiftLinkRoutesEvent r) {
+    final p = _compositeInfo ?? RiftLinkInfoEvent(id: '');
+    return RiftLinkInfoEvent(
+      cmdId: p.cmdId,
+      id: p.id,
+      nickname: p.nickname,
+      hasNicknameField: p.hasNicknameField,
+      hasChannelField: p.hasChannelField,
+      hasOfflinePendingField: p.hasOfflinePendingField,
+      hasOfflineCourierPendingField: p.hasOfflineCourierPendingField,
+      hasOfflineDirectPendingField: p.hasOfflineDirectPendingField,
+      region: p.region,
+      freq: p.freq,
+      power: p.power,
+      channel: p.channel,
+      version: p.version,
+      radioMode: p.radioMode,
+      radioVariant: p.radioVariant,
+      wifiConnected: p.wifiConnected,
+      wifiSsid: p.wifiSsid,
+      wifiIp: p.wifiIp,
+      neighbors: p.neighbors,
+      neighborsRssi: p.neighborsRssi,
+      neighborsHasKey: p.neighborsHasKey,
+      groups: p.groups,
+      routes: r.routes,
+      sf: p.sf,
+      bw: p.bw,
+      cr: p.cr,
+      modemPreset: p.modemPreset,
+      offlinePending: p.offlinePending,
+      offlineCourierPending: p.offlineCourierPending,
+      offlineDirectPending: p.offlineDirectPending,
+      batteryMv: p.batteryMv,
+      batteryPercent: p.batteryPercent,
+      charging: p.charging,
+      timeHour: p.timeHour,
+      timeMinute: p.timeMinute,
+      gpsPresent: p.gpsPresent,
+      gpsEnabled: p.gpsEnabled,
+      gpsFix: p.gpsFix,
+      powersave: p.powersave,
+      blePin: p.blePin,
+      espNowChannel: p.espNowChannel,
+      espNowAdaptive: p.espNowAdaptive,
+    );
+  }
+
+  RiftLinkInfoEvent _mergeFromGroups(RiftLinkGroupsEvent g) {
+    final p = _compositeInfo ?? RiftLinkInfoEvent(id: '');
+    return RiftLinkInfoEvent(
+      cmdId: p.cmdId,
+      id: p.id,
+      nickname: p.nickname,
+      hasNicknameField: p.hasNicknameField,
+      hasChannelField: p.hasChannelField,
+      hasOfflinePendingField: p.hasOfflinePendingField,
+      hasOfflineCourierPendingField: p.hasOfflineCourierPendingField,
+      hasOfflineDirectPendingField: p.hasOfflineDirectPendingField,
+      region: p.region,
+      freq: p.freq,
+      power: p.power,
+      channel: p.channel,
+      version: p.version,
+      radioMode: p.radioMode,
+      radioVariant: p.radioVariant,
+      wifiConnected: p.wifiConnected,
+      wifiSsid: p.wifiSsid,
+      wifiIp: p.wifiIp,
+      neighbors: p.neighbors,
+      neighborsRssi: p.neighborsRssi,
+      neighborsHasKey: p.neighborsHasKey,
+      groups: g.groups,
+      routes: p.routes,
+      sf: p.sf,
+      bw: p.bw,
+      cr: p.cr,
+      modemPreset: p.modemPreset,
+      offlinePending: p.offlinePending,
+      offlineCourierPending: p.offlineCourierPending,
+      offlineDirectPending: p.offlineDirectPending,
+      batteryMv: p.batteryMv,
+      batteryPercent: p.batteryPercent,
+      charging: p.charging,
+      timeHour: p.timeHour,
+      timeMinute: p.timeMinute,
+      gpsPresent: p.gpsPresent,
+      gpsEnabled: p.gpsEnabled,
+      gpsFix: p.gpsFix,
+      powersave: p.powersave,
+      blePin: p.blePin,
+      espNowChannel: p.espNowChannel,
+      espNowAdaptive: p.espNowAdaptive,
+    );
+  }
+
   void _emitParsedJson(Map<String, dynamic> json) {
     _trace('stage=app_parse action=json evt=${json['evt']} keys=${json.keys.length}');
     // Сначала UI/prelisten, потом raw → TransportResponseRouter: иначе Completer tracked-команд
@@ -580,10 +800,6 @@ class RiftLinkBle {
       }
       return;
     }
-    if (evt is RiftLinkInfoEvent) {
-      _lastInfo = evt;
-      _lastInfoEventAt = DateTime.now();
-    }
     if (evt == null) {
       if (kDebugMode) {
         debugPrint(
@@ -597,6 +813,33 @@ class RiftLinkBle {
         _rawEventBus.add(copy);
       }
       return;
+    }
+
+    final evtName = json['evt']?.toString() ?? '';
+    if (evt is RiftLinkInfoEvent) {
+      final hasTopology = evt.neighbors.isNotEmpty ||
+          evt.routes.isNotEmpty ||
+          evt.groups.isNotEmpty;
+      if (evtName == 'info' && hasTopology) {
+        _compositeInfo = evt;
+      } else {
+        _compositeInfo = _mergeFromNode(evt);
+      }
+      evt = _compositeInfo!;
+    } else if (evt is RiftLinkNeighborsEvent) {
+      _compositeInfo = _mergeFromNeighbors(evt);
+      evt = _compositeInfo!;
+    } else if (evt is RiftLinkRoutesEvent) {
+      _compositeInfo = _mergeFromRoutes(evt);
+      evt = _compositeInfo!;
+    } else if (evt is RiftLinkGroupsEvent) {
+      _compositeInfo = _mergeFromGroups(evt);
+      evt = _compositeInfo!;
+    }
+
+    if (evt is RiftLinkInfoEvent) {
+      _lastInfo = evt;
+      _lastInfoEventAt = DateTime.now();
     }
 
     if (!_eventBus.isClosed) {
@@ -733,7 +976,7 @@ class RiftLinkBle {
       } catch (e) {
         // Неполный JSON или несколько объектов подряд — разбираем ниже
         if (kDebugMode && s.length < 256) debugPrint('RiftLinkBle: single-object parse: $e');
-        // Длинный `evt:info` с groupsV2 всегда режется по MTU — до следующего notify это норма, не спамим BLE_CHAIN.
+        // Длинный JSON групп по BLE всегда может резаться по MTU — до следующего notify это норма, не спамим BLE_CHAIN.
         final isFragment =
             s.length > 120 &&
             e is FormatException &&
@@ -836,7 +1079,7 @@ class RiftLinkBle {
     return _requestCommand(
       cmd: 'nickname',
       payload: {'nickname': nickname},
-      expectedEvents: const {'info'},
+      expectedEvents: const {'node'},
       timeout: const Duration(seconds: 6),
     );
   }
@@ -858,7 +1101,7 @@ class RiftLinkBle {
     return _requestCommand(
       cmd: 'sf',
       payload: {'sf': sf},
-      expectedEvents: const {'info'},
+      expectedEvents: const {'node'},
       timeout: const Duration(seconds: 6),
     );
   }
@@ -869,7 +1112,7 @@ class RiftLinkBle {
     return _requestCommand(
       cmd: 'modemPreset',
       payload: {'preset': preset},
-      expectedEvents: const {'info'},
+      expectedEvents: const {'node'},
       timeout: const Duration(seconds: 6),
     );
   }
@@ -880,7 +1123,7 @@ class RiftLinkBle {
     return _requestCommand(
       cmd: 'modemCustom',
       payload: {'sf': sf, 'bw': bw, 'cr': cr},
-      expectedEvents: const {'info'},
+      expectedEvents: const {'node'},
       timeout: const Duration(seconds: 6),
     );
   }
@@ -1255,7 +1498,7 @@ class RiftLinkBle {
     return _requestCommand(
       cmd: 'espnowChannel',
       payload: {'channel': channel},
-      expectedEvents: const {'info'},
+      expectedEvents: const {'node'},
       timeout: const Duration(seconds: 6),
     );
   }
@@ -1265,7 +1508,7 @@ class RiftLinkBle {
       _requestCommand(
         cmd: 'espnowAdaptive',
         payload: {'enabled': enabled},
-        expectedEvents: const {'info'},
+        expectedEvents: const {'node'},
         timeout: const Duration(seconds: 6),
       );
 
@@ -1311,7 +1554,7 @@ class RiftLinkBle {
     return _requestCommand(
       cmd: 'acceptInvite',
       payload: payload,
-      expectedEvents: const {'info'},
+      expectedEvents: const {'node'},
       timeout: const Duration(seconds: 6),
     );
   }
@@ -1319,7 +1562,7 @@ class RiftLinkBle {
   /// Перегенерировать BLE PIN (passkey) — устройство покажет новый PIN на экране
   Future<bool> regeneratePin() async => _requestCommand(
     cmd: 'regeneratePin',
-    expectedEvents: const {'info'},
+    expectedEvents: const {'node'},
     timeout: const Duration(seconds: 5),
   );
 
@@ -1584,16 +1827,20 @@ Map<String, dynamic> _normalizeRouteMap(Map<dynamic, dynamic> raw) {
   return out;
 }
 
-List<RiftLinkGroupV2Info> _parseGroupsV2(dynamic raw) {
-  if (raw is! List) return const <RiftLinkGroupV2Info>[];
-  final out = <RiftLinkGroupV2Info>[];
+/// Список групп в JSON: только объекты (`groupUid`, `channelId32`, …). Legacy-массив только из чисел игнорируется.
+List<RiftLinkGroupInfo> _parseGroupInfoList(dynamic raw) {
+  if (raw is! List || raw.isEmpty) return const <RiftLinkGroupInfo>[];
+  if (raw.every((e) => e is int || e is num)) {
+    return const <RiftLinkGroupInfo>[];
+  }
+  final out = <RiftLinkGroupInfo>[];
   for (final item in raw) {
     if (item is! Map) continue;
     final m = Map<String, dynamic>.from(item as Map);
     final uid = (m['groupUid'] ?? '').toString();
     if (uid.trim().isEmpty) continue;
     out.add(
-      RiftLinkGroupV2Info(
+      RiftLinkGroupInfo(
         groupUid: uid,
         groupTag: (m['groupTag'] ?? '').toString(),
         canonicalName: (m['canonicalName'] ?? '').toString(),
@@ -1684,7 +1931,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       total: (json['total'] as num?)?.toInt() ?? 0,
     );
   }
-  if (evt == 'info') {
+  if (evt == 'info' || evt == 'node') {
     final neighbors = _parseNeighborIdList(json['neighbors']);
     final rssiList = json['neighborsRssi'];
     final neighborsRssi = rssiList is List ? (rssiList as List).map(_jsonInt).toList() : <int>[];
@@ -1692,9 +1939,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     final neighborsHasKey = hasKeyList is List
         ? (hasKeyList as List).map((e) => e == true || e == 1).toList()
         : <bool>[];
-    final grpList = json['groups'];
-    final groups = grpList is List ? (grpList as List).map(_jsonInt).toList() : <int>[];
-    final groupsV2 = _parseGroupsV2(json['groupsV2']);
+    final groups = _parseGroupInfoList(json['groups']);
     final routesList = json['routes'];
     final routes = <Map<String, dynamic>>[];
     if (routesList is List) {
@@ -1729,7 +1974,6 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       neighborsRssi: neighborsRssi,
       neighborsHasKey: neighborsHasKey,
       groups: groups,
-      groupsV2: groupsV2,
       routes: routes,
       sf: _jsonIntNullable(json['sf']),
       bw: _jsonDoubleNullable(json['bw']),
@@ -1765,12 +2009,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     return RiftLinkRoutesEvent(routes: routes);
   }
   if (evt == 'groups') {
-    final grpList = json['groups'];
-    final groupsV2 = _parseGroupsV2(json['groupsV2']);
-    return RiftLinkGroupsEvent(
-      groups: grpList is List ? (grpList as List).map(_jsonInt).toList() : <int>[],
-      groupsV2: groupsV2,
-    );
+    return RiftLinkGroupsEvent(groups: _parseGroupInfoList(json['groups']));
   }
   if (evt == 'groupStatus') {
     return RiftLinkGroupStatusEvent(
@@ -1973,7 +2212,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
 
 sealed class RiftLinkEvent {}
 
-class RiftLinkGroupV2Info {
+class RiftLinkGroupInfo {
   final String groupUid;
   final String groupTag;
   final String canonicalName;
@@ -1982,7 +2221,7 @@ class RiftLinkGroupV2Info {
   final String myRole;
   final int revocationEpoch;
   final bool ackApplied;
-  const RiftLinkGroupV2Info({
+  const RiftLinkGroupInfo({
     required this.groupUid,
     required this.groupTag,
     this.canonicalName = '',
@@ -2074,8 +2313,8 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
   final List<String> neighbors;
   final List<int> neighborsRssi;
   final List<bool> neighborsHasKey;
-  final List<int> groups;
-  final List<RiftLinkGroupV2Info> groupsV2;
+  /// Полные записи групп (в JSON ключ `groups`; legacy-массив id не используется).
+  final List<RiftLinkGroupInfo> groups;
   final List<Map<String, dynamic>> routes;
   final int? sf;
   final double? bw;
@@ -2119,7 +2358,6 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
     this.neighborsRssi = const [],
     this.neighborsHasKey = const [],
     this.groups = const [],
-    this.groupsV2 = const [],
     this.routes = const [],
     this.sf,
     this.bw,
@@ -2236,12 +2474,8 @@ class RiftLinkRoutesEvent extends RiftLinkEvent {
 }
 
 class RiftLinkGroupsEvent extends RiftLinkEvent {
-  final List<int> groups;
-  final List<RiftLinkGroupV2Info> groupsV2;
-  RiftLinkGroupsEvent({
-    required this.groups,
-    this.groupsV2 = const [],
-  });
+  final List<RiftLinkGroupInfo> groups;
+  RiftLinkGroupsEvent({this.groups = const []});
 }
 
 class RiftLinkGroupStatusEvent extends RiftLinkEvent {

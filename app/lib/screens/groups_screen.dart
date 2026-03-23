@@ -42,7 +42,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
   final FocusNode _searchFocusNode = FocusNode();
   List<int> _groups = [];
   final Map<int, int> _groupKeyVersion = <int, int>{};
-  final Map<int, RiftLinkGroupV2Info> _groupV2ByChannel = <int, RiftLinkGroupV2Info>{};
+  final Map<int, RiftLinkGroupInfo> _groupInfoByChannel = <int, RiftLinkGroupInfo>{};
   String _searchQuery = '';
   bool _searchMode = false;
   bool _loading = false;
@@ -54,27 +54,24 @@ class _GroupsScreenState extends State<GroupsScreen> {
     return out;
   }
 
-  void _applyGroups(
-    Iterable<int> groups, [
-    List<RiftLinkGroupV2Info>? groupsV2,
-  ]) {
-    final fromV2 = (groupsV2 ?? const <RiftLinkGroupV2Info>[])
+  void _applyGroups(List<RiftLinkGroupInfo> groupInfos) {
+    final fromBle = groupInfos
         .map((e) => e.channelId32)
         .where((e) => e > 1 && e != kMeshBroadcastGroupId);
-    final normalized = _normalizeGroups([...groups, ...fromV2]);
+    final normalized = _normalizeGroups(fromBle);
     final nextVer = <int, int>{};
-    final nextV2 = <int, RiftLinkGroupV2Info>{};
-    for (final g in groupsV2 ?? const <RiftLinkGroupV2Info>[]) {
+    final nextByChannel = <int, RiftLinkGroupInfo>{};
+    for (final g in groupInfos) {
       if (g.channelId32 > 1 && g.channelId32 != kMeshBroadcastGroupId) {
-        nextV2[g.channelId32] = g;
+        nextByChannel[g.channelId32] = g;
       }
     }
     for (var i = 0; i < normalized.length; i++) {
       final gid = normalized[i];
       int ver = _groupKeyVersion[gid] ?? 0;
-      final v2 = nextV2[gid] ?? _groupV2ByChannel[gid];
-      if (v2 != null) {
-        ver = v2.keyVersion > 0 ? v2.keyVersion : ver;
+      final info = nextByChannel[gid] ?? _groupInfoByChannel[gid];
+      if (info != null) {
+        ver = info.keyVersion > 0 ? info.keyVersion : ver;
       }
       nextVer[gid] = ver;
     }
@@ -82,27 +79,27 @@ class _GroupsScreenState extends State<GroupsScreen> {
     _groupKeyVersion
       ..clear()
       ..addAll(nextVer);
-    _groupV2ByChannel
+    _groupInfoByChannel
       ..clear()
-      ..addAll(nextV2);
+      ..addAll(nextByChannel);
   }
 
   int? _channelByUid(String groupUid) {
     final uid = groupUid.trim().toUpperCase();
     if (uid.isEmpty) return null;
-    for (final entry in _groupV2ByChannel.entries) {
+    for (final entry in _groupInfoByChannel.entries) {
       if (entry.value.groupUid.toUpperCase() == uid) return entry.key;
     }
     return null;
   }
 
   String? _uidByChannel(int gid) {
-    final uid = _groupV2ByChannel[gid]?.groupUid.trim();
+    final uid = _groupInfoByChannel[gid]?.groupUid.trim();
     return (uid == null || uid.isEmpty) ? null : uid;
   }
 
   String _groupDisplayName(int gid) {
-    final v2 = _groupV2ByChannel[gid];
+    final v2 = _groupInfoByChannel[gid];
     final name = v2?.canonicalName.trim();
     if (name != null && name.isNotEmpty) return name;
     return '${context.l10n.tr('group')} $gid';
@@ -122,27 +119,19 @@ class _GroupsScreenState extends State<GroupsScreen> {
   @override
   void initState() {
     super.initState();
-    _applyGroups(const <int>[], widget.ble.lastInfo?.groupsV2 ?? const <RiftLinkGroupV2Info>[]);
+    _applyGroups(widget.ble.lastInfo?.groups ?? const <RiftLinkGroupInfo>[]);
     _sub = widget.ble.events.listen((evt) {
       if (!mounted) return;
-      // Ответ на getGroups — и поле groups в evt:info (как в чате), иначе список не обновлялся без отдельного notify.
-      if (evt is RiftLinkGroupsEvent) {
-        setState(() => _applyGroups(
-              const <int>[],
-              evt.groupsV2,
-            ));
-      } else if (evt is RiftLinkInfoEvent) {
-        setState(() => _applyGroups(
-              const <int>[],
-              evt.groupsV2,
-            ));
+      // Снимок групп приходит в склеенном RiftLinkInfoEvent (evt:node + groups по seq на прошивке).
+      if (evt is RiftLinkInfoEvent) {
+        setState(() => _applyGroups(evt.groups));
       } else if (evt is RiftLinkGroupStatusEvent) {
         final gid = evt.channelId32 ?? _channelByUid(evt.groupUid);
         if (gid == null || gid <= 1) return;
-        final prev = _groupV2ByChannel[gid];
+        final prev = _groupInfoByChannel[gid];
         final prevKnownVersion = prev?.keyVersion ?? (_groupKeyVersion[gid] ?? 0);
         final nextVersion = evt.keyVersion > 0 ? evt.keyVersion : prevKnownVersion;
-        final next = RiftLinkGroupV2Info(
+        final next = RiftLinkGroupInfo(
           groupUid: evt.groupUid,
           groupTag: prev?.groupTag ?? '',
           canonicalName: evt.canonicalName.trim().isNotEmpty
@@ -155,18 +144,18 @@ class _GroupsScreenState extends State<GroupsScreen> {
           ackApplied: !evt.rekeyRequired,
         );
         setState(() {
-          _groupV2ByChannel[gid] = next;
+          _groupInfoByChannel[gid] = next;
           if (nextVersion > 0) {
             _groupKeyVersion[gid] = nextVersion;
           }
           if (!_groups.contains(gid)) {
-            _applyGroups([..._groups, gid], _groupV2ByChannel.values.toList());
+            _applyGroups(_groupInfoByChannel.values.toList());
           }
         });
       } else if (evt is RiftLinkGroupRekeyProgressEvent) {
         final gid = _channelByUid(evt.groupUid);
         if (gid != null && mounted) {
-          final prev = _groupV2ByChannel[gid];
+          final prev = _groupInfoByChannel[gid];
           final nextAckApplied = evt.pending == 0 && evt.failed == 0;
           final nextVersion = evt.keyVersion > 0
               ? evt.keyVersion
@@ -176,7 +165,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
               _groupKeyVersion[gid] = nextVersion;
             }
             if (prev != null) {
-              _groupV2ByChannel[gid] = RiftLinkGroupV2Info(
+              _groupInfoByChannel[gid] = RiftLinkGroupInfo(
                 groupUid: prev.groupUid,
                 groupTag: prev.groupTag,
                 canonicalName: prev.canonicalName,
@@ -198,9 +187,9 @@ class _GroupsScreenState extends State<GroupsScreen> {
         if (gid != null && mounted) {
           if (evt.status == 'applied') {
             setState(() {
-              final prev = _groupV2ByChannel[gid];
+              final prev = _groupInfoByChannel[gid];
               if (prev != null && !prev.ackApplied) {
-                _groupV2ByChannel[gid] = RiftLinkGroupV2Info(
+                _groupInfoByChannel[gid] = RiftLinkGroupInfo(
                   groupUid: prev.groupUid,
                   groupTag: prev.groupTag,
                   canonicalName: prev.canonicalName,
@@ -276,7 +265,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
 
   Future<void> _ackCurrentGroupKey(int gid) async {
     final l = context.l10n;
-    final v2 = _groupV2ByChannel[gid];
+    final v2 = _groupInfoByChannel[gid];
     if (v2 == null || v2.groupUid.trim().isEmpty || v2.keyVersion <= 0) {
       _snack(l.tr('error'), backgroundColor: context.palette.error);
       return;
@@ -290,7 +279,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
       return;
     }
     setState(() {
-      _groupV2ByChannel[gid] = RiftLinkGroupV2Info(
+      _groupInfoByChannel[gid] = RiftLinkGroupInfo(
         groupUid: v2.groupUid,
         groupTag: v2.groupTag,
         canonicalName: v2.canonicalName,
@@ -326,7 +315,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
   Future<void> _renameCanonicalName(int gid) async {
     final l = context.l10n;
     final uid = _uidByChannel(gid);
-    final v2 = _groupV2ByChannel[gid];
+    final v2 = _groupInfoByChannel[gid];
     if (uid == null || v2 == null) {
       _snack(l.tr('error'), backgroundColor: context.palette.error);
       return;
@@ -470,7 +459,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
   Future<void> _copyInvite(int gid) async {
     final l = context.l10n;
     if (!widget.ble.isConnected) return;
-    final v2 = _groupV2ByChannel[gid];
+    final v2 = _groupInfoByChannel[gid];
     if (v2 != null && v2.groupUid.trim().isNotEmpty) {
       final invite = await widget.ble.groupInviteCreateInvite(
         groupUid: v2.groupUid,
@@ -725,11 +714,6 @@ class _GroupsScreenState extends State<GroupsScreen> {
                             channelId32: val,
                             groupTag: _generateBase64Token(8),
                           );
-                          if (ok && mounted) {
-                            setState(() {
-                              _applyGroups([..._groups, val]);
-                            });
-                          }
                           await _refresh();
                           if (mounted) {
                             _snack('${l.tr('group')} $val ${l.tr('added')}');
@@ -844,7 +828,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
   }
 
   Widget _buildGroupCard(int gid, AppLocalizations l, AppPalette p) {
-    final v2 = _groupV2ByChannel[gid];
+    final v2 = _groupInfoByChannel[gid];
     final ver = _groupKeyVersion[gid] ?? 0;
     final effectiveVersion = (v2 != null && v2.keyVersion > ver) ? v2.keyVersion : ver;
     final canRotate = v2 != null && (v2.myRole == 'owner' || v2.myRole == 'admin');
@@ -1008,7 +992,7 @@ class _GroupsScreenState extends State<GroupsScreen> {
     }
     setState(() {
       _groups.remove(gid);
-      _groupV2ByChannel.remove(gid);
+      _groupInfoByChannel.remove(gid);
       _groupKeyVersion.remove(gid);
     });
     await _chatRepo.removeGroupConversation(groupUid: uid, channelId32: gid);

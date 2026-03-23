@@ -102,16 +102,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
       if (!mounted) return;
       if (evt is RiftLinkInfoEvent) {
         _setNeighbors(evt.neighbors);
-      } else if (evt is RiftLinkNeighborsEvent) {
-        if (evt.neighbors.isEmpty) {
-          final li = ble.lastInfo;
-          if (li != null && li.neighbors.isNotEmpty) {
-            _setNeighbors(li.neighbors);
-            unawaited(ble.getInfo(force: true));
-            return;
-          }
-        }
-        _setNeighbors(evt.neighbors);
       }
     });
     unawaited(Future<void>.delayed(const Duration(milliseconds: 400), () {

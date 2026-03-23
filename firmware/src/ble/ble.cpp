@@ -844,13 +844,12 @@ static BlsScanCallbacks s_blsScanCallbacks;
 /** Большой evt info — раньше String::reserve(1200); теперь BSS, без heap. */
 static constexpr size_t NOTIFY_INFO_JSON_CAP = 1280;
 static char s_notifyInfoPayload[NOTIFY_INFO_JSON_CAP];
-static char s_lastInfoPayload[NOTIFY_INFO_JSON_CAP];
-static size_t s_lastInfoPayloadLen = 0;
+/** Монотонный счётчик волн sync (node+neighbors+routes+groups) и отдельных evt. */
+static uint32_t s_bleSyncSeq = 0;
 
 class ServerCallbacks : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
     s_connected = true;
-    s_lastInfoPayloadLen = 0;  // send first info snapshot on every new BLE session
     displayWakeRequest();
     vTaskDelay(pdMS_TO_TICKS(5));   // краткая пауза для GATT
   }
@@ -2462,13 +2461,12 @@ void notifyTimeCapsuleReleased(const uint8_t* to, uint32_t msgId, uint8_t trigge
   notifyJsonToApp(buf, len);
 }
 
-void notifyInfo() {
-  const uint32_t cmdId = s_emitInfoCmdId;
-  s_emitInfoCmdId = 0;
+/** Паспорт узла без массивов соседей/маршрутов/групп — один notify. */
+static void notifyNodeSnapshot(uint32_t seq, uint32_t cmdId) {
   if (!hasActiveTransport()) return;
-
   JsonDocument doc(&s_bleJsonAllocator);
-  doc["evt"] = "info";
+  doc["evt"] = "node";
+  doc["seq"] = seq;
   if (cmdId != 0) doc["cmdId"] = cmdId;
   const uint8_t* id = node::getId();
   char idHex[17] = {0};
@@ -2519,67 +2517,51 @@ void notifyInfo() {
   doc["powersave"] = powersave::isEnabled();
   doc["blePin"] = s_passkey;
 
-  JsonArray grpArr = doc["groups"].to<JsonArray>();
-  const int ng = groups::getV2Count();
-  for (int i = 0; i < ng; i++) {
-    char uid[groups::GROUP_UID_MAX_LEN + 1] = {0};
-    char tag[groups::GROUP_TAG_MAX_LEN + 1] = {0};
-    char canonicalName[groups::GROUP_CANONICAL_NAME_MAX_LEN + 1] = {0};
-    uint32_t channelId32 = 0;
-    if (!groups::getV2At(i, uid, sizeof(uid), &channelId32, tag, sizeof(tag), canonicalName, sizeof(canonicalName), nullptr, nullptr, nullptr, nullptr)) continue;
-    if (channelId32 == 0) continue;
-    grpArr.add(channelId32);
-  }
-  JsonArray grpV2Arr = doc["groupsV2"].to<JsonArray>();
-  const int nv2 = groups::getV2Count();
-  // Слишком длинный info режется на несколько notify; обрезка по числу групп снижает «обрыв посередине строки» в первом чанке.
-  constexpr int kMaxGroupsV2InBleInfo = 12;
-  const int nv2Cap = (nv2 > kMaxGroupsV2InBleInfo) ? kMaxGroupsV2InBleInfo : nv2;
-  for (int i = 0; i < nv2Cap; i++) {
-    char uid[groups::GROUP_UID_MAX_LEN + 1] = {0};
-    char tag[groups::GROUP_TAG_MAX_LEN + 1] = {0};
-    char canonicalName[groups::GROUP_CANONICAL_NAME_MAX_LEN + 1] = {0};
-    uint32_t channelId32 = 0;
-    uint16_t keyVersion = 0;
-    groups::GroupRole role = groups::GroupRole::None;
-    uint32_t revEpoch = 0;
-    bool ackApplied = false;
-    if (!groups::getV2At(i, uid, sizeof(uid), &channelId32, tag, sizeof(tag), canonicalName, sizeof(canonicalName), &keyVersion, &role, &revEpoch, &ackApplied)) continue;
-    JsonObject gv2 = grpV2Arr.add<JsonObject>();
-    gv2["groupUid"] = uid;
-    gv2["groupTag"] = tag;
-    gv2["canonicalName"] = canonicalName;
-    gv2["channelId32"] = channelId32;
-    gv2["keyVersion"] = keyVersion;
-    gv2["myRole"] = groupRoleToStr(role);
-    gv2["revocationEpoch"] = revEpoch;
-    gv2["ackApplied"] = ackApplied;
-  }
+  size_t plen = serializeJson(doc, s_notifyInfoPayload, sizeof(s_notifyInfoPayload));
+  if (plen == 0) return;
+  notifyJsonToApp(s_notifyInfoPayload, plen);
+}
 
+static void notifyNeighborsWithSeq(uint32_t seq, uint32_t cmdId) {
+  if (!hasActiveTransport()) return;
+  JsonDocument doc(&s_bleJsonAllocator);
+  doc["evt"] = "neighbors";
+  doc["seq"] = seq;
+  if (cmdId != 0) doc["cmdId"] = cmdId;
   JsonArray arr = doc["neighbors"].to<JsonArray>();
-  JsonArray rssiArr = doc["neighborsRssi"].to<JsonArray>();
-  JsonArray hasKeyArr = doc["neighborsHasKey"].to<JsonArray>();
+  JsonArray rssiArr = doc["rssi"].to<JsonArray>();
+  JsonArray hasKeyArr = doc["hasKey"].to<JsonArray>();
   int n = neighbors::getCount();
   char hex[17];
   uint8_t peerId[protocol::NODE_ID_LEN];
   for (int i = 0; i < n; i++) {
     neighbors::getIdHex(i, hex);
     arr.add(hex);
-    rssiArr.add(neighbors::getRssi(i));
+    rssiArr.add(neighbors::getRssi(i) != 0 ? neighbors::getRssi(i) : (int)0);
     if (neighbors::getId(i, peerId)) hasKeyArr.add(x25519_keys::hasKeyFor(peerId));
     else hasKeyArr.add(false);
   }
+  char buf[320];
+  size_t len = serializeJson(doc, buf, sizeof(buf));
+  notifyJsonToApp(buf, len);
+}
 
-  JsonArray routesArr = doc["routes"].to<JsonArray>();
-  int nr = routing::getRouteCount();
+static void notifyRoutesWithSeq(uint32_t seq, uint32_t cmdId) {
+  if (!hasActiveTransport()) return;
+  JsonDocument doc(&s_bleJsonAllocator);
+  doc["evt"] = "routes";
+  doc["seq"] = seq;
+  if (cmdId != 0) doc["cmdId"] = cmdId;
+  JsonArray arr = doc["routes"].to<JsonArray>();
+  int n = routing::getRouteCount();
   uint8_t dest[8], nextHop[8];
   uint8_t hops;
   int8_t rssi;
   int trustScore;
-  for (int i = 0; i < nr; i++) {
+  char d[17], nh[17];
+  for (int i = 0; i < n; i++) {
     if (!routing::getRouteAt(i, dest, nextHop, &hops, &rssi, &trustScore)) continue;
-    JsonObject ro = routesArr.add<JsonObject>();
-    char d[17], nh[17];
+    JsonObject ro = arr.add<JsonObject>();
     for (int j = 0; j < 8; j++) { snprintf(d + j*2, 3, "%02X", dest[j]); snprintf(nh + j*2, 3, "%02X", nextHop[j]); }
     d[16] = nh[16] = '\0';
     ro["dest"] = d;
@@ -2592,19 +2574,58 @@ void notifyInfo() {
     ro["cr"] = radio::getCodingRate();
     ro["trustScore"] = trustScore;
   }
+  char buf[400];
+  size_t len = serializeJson(doc, buf, sizeof(buf));
+  notifyJsonToApp(buf, len);
+}
 
-  // Буфер 600 обрезал большой `info` (соседи/маршруты) → невалидный JSON в приложении.
-  size_t plen = serializeJson(doc, s_notifyInfoPayload, sizeof(s_notifyInfoPayload));
-  if (plen == 0) return;
-  if (cmdId == 0 && s_lastInfoPayloadLen == plen && memcmp(s_lastInfoPayload, s_notifyInfoPayload, plen) == 0) {
-    Serial.println("[BLE_CHAIN] stage=fw_notify_info action=skip reason=unchanged");
+static void notifyGroupsWithSeq(uint32_t seq, uint32_t cmdId) {
+  if (!hasActiveTransport()) return;
+  JsonDocument doc(&s_bleJsonAllocator);
+  doc["evt"] = "groups";
+  doc["seq"] = seq;
+  if (cmdId != 0) doc["cmdId"] = cmdId;
+  JsonArray arr = doc["groups"].to<JsonArray>();
+  const int nv2 = groups::getV2Count();
+  for (int i = 0; i < nv2; i++) {
+    char uid[groups::GROUP_UID_MAX_LEN + 1] = {0};
+    char tag[groups::GROUP_TAG_MAX_LEN + 1] = {0};
+    char canonicalName[groups::GROUP_CANONICAL_NAME_MAX_LEN + 1] = {0};
+    uint32_t channelId32 = 0;
+    uint16_t keyVersion = 0;
+    groups::GroupRole role = groups::GroupRole::None;
+    uint32_t revEpoch = 0;
+    bool ackApplied = false;
+    if (!groups::getV2At(i, uid, sizeof(uid), &channelId32, tag, sizeof(tag), canonicalName, sizeof(canonicalName), &keyVersion, &role, &revEpoch, &ackApplied)) continue;
+    JsonObject gv2 = arr.add<JsonObject>();
+    gv2["groupUid"] = uid;
+    gv2["groupTag"] = tag;
+    gv2["canonicalName"] = canonicalName;
+    gv2["channelId32"] = channelId32;
+    gv2["keyVersion"] = keyVersion;
+    gv2["myRole"] = groupRoleToStr(role);
+    gv2["revocationEpoch"] = revEpoch;
+    gv2["ackApplied"] = ackApplied;
+  }
+  const size_t needed = measureJson(doc);
+  if (needed >= 768) {
+    notifyError("groups_payload_too_large", "groups payload exceeds BLE notify buffer");
     return;
   }
-  if (plen <= sizeof(s_lastInfoPayload)) {
-    memcpy(s_lastInfoPayload, s_notifyInfoPayload, plen);
-    s_lastInfoPayloadLen = plen;
-  }
-  notifyJsonToApp(s_notifyInfoPayload, plen);
+  char buf[768];
+  size_t len = serializeJson(doc, buf, sizeof(buf));
+  notifyJsonToApp(buf, len);
+}
+
+void notifyInfo() {
+  const uint32_t cmdId = s_emitInfoCmdId;
+  s_emitInfoCmdId = 0;
+  if (!hasActiveTransport()) return;
+  const uint32_t seq = ++s_bleSyncSeq;
+  notifyNodeSnapshot(seq, cmdId);
+  notifyNeighborsWithSeq(seq, 0);
+  notifyRoutesWithSeq(seq, 0);
+  notifyGroupsWithSeq(seq, 0);
 }
 
 void notifyInvite() {
@@ -2656,87 +2677,16 @@ void notifyRoutes() {
   const uint32_t cmdId = s_emitRoutesCmdId;
   s_emitRoutesCmdId = 0;
   if (!hasActiveTransport()) return;
-
-  JsonDocument doc(&s_bleJsonAllocator);
-  doc["evt"] = "routes";
-  if (cmdId != 0) doc["cmdId"] = cmdId;
-  JsonArray arr = doc["routes"].to<JsonArray>();
-  int n = routing::getRouteCount();
-  uint8_t dest[8], nextHop[8];
-  uint8_t hops;
-  int8_t rssi;
-  int trustScore;
-  char d[17], nh[17];
-  for (int i = 0; i < n; i++) {
-    if (!routing::getRouteAt(i, dest, nextHop, &hops, &rssi, &trustScore)) continue;
-    JsonObject ro = arr.add<JsonObject>();
-    for (int j = 0; j < 8; j++) { snprintf(d + j*2, 3, "%02X", dest[j]); snprintf(nh + j*2, 3, "%02X", nextHop[j]); }
-    d[16] = nh[16] = '\0';
-    ro["dest"] = d;
-    ro["nextHop"] = nh;
-    ro["hops"] = hops;
-    ro["rssi"] = (int)rssi;
-    ro["modemPreset"] = (int)radio::getModemPreset();
-    ro["sf"] = radio::getSpreadingFactor();
-    ro["bw"] = radio::getBandwidth();
-    ro["cr"] = radio::getCodingRate();
-    ro["trustScore"] = trustScore;
-  }
-  char buf[400];
-  size_t len = serializeJson(doc, buf);
-  notifyJsonToApp(buf, len);
+  const uint32_t seq = ++s_bleSyncSeq;
+  notifyRoutesWithSeq(seq, cmdId);
 }
 
 void notifyGroups() {
   const uint32_t cmdId = s_emitGroupsCmdId;
   s_emitGroupsCmdId = 0;
   if (!hasActiveTransport()) return;
-
-  JsonDocument doc(&s_bleJsonAllocator);
-  doc["evt"] = "groups";
-  if (cmdId != 0) doc["cmdId"] = cmdId;
-  JsonArray arr = doc["groups"].to<JsonArray>();
-  const int n = groups::getV2Count();
-  for (int i = 0; i < n; i++) {
-    char uid[groups::GROUP_UID_MAX_LEN + 1] = {0};
-    char tag[groups::GROUP_TAG_MAX_LEN + 1] = {0};
-    char canonicalName[groups::GROUP_CANONICAL_NAME_MAX_LEN + 1] = {0};
-    uint32_t channelId32 = 0;
-    if (!groups::getV2At(i, uid, sizeof(uid), &channelId32, tag, sizeof(tag), canonicalName, sizeof(canonicalName), nullptr, nullptr, nullptr, nullptr)) continue;
-    if (channelId32 == 0) continue;
-    arr.add(channelId32);
-  }
-  JsonArray arrV2 = doc["groupsV2"].to<JsonArray>();
-  const int nv2 = groups::getV2Count();
-  for (int i = 0; i < nv2; i++) {
-    char uid[groups::GROUP_UID_MAX_LEN + 1] = {0};
-    char tag[groups::GROUP_TAG_MAX_LEN + 1] = {0};
-    char canonicalName[groups::GROUP_CANONICAL_NAME_MAX_LEN + 1] = {0};
-    uint32_t channelId32 = 0;
-    uint16_t keyVersion = 0;
-    groups::GroupRole role = groups::GroupRole::None;
-    uint32_t revEpoch = 0;
-    bool ackApplied = false;
-    if (!groups::getV2At(i, uid, sizeof(uid), &channelId32, tag, sizeof(tag), canonicalName, sizeof(canonicalName), &keyVersion, &role, &revEpoch, &ackApplied)) continue;
-    JsonObject gv2 = arrV2.add<JsonObject>();
-    gv2["groupUid"] = uid;
-    gv2["groupTag"] = tag;
-    gv2["canonicalName"] = canonicalName;
-    gv2["channelId32"] = channelId32;
-    gv2["keyVersion"] = keyVersion;
-    gv2["myRole"] = groupRoleToStr(role);
-    gv2["revocationEpoch"] = revEpoch;
-    gv2["ackApplied"] = ackApplied;
-  }
-
-  const size_t needed = measureJson(doc);
-  if (needed >= 768) {
-    notifyError("groups_payload_too_large", "groups payload exceeds BLE notify buffer");
-    return;
-  }
-  char buf[768];
-  size_t len = serializeJson(doc, buf, sizeof(buf));
-  notifyJsonToApp(buf, len);
+  const uint32_t seq = ++s_bleSyncSeq;
+  notifyGroupsWithSeq(seq, cmdId);
 }
 
 void requestNeighborsNotify() {
@@ -2748,27 +2698,8 @@ void notifyNeighbors() {
   const uint32_t cmdId = s_emitNeighborsCmdId;
   s_emitNeighborsCmdId = 0;
   if (!hasActiveTransport()) return;
-
-  JsonDocument doc(&s_bleJsonAllocator);
-  doc["evt"] = "neighbors";
-  if (cmdId != 0) doc["cmdId"] = cmdId;
-  JsonArray arr = doc["neighbors"].to<JsonArray>();
-  JsonArray rssiArr = doc["rssi"].to<JsonArray>();
-  JsonArray hasKeyArr = doc["hasKey"].to<JsonArray>();
-  int n = neighbors::getCount();
-  char hex[17];
-  uint8_t peerId[protocol::NODE_ID_LEN];
-  for (int i = 0; i < n; i++) {
-    neighbors::getIdHex(i, hex);
-    arr.add(hex);
-    rssiArr.add(neighbors::getRssi(i) != 0 ? neighbors::getRssi(i) : (int)0);
-    if (neighbors::getId(i, peerId)) hasKeyArr.add(x25519_keys::hasKeyFor(peerId));
-    else hasKeyArr.add(false);
-  }
-
-  char buf[320];
-  size_t len = serializeJson(doc, buf);
-  notifyJsonToApp(buf, len);
+  const uint32_t seq = ++s_bleSyncSeq;
+  notifyNeighborsWithSeq(seq, cmdId);
 }
 
 void notifyWifi(bool connected, const char* ssid, const char* ip) {

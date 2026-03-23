@@ -51,7 +51,7 @@ RiftLinkEvent? parseEvent(Map<String, dynamic> json) {
       trigger: json['trigger'] as String? ?? '',
     );
   }
-  if (evt == 'info') {
+  if (evt == 'info' || evt == 'node') {
     final neighborsRssiRaw = json['neighborsRssi'] ?? json['rssi'];
     List<int> neighborsRssi = [];
     if (neighborsRssiRaw is List) {
@@ -191,9 +191,9 @@ void main() {
     });
   });
 
-  group('parseEvent: info', () {
-    test('parses info with neighborsRssi', () {
-      final json = jsonDecode('{"evt":"info","id":"N1","neighbors":["A","B"],"neighborsRssi":[-45,-60]}') as Map<String, dynamic>;
+  group('parseEvent: info/node', () {
+    test('parses node with neighborsRssi', () {
+      final json = jsonDecode('{"evt":"node","id":"N1","neighbors":["A","B"],"neighborsRssi":[-45,-60]}') as Map<String, dynamic>;
       final e = parseEvent(json);
       expect(e, isA<RiftLinkInfoEvent>());
       final i = e as RiftLinkInfoEvent;
