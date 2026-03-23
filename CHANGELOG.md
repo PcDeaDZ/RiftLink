@@ -20,7 +20,8 @@
 ### Веб-прошивка (ESP Web Flasher)
 
 - Обновлены манифесты и образы `*_full.bin` для Heltec V3, V3 Paper и V4.
-- Добавлен **`docs/flasher/embedded-release.json`**: версия и краткие заметки показываются **сразу** с репозитория; запрос к GitHub API дополняет ссылку на APK и release notes (без вечной «загрузки», если релиз на GitHub ещё не оформлен).
+- **`docs/flasher/embedded-release.json`** — версия и заметки сразу с деплоя; опционально **`apkDownloadUrl`**.
+- **`docs/flasher/release-github.json`** — при необходимости ссылка на APK и **`releaseBody`** (тот же origin при открытии с GitHub Pages или `raw.githubusercontent.com`), **без** запросов к **`api.github.com`** из браузера (нет CORS preflight и лимитов API).
 
 ---
 

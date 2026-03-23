@@ -1,12 +1,14 @@
 const REPO_OWNER = "PcDeaDZ";
 const REPO_NAME = "RiftLink";
-const RELEASE_API_URL = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest`;
 const ROADMAP_RAW_URL = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/master/docs/CUSTOM_PROTOCOL_PLAN.md`;
 const EMBEDDED_RELEASE_URL = "./embedded-release.json";
+/** То же содержимое, что в репо: без запроса к api.github.com (CORS / preflight). Сначала same-origin, затем raw. */
+const RELEASE_MIRROR_RELATIVE = "./release-github.json";
+const RELEASE_MIRROR_RAW = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/master/docs/flasher/release-github.json`;
 const RELEASE_FETCH_TIMEOUT_MS = 12000;
 const LANG_STORAGE_KEY = "riftlink_flasher_lang";
 
-/** Данные из репозитория (версия прошивки в комплекте с флешером); GitHub API подмешивается поверх. */
+/** Данные из репозитория (версия прошивки в комплекте с флешером). */
 let embeddedReleaseRaw = null;
 
 const STATIC_MANIFESTS = {
@@ -349,11 +351,15 @@ function applyReleaseStateFromEmbedded(data) {
   const av = String(data.appVersion ?? data.firmwareVersion ?? "?");
   const tagRaw = data.tag != null ? String(data.tag) : `v${fv}`;
   const tag = tagRaw.startsWith("v") ? tagRaw : `v${tagRaw}`;
+  const embeddedApk =
+    typeof data.apkDownloadUrl === "string" && data.apkDownloadUrl.trim().length > 0
+      ? data.apkDownloadUrl.trim()
+      : null;
   releaseState = {
     tag,
     firmwareVersion: fv,
     appVersion: av,
-    apkUrl: null,
+    apkUrl: embeddedApk,
     notes: embeddedNotesForLang(),
   };
 }
@@ -459,80 +465,73 @@ function setApkLink(url, versionText) {
   apkDownloadLinkEl.setAttribute("aria-disabled", "false");
 }
 
-async function loadLatestRelease() {
+async function fetchReleaseMirrorJson() {
+  let res = await fetchWithTimeout(RELEASE_MIRROR_RELATIVE, { cache: "no-store" });
+  if (res.ok) return res.json();
+  res = await fetchWithTimeout(RELEASE_MIRROR_RAW, { cache: "no-store" });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/**
+ * Дополняет embedded: APK и releaseBody из release-github.json
+ * (same-origin или raw — простой GET без api.github.com / CORS preflight).
+ */
+async function loadReleaseMirror() {
   const snapshot = {
     ...releaseState,
     notes: Array.isArray(releaseState.notes) ? [...releaseState.notes] : [],
   };
-  const hadEmbedded = embeddedReleaseRaw != null;
+
+  if (!embeddedReleaseRaw) {
+    releaseState = {
+      tag: t("latestUnavailable"),
+      firmwareVersion: t("loadFailed"),
+      appVersion: t("loadFailed"),
+      apkUrl: null,
+      notes: [],
+    };
+    renderReleaseState();
+    return;
+  }
 
   try {
-    const response = await fetchWithTimeout(RELEASE_API_URL, {
-      headers: { Accept: "application/vnd.github+json" },
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+    const data = await fetchReleaseMirrorJson();
+    if (!data || typeof data !== "object") {
+      return;
     }
-    const release = await response.json();
-    const assets = Array.isArray(release.assets) ? release.assets : [];
 
-    const fwV3 = assets.find((a) => a.name === "heltec_v3_full.bin");
-    const fwV4 = assets.find((a) => a.name === "heltec_v4_full.bin");
-    const fwPaper = assets.find((a) => a.name === "heltec_v3_paper_full.bin");
-    const apkArm64 = assets.find(
-      (a) => a.name.toLowerCase().includes("arm64-v8a") && a.name.toLowerCase().endsWith(".apk"),
+    const mirrorApk =
+      typeof data.apkDownloadUrl === "string" && data.apkDownloadUrl.trim().length > 0
+        ? data.apkDownloadUrl.trim()
+        : null;
+    const apkUrl = mirrorApk ?? snapshot.apkUrl;
+
+    const mirrorNotes = normalizeReleaseNotes(
+      typeof data.releaseBody === "string" ? data.releaseBody : "",
     );
+    const useMirrorNotes = mirrorNotes.length > 0;
 
-    const fallbackTag = (release.tag_name ?? "").replace(/^v/i, "") || "unknown";
-    const firmwareFromAssets =
-      parseSemverFromName(fwV4?.name ?? "") ??
-      parseSemverFromName(fwV3?.name ?? "") ??
-      parseSemverFromName(fwPaper?.name ?? "") ??
-      null;
-    const firmwareVersion = firmwareFromAssets || fallbackTag || snapshot.firmwareVersion;
-    const appVersionFromApk = parseSemverFromName(apkArm64?.name ?? "");
-    const appVersion = appVersionFromApk || fallbackTag || snapshot.appVersion;
-
-    const githubNotes = normalizeReleaseNotes(release.body);
-    const useGithubNotes = githubNotes.length > 0;
-    const apkUrl = apkArm64?.browser_download_url ?? snapshot.apkUrl;
-
-    if (hadEmbedded) {
-      /** Версия образов в этом деплое — из embedded-release.json; GitHub даёт только APK и release notes. */
-      releaseState = {
-        tag: snapshot.tag,
-        firmwareVersion: snapshot.firmwareVersion,
-        appVersion: appVersionFromApk || snapshot.appVersion,
-        apkUrl,
-        notes: useGithubNotes ? githubNotes : snapshot.notes,
-      };
-    } else {
-      releaseState = {
-        tag: release.tag_name ?? "unknown",
-        firmwareVersion,
-        appVersion,
-        apkUrl,
-        notes: useGithubNotes ? githubNotes : snapshot.notes,
-      };
+    let appVersion = snapshot.appVersion;
+    if (apkUrl) {
+      const fromUrl = parseSemverFromName(mirrorApk || apkUrl);
+      appVersion = fromUrl || snapshot.appVersion;
     }
+
+    releaseState = {
+      ...snapshot,
+      apkUrl,
+      appVersion,
+      notes: useMirrorNotes ? mirrorNotes : snapshot.notes,
+    };
     renderReleaseState();
   } catch (error) {
-    if (!hadEmbedded && (!snapshot.firmwareVersion || snapshot.firmwareVersion === t("loading"))) {
-      releaseState = {
-        tag: t("latestUnavailable"),
-        firmwareVersion: t("loadFailed"),
-        appVersion: t("loadFailed"),
-        apkUrl: null,
-        notes: [],
-      };
-    } else {
-      releaseState = {
-        ...snapshot,
-        notes: [...snapshot.notes],
-      };
-    }
+    releaseState = {
+      ...snapshot,
+      notes: [...snapshot.notes],
+    };
     renderReleaseState();
-    console.error("Failed to load latest release metadata:", error);
+    console.warn("release-github.json:", error);
   }
 }
 
@@ -575,7 +574,7 @@ releaseState = {
 };
 renderLanguage();
 await loadEmbeddedRelease();
-await loadLatestRelease();
+await loadReleaseMirror();
 await loadRoadmap();
 setDevice(selectEl.value);
 
