@@ -134,6 +134,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   final Set<String> _readSent = {};
   final Set<String> _pendingPings = {};
   final Set<String> _silentPendingPings = {};
+  final Map<int, String> _pendingPingByCmdId = <int, String>{};
   Timer? _ttlTimer;
   Timer? _voiceRxCleanupTimer;
   Timer? _neighborsPollTimer;
@@ -258,6 +259,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       case ChatContextType.direct:
         final id = _activeDirectPeerId();
         if (id == null) return l.tr('chat_context_direct_subtitle');
+        if (_isDirectPeerPingPending(id)) {
+          return l.tr('ping_checking', {'id': _pingPeerLabel(id)});
+        }
         final nick = _nicknameForId(id);
         if (nick == null || nick.trim().isEmpty) {
           return l.tr('chat_context_direct_subtitle');
@@ -322,6 +326,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     return a.startsWith(b) || b.startsWith(a);
   }
 
+  bool _isDirectPeerPingPending(String peerId) {
+    final peerKey = _pingKey(peerId);
+    if (peerKey.length < 8) return false;
+    return _pendingPings.any((k) => _pingKeyMatches(k, peerKey));
+  }
+
   bool _isDirectPeerInContacts(String peerId) {
     final norm = _normNodeId(peerId);
     if (norm.isEmpty) return false;
@@ -337,37 +347,49 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       if (showSuccessSnack) _showSnack(context.l10n.tr('connect_first'));
       return;
     }
-    final ok = await widget.ble.sendPing(peerId);
+    final cmdId = await widget.ble.sendPingTracked(peerId);
     if (!mounted) return;
-    if (!ok) {
+    if (cmdId == null) {
       if (showSuccessSnack) _showSnack(context.l10n.tr('error'));
       return;
     }
     final peerKey = _pingKey(peerId);
     if (peerKey.length < 8) return;
-    _pendingPings.add(peerKey);
-    if (!showSuccessSnack && !showTimeoutSnack) {
-      _silentPendingPings.add(peerKey);
-    } else {
-      _silentPendingPings.remove(peerKey);
+    setState(() {
+      _pendingPings.add(peerKey);
+      _pendingPingByCmdId[cmdId] = peerKey;
+      if (!showSuccessSnack && !showTimeoutSnack) {
+        _silentPendingPings.add(peerKey);
+      } else {
+        _silentPendingPings.remove(peerKey);
+      }
+    });
+    if (_pingKeyMatches(_pingKey(_activeDirectPeerId() ?? ''), peerKey)) {
+      _setDirectPeerOnline(false);
     }
     if (showSuccessSnack) {
       _showSnack(context.l10n.tr('ping_checking', {'id': _pingPeerLabel(peerId)}));
     }
     Future.delayed(const Duration(seconds: 20), () {
       if (!mounted) return;
-      if (_pendingPings.remove(peerKey)) {
-        _silentPendingPings.remove(peerKey);
-        if (_pingKeyMatches(_pingKey(_activeDirectPeerId() ?? ''), peerKey)) {
-          _setDirectPeerOnline(false);
+      var removed = false;
+      setState(() {
+        if (_pendingPings.remove(peerKey)) {
+          _silentPendingPings.remove(peerKey);
+          _pendingPingByCmdId.removeWhere((_, v) => _pingKeyMatches(v, peerKey));
+          removed = true;
         }
-        if (showTimeoutSnack) {
-          _showSnack(
-            context.l10n.tr('ping_timeout', {'id': peerId}),
-            backgroundColor: context.palette.error,
-            duration: const Duration(seconds: 4),
-          );
-        }
+      });
+      if (!removed) return;
+      if (_pingKeyMatches(_pingKey(_activeDirectPeerId() ?? ''), peerKey)) {
+        _setDirectPeerOnline(false);
+      }
+      if (showTimeoutSnack) {
+        _showSnack(
+          context.l10n.tr('ping_timeout', {'id': peerId}),
+          backgroundColor: context.palette.error,
+          duration: const Duration(seconds: 4),
+        );
       }
     });
   }
@@ -1530,28 +1552,36 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       },
       onPongEvent: (event) {
         final fromKey = _pingKey(event.from);
+        var resolvedKey = fromKey;
+        if (event.cmdId != null) {
+          final byCmd = _pendingPingByCmdId.remove(event.cmdId!);
+          if (byCmd != null && byCmd.length >= 8) {
+            resolvedKey = byCmd;
+          }
+        }
         var hadPendingPing = false;
         var wasSilentPing = false;
-        if (fromKey.length >= 8) {
-          final matchedPending = _pendingPings.where((k) => _pingKeyMatches(k, fromKey)).toList();
+        if (resolvedKey.length >= 8) {
+          final matchedPending = _pendingPings.where((k) => _pingKeyMatches(k, resolvedKey)).toList();
           hadPendingPing = matchedPending.isNotEmpty;
           for (final k in matchedPending) {
             _pendingPings.remove(k);
           }
-          final matchedSilent = _silentPendingPings.where((k) => _pingKeyMatches(k, fromKey)).toList();
+          final matchedSilent = _silentPendingPings.where((k) => _pingKeyMatches(k, resolvedKey)).toList();
           wasSilentPing = matchedSilent.isNotEmpty;
           for (final k in matchedSilent) {
             _silentPendingPings.remove(k);
           }
+          _pendingPingByCmdId.removeWhere((_, v) => _pingKeyMatches(v, resolvedKey));
         }
         final activePeer = _activeDirectPeerId();
-        if (activePeer != null && _pingKeyMatches(_pingKey(activePeer), fromKey)) {
+        if (activePeer != null && _pingKeyMatches(_pingKey(activePeer), resolvedKey)) {
           _setDirectPeerOnline(true);
           _directOnlineTtlTimer?.cancel();
           _directOnlineTtlTimer = Timer(const Duration(seconds: 45), () {
             if (!mounted) return;
             final current = _activeDirectPeerId();
-            if (current != null && _pingKeyMatches(_pingKey(current), fromKey)) {
+            if (current != null && _pingKeyMatches(_pingKey(current), resolvedKey)) {
               _setDirectPeerOnline(false);
             }
           });
@@ -2299,7 +2329,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       case 'ping_current':
         final peer = _activeDirectPeerId();
         if (peer != null) {
-          _pingDirectPeer(
+          await _pingDirectPeer(
             peerId: peer,
             showSuccessSnack: true,
             showTimeoutSnack: true,

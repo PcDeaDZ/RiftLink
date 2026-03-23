@@ -220,7 +220,8 @@ class ChatScreenController {
       deps.setState(() {
         final toMatch = evt.to.isEmpty ? null : evt.to;
         var matched = false;
-        for (var i = 0; i < deps.messages.length; i++) {
+        // Match the most recent pending outgoing first.
+        for (var i = deps.messages.length - 1; i >= 0; i--) {
           final m = deps.messages[i];
           final sameTo = (m.to == null && toMatch == null) || deps.sameNodeId(m.to, toMatch);
           if (!m.isIncoming && m.msgId == null && sameTo) {

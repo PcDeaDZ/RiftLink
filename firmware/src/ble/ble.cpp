@@ -157,10 +157,15 @@ static constexpr uint32_t BLE_ADV_RESTART_BACKOFF_MS = 2000;
 // Отложенные ответы — тяжёлые notify вызываем из main loop, не из callback (Stack canary)
 static volatile bool s_pendingInfo = false;
 static uint32_t s_pendingInfoNotBeforeMs = 0;
+static uint32_t s_pendingInfoCmdId = 0;
 static volatile bool s_pendingGroups = false;
+static uint32_t s_pendingGroupsCmdId = 0;
 static volatile bool s_pendingRoutes = false;
+static uint32_t s_pendingRoutesCmdId = 0;
 static volatile bool s_pendingNeighbors = false;
+static uint32_t s_pendingNeighborsCmdId = 0;
 static volatile bool s_pendingInvite = false;
+static uint32_t s_pendingInviteCmdId = 0;
 static volatile bool s_pendingSelftest = false;
 static volatile bool s_pendingGroupSend = false;
 static uint32_t s_pendingGroupId = 0;
@@ -179,6 +184,7 @@ static char s_pendingMsgGroupUid[groups::GROUP_UID_MAX_LEN + 1] = {0};
 static volatile bool s_pendingNickname = false;
 static char s_pendingNicknameBuf[33] = {0};
 static volatile bool s_pendingGps = false;
+static uint32_t s_pendingGpsCmdId = 0;
 static bool s_pendingGpsHasEnabled = false;
 static bool s_pendingGpsEnabled = false;
 static bool s_pendingGpsHasPins = false;
@@ -255,9 +261,75 @@ static bool isSelfNodeHex(const char* hexId) {
   return memcmp(id, node::getId(), protocol::NODE_ID_LEN) == 0;
 }
 
-static inline void scheduleInfoNotify(uint32_t delayMs = 0) {
+struct PendingPingCmdId {
+  bool used = false;
+  uint8_t to[protocol::NODE_ID_LEN] = {0};
+  uint32_t cmdId = 0;
+  uint32_t expiresAtMs = 0;
+};
+static PendingPingCmdId s_pendingPingCmdIds[8];
+
+static inline uint32_t parseCmdIdFromDoc(const JsonDocument& doc) {
+  if (!doc["cmdId"].is<uint32_t>() && !doc["cmdId"].is<int>() &&
+      !doc["cmdId"].is<int64_t>() && !doc["cmdId"].is<uint64_t>()) {
+    return 0;
+  }
+  uint64_t raw = doc["cmdId"] | 0;
+  if (raw == 0 || raw > 0xFFFFFFFFULL) return 0;
+  return (uint32_t)raw;
+}
+
+static inline void scheduleInfoNotify(uint32_t delayMs = 0, uint32_t cmdId = 0) {
   s_pendingInfo = true;
+  if (cmdId != 0) s_pendingInfoCmdId = cmdId;
   s_pendingInfoNotBeforeMs = millis() + delayMs;
+}
+
+static void rememberPingCmdId(const uint8_t to[protocol::NODE_ID_LEN], uint32_t cmdId) {
+  if (!to || cmdId == 0 || memcmp(to, protocol::BROADCAST_ID, protocol::NODE_ID_LEN) == 0) return;
+  const uint32_t now = millis();
+  int freeIdx = -1;
+  int replaceIdx = 0;
+  uint32_t oldest = 0xFFFFFFFFUL;
+  for (int i = 0; i < (int)(sizeof(s_pendingPingCmdIds) / sizeof(s_pendingPingCmdIds[0])); i++) {
+    auto& e = s_pendingPingCmdIds[i];
+    if (e.used && (int32_t)(now - e.expiresAtMs) >= 0) e.used = false;
+    if (e.used && memcmp(e.to, to, protocol::NODE_ID_LEN) == 0) {
+      e.cmdId = cmdId;
+      e.expiresAtMs = now + 30000UL;
+      return;
+    }
+    if (!e.used && freeIdx < 0) freeIdx = i;
+    if (e.expiresAtMs < oldest) {
+      oldest = e.expiresAtMs;
+      replaceIdx = i;
+    }
+  }
+  const int idx = (freeIdx >= 0) ? freeIdx : replaceIdx;
+  auto& dst = s_pendingPingCmdIds[idx];
+  dst.used = true;
+  memcpy(dst.to, to, protocol::NODE_ID_LEN);
+  dst.cmdId = cmdId;
+  dst.expiresAtMs = now + 30000UL;
+}
+
+static uint32_t takePingCmdIdForFrom(const uint8_t from[protocol::NODE_ID_LEN]) {
+  if (!from) return 0;
+  const uint32_t now = millis();
+  for (int i = 0; i < (int)(sizeof(s_pendingPingCmdIds) / sizeof(s_pendingPingCmdIds[0])); i++) {
+    auto& e = s_pendingPingCmdIds[i];
+    if (!e.used) continue;
+    if ((int32_t)(now - e.expiresAtMs) >= 0) {
+      e.used = false;
+      continue;
+    }
+    if (memcmp(e.to, from, protocol::NODE_ID_LEN) == 0) {
+      const uint32_t cmdId = e.cmdId;
+      e.used = false;
+      return cmdId;
+    }
+  }
+  return 0;
 }
 
 #define VOICE_BUF_MAX (voice_frag::MAX_VOICE_PLAIN + 1024)
@@ -265,6 +337,13 @@ static uint8_t s_voiceBuf[VOICE_BUF_MAX];
 static size_t s_voiceBufLen = 0;
 static int s_voiceChunkTotal = -1;
 static uint8_t s_voiceTo[protocol::NODE_ID_LEN];
+
+static uint32_t s_emitInfoCmdId = 0;
+static uint32_t s_emitGroupsCmdId = 0;
+static uint32_t s_emitRoutesCmdId = 0;
+static uint32_t s_emitNeighborsCmdId = 0;
+static uint32_t s_emitInviteCmdId = 0;
+static uint32_t s_emitGpsCmdId = 0;
 
 #ifndef BLE_LOG_TX_JSON
 #define BLE_LOG_TX_JSON 1
@@ -752,6 +831,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
   }
 
     const char* cmd = doc["cmd"];
+    const uint32_t cmdId = parseCmdIdFromDoc(doc);
     if (!cmd) return;
 
     if (strcmp(cmd, "bleOtaStart") == 0) {
@@ -772,7 +852,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     }
 
     if (strcmp(cmd, "info") == 0) {
-      scheduleInfoNotify();
+      scheduleInfoNotify(0, cmdId);
       return;
     }
 
@@ -786,6 +866,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       s_inviteExpiryMs = millis() + ttlSec * 1000UL;
       s_inviteTokenValid = true;
       s_pendingInvite = true;
+      if (cmdId != 0) s_pendingInviteCmdId = cmdId;
       return;
     }
 
@@ -1061,6 +1142,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
 
     if (strcmp(cmd, "groups") == 0) {
       s_pendingGroups = true;
+      if (cmdId != 0) s_pendingGroupsCmdId = cmdId;
       return;
     }
     if (strcmp(cmd, "groupCreate") == 0) {
@@ -1505,6 +1587,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     }
     if (strcmp(cmd, "routes") == 0 || strcmp(cmd, "mesh") == 0) {
       s_pendingRoutes = true;
+      if (cmdId != 0) s_pendingRoutesCmdId = cmdId;
       return;
     }
     if (strcmp(cmd, "powersave") == 0) {
@@ -1549,6 +1632,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       }
       __sync_synchronize();
       s_pendingGps = true;
+      if (cmdId != 0) s_pendingGpsCmdId = cmdId;
       return;
     }
 
@@ -1639,6 +1723,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
           node::getId(), to, 31, protocol::OP_PING, nullptr, 0,
           false, false, false, protocol::CHANNEL_DEFAULT, pktId);
       if (len > 0) {
+        if (cmdId != 0) rememberPingCmdId(to, cmdId);
         uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(to));
         char reasonBuf[40];
         if (!queueTxPacket(pkt, len, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
@@ -2067,10 +2152,13 @@ void notifyTimeCapsuleReleased(const uint8_t* to, uint32_t msgId, uint8_t trigge
 }
 
 void notifyInfo() {
+  const uint32_t cmdId = s_emitInfoCmdId;
+  s_emitInfoCmdId = 0;
   if (!hasActiveTransport()) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "info";
+  if (cmdId != 0) doc["cmdId"] = cmdId;
   const uint8_t* id = node::getId();
   char idHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(idHex + i*2, 3, "%02X", id[i]);
@@ -2206,6 +2294,8 @@ void notifyInfo() {
 }
 
 void notifyInvite() {
+  const uint32_t cmdId = s_emitInviteCmdId;
+  s_emitInviteCmdId = 0;
   if (!pRxChar || !s_connected) return;
 
   uint8_t pubKey[32];
@@ -2219,6 +2309,7 @@ void notifyInvite() {
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "invite";
+  if (cmdId != 0) doc["cmdId"] = cmdId;
   const uint8_t* id = node::getId();
   char idHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(idHex + i*2, 3, "%02X", id[i]);
@@ -2248,10 +2339,13 @@ void notifyInvite() {
 }
 
 void notifyRoutes() {
+  const uint32_t cmdId = s_emitRoutesCmdId;
+  s_emitRoutesCmdId = 0;
   if (!pRxChar || !s_connected) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "routes";
+  if (cmdId != 0) doc["cmdId"] = cmdId;
   JsonArray arr = doc["routes"].to<JsonArray>();
   int n = routing::getRouteCount();
   uint8_t dest[8], nextHop[8];
@@ -2280,10 +2374,13 @@ void notifyRoutes() {
 }
 
 void notifyGroups() {
+  const uint32_t cmdId = s_emitGroupsCmdId;
+  s_emitGroupsCmdId = 0;
   if (!pRxChar || !s_connected) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "groups";
+  if (cmdId != 0) doc["cmdId"] = cmdId;
   JsonArray arr = doc["groups"].to<JsonArray>();
   const int n = groups::getV2Count();
   for (int i = 0; i < n; i++) {
@@ -2330,13 +2427,17 @@ void notifyGroups() {
 
 void requestNeighborsNotify() {
   s_pendingNeighbors = true;
+  s_pendingNeighborsCmdId = 0;
 }
 
 void notifyNeighbors() {
+  const uint32_t cmdId = s_emitNeighborsCmdId;
+  s_emitNeighborsCmdId = 0;
   if (!pRxChar || !s_connected) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "neighbors";
+  if (cmdId != 0) doc["cmdId"] = cmdId;
   JsonArray arr = doc["neighbors"].to<JsonArray>();
   JsonArray rssiArr = doc["rssi"].to<JsonArray>();
   JsonArray hasKeyArr = doc["hasKey"].to<JsonArray>();
@@ -2386,10 +2487,13 @@ void notifyRegion(const char* code, float freq, int power, int channel) {
 }
 
 void notifyGps(bool present, bool enabled, bool hasFix, int rx, int tx, int en) {
+  const uint32_t cmdId = s_emitGpsCmdId;
+  s_emitGpsCmdId = 0;
   if (!pRxChar || !s_connected) return;
 
   JsonDocument doc(&s_bleJsonAllocator);
   doc["evt"] = "gps";
+  if (cmdId != 0) doc["cmdId"] = cmdId;
   doc["present"] = present;
   doc["enabled"] = enabled;
   doc["hasFix"] = hasFix;
@@ -2424,6 +2528,8 @@ void notifyPong(const uint8_t* from, int rssi) {
   for (int i = 0; i < 8; i++) snprintf(fromHex + i*2, 3, "%02X", from[i]);
   doc["from"] = fromHex;
   if (rssi != 0) doc["rssi"] = rssi;
+  const uint32_t cmdId = takePingCmdIdForFrom(from);
+  if (cmdId != 0) doc["cmdId"] = cmdId;
 
   char buf[80];
   size_t len = serializeJson(doc, buf);
@@ -2503,6 +2609,8 @@ void update() {
       gps::saveConfig();
     }
     if (hasActiveTransport()) {
+      s_emitGpsCmdId = s_pendingGpsCmdId;
+      s_pendingGpsCmdId = 0;
       int rx, tx, en;
       gps::getPins(&rx, &tx, &en);
       notifyGps(gps::isPresent(), gps::isEnabled(), gps::hasFix(), rx, tx, en);
@@ -2524,6 +2632,8 @@ void update() {
     // По одному notify за вызов — не перегружать BLE stack
     if (s_pendingInfo && (int32_t)(millis() - s_pendingInfoNotBeforeMs) >= 0) {
       s_pendingInfo = false;
+      s_emitInfoCmdId = s_pendingInfoCmdId;
+      s_pendingInfoCmdId = 0;
       notifyInfo();
       vTaskDelay(pdMS_TO_TICKS(2));  // дать BLE отправить большой payload
       return;
@@ -2534,10 +2644,34 @@ void update() {
           s_pendingMsgLane, s_pendingMsgType, s_pendingMsgGroupId, s_pendingMsgGroupUid);
       return;
     }
-    if (s_pendingGroups) { s_pendingGroups = false; notifyGroups(); return; }
-    if (s_pendingRoutes) { s_pendingRoutes = false; notifyRoutes(); return; }
-    if (s_pendingNeighbors) { s_pendingNeighbors = false; notifyNeighbors(); return; }
-    if (s_pendingInvite) { s_pendingInvite = false; notifyInvite(); return; }
+    if (s_pendingGroups) {
+      s_pendingGroups = false;
+      s_emitGroupsCmdId = s_pendingGroupsCmdId;
+      s_pendingGroupsCmdId = 0;
+      notifyGroups();
+      return;
+    }
+    if (s_pendingRoutes) {
+      s_pendingRoutes = false;
+      s_emitRoutesCmdId = s_pendingRoutesCmdId;
+      s_pendingRoutesCmdId = 0;
+      notifyRoutes();
+      return;
+    }
+    if (s_pendingNeighbors) {
+      s_pendingNeighbors = false;
+      s_emitNeighborsCmdId = s_pendingNeighborsCmdId;
+      s_pendingNeighborsCmdId = 0;
+      notifyNeighbors();
+      return;
+    }
+    if (s_pendingInvite) {
+      s_pendingInvite = false;
+      s_emitInviteCmdId = s_pendingInviteCmdId;
+      s_pendingInviteCmdId = 0;
+      notifyInvite();
+      return;
+    }
     if (s_pendingSelftest) {
       s_pendingSelftest = false;
       selftest::Result r;

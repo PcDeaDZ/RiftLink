@@ -96,6 +96,7 @@ class RiftLinkBle {
   Completer<void>? _txLock;
   DateTime? _lastInfoRequestAt;
   DateTime? _lastInfoEventAt;
+  int _nextCmdId = 1;
   Timer? _queuedInfoTimer;
   bool _hasQueuedInfoRequest = false;
 
@@ -173,20 +174,21 @@ class RiftLinkBle {
 
   Future<bool> _sendCmd(Map<String, dynamic> payload) async {
     final cmd = payload['cmd']?.toString() ?? 'unknown';
+    final cmdId = _extractOrAttachCmdId(payload);
     final json = jsonEncode(payload);
     _diagInc('tx_attempt');
     // WiFi mode: route through WebSocket (no MTU limit)
     if (_isWifiMode && _wifiTransport != null && _wifiTransport!.isConnected) {
       final ok = await _wifiTransport!.sendJson(json);
       _diagInc(ok ? 'tx_ok' : 'tx_fail');
-      _trace('stage=app_tx action=send mode=wifi cmd=$cmd len=${json.length} ok=$ok');
+      _trace('stage=app_tx action=send mode=wifi cmd=$cmd cmdId=$cmdId len=${json.length} ok=$ok');
       _diagMaybeDump(ok ? 'tx_ok' : 'tx_fail');
       return ok;
     }
     if (_txChar == null || !isConnected) {
       _diagInc('tx_fail');
       _diagInc('tx_fail_no_transport');
-      _trace('stage=app_tx action=drop reason=no_transport mode=ble cmd=$cmd len=${json.length}');
+      _trace('stage=app_tx action=drop reason=no_transport mode=ble cmd=$cmd cmdId=$cmdId len=${json.length}');
       _diagMaybeDump('tx_fail_no_transport');
       return false;
     }
@@ -198,12 +200,12 @@ class RiftLinkBle {
     try {
       await _txChar!.write(utf8.encode(json), withoutResponse: true);
       _diagInc('tx_ok');
-      _trace('stage=app_tx action=send mode=ble cmd=$cmd len=${json.length} ok=true');
+      _trace('stage=app_tx action=send mode=ble cmd=$cmd cmdId=$cmdId len=${json.length} ok=true');
       _diagMaybeDump('tx_ok');
       return true;
     } catch (e) {
       _diagInc('tx_fail');
-      _trace('stage=app_tx action=send mode=ble cmd=$cmd len=${json.length} ok=false err=$e');
+      _trace('stage=app_tx action=send mode=ble cmd=$cmd cmdId=$cmdId len=${json.length} ok=false err=$e');
       _diagMaybeDump('tx_fail');
       debugPrint('RiftLinkBle: _sendCmd error: $e');
       return false;
@@ -212,6 +214,15 @@ class RiftLinkBle {
       _txLock = null;
       c?.complete();
     }
+  }
+
+  int _extractOrAttachCmdId(Map<String, dynamic> payload) {
+    final raw = payload['cmdId'];
+    if (raw is int && raw > 0) return raw;
+    final next = _nextCmdId;
+    _nextCmdId = (next >= 0x7FFFFFFF) ? 1 : (next + 1);
+    payload['cmdId'] = next;
+    return next;
   }
 
   /// Подключение к устройству
@@ -849,8 +860,16 @@ class RiftLinkBle {
   }
 
   /// Отправить PING на узел (проверка связи)
-  Future<bool> sendPing(String to) async =>
-      !isValidFullNodeId(to) ? false : _sendCmd({'cmd': 'ping', 'to': to});
+  Future<bool> sendPing(String to) async => (await sendPingTracked(to)) != null;
+
+  Future<int?> sendPingTracked(String to) async {
+    if (!isValidFullNodeId(to)) return null;
+    final payload = <String, dynamic>{'cmd': 'ping', 'to': to};
+    final cmdId = _extractOrAttachCmdId(payload);
+    final ok = await _sendCmd(payload);
+    if (!ok) return null;
+    return cmdId;
+  }
 
   // --- Radio Mode Switching (Time-sharing BLE ↔ WiFi) ---
 
@@ -1353,6 +1372,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     final idRaw = json['id'] ?? json['nodeId'];
     final idStr = idRaw == null ? '' : idRaw.toString();
     return RiftLinkInfoEvent(
+      cmdId: _jsonIntNullable(json['cmdId']),
       id: idStr,
       nickname: _trimmedStringOrNull(json['nickname']),
       hasNicknameField: json.containsKey('nickname'),
@@ -1508,6 +1528,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     return RiftLinkPongEvent(
       from: json['from'] as String? ?? '',
       rssi: _jsonIntNullable(json['rssi']),
+      cmdId: _jsonIntNullable(json['cmdId']),
     );
   }
   if (evt == 'error') {
@@ -1694,6 +1715,7 @@ class RiftLinkBroadcastDeliveryEvent extends RiftLinkEvent {
 }
 
 class RiftLinkInfoEvent extends RiftLinkEvent {
+  final int? cmdId;
   final String id;
   final String? nickname;
   final bool hasNicknameField;
@@ -1737,6 +1759,7 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
   final int? espNowChannel;
   final bool espNowAdaptive;
   RiftLinkInfoEvent({
+    this.cmdId,
     required this.id,
     this.nickname,
     this.hasNicknameField = false,
@@ -2009,7 +2032,8 @@ class RiftLinkLocationEvent extends RiftLinkEvent {
 class RiftLinkPongEvent extends RiftLinkEvent {
   final String from;
   final int? rssi;
-  RiftLinkPongEvent({required this.from, this.rssi});
+  final int? cmdId;
+  RiftLinkPongEvent({required this.from, this.rssi, this.cmdId});
 }
 
 class RiftLinkErrorEvent extends RiftLinkEvent {
