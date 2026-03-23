@@ -310,6 +310,7 @@ class RiftLinkBle {
     required Set<String> expectedEvents,
     Duration timeout = const Duration(seconds: 4),
     int retries = 0,
+    int sendAttempts = 1,
   }) async {
     _lastGroupSecurityError = null;
     try {
@@ -319,6 +320,7 @@ class RiftLinkBle {
         expectedEvents: expectedEvents,
         timeout: timeout,
         retries: retries,
+        sendAttempts: sendAttempts,
       );
       return true;
     } catch (e) {
@@ -791,7 +793,7 @@ class RiftLinkBle {
       myRole: s.myRole,
       revocationEpoch: prev?.revocationEpoch ?? 0,
       ackApplied: !s.rekeyRequired,
-    );
+    ).mergedWithPrevious(prev);
     final nextGroups = List<RiftLinkGroupInfo>.from(p.groups);
     if (idx >= 0) {
       nextGroups[idx] = merged;
@@ -849,10 +851,15 @@ class RiftLinkBle {
     // Пустой `groups: []` на узле возможен из‑за гонки (два PEND_INFO/PEND_GROUPS,
     // порядок getGroups vs волна node/…/groups) или кратковременного снимка до NVS.
     // Замена непустого склеенного списка на пустой даёт «мигание» и исчезновение всех групп в UI.
-    final mergedGroups =
-        (g.groups.isEmpty && p.groups.isNotEmpty) ? p.groups : g.groups;
+    // Неполный `myRole`/имена в очередном `evt:groups` не должны затирать кэш.
+    final List<RiftLinkGroupInfo> mergedGroups;
     if (g.groups.isEmpty && p.groups.isNotEmpty) {
+      mergedGroups = p.groups;
       _trace('stage=app_merge action=groups_keep_nonempty reason=ignore_empty_snapshot');
+    } else if (g.groups.isNotEmpty && p.groups.isNotEmpty) {
+      mergedGroups = _mergeGroupListWithPrevious(g.groups, p.groups);
+    } else {
+      mergedGroups = g.groups;
     }
     return RiftLinkInfoEvent(
       cmdId: p.cmdId,
@@ -939,6 +946,18 @@ class RiftLinkBle {
           evt.routes.isNotEmpty ||
           evt.groups.isNotEmpty;
       if (evtName == 'info' && hasTopology) {
+        final p = _compositeInfo;
+        if (p != null && p.groups.isNotEmpty) {
+          if (evt.groups.isEmpty) {
+            _trace('stage=app_merge action=info_keep_groups reason=ignore_empty_groups_on_info');
+            evt = _copyInfoReplacingGroups(evt, p.groups);
+          } else {
+            evt = _copyInfoReplacingGroups(
+              evt,
+              _mergeGroupListWithPrevious(evt.groups, p.groups),
+            );
+          }
+        }
         _compositeInfo = evt;
       } else {
         _compositeInfo = _mergeFromNode(evt);
@@ -1279,8 +1298,12 @@ class RiftLinkBle {
   }
 
   /// Запросить маршруты (evt "routes")
-  Future<bool> getRoutes() async =>
-      _requestCommand(cmd: 'routes', expectedEvents: const {'routes'}, timeout: const Duration(seconds: 5));
+  Future<bool> getRoutes() async => _requestCommand(
+        cmd: 'routes',
+        expectedEvents: const {'routes'},
+        timeout: const Duration(seconds: 5),
+        sendAttempts: 3,
+      );
 
   /// Запросить список групп
   Future<bool> getGroups() async =>
@@ -1497,6 +1520,7 @@ class RiftLinkBle {
       payload: <String, dynamic>{'to': to},
       expectedEvents: const {'pong'},
       timeout: const Duration(seconds: 20),
+      sendAttempts: 3,
     );
     try {
       // Достаточно для ответа «команда не записалась»; при занятой очереди BLE подождём дольше, чем мгновенный fail.
@@ -1616,7 +1640,13 @@ class RiftLinkBle {
   Future<bool> shutdown() => _sendCmd({'cmd': 'shutdown'});
 
   /// Тест сигнала: пинг всех соседей (ответы приходят как evt:pong)
-  Future<bool> signalTest() => _sendCmd({'cmd': 'signalTest'});
+  Future<bool> signalTest() async {
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await Future<void>.delayed(const Duration(milliseconds: 100));
+      if (await _sendCmd({'cmd': 'signalTest'})) return true;
+    }
+    return false;
+  }
 
   /// Трассировка: запрос маршрута до узла (ответ evt:routes)
   Future<bool> traceroute(String to) async =>
@@ -1627,6 +1657,7 @@ class RiftLinkBle {
               payload: {'to': to},
               expectedEvents: const {'routes'},
               timeout: const Duration(seconds: 18),
+              sendAttempts: 3,
             );
 
   /// ESP-NOW: канал 1..13 (для WiFi-режима)
@@ -2373,6 +2404,26 @@ class RiftLinkGroupInfo {
     required this.revocationEpoch,
     this.ackApplied = false,
   });
+
+  /// Слияние с прошлым снимком: пустой/`none` [myRole] и пустые строки не затирают
+  /// известную роль и метаданные (частичные JSON при `info` / гонки notify).
+  RiftLinkGroupInfo mergedWithPrevious(RiftLinkGroupInfo? previous) {
+    if (previous == null) return this;
+    final incRole = myRole.trim().toLowerCase();
+    final prevRole = previous.myRole.trim().toLowerCase();
+    final usePrevRole =
+        (incRole.isEmpty || incRole == 'none') && prevRole.isNotEmpty && prevRole != 'none';
+    return RiftLinkGroupInfo(
+      groupUid: groupUid.trim().isNotEmpty ? groupUid : previous.groupUid,
+      groupTag: groupTag.trim().isNotEmpty ? groupTag : previous.groupTag,
+      canonicalName: canonicalName.trim().isNotEmpty ? canonicalName : previous.canonicalName,
+      channelId32: channelId32,
+      keyVersion: keyVersion > 0 ? keyVersion : previous.keyVersion,
+      myRole: usePrevRole ? previous.myRole : myRole,
+      revocationEpoch: revocationEpoch != 0 ? revocationEpoch : previous.revocationEpoch,
+      ackApplied: ackApplied || previous.ackApplied,
+    );
+  }
 }
 
 class RiftLinkMsgEvent extends RiftLinkEvent {
@@ -2799,4 +2850,73 @@ class RiftLinkBleOtaResultEvent extends RiftLinkEvent {
   final bool ok;
   final String? reason;
   RiftLinkBleOtaResultEvent({required this.ok, this.reason});
+}
+
+List<RiftLinkGroupInfo> _mergeGroupListWithPrevious(
+  List<RiftLinkGroupInfo> incoming,
+  List<RiftLinkGroupInfo> previous,
+) {
+  final prevByCh = <int, RiftLinkGroupInfo>{};
+  final prevByUid = <String, RiftLinkGroupInfo>{};
+  for (final g in previous) {
+    if (g.channelId32 > 1) prevByCh[g.channelId32] = g;
+    final u = g.groupUid.trim().toUpperCase();
+    if (u.isNotEmpty) prevByUid[u] = g;
+  }
+  return incoming
+      .map((g) {
+        RiftLinkGroupInfo? pr;
+        if (g.channelId32 > 1) pr = prevByCh[g.channelId32];
+        final u = g.groupUid.trim().toUpperCase();
+        if (u.isNotEmpty) pr ??= prevByUid[u];
+        return g.mergedWithPrevious(pr);
+      })
+      .toList();
+}
+
+RiftLinkInfoEvent _copyInfoReplacingGroups(RiftLinkInfoEvent e, List<RiftLinkGroupInfo> groups) {
+  return RiftLinkInfoEvent(
+    cmdId: e.cmdId,
+    id: e.id,
+    nickname: e.nickname,
+    hasNicknameField: e.hasNicknameField,
+    hasChannelField: e.hasChannelField,
+    hasOfflinePendingField: e.hasOfflinePendingField,
+    hasOfflineCourierPendingField: e.hasOfflineCourierPendingField,
+    hasOfflineDirectPendingField: e.hasOfflineDirectPendingField,
+    region: e.region,
+    freq: e.freq,
+    power: e.power,
+    channel: e.channel,
+    version: e.version,
+    radioMode: e.radioMode,
+    radioVariant: e.radioVariant,
+    wifiConnected: e.wifiConnected,
+    wifiSsid: e.wifiSsid,
+    wifiIp: e.wifiIp,
+    neighbors: e.neighbors,
+    neighborsRssi: e.neighborsRssi,
+    neighborsHasKey: e.neighborsHasKey,
+    groups: groups,
+    routes: e.routes,
+    sf: e.sf,
+    bw: e.bw,
+    cr: e.cr,
+    modemPreset: e.modemPreset,
+    offlinePending: e.offlinePending,
+    offlineCourierPending: e.offlineCourierPending,
+    offlineDirectPending: e.offlineDirectPending,
+    batteryMv: e.batteryMv,
+    batteryPercent: e.batteryPercent,
+    charging: e.charging,
+    timeHour: e.timeHour,
+    timeMinute: e.timeMinute,
+    gpsPresent: e.gpsPresent,
+    gpsEnabled: e.gpsEnabled,
+    gpsFix: e.gpsFix,
+    powersave: e.powersave,
+    blePin: e.blePin,
+    espNowChannel: e.espNowChannel,
+    espNowAdaptive: e.espNowAdaptive,
+  );
 }

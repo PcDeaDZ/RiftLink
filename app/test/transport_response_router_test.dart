@@ -124,5 +124,33 @@ void main() {
       await router.dispose();
       await responses.close();
     });
+
+    test('repeats send up to sendAttempts when BLE write fails', () async {
+      final responses = StreamController<Map<String, dynamic>>.broadcast();
+      var sendCount = 0;
+      final router = TransportResponseRouter(
+        sendCommand: (payload) async {
+          sendCount++;
+          return false;
+        },
+        responses: responses.stream,
+      );
+
+      final future = router.sendRequest(
+        cmd: 'routes',
+        expectedEvents: const {'routes'},
+        timeout: const Duration(milliseconds: 500),
+        sendAttempts: 3,
+      );
+
+      await expectLater(
+        future,
+        throwsA(isA<StateError>()),
+      );
+      expect(sendCount, 3);
+
+      await router.dispose();
+      await responses.close();
+    });
   });
 }

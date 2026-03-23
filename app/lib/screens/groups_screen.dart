@@ -65,7 +65,8 @@ class _GroupsScreenState extends State<GroupsScreen> {
     final nextByChannel = <int, RiftLinkGroupInfo>{};
     for (final g in groupInfos) {
       if (g.channelId32 > 1 && g.channelId32 != kMeshBroadcastGroupId) {
-        nextByChannel[g.channelId32] = g;
+        final prev = _groupInfoByChannel[g.channelId32];
+        nextByChannel[g.channelId32] = g.mergedWithPrevious(prev);
       }
     }
     for (var i = 0; i < normalized.length; i++) {

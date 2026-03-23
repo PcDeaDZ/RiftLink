@@ -1995,16 +1995,18 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
 
     if (strcmp(cmd, "traceroute") == 0) {
       const char* toStr = doc["to"];
-      if (toStr && toStr[0]) {
-        uint8_t target[protocol::NODE_ID_LEN];
-        if (!parseFullNodeIdHex(toStr, target)) {
-          ble::notifyError("traceroute_to_bad", "to must be full 16 hex node id");
-          return;
-        }
-        routing::requestRoute(target);
-        pendSet(PEND_ROUTES);
-        if (cmdId != 0) s_pendingRoutesCmdId = cmdId;
+      if (!toStr || !toStr[0]) {
+        ble::notifyError("traceroute_to_missing", "to is required (full 16 hex node id)");
+        return;
       }
+      uint8_t target[protocol::NODE_ID_LEN];
+      if (!parseFullNodeIdHex(toStr, target)) {
+        ble::notifyError("traceroute_to_bad", "to must be full 16 hex node id");
+        return;
+      }
+      routing::requestRoute(target);
+      pendSet(PEND_ROUTES);
+      if (cmdId != 0) s_pendingRoutesCmdId = cmdId;
       return;
     }
 

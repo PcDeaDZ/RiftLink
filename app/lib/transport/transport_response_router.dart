@@ -61,6 +61,7 @@ class TransportResponseRouter {
     required Set<String> expectedEvents,
     Duration timeout = const Duration(seconds: 4),
     int retries = 0,
+    int sendAttempts = 1,
   }) {
     final ticket = sendTrackedRequest(
       cmd: cmd,
@@ -68,6 +69,7 @@ class TransportResponseRouter {
       expectedEvents: expectedEvents,
       timeout: timeout,
       retries: retries,
+      sendAttempts: sendAttempts,
     );
     return ticket.response;
   }
@@ -78,6 +80,7 @@ class TransportResponseRouter {
     required Set<String> expectedEvents,
     Duration timeout = const Duration(seconds: 4),
     int retries = 0,
+    int sendAttempts = 1,
   }) {
     final body = <String, dynamic>{...(payload ?? const <String, dynamic>{})};
     body['cmd'] = cmd;
@@ -93,11 +96,13 @@ class TransportResponseRouter {
       payload: body,
       timeout: timeout,
       retriesLeft: retries,
+      sendAttempts: sendAttempts < 1 ? 1 : sendAttempts,
       completer: completer,
       startedAt: DateTime.now(),
     );
     _pending[cmdId] = req;
-    _trace?.call('stage=router action=request_sent cmd=$cmd cmdId=$cmdId retries=$retries');
+    _trace?.call(
+        'stage=router action=request_sent cmd=$cmd cmdId=$cmdId retries=$retries send_attempts=${req.sendAttempts}');
     _sendPending(req);
     return TransportRequestTicket(cmdId: cmdId, response: completer.future);
   }
@@ -106,12 +111,20 @@ class TransportResponseRouter {
     req.timer?.cancel();
     req.timer = Timer(req.timeout, () => _onTimeout(req.cmdId));
     unawaited(() async {
-      final ok = await _sendCommand(req.payload);
-      if (!ok) {
-        req.timer?.cancel();
-        if (_pending.remove(req.cmdId) != null && !req.completer.isCompleted) {
-          req.completer.completeError(StateError('request_send_failed:${req.cmd}:${req.cmdId}'));
+      var left = req.sendAttempts;
+      while (left > 0) {
+        left--;
+        final ok = await _sendCommand(req.payload);
+        if (ok) return;
+        if (left > 0) {
+          _trace?.call(
+              'stage=router action=send_retry cmd=${req.cmd} cmdId=${req.cmdId} attempts_left=$left');
+          await Future<void>.delayed(const Duration(milliseconds: 90));
         }
+      }
+      req.timer?.cancel();
+      if (_pending.remove(req.cmdId) != null && !req.completer.isCompleted) {
+        req.completer.completeError(StateError('request_send_failed:${req.cmd}:${req.cmdId}'));
       }
     }());
   }
@@ -307,6 +320,8 @@ class _PendingRequest {
   final Map<String, dynamic> payload;
   final Duration timeout;
   int retriesLeft;
+  /// Сколько раз подряд вызывать [_sendCommand] при ошибке BLE/WiFi записи (до ожидания ответа).
+  final int sendAttempts;
   final Completer<Map<String, dynamic>> completer;
   final DateTime startedAt;
   Timer? timer;
@@ -318,6 +333,7 @@ class _PendingRequest {
     required this.payload,
     required this.timeout,
     required this.retriesLeft,
+    required this.sendAttempts,
     required this.completer,
     required this.startedAt,
   });
