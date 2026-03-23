@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
-import 'app_navigator.dart';
+import 'app_navigator.dart' show appPageRoute, appRouteObserver, navigatorKey, scaffoldMessengerKey;
 import 'ble/riftlink_ble.dart';
 import 'ble/riftlink_ble_scope.dart';
 import 'l10n/app_localizations.dart';
@@ -93,6 +93,7 @@ class _RiftLinkAppState extends State<RiftLinkApp> {
       ble: _ble,
       child: MaterialApp(
         navigatorKey: navigatorKey,
+        navigatorObservers: [appRouteObserver],
         scaffoldMessengerKey: scaffoldMessengerKey,
         title: 'RiftLink',
         locale: localeNotifier.value,

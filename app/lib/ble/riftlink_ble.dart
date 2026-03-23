@@ -355,7 +355,11 @@ class RiftLinkBle {
 
   /// Запросить info (evt "info"). Централизованный throttle, чтобы экраны не спамили устройству.
   Future<bool> getInfo({bool force = false}) async {
-    if (!isTransportConnected) return false;
+    if (!isTransportConnected) {
+      // B2: при недоступном транспорте всё равно отдать кэш в шину — UI остаётся согласованным с последним известным состоянием узла.
+      _replayLastInfo();
+      return false;
+    }
     final now = DateTime.now();
     const forceMinGap = Duration(milliseconds: 900);
     if (force) {
@@ -1312,7 +1316,15 @@ class RiftLinkBle {
                 if (trigger != null && trigger.isNotEmpty) 'trigger': trigger,
                 if (triggerAtMs != null) 'triggerAtMs': triggerAtMs,
               };
-    if (payload == null) return false;
+    if (payload == null) {
+      if (to != null) {
+        _trace(
+          'stage=app_tx action=drop reason=invalid_recipient mode=ble to=$to '
+          '(expected 16 hex chars)',
+        );
+      }
+      return false;
+    }
     return _sendCmd(payload);
   }
 

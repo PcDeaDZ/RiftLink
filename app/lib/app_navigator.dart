@@ -4,6 +4,9 @@ import 'package:flutter/material.dart';
 final navigatorKey = GlobalKey<NavigatorState>();
 final scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
 
+/// Для [RouteAware] (например перезагрузка чата из SQLite при pop с вложенного экрана).
+final RouteObserver<ModalRoute<void>> appRouteObserver = RouteObserver<ModalRoute<void>>();
+
 /// Показывает диалог через корневой контекст (обходит проблемы с русской локалью)
 Future<T?> showAppDialog<T>({
   required BuildContext context,

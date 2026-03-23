@@ -81,7 +81,7 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, WidgetsBindingObserver {
+class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, WidgetsBindingObserver, RouteAware {
   final ChatRepository _chatRepo = ChatRepository.instance;
   final ChatScreenController _screenController = ChatScreenController();
   final _controller = TextEditingController();
@@ -152,6 +152,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   bool _intentionalDisconnect = false;
   String? _currentBleRemoteId;
   String? _connectionListenerRemoteId;
+  bool _routeObserverSubscribed = false;
   List<RecentDevice> _recentDevices = [];
   AppLifecycleState _appLifecycle = AppLifecycleState.resumed;
 
@@ -565,6 +566,23 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   // ── Lifecycle ──
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_routeObserverSubscribed) {
+      final route = ModalRoute.of(context);
+      if (route is PageRoute<void>) {
+        appRouteObserver.subscribe(this, route);
+        _routeObserverSubscribed = true;
+      }
+    }
+  }
+
+  @override
+  void didPopNext() {
+    unawaited(_reloadMessagesFromRepository());
+  }
+
+  @override
   void initState() {
     super.initState();
     _intentionalDisconnect = false;
@@ -662,6 +680,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   @override
   void dispose() {
+    if (_routeObserverSubscribed) {
+      appRouteObserver.unsubscribe(this);
+      _routeObserverSubscribed = false;
+    }
     final convId = _conversationId;
     if (convId != null) {
       _chatRepo.setDraft(convId, _controller.text);
