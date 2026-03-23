@@ -7,12 +7,12 @@
     "Единая дизайн-система: токены типографики, отступов, иконок, теней и анимаций; глобальный textTheme в теме.",
     "Заголовок AppBar и riftAppBar согласованы (navTitle 18).",
     "Образы прошивки V3 / V4 / V3 Paper в этом флешере соответствуют версии выше.",
-    "Ссылка на APK: поле apkDownloadUrl в этом файле или в release-github.json (без запроса к GitHub API из браузера)."
+    "Прямая ссылка на APK (опционально): apkDownloadUrl — после публикации в GitHub Releases; иначе кнопка ведёт на страницу релизов."
   ],
   "notesEn": [
     "Unified design system: typography, spacing, icons, shadows, motion tokens; global textTheme.",
     "AppBar / riftAppBar titles aligned (navTitle 18).",
     "Firmware images (V3 / V4 / V3 Paper) bundled with this flasher match the version above.",
-    "APK link: apkDownloadUrl in this file or release-github.json (no GitHub API from the browser)."
+    "Direct APK URL (optional): apkDownloadUrl after publishing; otherwise the button opens the Releases page."
   ]
 }

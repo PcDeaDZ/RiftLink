@@ -8,6 +8,7 @@ const RELEASE_MIRROR_RELATIVE = "./release-github.json";
 const RELEASE_MIRROR_RAW = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/master/docs/flasher/release-github.json`;
 const RELEASE_FETCH_TIMEOUT_MS = 12000;
 const LANG_STORAGE_KEY = "riftlink_flasher_lang";
+const DEFAULT_RELEASES_PAGE_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases`;
 
 /** Данные из репозитория (версия прошивки в комплекте с флешером). */
 let embeddedReleaseRaw = null;
@@ -75,6 +76,7 @@ const I18N = {
     latestUnavailable: "latest недоступен",
     loadFailed: "не удалось загрузить",
     apkNotFound: "APK пока не найден в latest release",
+    apkBrowseReleases: "Релизы и APK на GitHub →",
     apkDownload: "Скачать APK (arm64-v8a) v{version}",
     deviceNames: {
       "heltec-v3": "Heltec WiFi LoRa 32 V3 (OLED)",
@@ -138,6 +140,7 @@ const I18N = {
     latestUnavailable: "latest unavailable",
     loadFailed: "failed to load",
     apkNotFound: "APK not found in latest release",
+    apkBrowseReleases: "Releases & APK on GitHub →",
     apkDownload: "Download APK (arm64-v8a) v{version}",
     deviceNames: {
       "heltec-v3": "Heltec WiFi LoRa 32 V3 (OLED)",
@@ -464,16 +467,23 @@ function parseSemverFromName(name) {
 
 function setApkLink(url, versionText) {
   if (!apkDownloadLinkEl) return;
-  if (!url) {
-    apkDownloadLinkEl.textContent = t("apkNotFound");
-    apkDownloadLinkEl.setAttribute("aria-disabled", "true");
-    apkDownloadLinkEl.removeAttribute("href");
+  const trimmed = url && typeof url === "string" ? url.trim() : "";
+
+  if (!trimmed) {
+    apkDownloadLinkEl.href = DEFAULT_RELEASES_PAGE_URL;
+    apkDownloadLinkEl.textContent = t("apkBrowseReleases");
+    apkDownloadLinkEl.setAttribute("aria-disabled", "false");
+    apkDownloadLinkEl.setAttribute("target", "_blank");
+    apkDownloadLinkEl.setAttribute("rel", "noopener noreferrer");
     return;
   }
+
   const titleVersion = versionText ?? "unknown";
-  apkDownloadLinkEl.href = url;
+  apkDownloadLinkEl.href = trimmed;
   apkDownloadLinkEl.textContent = tWithVersion("apkDownload", titleVersion);
   apkDownloadLinkEl.setAttribute("aria-disabled", "false");
+  apkDownloadLinkEl.setAttribute("target", "_blank");
+  apkDownloadLinkEl.setAttribute("rel", "noopener noreferrer");
 }
 
 async function fetchReleaseMirrorJson() {
