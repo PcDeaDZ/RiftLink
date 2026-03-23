@@ -714,7 +714,14 @@ class RiftLinkBle {
       } catch (e) {
         // Неполный JSON или несколько объектов подряд — разбираем ниже
         if (kDebugMode && s.length < 256) debugPrint('RiftLinkBle: single-object parse: $e');
-        _trace('stage=app_parse action=single_object_retry err=$e len=${s.length}');
+        // Длинный `evt:info` с groupsV2 всегда режется по MTU — до следующего notify это норма, не спамим BLE_CHAIN.
+        final isFragment =
+            s.length > 120 &&
+            e is FormatException &&
+            (e.message?.contains('Unterminated') == true || e.message?.contains('Unexpected end') == true);
+        if (!isFragment) {
+          _trace('stage=app_parse action=single_object_retry err=$e len=${s.length}');
+        }
       }
 
       final objs = _extractTopLevelJsonObjects(s);

@@ -579,7 +579,7 @@ static void notifyJsonToApp(const char* payload, size_t len) {
     off += chunk;
     chunks++;
 
-    if (!lastChunk) vTaskDelay(pdMS_TO_TICKS(8));
+    if (!lastChunk) vTaskDelay(pdMS_TO_TICKS(12));
   }
   s_bleDiag.notifySent++;
   s_bleDiag.notifyBytes += (uint32_t)len;
@@ -2288,7 +2288,10 @@ void notifyInfo() {
   }
   JsonArray grpV2Arr = doc["groupsV2"].to<JsonArray>();
   const int nv2 = groups::getV2Count();
-  for (int i = 0; i < nv2; i++) {
+  // Слишком длинный info режется на несколько notify; обрезка по числу групп снижает «обрыв посередине строки» в первом чанке.
+  constexpr int kMaxGroupsV2InBleInfo = 12;
+  const int nv2Cap = (nv2 > kMaxGroupsV2InBleInfo) ? kMaxGroupsV2InBleInfo : nv2;
+  for (int i = 0; i < nv2Cap; i++) {
     char uid[groups::GROUP_UID_MAX_LEN + 1] = {0};
     char tag[groups::GROUP_TAG_MAX_LEN + 1] = {0};
     char canonicalName[groups::GROUP_CANONICAL_NAME_MAX_LEN + 1] = {0};
