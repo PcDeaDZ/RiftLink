@@ -167,7 +167,8 @@ static uint32_t computeTxAsymSkewMs(const uint8_t* buf, size_t len, TxAsymMeta* 
 #if defined(USE_EINK)
 #define PACKET_TASK_STACK 32768
 #else
-#define PACKET_TASK_STACK 4096
+// Align OLED with a wide safety margin for deep packet/notify/log call chains.
+#define PACKET_TASK_STACK 32768
 #endif
 #define DISPLAY_TASK_STACK 8192   // 12KB — create FAIL (heap), 8KB — минимум для создания
 #define PACKET_TASK_PRIO 2

@@ -38,6 +38,9 @@ static SemaphoreHandle_t s_adcMutex = nullptr;
 static uint16_t s_lastBatteryMv = 0;
 static uint32_t s_lastBatteryReadMs = 0;
 static constexpr uint32_t BATTERY_CACHE_MS = 900;
+// ESP32-S3 occasionally aborts inside adc_oneshot HAL under runtime load.
+// Keep legacy Arduino ADC path as default to avoid hard crashes in displayTask.
+static constexpr bool kUseEspIdfOneshotAdc = false;
 #if !defined(USE_EINK)
 static adc_oneshot_unit_handle_t s_batAdcUnit = nullptr;
 static adc_cali_handle_t s_batAdcCali = nullptr;
@@ -152,7 +155,11 @@ void init() {
   digitalWrite(PAPER_ADC_CTRL, LOW);
   analogSetPinAttenuation(PAPER_ADC_IN, ADC_11db);
 #else
-  if (!setupBatteryAdc()) {
+  pinMode(BAT_ADC_CTRL, OUTPUT);
+  digitalWrite(BAT_ADC_CTRL, HIGH);
+  analogReadResolution(12);
+  analogSetPinAttenuation(BAT_ADC_PIN, ADC_11db);
+  if (kUseEspIdfOneshotAdc && !setupBatteryAdc()) {
     uint32_t nowMs = millis();
     if (canLogAdcDiag(nowMs)) {
       RIFTLINK_DIAG("TELEM", "event=ADC_INIT_FAIL");
@@ -198,7 +205,9 @@ uint16_t readBatteryMv() {
   uint32_t nowDiagMs = nowMs;
   for (int i = 0; i < 8; i++) {
     int mv = 0;
-    if (s_batAdcReady) {
+    if (!kUseEspIdfOneshotAdc) {
+      mv = analogReadMilliVolts(BAT_ADC_PIN);
+    } else if (s_batAdcReady) {
       if (s_batAdcUnit != nullptr) {
         if (!configureBatteryAdcChannel()) {
           s_adcConsecutiveReadFails++;

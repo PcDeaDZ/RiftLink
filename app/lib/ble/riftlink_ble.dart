@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show debugPrint, kDebugMode, kIsWeb;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
+import '../transport/transport_response_router.dart';
 import '../transport/wifi_transport.dart';
 
 class RiftLinkBle {
@@ -35,6 +36,8 @@ class RiftLinkBle {
     onListen: _onEventsStreamListen,
     onCancel: _onEventsStreamCancel,
   );
+  late final StreamController<Map<String, dynamic>> _rawEventBus =
+      StreamController<Map<String, dynamic>>.broadcast();
 
   void _trace(String message) {
     debugPrint('[BLE_CHAIN] $message');
@@ -97,6 +100,12 @@ class RiftLinkBle {
   DateTime? _lastInfoRequestAt;
   DateTime? _lastInfoEventAt;
   int _nextCmdId = 1;
+  late final TransportResponseRouter _responseRouter = TransportResponseRouter(
+    sendCommand: _sendCmd,
+    responses: _rawEventBus.stream,
+    commandIdFactory: _allocateCmdId,
+    trace: (message) => _trace(message),
+  );
   Timer? _queuedInfoTimer;
   bool _hasQueuedInfoRequest = false;
 
@@ -216,13 +225,40 @@ class RiftLinkBle {
     }
   }
 
+  int _allocateCmdId() {
+    final id = _nextCmdId;
+    _nextCmdId = (id >= 0x7FFFFFFF) ? 1 : (id + 1);
+    return id;
+  }
+
   int _extractOrAttachCmdId(Map<String, dynamic> payload) {
     final raw = payload['cmdId'];
     if (raw is int && raw > 0) return raw;
-    final next = _nextCmdId;
-    _nextCmdId = (next >= 0x7FFFFFFF) ? 1 : (next + 1);
+    final next = _allocateCmdId();
     payload['cmdId'] = next;
     return next;
+  }
+
+  Future<bool> _requestCommand({
+    required String cmd,
+    Map<String, dynamic>? payload,
+    required Set<String> expectedEvents,
+    Duration timeout = const Duration(seconds: 4),
+    int retries = 0,
+  }) async {
+    try {
+      await _responseRouter.sendRequest(
+        cmd: cmd,
+        payload: payload,
+        expectedEvents: expectedEvents,
+        timeout: timeout,
+        retries: retries,
+      );
+      return true;
+    } catch (e) {
+      _trace('stage=app_rr action=request_fail cmd=$cmd err=$e');
+      return false;
+    }
   }
 
   /// Подключение к устройству
@@ -287,7 +323,11 @@ class RiftLinkBle {
           _hasQueuedInfoRequest = false;
           if (!isTransportConnected) return;
           _lastInfoRequestAt = DateTime.now();
-          await _sendCmd({'cmd': 'info'});
+          await _requestCommand(
+            cmd: 'info',
+            expectedEvents: const {'info'},
+            timeout: const Duration(seconds: 5),
+          );
         });
         return true;
       }
@@ -295,7 +335,11 @@ class RiftLinkBle {
       _queuedInfoTimer = null;
       _hasQueuedInfoRequest = false;
       _lastInfoRequestAt = now;
-      return _sendCmd({'cmd': 'info'});
+      return _requestCommand(
+        cmd: 'info',
+        expectedEvents: const {'info'},
+        timeout: const Duration(seconds: 5),
+      );
     }
 
     // Keep BLE channel free for status events (sent/delivered/read/undelivered).
@@ -309,7 +353,11 @@ class RiftLinkBle {
     final last = _lastInfoRequestAt;
     if (last == null || now.difference(last) >= minGap) {
       _lastInfoRequestAt = now;
-      return _sendCmd({'cmd': 'info'});
+      return _requestCommand(
+        cmd: 'info',
+        expectedEvents: const {'info'},
+        timeout: const Duration(seconds: 5),
+      );
     }
 
     if (_hasQueuedInfoRequest) return true;
@@ -320,7 +368,11 @@ class RiftLinkBle {
       _hasQueuedInfoRequest = false;
       if (!isTransportConnected) return;
       _lastInfoRequestAt = DateTime.now();
-      await _sendCmd({'cmd': 'info'});
+      await _requestCommand(
+        cmd: 'info',
+        expectedEvents: const {'info'},
+        timeout: const Duration(seconds: 5),
+      );
     });
     return true;
   }
@@ -436,6 +488,9 @@ class RiftLinkBle {
 
   void _emitParsedJson(Map<String, dynamic> json) {
     _trace('stage=app_parse action=json evt=${json['evt']} keys=${json.keys.length}');
+    if (!_rawEventBus.isClosed) {
+      _rawEventBus.add(Map<String, dynamic>.from(json));
+    }
     RiftLinkEvent? evt;
     try {
       evt = _jsonToEvent(json);
@@ -676,37 +731,65 @@ class RiftLinkBle {
       utcMs != 0 ? _sendCmd({'cmd': 'gps_sync', 'utc_ms': utcMs, 'lat': lat, 'lon': lon, 'alt': alt}) : Future.value(false);
 
   /// Установить регион (EU, RU, UK, US, AU)
-  Future<bool> setRegion(String region) async =>
-      _sendCmd({'cmd': 'region', 'region': region});
+  Future<bool> setRegion(String region) async => _requestCommand(
+        cmd: 'region',
+        payload: {'region': region},
+        expectedEvents: const {'region'},
+      );
 
   /// Установить никнейм (до 16 символов)
   Future<bool> setNickname(String nickname) async {
     if (utf8.encode(nickname).length > 32) return false;
-    return _sendCmd({'cmd': 'nickname', 'nickname': nickname});
+    return _requestCommand(
+      cmd: 'nickname',
+      payload: {'nickname': nickname},
+      expectedEvents: const {'info'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   /// Установить канал (0–2) для EU/UK
   Future<bool> setChannel(int channel) async {
     if (channel < 0 || channel > 2) return false;
-    return _sendCmd({'cmd': 'channel', 'channel': channel});
+    return _requestCommand(
+      cmd: 'channel',
+      payload: {'channel': channel},
+      expectedEvents: const {'region'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   /// LoRa spreading factor (mesh), 7–12
   Future<bool> setSpreadingFactor(int sf) async {
     if (sf < 7 || sf > 12) return false;
-    return _sendCmd({'cmd': 'sf', 'sf': sf});
+    return _requestCommand(
+      cmd: 'sf',
+      payload: {'sf': sf},
+      expectedEvents: const {'info'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   /// Modem preset (0=Speed, 1=Normal, 2=Range, 3=MaxRange)
   Future<bool> setModemPreset(int preset) async {
     if (preset < 0 || preset > 3) return false;
-    return _sendCmd({'cmd': 'modemPreset', 'preset': preset});
+    return _requestCommand(
+      cmd: 'modemPreset',
+      payload: {'preset': preset},
+      expectedEvents: const {'info'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   /// Custom modem: SF 7–12, BW kHz (62.5/125/250/500), CR 5–8
   Future<bool> setCustomModem(int sf, double bw, int cr) async {
     if (sf < 7 || sf > 12 || cr < 5 || cr > 8) return false;
-    return _sendCmd({'cmd': 'modemCustom', 'sf': sf, 'bw': bw, 'cr': cr});
+    return _requestCommand(
+      cmd: 'modemCustom',
+      payload: {'sf': sf, 'bw': bw, 'cr': cr},
+      expectedEvents: const {'info'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   /// Отправить голосовое сообщение (Opus/AAC, base64 чанками)
@@ -732,10 +815,12 @@ class RiftLinkBle {
   }
 
   /// Запросить маршруты (evt "routes")
-  Future<bool> getRoutes() async => _sendCmd({'cmd': 'routes'});
+  Future<bool> getRoutes() async =>
+      _requestCommand(cmd: 'routes', expectedEvents: const {'routes'}, timeout: const Duration(seconds: 5));
 
   /// Запросить список групп
-  Future<bool> getGroups() async => _sendCmd({'cmd': 'groups'});
+  Future<bool> getGroups() async =>
+      _requestCommand(cmd: 'groups', expectedEvents: const {'groups'}, timeout: const Duration(seconds: 5));
 
   // --- Groups V2 (thin-device, no-legacy) ---
 
@@ -765,12 +850,16 @@ class RiftLinkBle {
     int ttlSec = 600,
   }) async {
     if (!_isValidGroupUid(groupUid) || role.trim().isEmpty || ttlSec <= 0) return false;
-    return _sendCmd({
-      'cmd': 'groupInviteCreate',
-      'groupUid': groupUid.trim(),
-      'role': role.trim(),
-      'ttlSec': ttlSec,
-    });
+    return _requestCommand(
+      cmd: 'groupInviteCreate',
+      payload: {
+        'groupUid': groupUid.trim(),
+        'role': role.trim(),
+        'ttlSec': ttlSec,
+      },
+      expectedEvents: const {'groupInvite'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   Future<bool> groupInviteAccept(String invitePayload) async {
@@ -834,7 +923,12 @@ class RiftLinkBle {
 
   Future<bool> groupStatus(String groupUid) async {
     if (!_isValidGroupUid(groupUid)) return false;
-    return _sendCmd({'cmd': 'groupStatus', 'groupUid': groupUid.trim()});
+    return _requestCommand(
+      cmd: 'groupStatus',
+      payload: {'groupUid': groupUid.trim()},
+      expectedEvents: const {'groupStatus'},
+      timeout: const Duration(seconds: 5),
+    );
   }
 
   Future<bool> groupCanonicalRename({
@@ -864,11 +958,14 @@ class RiftLinkBle {
 
   Future<int?> sendPingTracked(String to) async {
     if (!isValidFullNodeId(to)) return null;
-    final payload = <String, dynamic>{'cmd': 'ping', 'to': to};
-    final cmdId = _extractOrAttachCmdId(payload);
-    final ok = await _sendCmd(payload);
-    if (!ok) return null;
-    return cmdId;
+    final ticket = _responseRouter.sendTrackedRequest(
+      cmd: 'ping',
+      payload: <String, dynamic>{'to': to},
+      expectedEvents: const {'pong'},
+      timeout: const Duration(seconds: 20),
+    );
+    unawaited(ticket.response.catchError((_) => <String, dynamic>{}));
+    return ticket.cmdId;
   }
 
   // --- Radio Mode Switching (Time-sharing BLE ↔ WiFi) ---
@@ -977,25 +1074,46 @@ class RiftLinkBle {
 
   /// Трассировка: запрос маршрута до узла (ответ evt:routes)
   Future<bool> traceroute(String to) async =>
-      !isValidFullNodeId(to) ? false : _sendCmd({'cmd': 'traceroute', 'to': to});
+      !isValidFullNodeId(to)
+          ? false
+          : _requestCommand(
+              cmd: 'traceroute',
+              payload: {'to': to},
+              expectedEvents: const {'routes'},
+              timeout: const Duration(seconds: 8),
+            );
 
   /// ESP-NOW: канал 1..13 (для WiFi-режима)
   Future<bool> setEspNowChannel(int channel) async {
     if (channel < 1 || channel > 13) return false;
-    return _sendCmd({'cmd': 'espnowChannel', 'channel': channel});
+    return _requestCommand(
+      cmd: 'espnowChannel',
+      payload: {'channel': channel},
+      expectedEvents: const {'info'},
+      timeout: const Duration(seconds: 6),
+    );
   }
 
   /// ESP-NOW: адаптивный подбор канала
   Future<bool> setEspNowAdaptive(bool enabled) async =>
-      _sendCmd({'cmd': 'espnowAdaptive', 'enabled': enabled});
+      _requestCommand(
+        cmd: 'espnowAdaptive',
+        payload: {'enabled': enabled},
+        expectedEvents: const {'info'},
+        timeout: const Duration(seconds: 6),
+      );
 
   /// WiFi: SSID + пароль (переключает в WiFi STA)
   Future<bool> setWifi({required String ssid, required String pass}) async =>
       switchToWifiSta(ssid: ssid, pass: pass);
 
   /// GPS: вкл/выкл
-  Future<bool> setGps(bool enabled) async =>
-      _sendCmd({'cmd': 'gps', 'enabled': enabled});
+  Future<bool> setGps(bool enabled) async => _requestCommand(
+        cmd: 'gps',
+        payload: {'enabled': enabled},
+        expectedEvents: const {'gps'},
+        timeout: const Duration(seconds: 5),
+      );
 
   /// Powersave
   Future<bool> setPowersave(bool enabled) async =>
@@ -1006,7 +1124,12 @@ class RiftLinkBle {
       _sendCmd({'cmd': 'lang', 'lang': lang});
 
   /// Создать E2E invite (evt "invite"), TTL ограничен на устройстве.
-  Future<bool> createInvite({int ttlSec = 600}) async => _sendCmd({'cmd': 'invite', 'ttlSec': ttlSec});
+  Future<bool> createInvite({int ttlSec = 600}) async => _requestCommand(
+        cmd: 'invite',
+        payload: {'ttlSec': ttlSec},
+        expectedEvents: const {'invite'},
+        timeout: const Duration(seconds: 6),
+      );
 
   /// Принять invite (id + pubKey base64, опционально channelKey/inviteToken).
   Future<bool> acceptInvite({
@@ -1026,7 +1149,8 @@ class RiftLinkBle {
   Future<bool> regeneratePin() async => _sendCmd({'cmd': 'regeneratePin'});
 
   /// Selftest (evt "selftest")
-  Future<bool> selftest() async => _sendCmd({'cmd': 'selftest'});
+  Future<bool> selftest() async =>
+      _requestCommand(cmd: 'selftest', expectedEvents: const {'selftest'}, timeout: const Duration(seconds: 8));
 
   /// Отправка сообщения (broadcast, unicast или в группу).
   Future<bool> send({
@@ -1077,6 +1201,9 @@ class RiftLinkBle {
 
   /// Все подписчики получают каждое событие (multicast). Длинные JSON склеиваются в [_drainRxAccum].
   Stream<RiftLinkEvent> get events => _eventBus.stream;
+
+  /// Raw parsed JSON events for request/response routing by cmdId.
+  Stream<Map<String, dynamic>> get rawEvents => _rawEventBus.stream;
 }
 
 List<int> retainRxTailFromLastBraceBytes(List<int> bytes, {int maxRetain = 4096}) {

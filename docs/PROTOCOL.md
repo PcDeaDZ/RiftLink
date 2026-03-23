@@ -197,18 +197,23 @@ Groups V2 использует `groupUID` как основной идентиф
 
 **Важное ограничение BLE transport:** запись команд из app выполняется как `write without response`, поэтому подтверждение на этом уровне не гарантируется; прикладной статус доставки задаётся событиями `sent/delivered/read/undelivered`.
 
+**Корреляция request/response (`cmdId`):**
+- Приложение добавляет `cmdId` (uint32) в команды с запросной семантикой.
+- Устройство возвращает тот же `cmdId` в ответных `evt` (`info/groups/routes/neighbors/invite/gps/pong`) и в `evt:error`, если ошибка относится к конкретной команде.
+- При отсутствии `cmdId` (старые клиенты/переходный режим) событие считается только broadcast-ивентом и не матчится как response.
+
 ### 7.1 Команды (приложение → устройство)
 
 | cmd | Параметры | Описание |
 |-----|-----------|----------|
-| send | text, to?, lane?, trigger?, triggerAtMs? | Отправить сообщение (normal/critical, Time Capsule trigger) |
+| send | text, to?, lane?, trigger?, triggerAtMs?, cmdId? | Отправить сообщение (normal/critical, Time Capsule trigger) |
 | sos | text? | Emergency flood |
-| location | lat, lon, alt, radiusM?, expiryEpochSec? | Геолокация (в т.ч. geofence) |
-| read | from, msgId | Маркер «прочитано» для входящего сообщения |
-| info | — | Запросить `evt:"info"` snapshot |
-| groups | — | Запросить `evt:"groups"` snapshot |
-| neighbors | — | Запросить `evt:"neighbors"` snapshot |
-| ping | to? | Диагностический ping (`evt:"pong"`) |
+| location | lat, lon, alt, radiusM?, expiryEpochSec?, cmdId? | Геолокация (в т.ч. geofence) |
+| read | from, msgId, cmdId? | Маркер «прочитано» для входящего сообщения |
+| info | cmdId? | Запросить `evt:"info"` snapshot |
+| groups | cmdId? | Запросить `evt:"groups"` snapshot |
+| neighbors | cmdId? | Запросить `evt:"neighbors"` snapshot |
+| ping | to?, cmdId? | Диагностический ping (`evt:"pong"`) |
 | voice | to, chunk, total, data(base64) | Отправка голосовых фрагментов |
 
 GeoFence baseline hardening (приёмник):
@@ -218,7 +223,7 @@ GeoFence baseline hardening (приёмник):
 - anti-spoof по нереалистичному скачку позиции относительно предыдущего пакета от того же узла.
 | ota | — | Запустить OTA (WiFi AP) |
 | region | region | Установить регион (EU, UK, RU, US, AU) |
-| routes | — | Запросить маршруты (evt "routes") |
+| routes | cmdId? | Запросить маршруты (evt "routes") |
 
 Список команд выше — рабочий минимум для app↔device, не исчерпывающий для всех debug/maintenance команд прошивки.
 
@@ -226,9 +231,9 @@ GeoFence baseline hardening (приёмник):
 
 | evt | Поля | Описание |
 |-----|------|----------|
-| info | id, nickname?, region, freq, power, channel?, neighbors?, version? | При подключении |
-| neighbors | neighbors | Обновление списка соседей (при новом HELLO) |
-| routes | routes | Маршруты: [{dest, nextHop, hops, rssi, trustScore}] |
+| info | id, nickname?, region, freq, power, channel?, neighbors?, version?, cmdId? | Snapshot состояния |
+| neighbors | neighbors, cmdId? | Обновление списка соседей (при новом HELLO) |
+| routes | routes, cmdId? | Маршруты: [{dest, nextHop, hops, rssi, trustScore}] |
 | msg | from, text, lane?, type?, group?, groupUid? | Входящее сообщение (normal/critical, text/sos/...); для `GROUP_MSG` добавляются `group=channelId32` и опционально `groupUid` |
 | sent | to, msgId | Сообщение принято в обработку на узле (не ACK mesh-доставки) |
 | delivered | from, msgId, rssi? | Получен ACK доставки от адресата |
@@ -241,7 +246,11 @@ GeoFence baseline hardening (приёмник):
 | timeCapsuleQueued | to, trigger, triggerAtMs? | Подтверждение постановки в отложенную отправку |
 | timeCapsuleReleased | to, msgId, trigger | Сработал trigger отложенной отправки |
 | ota | ip, ssid, password | OTA запущен |
-| region | region, freq, power | Регион изменён |
+| region | region, freq, power, cmdId? | Регион изменён |
+| gps | present, enabled, hasFix, rx?, tx?, en?, cmdId? | Ответ на команду GPS и периодический статус |
+| invite | id, pubKey, inviteToken?, inviteTtlMs?, channelKey?, cmdId? | Ответ на `cmd:"invite"` |
+| pong | from, rssi?, cmdId? | Ответ на `cmd:"ping"` |
+| error | code, msg, cmdId? | Ошибка; при наличии `cmdId` относится к конкретному запросу |
 
 ---
 

@@ -279,6 +279,14 @@ static inline uint32_t parseCmdIdFromDoc(const JsonDocument& doc) {
   return (uint32_t)raw;
 }
 
+static uint32_t s_activeCmdId = 0;
+
+class ActiveCmdScope {
+ public:
+  explicit ActiveCmdScope(uint32_t cmdId) { s_activeCmdId = cmdId; }
+  ~ActiveCmdScope() { s_activeCmdId = 0; }
+};
+
 static inline void scheduleInfoNotify(uint32_t delayMs = 0, uint32_t cmdId = 0) {
   s_pendingInfo = true;
   if (cmdId != 0) s_pendingInfoCmdId = cmdId;
@@ -833,6 +841,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     const char* cmd = doc["cmd"];
     const uint32_t cmdId = parseCmdIdFromDoc(doc);
     if (!cmd) return;
+    ActiveCmdScope activeCmdScope(cmdId);
 
     if (strcmp(cmd, "bleOtaStart") == 0) {
       uint32_t size = doc["size"] | 0;
@@ -2282,7 +2291,7 @@ void notifyInfo() {
   // Буфер 600 обрезал большой `info` (соседи/маршруты) → невалидный JSON в приложении.
   size_t plen = serializeJson(doc, s_notifyInfoPayload, sizeof(s_notifyInfoPayload));
   if (plen == 0) return;
-  if (s_lastInfoPayloadLen == plen && memcmp(s_lastInfoPayload, s_notifyInfoPayload, plen) == 0) {
+  if (cmdId == 0 && s_lastInfoPayloadLen == plen && memcmp(s_lastInfoPayload, s_notifyInfoPayload, plen) == 0) {
     Serial.println("[BLE_CHAIN] stage=fw_notify_info action=skip reason=unchanged");
     return;
   }
@@ -2513,6 +2522,7 @@ void notifyError(const char* code, const char* msg) {
   doc["evt"] = "error";
   doc["code"] = code;
   doc["msg"] = msg;
+  if (s_activeCmdId != 0) doc["cmdId"] = s_activeCmdId;
 
   char buf[200];
   size_t len = serializeJson(doc, buf);
