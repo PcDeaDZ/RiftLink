@@ -1,6 +1,6 @@
 {
   "name": "RiftLink Heltec V4",
-  "version": "1.5.18",
+  "version": "1.5.19",
   "new_install_prompt_erase": true,
   "builds": [
     {
@@ -14,4 +14,3 @@
     }
   ]
 }
-

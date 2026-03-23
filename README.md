@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-firmware_1.3.6_|_app_1.0.1-888?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-firmware_1.5.19_|_app_1.5.19-888?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/license-See_project-888?style=flat-square" alt="License" />
 </p>
 
@@ -201,6 +201,7 @@ irm https://raw.githubusercontent.com/PcDeaDZ/RiftLink/master/install.ps1 | iex
 | [📘 API.md](docs/API.md) | BLE/Serial API с примерами |
 | [🔧 RECOVERY.md](docs/RECOVERY.md) | Восстановление при «не включается» |
 | [🌐 WEB_FLASH_GITHUB.md](docs/WEB_FLASH_GITHUB.md) | GitHub Pages веб‑прошивка через ESP Web Tools |
+| [📋 CHANGELOG.md](CHANGELOG.md) | Журнал изменений по релизам |
 
 ---
 
