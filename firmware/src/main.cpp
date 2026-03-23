@@ -1000,16 +1000,21 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     uint8_t decodedBuf[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
     size_t decodedLen = 0;
     if (network_coding::onXorRelayReceived(frameBuf, frameLen, decodedBuf, &decodedLen) && decodedLen > 0) {
-      if (packetQueue && decodedLen <= PACKET_BUF_SIZE) {
-        PacketQueueItem item;
-        memcpy(item.buf, decodedBuf, decodedLen);
-        item.len = (uint16_t)decodedLen;
-        item.rssi = (int8_t)rssi;
-        item.sf = sf;
-        if (xQueueSend(packetQueue, &item, 0) != pdTRUE) {
-          RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_queue action=fallback queue=packetQueue reason=full len=%u op=0x%02X rssi=%d sf=%u",
-              (unsigned)decodedLen, (unsigned)protocol::OP_XOR_RELAY, rssi, (unsigned)sf);
-          handlePacket(decodedBuf, decodedLen, rssi, sf);  // fallback при полной очереди
+      if (packetQueue && packetPool.ready() && decodedLen <= PACKET_BUF_SIZE) {
+        PacketQueueItem* slot = packetPool.alloc();
+        if (slot) {
+          memcpy(slot->buf, decodedBuf, decodedLen);
+          slot->len = (uint16_t)decodedLen;
+          slot->rssi = (int8_t)rssi;
+          slot->sf = sf;
+          if (xQueueSend(packetQueue, &slot, 0) != pdTRUE) {
+            packetPool.free(slot);
+            RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_queue action=fallback queue=packetQueue reason=full len=%u op=0x%02X rssi=%d sf=%u",
+                (unsigned)decodedLen, (unsigned)protocol::OP_XOR_RELAY, rssi, (unsigned)sf);
+            handlePacket(decodedBuf, decodedLen, rssi, sf);
+          }
+        } else {
+          handlePacket(decodedBuf, decodedLen, rssi, sf);
         }
       } else {
         handlePacket(decodedBuf, decodedLen, rssi, sf);
@@ -1094,16 +1099,21 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       size_t decodedLen = 0;
         if (network_coding::getDecodedFromPending(frameBuf, frameLen, hdr.from, hdr.to, hdr.pktId,
                                                   decodedBuf, &decodedLen) && decodedLen > 0) {
-        if (packetQueue && decodedLen <= PACKET_BUF_SIZE) {
-          PacketQueueItem item;
-          memcpy(item.buf, decodedBuf, decodedLen);
-          item.len = (uint16_t)decodedLen;
-          item.rssi = (int8_t)rssi;
-          item.sf = sf;
-          if (xQueueSend(packetQueue, &item, 0) != pdTRUE) {
-            RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_queue action=fallback queue=packetQueue reason=full len=%u op=0x%02X rssi=%d sf=%u",
-                (unsigned)decodedLen, (unsigned)protocol::OP_XOR_RELAY, rssi, (unsigned)sf);
-            handlePacket(decodedBuf, decodedLen, rssi, sf);  // fallback при полной очереди
+        if (packetQueue && packetPool.ready() && decodedLen <= PACKET_BUF_SIZE) {
+          PacketQueueItem* slot = packetPool.alloc();
+          if (slot) {
+            memcpy(slot->buf, decodedBuf, decodedLen);
+            slot->len = (uint16_t)decodedLen;
+            slot->rssi = (int8_t)rssi;
+            slot->sf = sf;
+            if (xQueueSend(packetQueue, &slot, 0) != pdTRUE) {
+              packetPool.free(slot);
+              RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_queue action=fallback queue=packetQueue reason=full len=%u op=0x%02X rssi=%d sf=%u",
+                  (unsigned)decodedLen, (unsigned)protocol::OP_XOR_RELAY, rssi, (unsigned)sf);
+              handlePacket(decodedBuf, decodedLen, rssi, sf);
+            }
+          } else {
+            handlePacket(decodedBuf, decodedLen, rssi, sf);
           }
         } else {
           handlePacket(decodedBuf, decodedLen, rssi, sf);
@@ -2244,12 +2254,14 @@ void loop() {
   // Fallback: loop помогает drain packetQueue только если packetTask не создан.
   // Иначе получаем два параллельных исполнителя handlePacket() и гонки по shared-буферам.
   if (!asyncHasPacketTask() && packetQueue && uxQueueMessagesWaiting(packetQueue) > 8) {
-    PacketQueueItem pitem;
     constexpr int kLoopDrainMax = 2;
-    for (int i = 0; i < kLoopDrainMax && xQueueReceive(packetQueue, &pitem, 0) == pdTRUE; i++) {
-      handlePacket(pitem.buf, pitem.len, (int)pitem.rssi, pitem.sf);
+    for (int i = 0; i < kLoopDrainMax; i++) {
+      PacketQueueItem* pitem = nullptr;
+      if (xQueueReceive(packetQueue, &pitem, 0) != pdTRUE || !pitem) break;
+      handlePacket(pitem->buf, pitem->len, (int)pitem->rssi, pitem->sf);
+      packetPool.free(pitem);
       pollButtonAndQueue();
-      vTaskDelay(1);  // yield: packetTask, displayTask, BLE
+      vTaskDelay(1);
     }
   }
 

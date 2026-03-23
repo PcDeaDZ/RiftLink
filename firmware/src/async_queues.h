@@ -55,6 +55,22 @@ struct RadioCmd {
   } u;
 };
 
+enum class TxRequestClass : uint8_t {
+  critical = 0,
+  control = 1,
+  data = 2,
+  voice = 3,
+};
+
+struct TxRequest {
+  uint8_t buf[PACKET_BUF_SIZE];
+  uint16_t len = 0;
+  uint8_t txSf = 0;
+  bool priority = false;
+  TxRequestClass klass = TxRequestClass::data;
+  uint32_t enqueueMs = 0;
+};
+
 // Команды отображения
 constexpr uint8_t CMD_REDRAW_SCREEN = 1;
 constexpr uint8_t CMD_SET_LAST_MSG = 2;
@@ -70,8 +86,16 @@ struct DisplayQueueItem {
   char text[64];
 };
 
-extern QueueHandle_t packetQueue;
-extern QueueHandle_t radioCmdQueue;  // RadioCmd: TX + ApplyRegion + ApplySf
+extern QueueHandle_t packetQueue;      // PacketQueueItem* (pointer-based)
+extern QueueHandle_t radioCmdQueue;    // RadioCmd: TX + ApplyRegion + ApplySf (copy-based, small items OK)
 extern QueueHandle_t displayQueue;
+
+#include "ptr_pool.h"
+
+inline constexpr size_t PACKET_POOL_SIZE = 16;
+inline constexpr size_t TX_REQUEST_POOL_SIZE = 24;
+
+extern PtrPool<PacketQueueItem, PACKET_POOL_SIZE> packetPool;
+extern PtrPool<TxRequest, TX_REQUEST_POOL_SIZE> txRequestPool;
 
 bool asyncQueuesInit();

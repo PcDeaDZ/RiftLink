@@ -24,10 +24,23 @@ class ChatEventIngestor {
   DateTime _lastStatusDumpAt = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastQueueLagLogAt = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// Events re-emitted AFTER persistence is complete.
+  /// UI subscribers get sequential consistency: the DB row exists by the time
+  /// they receive the event. Replaces the dual-subscription pattern where
+  /// ChatScreen listened on ble.events in parallel with the ingestor.
+  final StreamController<RiftLinkEvent> _processedController =
+      StreamController<RiftLinkEvent>.broadcast();
+  Stream<RiftLinkEvent> get processedEvents => _processedController.stream;
+
+  static ChatEventIngestor? _instance;
+  static ChatEventIngestor? get instance => _instance;
+
   ChatEventIngestor({
     required this.ble,
     required this.repo,
-  });
+  }) {
+    _instance = this;
+  }
 
   Future<void> start() async {
     await repo.init();
@@ -43,6 +56,10 @@ class ChatEventIngestor {
     _dedupKeys.clear();
     _dedupFifo.clear();
     _incomingNoIdSeq = 0;
+  }
+
+  void dispose() {
+    _processedController.close();
   }
 
   bool _dedupTryAdd(String key) {
@@ -81,6 +98,9 @@ class ChatEventIngestor {
           final queued = _eventQueue.removeFirst();
           _maybeLogQueueLag(queued);
           await _handle(queued.event);
+          if (!_processedController.isClosed) {
+            _processedController.add(queued.event);
+          }
         }
       } finally {
         _processingQueue = false;

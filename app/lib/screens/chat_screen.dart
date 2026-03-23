@@ -236,6 +236,27 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     return id.isEmpty ? null : id;
   }
 
+  /// Индекс соседа в параллельных списках `_neighbors` / `_neighborsHasKey`, или null если сейчас нет в списке.
+  int? _neighborIndexForPeer(String peerNorm) {
+    final p = _normNodeId(peerNorm);
+    if (p.isEmpty) return null;
+    for (var i = 0; i < _neighbors.length; i++) {
+      if (_normNodeId(_neighbors[i]) == p) return i;
+    }
+    return null;
+  }
+
+  /// Личный чат: отправка текста только при известном pairwise-ключе (evt `hasKey` для этого соседа).
+  /// Если собеседника нет в списке соседей — не блокируем (нет явного `hasKey: false`).
+  bool get _canSendPrivateText {
+    if (_chatContextType() != ChatContextType.direct) return true;
+    final peer = _activeDirectPeerId();
+    if (peer == null || peer.isEmpty) return false;
+    final idx = _neighborIndexForPeer(peer);
+    if (idx == null) return true;
+    return idx < _neighborsHasKey.length ? _neighborsHasKey[idx] : true;
+  }
+
   String _chatTitle(AppLocalizations l) {
     switch (_chatContextType()) {
       case ChatContextType.direct:
@@ -1856,6 +1877,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   static const _broadcastTo = 'FFFFFFFFFFFFFFFF';  // совпадает с evt.to в "sent" для broadcast
 
   Future<void> _send({int ttlMinutes = 0, String lane = 'normal', String? trigger, int? triggerAtMs}) async {
+    if (_chatContextType() == ChatContextType.direct && !_canSendPrivateText) {
+      if (mounted) _showSnack(context.l10n.tr('waiting_key'));
+      return;
+    }
     await _screenController.sendTextMessage(
       _buildActionDeps(),
       ttlMinutes: ttlMinutes,
@@ -2629,6 +2654,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
     final mq = MediaQuery.of(context);
     final bottomInset = mq.padding.bottom + mq.viewInsets.bottom;
+    final connected = widget.ble.isTransportConnected;
+    final canSendPrivate = connected && _canSendPrivateText;
     return ChatInputBar(
       bottomInset: bottomInset,
       child: Row(
@@ -2738,20 +2765,30 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                               ),
                             )
                           : _hasText
-                            ? _TtlTapButton(
-                                onTap: widget.ble.isTransportConnected ? () => _send() : null,
-                                onLongPress: widget.ble.isTransportConnected ? _showTtlSendMenu : null,
-                                icon: Icons.send,
-                                size: 36,
-                                iconSize: 18,
-                              )
+                            ? !connected
+                                ? _TtlTapButton(
+                                    onTap: null,
+                                    onLongPress: null,
+                                    icon: Icons.send,
+                                    size: 36,
+                                    iconSize: 18,
+                                  )
+                                : !canSendPrivate
+                                    ? const SizedBox(width: 36, height: 36)
+                                    : _TtlTapButton(
+                                        onTap: () => _send(),
+                                        onLongPress: _showTtlSendMenu,
+                                        icon: Icons.send,
+                                        size: 36,
+                                        iconSize: 18,
+                                      )
                             : _TtlTapButton(
-                                onTap: widget.ble.isTransportConnected
+                                onTap: connected
                                     ? (matrix.canVoice
                                         ? _toggleVoiceRecord
                                         : _showVoiceRestrictionSnack)
                                     : null,
-                                onLongPress: widget.ble.isTransportConnected && matrix.canVoice
+                                onLongPress: connected && matrix.canVoice
                                     ? _onVoiceLongPress
                                     : null,
                                 icon: Icons.mic,

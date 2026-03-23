@@ -217,7 +217,7 @@ bool asyncInfraEnsure() {
     return false;
   }
   if (!s_txRequestQueue) {
-    s_txRequestQueue = xQueueCreate(TX_REQUEST_QUEUE_LEN, sizeof(TxRequest));
+    s_txRequestQueue = xQueueCreate(TX_REQUEST_QUEUE_LEN, sizeof(TxRequest*));
   }
   if (!s_txRequestQueue) {
     RIFTLINK_LOG_ERR("[RiftLink] TX request queue init FAILED (lazy)\n");
@@ -339,9 +339,23 @@ static bool queueTxRequestInternal(const TxRequest& inReq, char* reasonBuf, size
         (unsigned)req.txSf, (unsigned)req.len, (unsigned)uxQueueSpacesAvailable(s_txRequestQueue));
     return false;
   }
-  BaseType_t ok = req.priority ? xQueueSendToFront(s_txRequestQueue, &req, 0)
-                               : xQueueSend(s_txRequestQueue, &req, 0);
+  TxRequest* slot = txRequestPool.alloc();
+  if (!slot) {
+    if (send_overflow::push(req)) {
+      RIFTLINK_DIAG("QUEUE", "event=TX_DEFER lane=overflow cause=pool_empty priority=%u sf=%u len=%u",
+          (unsigned)req.priority, (unsigned)req.txSf, (unsigned)req.len);
+      return true;
+    }
+    queueSendReason(reasonBuf, reasonLen, "txreq_pool_empty");
+    RIFTLINK_DIAG("QUEUE", "event=TX_DROP cause=txreq_pool_empty sf=%u len=%u",
+        (unsigned)req.txSf, (unsigned)req.len);
+    return false;
+  }
+  *slot = req;
+  BaseType_t ok = req.priority ? xQueueSendToFront(s_txRequestQueue, &slot, 0)
+                               : xQueueSend(s_txRequestQueue, &slot, 0);
   if (ok != pdTRUE) {
+    txRequestPool.free(slot);
     if (send_overflow::push(req)) {
       RIFTLINK_DIAG("QUEUE", "event=TX_DEFER lane=overflow cause=txreq_busy priority=%u sf=%u len=%u",
           (unsigned)req.priority, (unsigned)req.txSf, (unsigned)req.len);
@@ -636,10 +650,11 @@ void queueDisplayWake() {
 }
 
 static void packetTask(void* arg) {
-  PacketQueueItem item;
   for (;;) {
-    if (xQueueReceive(packetQueue, &item, portMAX_DELAY) == pdTRUE) {
-      handlePacket(item.buf, item.len, (int)item.rssi, item.sf);
+    PacketQueueItem* item = nullptr;
+    if (xQueueReceive(packetQueue, &item, portMAX_DELAY) == pdTRUE && item) {
+      handlePacket(item->buf, item->len, (int)item->rssi, item->sf);
+      packetPool.free(item);
     }
   }
 }
@@ -795,40 +810,51 @@ static void deliverRxToPacketQueue(uint8_t* rxBuf, int n, int rssi, uint8_t sf) 
   uint8_t op = (n > 2 && rxBuf[0] == protocol::SYNC_BYTE) ? rxBuf[2] : 0xFF;
   RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_rx_queue action=enqueue len=%u rssi=%d sf=%u op=0x%02X",
       (unsigned)n, rssi, (unsigned)sf, (unsigned)op);
-  if (packetQueue) {
-    PacketQueueItem pitem;
-    if ((size_t)n <= sizeof(pitem.buf)) {
-      memcpy(pitem.buf, rxBuf, (size_t)n);
-      pitem.len = (uint16_t)n;
-      pitem.rssi = (int8_t)rssi;
-      pitem.sf = sf;
-      bool isHello = (n == 13 && rxBuf[0] == protocol::SYNC_BYTE && rxBuf[2] == protocol::OP_HELLO);
-      auto tryEnqueueSpill = [&]() {
-        bool added = false;
-        PacketQueueItem discarded;
-        if (xQueueReceive(packetQueue, &discarded, 0) != pdTRUE) return false;
-        bool frontWasHello = (discarded.len == 13 && discarded.buf[0] == protocol::SYNC_BYTE &&
-            discarded.buf[2] == protocol::OP_HELLO);
+  if (packetQueue && packetPool.ready()) {
+    if ((size_t)n <= PACKET_BUF_SIZE) {
+      PacketQueueItem* slot = packetPool.alloc();
+      if (!slot) {
+        bool isHello = (n == 13 && rxBuf[0] == protocol::SYNC_BYTE && rxBuf[2] == protocol::OP_HELLO);
         if (isHello) {
-          added = (xQueueSendToFront(packetQueue, &pitem, 0) == pdTRUE);
-        } else if (frontWasHello) {
-          // Preserve HELLO in queue: do not spill it out for non-HELLO frames.
-          added = false;
+          PacketQueueItem* discarded = nullptr;
+          if (xQueueReceive(packetQueue, &discarded, 0) == pdTRUE) {
+            bool frontWasHello = (discarded->len == 13 && discarded->buf[0] == protocol::SYNC_BYTE &&
+                discarded->buf[2] == protocol::OP_HELLO);
+            if (!frontWasHello) {
+              packetPool.free(discarded);
+              slot = packetPool.alloc();
+            } else {
+              (void)xQueueSendToFront(packetQueue, &discarded, 0);
+            }
+          }
         }
-        if (!added) (void)xQueueSendToFront(packetQueue, &discarded, 0);
-        return added;
-      };
-      BaseType_t ok = isHello ? xQueueSendToFront(packetQueue, &pitem, pdMS_TO_TICKS(30))
-                              : xQueueSend(packetQueue, &pitem, pdMS_TO_TICKS(30));
-      if (ok != pdTRUE && !tryEnqueueSpill()) {
+      }
+      if (slot) {
+        memcpy(slot->buf, rxBuf, (size_t)n);
+        slot->len = (uint16_t)n;
+        slot->rssi = (int8_t)rssi;
+        slot->sf = sf;
+        bool isHello = (n == 13 && rxBuf[0] == protocol::SYNC_BYTE && rxBuf[2] == protocol::OP_HELLO);
+        BaseType_t ok = isHello ? xQueueSendToFront(packetQueue, &slot, pdMS_TO_TICKS(30))
+                                : xQueueSend(packetQueue, &slot, pdMS_TO_TICKS(30));
+        if (ok != pdTRUE) {
+          packetPool.free(slot);
+          TickType_t t = xTaskGetTickCount();
+          if (t - s_packetRxDropLogTick >= pdMS_TO_TICKS(5000)) {
+            s_packetRxDropLogTick = t;
+            RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_rx_queue action=drop reason=queue_full queue=packetQueue len=%u rssi=%d sf=%u op=0x%02X",
+                (unsigned)n, rssi, (unsigned)sf, (unsigned)op);
+            RIFTLINK_DIAG("QUEUE", "event=RX_DROP queue=packetQueue len=%u rssi=%d sf=%u op=0x%02X",
+                (unsigned)n, rssi, (unsigned)sf, (unsigned)op);
+            RIFTLINK_LOG_ERR("[RiftLink] packetQueue full, drop\n");
+          }
+        }
+      } else {
         TickType_t t = xTaskGetTickCount();
         if (t - s_packetRxDropLogTick >= pdMS_TO_TICKS(5000)) {
           s_packetRxDropLogTick = t;
-          RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_rx_queue action=drop reason=queue_full queue=packetQueue len=%u rssi=%d sf=%u op=0x%02X",
+          RIFTLINK_DIAG("QUEUE", "event=RX_DROP queue=packetQueue reason=pool_empty len=%u rssi=%d sf=%u op=0x%02X",
               (unsigned)n, rssi, (unsigned)sf, (unsigned)op);
-          RIFTLINK_DIAG("QUEUE", "event=RX_DROP queue=packetQueue len=%u rssi=%d sf=%u op=0x%02X",
-              (unsigned)n, rssi, (unsigned)sf, (unsigned)op);
-          RIFTLINK_LOG_ERR("[RiftLink] packetQueue full, drop\n");
         }
       }
     }
@@ -837,6 +863,18 @@ static void deliverRxToPacketQueue(uint8_t* rxBuf, int n, int rssi, uint8_t sf) 
         (unsigned)n, rssi, (unsigned)sf);
     handlePacket(rxBuf, (size_t)n, rssi, sf);
   }
+}
+
+/** Push a TxRequest back to the front of the pointer-based s_txRequestQueue. */
+static bool pushBackTxRequest(const TxRequest& item) {
+  TxRequest* slot = txRequestPool.alloc();
+  if (!slot) return false;
+  *slot = item;
+  if (xQueueSendToFront(s_txRequestQueue, &slot, 0) != pdTRUE) {
+    txRequestPool.free(slot);
+    return false;
+  }
+  return true;
 }
 
 /** Radio scheduler: один владелец радио, чередует RX и TX. Нет конкуренции drain vs rx. */
@@ -1101,7 +1139,7 @@ static void radioSchedulerTask(void* arg) {
           if (item.txSf >= 10 && highSfDrained >= 2) {
             item.priority = true;
             item.enqueueMs = millis();
-            (void)xQueueSendToFront(s_txRequestQueue, &item, 0);
+            (void)pushBackTxRequest(item);
             pushedBack = true;
             break;
           }
@@ -1118,11 +1156,10 @@ static void radioSchedulerTask(void* arg) {
 #endif
           }
           uint32_t pktToaUs = radio::getTimeOnAir(item.len);
-          // Не держать radio task в непрерывном TX-бёрсте дольше watchdog-safe окна.
           if (didTx && (burstToaUs + pktToaUs) > (FSM_TX_PREEMPT_BUDGET_MS * 1000UL)) {
             item.priority = true;
             item.enqueueMs = millis();
-            (void)xQueueSendToFront(s_txRequestQueue, &item, 0);
+            (void)pushBackTxRequest(item);
             RIFTLINK_DIAG("FSM", "event=FSM_PREEMPT reason=tx_burst_budget budget_ms=%u burst_ms=%lu",
                 (unsigned)FSM_TX_PREEMPT_BUDGET_MS, (unsigned long)(burstToaUs / 1000UL));
             pushedBack = true;
@@ -1137,7 +1174,30 @@ static void radioSchedulerTask(void* arg) {
             RIFTLINK_DIAG("RADIO", "event=TX_FAIL_REQUEUE len=%u sf=%u", (unsigned)item.len, (unsigned)item.txSf);
           }
           didTx = true;
-          vTaskDelay(pdMS_TO_TICKS(1));
+          // TX/RX interleave: release mutex between packets, check for pending RX
+          if (drainIdx + 1 < drainLimit) {
+            radio::releaseMutex();
+            vTaskDelay(pdMS_TO_TICKS(1));
+            if (radio::consumeIrqEvent()) {
+              if (radio::takeMutex(pdMS_TO_TICKS(50)) == pdTRUE) {
+                uint8_t interBuf[protocol::SYNC_LEN + protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];
+                (void)radio::startReceiveWithTimeout(50);
+                int rn = radio::receiveAsync(interBuf, sizeof(interBuf));
+                if (rn > 0) {
+                  int rrssi = radio::getLastRssi();
+                  radio::releaseMutex();
+                  deliverRxToPacketQueue(interBuf, rn, rrssi, radio::getSpreadingFactor());
+                } else {
+                  radio::releaseMutex();
+                }
+              }
+            }
+            if (radio::takeMutex(pdMS_TO_TICKS(200)) != pdTRUE) {
+              rxMutexTimeoutCount++;
+              break;
+            }
+            radio::standbyChipUnderMutex();
+          }
         }
         if (didTx) {
           uint8_t rxSf; uint32_t _unusedSlotMs;
@@ -1362,9 +1422,9 @@ static void radioSchedulerTask(void* arg) {
         if (item.txSf >= 10 && highSfDrained >= 2) {
           item.priority = true;
           item.enqueueMs = millis();
-          (void)xQueueSendToFront(s_txRequestQueue, &item, 0);
+          (void)pushBackTxRequest(item);
           pushedBack = true;
-          break;  // не drain дальше — ждём RX
+          break;
         } else {
           if (item.txSf >= 7 && item.txSf <= 12) {
             radio::applyHardwareSpreadingFactor(item.txSf);
@@ -1381,7 +1441,7 @@ static void radioSchedulerTask(void* arg) {
           if (didTx && (burstToaUs + pktToaUs) > (FSM_TX_PREEMPT_BUDGET_MS * 1000UL)) {
             item.priority = true;
             item.enqueueMs = millis();
-            (void)xQueueSendToFront(s_txRequestQueue, &item, 0);
+            (void)pushBackTxRequest(item);
             RIFTLINK_DIAG("FSM", "event=FSM_PREEMPT reason=tx_burst_budget budget_ms=%u burst_ms=%lu",
                 (unsigned)FSM_TX_PREEMPT_BUDGET_MS, (unsigned long)(burstToaUs / 1000UL));
             pushedBack = true;

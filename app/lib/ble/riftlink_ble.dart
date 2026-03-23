@@ -100,7 +100,12 @@ class RiftLinkBle {
   final List<int> _rxAccum = [];
   int _lastRxIncompleteLogLen = 0;
   Timer? _rxAccumTimeout;
-  Completer<void>? _txLock;
+  /// Pipelined BLE write: up to [_txPipelineDepth] concurrent writes to avoid
+  /// stalling on sequential Completer waits. The BLE ATT layer with
+  /// writeWithoutResponse can handle multiple in-flight writes.
+  static const int _txPipelineDepth = 3;
+  int _txInFlight = 0;
+  Completer<void>? _txDrain;
   DateTime? _lastInfoRequestAt;
   DateTime? _lastInfoEventAt;
   int _nextCmdId = 1;
@@ -248,10 +253,11 @@ class RiftLinkBle {
     required String traceOnSuccess,
     required String Function(Object error) traceOnFailure,
   }) async {
-    while (_txLock != null) {
-      await _txLock!.future;
+    while (_txInFlight >= _txPipelineDepth) {
+      _txDrain ??= Completer<void>();
+      await _txDrain!.future;
     }
-    _txLock = Completer<void>();
+    _txInFlight++;
     try {
       await _txChar!.write(bytes, withoutResponse: true);
       _diagInc('tx_ok');
@@ -265,9 +271,12 @@ class RiftLinkBle {
       debugPrint('RiftLinkBle: BLE write error: $e');
       return false;
     } finally {
-      final c = _txLock;
-      _txLock = null;
-      c?.complete();
+      _txInFlight--;
+      if (_txInFlight < _txPipelineDepth && _txDrain != null) {
+        final c = _txDrain;
+        _txDrain = null;
+        c?.complete();
+      }
     }
   }
 

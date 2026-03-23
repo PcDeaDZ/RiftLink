@@ -1,6 +1,8 @@
 /**
- * send_overflow — буфер при полной radioCmdQueue (Tx) или при отказе queueSend.
- * Pull on-demand, приоритеты для ACK.
+ * send_overflow — lock-free MPSC overflow buffer for TX requests.
+ * Push from any context (BLE, main, msg_queue), pop only from radioSchedulerTask.
+ * Priority lane (ACK) is drained first.
+ * Uses FreeRTOS queues internally for pointer passing (4 bytes per item, negligible critical section).
  */
 
 #include "send_overflow.h"
@@ -9,88 +11,73 @@
 #include <Arduino.h>
 #include <string.h>
 #include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include <freertos/queue.h>
+#include <esp_heap_caps.h>
 
-#define PRIORITY_SLOTS 2   // ACK — обслуживаются первыми
-#define NORMAL_SLOTS 4     // MSG, KEY_EXCHANGE и т.п.
-#define MUTEX_TIMEOUT_MS 50
+#define PRIORITY_SLOTS 4
+#define NORMAL_SLOTS 8
 
 struct OverflowSlot {
   TxRequest req;
-  bool used;
 };
 
-static OverflowSlot s_priority[PRIORITY_SLOTS];
-static OverflowSlot s_normal[NORMAL_SLOTS];
-static uint8_t s_priHead = 0, s_priTail = 0, s_priCount = 0;
-static uint8_t s_normHead = 0, s_normTail = 0, s_normCount = 0;
-static SemaphoreHandle_t s_mutex = nullptr;
+static OverflowSlot s_priStorage[PRIORITY_SLOTS];
+static OverflowSlot s_normStorage[NORMAL_SLOTS];
+static QueueHandle_t s_priFreeList = nullptr;
+static QueueHandle_t s_normFreeList = nullptr;
+static QueueHandle_t s_priQueue = nullptr;
+static QueueHandle_t s_normQueue = nullptr;
 static bool s_inited = false;
 
 namespace send_overflow {
 
 void init() {
   if (s_inited) return;
-  s_mutex = xSemaphoreCreateMutex();
-  memset(s_priority, 0, sizeof(s_priority));
-  memset(s_normal, 0, sizeof(s_normal));
+  s_priFreeList = xQueueCreate(PRIORITY_SLOTS, sizeof(OverflowSlot*));
+  s_normFreeList = xQueueCreate(NORMAL_SLOTS, sizeof(OverflowSlot*));
+  s_priQueue = xQueueCreate(PRIORITY_SLOTS, sizeof(OverflowSlot*));
+  s_normQueue = xQueueCreate(NORMAL_SLOTS, sizeof(OverflowSlot*));
+  if (!s_priFreeList || !s_normFreeList || !s_priQueue || !s_normQueue) return;
+  for (int i = 0; i < PRIORITY_SLOTS; i++) {
+    OverflowSlot* p = &s_priStorage[i];
+    xQueueSend(s_priFreeList, &p, 0);
+  }
+  for (int i = 0; i < NORMAL_SLOTS; i++) {
+    OverflowSlot* p = &s_normStorage[i];
+    xQueueSend(s_normFreeList, &p, 0);
+  }
   s_inited = true;
 }
 
 bool push(const TxRequest& req) {
   if (!s_inited || req.len == 0 || req.len > PACKET_BUF_SIZE) return false;
-  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
-
-  OverflowSlot* arr = req.priority ? s_priority : s_normal;
-  int cap = req.priority ? PRIORITY_SLOTS : NORMAL_SLOTS;
-  uint8_t* tail = req.priority ? &s_priTail : &s_normTail;
-  uint8_t* count = req.priority ? &s_priCount : &s_normCount;
-
-  if (*count >= cap) {
-    xSemaphoreGive(s_mutex);
-    return false;
-  }
-
-  OverflowSlot* slot = &arr[*tail];
+  QueueHandle_t freeList = req.priority ? s_priFreeList : s_normFreeList;
+  QueueHandle_t queue = req.priority ? s_priQueue : s_normQueue;
+  OverflowSlot* slot = nullptr;
+  if (xQueueReceive(freeList, &slot, 0) != pdTRUE || !slot) return false;
   slot->req = req;
   slot->req.txSf = (req.txSf >= 7 && req.txSf <= 12) ? req.txSf : 0;
-  slot->used = true;
-  *tail = (*tail + 1) % cap;
-  (*count)++;
-  xSemaphoreGive(s_mutex);
+  if (xQueueSend(queue, &slot, 0) != pdTRUE) {
+    xQueueSend(freeList, &slot, 0);
+    return false;
+  }
   return true;
 }
 
 bool pop(TxRequest* req) {
   if (!s_inited || !req) return false;
-  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return false;
-
   OverflowSlot* slot = nullptr;
-  uint8_t* head = nullptr;
-  int cap = 0;
-
-  if (s_priCount > 0) {
-    slot = &s_priority[s_priHead];
-    head = &s_priHead;
-    cap = PRIORITY_SLOTS;
-    s_priCount--;
-  } else if (s_normCount > 0) {
-    slot = &s_normal[s_normHead];
-    head = &s_normHead;
-    cap = NORMAL_SLOTS;
-    s_normCount--;
+  if (s_priQueue && xQueueReceive(s_priQueue, &slot, 0) == pdTRUE && slot) {
+    *req = slot->req;
+    xQueueSend(s_priFreeList, &slot, 0);
+    return true;
   }
-
-  if (!slot) {
-    xSemaphoreGive(s_mutex);
-    return false;
+  if (s_normQueue && xQueueReceive(s_normQueue, &slot, 0) == pdTRUE && slot) {
+    *req = slot->req;
+    xQueueSend(s_normFreeList, &slot, 0);
+    return true;
   }
-
-  *req = slot->req;
-  slot->used = false;
-  *head = (*head + 1) % cap;
-  xSemaphoreGive(s_mutex);
-  return true;
+  return false;
 }
 
 void drainApplyCommandsFromRadioQueue(void) {
@@ -119,8 +106,13 @@ void drainApplyCommandsFromRadioQueue(void) {
 bool getNextTxRequest(QueueHandle_t txRequestQueue, TxRequest* req) {
   if (!req) return false;
   drainApplyCommandsFromRadioQueue();
-  if (txRequestQueue && xQueueReceive(txRequestQueue, req, 0) == pdTRUE) {
-    return true;
+  if (txRequestQueue) {
+    TxRequest* ptr = nullptr;
+    if (xQueueReceive(txRequestQueue, &ptr, 0) == pdTRUE && ptr) {
+      *req = *ptr;
+      txRequestPool.free(ptr);
+      return true;
+    }
   }
   RadioCmd cmd;
   if (radioCmdQueue && xQueueReceive(radioCmdQueue, &cmd, 0) == pdTRUE) {

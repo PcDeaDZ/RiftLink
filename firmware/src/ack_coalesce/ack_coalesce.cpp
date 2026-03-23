@@ -122,9 +122,13 @@ static uint8_t adaptiveBatchIds(uint8_t txSf, uint8_t txFree) {
 }
 
 static uint32_t adaptiveWindowMs(uint8_t txSf, uint8_t txFree) {
+  // Scale window with SF: higher SF = longer airtime = more time to aggregate.
+  // SF7=50ms, SF8=65ms, SF9=80ms, SF10=110ms, SF11=140ms, SF12=200ms.
   uint32_t w = COALESCE_WINDOW_MS;
-  if (txSf >= 10) w += 20;       // higher SF: give more time to aggregate
-  if (txFree <= 2) w = 12;       // queue pressure: flush quickly
+  if (txSf >= 7 && txSf <= 12) {
+    w = COALESCE_WINDOW_MS + (uint32_t)(txSf - 7) * 30;
+  }
+  if (txFree <= 2) w = 12;
   else if (txFree <= 4) w = 20;
   return w;
 }

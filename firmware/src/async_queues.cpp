@@ -1,6 +1,8 @@
 /**
  * Async Queues — инициализация очередей
- * При OOM (WiFi timer alloc, heap exhaustion) — fallback с уменьшенными размерами
+ * packetQueue: pointer-based (PacketQueueItem*) — 4 bytes in critical section vs ~228.
+ * radioCmdQueue: copy-based (RadioCmd contains union with non-TX commands, kept as-is).
+ * При OOM (WiFi timer alloc, heap exhaustion) — fallback с уменьшенными размерами.
  */
 
 #include "async_queues.h"
@@ -9,6 +11,9 @@
 QueueHandle_t packetQueue = nullptr;
 QueueHandle_t radioCmdQueue = nullptr;
 QueueHandle_t displayQueue = nullptr;
+
+PtrPool<PacketQueueItem, PACKET_POOL_SIZE> packetPool;
+PtrPool<TxRequest, TX_REQUEST_POOL_SIZE> txRequestPool;
 
 static constexpr size_t PACKET_QUEUE_LEN =
 #if defined(USE_EINK)
@@ -34,9 +39,8 @@ static bool tryCreateQueues(size_t pktLen, size_t sendLen, size_t dispLen) {
   if (radioCmdQueue) { vQueueDelete(radioCmdQueue); radioCmdQueue = nullptr; }
   if (displayQueue) { vQueueDelete(displayQueue); displayQueue = nullptr; }
 
-  // Сначала маленькая displayQueue — оставляет больший contiguous блок под крупные packet/send.
   displayQueue = xQueueCreate(dispLen, sizeof(DisplayQueueItem));
-  packetQueue = xQueueCreate(pktLen, sizeof(PacketQueueItem));
+  packetQueue = xQueueCreate(pktLen, sizeof(PacketQueueItem*));
   radioCmdQueue = xQueueCreate(sendLen, sizeof(RadioCmd));
 
   if (!packetQueue || !radioCmdQueue || !displayQueue) {
@@ -46,6 +50,23 @@ static bool tryCreateQueues(size_t pktLen, size_t sendLen, size_t dispLen) {
     packetQueue = radioCmdQueue = displayQueue = nullptr;
     return false;
   }
+
+  if (!packetPool.init()) {
+    vQueueDelete(displayQueue);
+    vQueueDelete(packetQueue);
+    vQueueDelete(radioCmdQueue);
+    packetQueue = radioCmdQueue = displayQueue = nullptr;
+    return false;
+  }
+
+  if (!txRequestPool.init()) {
+    vQueueDelete(displayQueue);
+    vQueueDelete(packetQueue);
+    vQueueDelete(radioCmdQueue);
+    packetQueue = radioCmdQueue = displayQueue = nullptr;
+    return false;
+  }
+
   return true;
 }
 

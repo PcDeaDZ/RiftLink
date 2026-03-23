@@ -36,22 +36,6 @@ void asyncSignalDisplaySpiSessionDone(void);
 bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf = 0, bool priority = false,
     char* reasonBuf = nullptr, size_t reasonLen = 0);
 
-enum class TxRequestClass : uint8_t {
-  critical = 0,
-  control = 1,
-  data = 2,
-  voice = 3,
-};
-
-struct TxRequest {
-  uint8_t buf[PACKET_BUF_SIZE];
-  uint16_t len = 0;
-  uint8_t txSf = 0;
-  bool priority = false;
-  TxRequestClass klass = TxRequestClass::data;
-  uint32_t enqueueMs = 0;
-};
-
 /** Единая постановка TX-запроса в пайплайн Radio FSM (v2) или legacy scheduler (fallback). */
 bool queueTxRequest(const TxRequest& req, char* reasonBuf = nullptr, size_t reasonLen = 0);
 /** Удобный helper для существующих мест: автоматически собирает TxRequest. */

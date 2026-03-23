@@ -46,6 +46,7 @@
 #include <stdlib.h>
 #include <nvs.h>
 #include <esp_random.h>
+#include <atomic>
 #include <esp_wifi.h>
 #include <esp_log.h>
 #include <sodium.h>
@@ -156,21 +157,40 @@ static bool s_bleInited = false;
 static bool s_bleDeinitInProgress = false;
 static uint32_t s_advRetryNotBeforeMs = 0;
 static constexpr uint32_t BLE_ADV_RESTART_BACKOFF_MS = 2000;
-// Отложенные ответы — тяжёлые notify вызываем из main loop, не из callback (Stack canary)
-static volatile bool s_pendingInfo = false;
+// Отложенные ответы — тяжёлые notify вызываем из main loop, не из callback (Stack canary).
+// Atomic bitfield: одна операция вместо множества volatile проверок.
+enum PendingBit : uint32_t {
+  PEND_INFO       = 1u << 0,
+  PEND_GROUPS     = 1u << 1,
+  PEND_ROUTES     = 1u << 2,
+  PEND_NEIGHBORS  = 1u << 3,
+  PEND_INVITE     = 1u << 4,
+  PEND_SELFTEST   = 1u << 5,
+  PEND_GROUP_SEND = 1u << 6,
+  PEND_MSG        = 1u << 7,
+  PEND_PONG       = 1u << 8,
+  PEND_OVERSIZE   = 1u << 9,
+  PEND_NICKNAME   = 1u << 10,
+  PEND_GPS        = 1u << 11,
+};
+static std::atomic<uint32_t> s_pendingFlags{0};
+static inline bool pendTest(uint32_t bit) { return (s_pendingFlags.load(std::memory_order_acquire) & bit) != 0; }
+static inline void pendSet(uint32_t bit) { s_pendingFlags.fetch_or(bit, std::memory_order_release); }
+static inline void pendClear(uint32_t bit) { s_pendingFlags.fetch_and(~bit, std::memory_order_release); }
+static inline bool pendTestAndClear(uint32_t bit) {
+  uint32_t old = s_pendingFlags.fetch_and(~bit, std::memory_order_acq_rel);
+  return (old & bit) != 0;
+}
+
+// Macros for backward compatibility: reads use pendTest, writes need pendSet/pendClear directly.
+
 static uint32_t s_pendingInfoNotBeforeMs = 0;
 static uint32_t s_pendingInfoCmdId = 0;
-static volatile bool s_pendingGroups = false;
 static uint32_t s_pendingGroupsCmdId = 0;
-static volatile bool s_pendingRoutes = false;
 static uint32_t s_pendingRoutesCmdId = 0;
-static volatile bool s_pendingNeighbors = false;
 static uint32_t s_pendingNeighborsCmdId = 0;
-static volatile bool s_pendingInvite = false;
 static uint32_t s_pendingInviteCmdId = 0;
-static volatile bool s_pendingSelftest = false;
 static uint32_t s_pendingSelftestCmdId = 0;
-static volatile bool s_pendingGroupSend = false;
 static uint32_t s_pendingGroupId = 0;
 static char s_pendingGroupText[256] = {0};
 static uint16_t s_diagPktIdCounter = 0;  // pktId for BLE diagnostic traffic (ping/signalTest)
@@ -187,7 +207,6 @@ struct PingRetryState {
   uint8_t retriesLeft = 0;
 };
 static PingRetryState s_pingRetry{};
-static volatile bool s_pendingMsg = false;
 static uint8_t s_pendingMsgFrom[8] = {0};
 static char s_pendingMsgText[BLE_PENDING_MSG_TEXT_MAX + 1] = {0};
 static uint32_t s_pendingMsgId = 0;
@@ -197,15 +216,11 @@ static char s_pendingMsgLane[10] = "normal";
 static char s_pendingMsgType[10] = "text";
 static uint32_t s_pendingMsgGroupId = 0;
 static char s_pendingMsgGroupUid[groups::GROUP_UID_MAX_LEN + 1] = {0};
-static volatile bool s_pendingPong = false;
 static uint8_t s_pendingPongFrom[8] = {0};
 static int s_pendingPongRssi = 0;
 static uint16_t s_pendingPongPktId = 0;
-static volatile bool s_pendingOversizeCmdError = false;
 static uint16_t s_pendingOversizeCmdLen = 0;
-static volatile bool s_pendingNickname = false;
 static char s_pendingNicknameBuf[33] = {0};
-static volatile bool s_pendingGps = false;
 static uint32_t s_pendingGpsCmdId = 0;
 static bool s_pendingGpsHasEnabled = false;
 static bool s_pendingGpsEnabled = false;
@@ -310,7 +325,7 @@ class ActiveCmdScope {
 };
 
 static inline void scheduleInfoNotify(uint32_t delayMs = 0, uint32_t cmdId = 0) {
-  s_pendingInfo = true;
+  pendSet(PEND_INFO);
   if (cmdId != 0) s_pendingInfoCmdId = cmdId;
   s_pendingInfoNotBeforeMs = millis() + delayMs;
 }
@@ -624,7 +639,7 @@ static bool notifyJsonToApp(const char* payload, size_t len) {
     off += chunk;
     chunks++;
 
-    if (!lastChunk) vTaskDelay(pdMS_TO_TICKS(12));
+    if (!lastChunk) vTaskDelay(pdMS_TO_TICKS(2));
   }
   s_bleDiag.notifySent++;
   s_bleDiag.notifyBytes += (uint32_t)len;
@@ -722,7 +737,7 @@ class RiftTxCharacteristic : public NimBLECharacteristic {
     if (!val || len == 0) return;
     if (len > BLE_ATT_MAX_JSON_BYTES) {
       s_pendingOversizeCmdLen = len;
-      s_pendingOversizeCmdError = true;
+      pendSet(PEND_OVERSIZE);
       return;
     }
     if (!s_bleCmdQueue) return;
@@ -950,7 +965,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       }
       s_inviteExpiryMs = millis() + ttlSec * 1000UL;
       s_inviteTokenValid = true;
-      s_pendingInvite = true;
+      pendSet(PEND_INVITE);
       if (cmdId != 0) s_pendingInviteCmdId = cmdId;
       return;
     }
@@ -1043,7 +1058,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         s_pendingGroupText[sizeof(s_pendingGroupText) - 1] = '\0';
         s_pendingGroupId = groupId;
         __sync_synchronize();  // memory barrier — main loop должен видеть данные до флага
-        s_pendingGroupSend = true;
+        pendSet(PEND_GROUP_SEND);
       } else {
         uint8_t to[protocol::NODE_ID_LEN];
         memset(to, 0xFF, protocol::NODE_ID_LEN);
@@ -1217,7 +1232,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         strncpy(s_pendingNicknameBuf, nick, 32);
         s_pendingNicknameBuf[32] = '\0';
         __sync_synchronize();
-        s_pendingNickname = true;
+        pendSet(PEND_NICKNAME);
         scheduleInfoNotify(0, cmdId);
         queueDisplayRequestInfoRedraw();
       }
@@ -1225,7 +1240,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     }
 
     if (strcmp(cmd, "groups") == 0) {
-      s_pendingGroups = true;
+      pendSet(PEND_GROUPS);
       if (cmdId != 0) s_pendingGroupsCmdId = cmdId;
       return;
     }
@@ -1272,7 +1287,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         }
       }
       notifyGroupStatusV2(groupUid);
-      s_pendingGroups = true;
+      pendSet(PEND_GROUPS);
       if (cmdId != 0) s_pendingGroupsCmdId = cmdId;
       scheduleInfoNotify(0, cmdId);
       return;
@@ -1311,7 +1326,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         return;
       }
       notifyGroupStatusV2(groupUid);
-      s_pendingGroups = true;
+      pendSet(PEND_GROUPS);
       if (cmdId != 0) s_pendingGroupsCmdId = cmdId;
       scheduleInfoNotify(0, cmdId);
       return;
@@ -1528,7 +1543,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         notifyGroupSecurityErrorV2(groupUid, "group_v31_invite_bad", "Cannot persist owner signing key");
         return;
       }
-      s_pendingGroups = true;
+      pendSet(PEND_GROUPS);
       scheduleInfoNotify();
       notifyGroupStatusV2(groupUid);
       return;
@@ -1581,7 +1596,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         notifyGroupSecurityErrorV2(groupUid, "group_v2_leave_bad", "Unknown group");
         return;
       }
-      s_pendingGroups = true;
+      pendSet(PEND_GROUPS);
       if (cmdId != 0) s_pendingGroupsCmdId = cmdId;
       scheduleInfoNotify(0, cmdId);
       return;
@@ -1682,13 +1697,13 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         if (!groups::upsertGroupV2(groupUid, channelId32, groupTag, canonicalName, key, keyVersion, role, revEpoch)) continue;
         if (g["ackApplied"] == true) groups::ackKeyAppliedV2(groupUid, keyVersion);
       }
-      s_pendingGroups = true;
+      pendSet(PEND_GROUPS);
       if (cmdId != 0) s_pendingGroupsCmdId = cmdId;
       scheduleInfoNotify(0, cmdId);
       return;
     }
     if (strcmp(cmd, "routes") == 0 || strcmp(cmd, "mesh") == 0) {
-      s_pendingRoutes = true;
+      pendSet(PEND_ROUTES);
       if (cmdId != 0) s_pendingRoutesCmdId = cmdId;
       return;
     }
@@ -1733,13 +1748,13 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         s_pendingGpsEn = doc["en"] | -1;
       }
       __sync_synchronize();
-      s_pendingGps = true;
+      pendSet(PEND_GPS);
       if (cmdId != 0) s_pendingGpsCmdId = cmdId;
       return;
     }
 
     if (strcmp(cmd, "selftest") == 0 || strcmp(cmd, "test") == 0) {
-      s_pendingSelftest = true;
+      pendSet(PEND_SELFTEST);
       if (cmdId != 0) s_pendingSelftestCmdId = cmdId;
       return;
     }
@@ -1785,7 +1800,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
           return;
         }
         routing::requestRoute(target);
-        s_pendingRoutes = true;
+        pendSet(PEND_ROUTES);
         if (cmdId != 0) s_pendingRoutesCmdId = cmdId;
       }
       return;
@@ -2016,7 +2031,7 @@ void deinit() {
   }
   s_bleInited = false;
   s_bleDeinitInProgress = false;
-  s_pendingOversizeCmdError = false;
+  pendClear(PEND_OVERSIZE);
   s_pendingOversizeCmdLen = 0;
   Serial.printf("[BLE] Deinit done, heap free=%u\n",
       (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -2034,7 +2049,7 @@ void setOnLocation(void (*cb)(float lat, float lon, int16_t alt, uint16_t radius
 void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes,
     const char* lane, const char* type, uint32_t groupId, const char* groupUid) {
   if (!from || !text) return;
-  if (s_pendingMsg) {
+  if (pendTest(PEND_MSG)) {
     Serial.printf("[BLE_CHAIN] stage=fw_request_msg action=overwrite prevMsgId=%u prevFrom=%02X%02X\n",
         (unsigned)s_pendingMsgId, s_pendingMsgFrom[0], s_pendingMsgFrom[1]);
   }
@@ -2062,7 +2077,7 @@ void requestMsgNotify(const uint8_t* from, const char* text, uint32_t msgId, int
   } else {
     s_pendingMsgGroupUid[0] = '\0';
   }
-  s_pendingMsg = true;
+  pendSet(PEND_MSG);
 }
 
 void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes,
@@ -2552,7 +2567,7 @@ void notifyGroups() {
 }
 
 void requestNeighborsNotify() {
-  s_pendingNeighbors = true;
+  pendSet(PEND_NEIGHBORS);
   s_pendingNeighborsCmdId = 0;
 }
 
@@ -2683,14 +2698,14 @@ void notifyPong(const uint8_t* from, int rssi, uint16_t pingPktId) {
         from[0], from[1], rssi, (unsigned)pingPktId, transportModeTag());
     return;
   }
-  if (s_pendingPong) {
+  if (pendTest(PEND_PONG)) {
     Serial.printf("[BLE_CHAIN] stage=fw_request_pong action=overwrite prevFrom=%02X%02X\n",
         s_pendingPongFrom[0], s_pendingPongFrom[1]);
   }
   memcpy(s_pendingPongFrom, from, 8);
   s_pendingPongRssi = rssi;
   s_pendingPongPktId = pingPktId;
-  s_pendingPong = true;
+  pendSet(PEND_PONG);
   Serial.printf("[BLE_CHAIN] stage=fw_request_pong action=enqueue from=%02X%02X rssi=%d mode=%s\n",
       from[0], from[1], rssi, transportModeTag());
 }
@@ -2794,9 +2809,9 @@ static void pingRetryTick() {
 
 void update() {
   bleDiagMaybeSnapshot("tick", 15000);
-  if (s_pendingOversizeCmdError && hasActiveTransport()) {
+  if (pendTest(PEND_OVERSIZE) && hasActiveTransport()) {
     const uint16_t droppedLen = s_pendingOversizeCmdLen;
-    s_pendingOversizeCmdError = false;
+    pendClear(PEND_OVERSIZE);
     s_pendingOversizeCmdLen = 0;
     char buf[180];
     const int n = snprintf(
@@ -2817,8 +2832,8 @@ void update() {
   }
   pingRetryTick();
   // GPS: применить в main loop (thread-safe: setPins удаляет s_serial, main читает в gps::update)
-  if (s_pendingGps) {
-    s_pendingGps = false;
+  if (pendTest(PEND_GPS)) {
+    pendClear(PEND_GPS);
     if (s_pendingGpsHasEnabled) gps::setEnabled(s_pendingGpsEnabled);
     if (s_pendingGpsHasPins) {
       gps::setPins(s_pendingGpsRx, s_pendingGpsTx, s_pendingGpsEn);
@@ -2834,30 +2849,32 @@ void update() {
     return;
   }
   if (hasActiveTransport()) {
-    if (s_pendingMsg || s_pendingInfo || s_pendingPong || s_pendingGroups || s_pendingRoutes || s_pendingNeighbors || s_pendingInvite) {
+    if (pendTest(PEND_MSG) || pendTest(PEND_INFO) || pendTest(PEND_PONG) || pendTest(PEND_GROUPS) || pendTest(PEND_ROUTES) || pendTest(PEND_NEIGHBORS) || pendTest(PEND_INVITE)) {
       Serial.printf("[BLE_CHAIN] stage=fw_update action=pending mode=%s msg=%u info=%u pong=%u groups=%u routes=%u neighbors=%u invite=%u\n",
           transportModeTag(),
-          (unsigned)s_pendingMsg, (unsigned)s_pendingInfo, (unsigned)s_pendingPong, (unsigned)s_pendingGroups,
-          (unsigned)s_pendingRoutes, (unsigned)s_pendingNeighbors, (unsigned)s_pendingInvite);
+          (unsigned)pendTest(PEND_MSG), (unsigned)pendTest(PEND_INFO), (unsigned)pendTest(PEND_PONG), (unsigned)pendTest(PEND_GROUPS),
+          (unsigned)pendTest(PEND_ROUTES), (unsigned)pendTest(PEND_NEIGHBORS), (unsigned)pendTest(PEND_INVITE));
     }
     // Сначала применить nickname (thread-safe: main loop пишет в node)
-    if (s_pendingNickname) {
-      s_pendingNickname = false;
+    if (pendTest(PEND_NICKNAME)) {
+      pendClear(PEND_NICKNAME);
       node::setNickname(s_pendingNicknameBuf);
     }
-    // По одному notify за вызов — не перегружать BLE stack
-    if (s_pendingInfo && (int32_t)(millis() - s_pendingInfoNotBeforeMs) >= 0) {
-      s_pendingInfo = false;
+    // Batch: process up to kNotifyBatchMax pending notifies per tick to reduce latency.
+    // Priority order: info > pong > msg > groups > routes > neighbors > invite > selftest > groupSend.
+    constexpr int kNotifyBatchMax = 4;
+    int notifySent = 0;
+    if (notifySent < kNotifyBatchMax && pendTest(PEND_INFO) && (int32_t)(millis() - s_pendingInfoNotBeforeMs) >= 0) {
+      pendClear(PEND_INFO);
       s_emitInfoCmdId = s_pendingInfoCmdId;
       s_pendingInfoCmdId = 0;
       notifyInfo();
-      vTaskDelay(pdMS_TO_TICKS(2));  // дать BLE отправить большой payload
-      return;
+      notifySent++;
     }
-    // Pong — маленький JSON, проверка связи; раньше тяжёлого evt:msg, чтобы не копиться в очереди.
-    if (s_pendingPong) {
+    if (notifySent < kNotifyBatchMax && pendTest(PEND_PONG)) {
       if (emitPongToApp(s_pendingPongFrom, s_pendingPongRssi, s_pendingPongPktId)) {
-        s_pendingPong = false;
+        pendClear(PEND_PONG);
+        notifySent++;
       } else {
         static uint32_t s_lastPongRetryLogMs = 0;
         const uint32_t nowMs = millis();
@@ -2867,53 +2884,52 @@ void update() {
               s_pendingPongFrom[0], s_pendingPongFrom[1]);
         }
       }
-      return;
     }
-    if (s_pendingMsg) {
-      s_pendingMsg = false;
+    if (notifySent < kNotifyBatchMax && pendTest(PEND_MSG)) {
+      pendClear(PEND_MSG);
       notifyMsg(s_pendingMsgFrom, s_pendingMsgText, s_pendingMsgId, s_pendingMsgRssi, s_pendingMsgTtl,
           s_pendingMsgLane, s_pendingMsgType, s_pendingMsgGroupId, s_pendingMsgGroupUid);
-      return;
+      notifySent++;
     }
-    if (s_pendingGroups) {
-      s_pendingGroups = false;
+    if (notifySent < kNotifyBatchMax && pendTest(PEND_GROUPS)) {
+      pendClear(PEND_GROUPS);
       s_emitGroupsCmdId = s_pendingGroupsCmdId;
       s_pendingGroupsCmdId = 0;
       notifyGroups();
-      return;
+      notifySent++;
     }
-    if (s_pendingRoutes) {
-      s_pendingRoutes = false;
+    if (notifySent < kNotifyBatchMax && pendTest(PEND_ROUTES)) {
+      pendClear(PEND_ROUTES);
       s_emitRoutesCmdId = s_pendingRoutesCmdId;
       s_pendingRoutesCmdId = 0;
       notifyRoutes();
-      return;
+      notifySent++;
     }
-    if (s_pendingNeighbors) {
-      s_pendingNeighbors = false;
+    if (notifySent < kNotifyBatchMax && pendTest(PEND_NEIGHBORS)) {
+      pendClear(PEND_NEIGHBORS);
       s_emitNeighborsCmdId = s_pendingNeighborsCmdId;
       s_pendingNeighborsCmdId = 0;
       notifyNeighbors();
-      return;
+      notifySent++;
     }
-    if (s_pendingInvite) {
-      s_pendingInvite = false;
+    if (notifySent < kNotifyBatchMax && pendTest(PEND_INVITE)) {
+      pendClear(PEND_INVITE);
       s_emitInviteCmdId = s_pendingInviteCmdId;
       s_pendingInviteCmdId = 0;
       notifyInvite();
-      return;
+      notifySent++;
     }
-    if (s_pendingSelftest) {
-      s_pendingSelftest = false;
+    if (notifySent < kNotifyBatchMax && pendTest(PEND_SELFTEST)) {
+      pendClear(PEND_SELFTEST);
       const uint32_t stCmdId = s_pendingSelftestCmdId;
       s_pendingSelftestCmdId = 0;
       selftest::Result r;
       selftest::run(&r);
       notifySelftest(r.radioOk, r.displayOk, r.batteryMv, r.heapFree, stCmdId);
-      return;
+      notifySent++;
     }
-    if (s_pendingGroupSend) {
-      s_pendingGroupSend = false;
+    if (pendTest(PEND_GROUP_SEND)) {
+      pendClear(PEND_GROUP_SEND);
       bool ok = msg_queue::enqueueGroup(s_pendingGroupId, s_pendingGroupText);
       if (!ok) notifyError("group_send", "Сообщение слишком длинное или ошибка шифрования");
     }
