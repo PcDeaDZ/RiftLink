@@ -200,7 +200,7 @@ irm https://raw.githubusercontent.com/PcDeaDZ/RiftLink/master/install.ps1 | iex
 | [📋 CUSTOM_PROTOCOL_PLAN.md](docs/CUSTOM_PROTOCOL_PLAN.md) | Архитектура, спецификация, roadmap |
 | [📡 PROTOCOL.md](docs/PROTOCOL.md) | Формат пакетов, opcodes, BLE, Serial |
 | [📘 API.md](docs/API.md) | BLE/Serial API с примерами |
-| [⚖️ COMPARISON_MESHTASTIC.md](docs/COMPARISON_MESHTASTIC.md) | Сравнение RiftLink и Meshtastic (таблица) |
+| [⚖️ COMPARISON_MESHTASTIC.md](docs/COMPARISON_MESHTASTIC.md) | Сравнение RiftLink, MeshCore и Meshtastic (таблица) |
 | [🔧 RECOVERY.md](docs/RECOVERY.md) | Восстановление при «не включается» |
 | [🌐 WEB_FLASH_GITHUB.md](docs/WEB_FLASH_GITHUB.md) | GitHub Pages веб‑прошивка через ESP Web Tools |
 | [📋 CHANGELOG.md](CHANGELOG.md) | Журнал изменений по релизам |

@@ -23,7 +23,7 @@
 ### Документация (после тега v1.5.21)
 
 - Синхронизированы **README**, **PROTOCOL** (спецификация документа 0.3, прошивка 1.5.21), **CUSTOM_PROTOCOL_PLAN**, **API** (примеры версии), **RECOVERY**; добавлен **[WEB_FLASH_GITHUB.md](docs/WEB_FLASH_GITHUB.md)**; снята блокировка файла в `.gitignore`.
-- **[COMPARISON_MESHTASTIC.md](docs/COMPARISON_MESHTASTIC.md)** — таблица сравнения ключевых параметров **RiftLink** и **Meshtastic**.
+- **[COMPARISON_MESHTASTIC.md](docs/COMPARISON_MESHTASTIC.md)** — таблица сравнения **RiftLink**, **MeshCore** и **Meshtastic**.
 
 ---
 
