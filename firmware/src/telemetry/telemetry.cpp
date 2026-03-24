@@ -6,6 +6,9 @@
  */
 
 #include "telemetry.h"
+#if defined(ARDUINO_LILYGO_T_LORA_PAGER)
+#include "board/bq27220_tpager.h"
+#endif
 #include "neighbors/neighbors.h"
 #include "node/node.h"
 #include "radio/radio.h"
@@ -148,6 +151,12 @@ static bool reinitBatteryAdcIfNeeded(uint32_t nowMs, const char* reason) {
 
 void init() {
   if (!s_adcMutex) s_adcMutex = xSemaphoreCreateMutex();
+#if defined(ARDUINO_LILYGO_T_LORA_PAGER)
+  if (!s_adcMutex) s_adcMutex = xSemaphoreCreateMutex();
+  (void)bq27220_tpager::probe();
+  s_inited = true;
+  return;
+#endif
 #if defined(USE_EINK)
   // Paper path remains on Arduino ADC API.
   analogReadResolution(12);
@@ -170,6 +179,21 @@ void init() {
 }
 
 uint16_t readBatteryMv() {
+#if defined(ARDUINO_LILYGO_T_LORA_PAGER)
+  if (!s_inited) return 0;
+  uint32_t nowMs = millis();
+  if (s_lastBatteryMv > 0 && (nowMs - s_lastBatteryReadMs) < BATTERY_CACHE_MS) {
+    return s_lastBatteryMv;
+  }
+  if (s_adcMutex && xSemaphoreTake(s_adcMutex, pdMS_TO_TICKS(120)) != pdTRUE) {
+    return s_lastBatteryMv;
+  }
+  uint16_t batMv = bq27220_tpager::readVoltageMv();
+  s_lastBatteryMv = batMv;
+  s_lastBatteryReadMs = nowMs;
+  if (s_adcMutex) xSemaphoreGive(s_adcMutex);
+  return batMv;
+#else
   if (!s_inited) return 0;
   uint32_t nowMs = millis();
   if (s_lastBatteryMv > 0 && (nowMs - s_lastBatteryReadMs) < BATTERY_CACHE_MS) {
@@ -271,19 +295,35 @@ uint16_t readBatteryMv() {
   s_lastBatteryReadMs = nowMs;
   if (s_adcMutex) xSemaphoreGive(s_adcMutex);
   return batMv;
+#endif
 }
 
 bool isCharging() {
+#if defined(ARDUINO_LILYGO_T_LORA_PAGER)
+  return bq27220_tpager::isCharging();
+#else
   uint16_t mv = readBatteryMv();
   return mv > 4200;
+#endif
 }
 
 int batteryPercent() {
+#if defined(ARDUINO_LILYGO_T_LORA_PAGER)
+  if (!s_inited) return -1;
+  int soc = bq27220_tpager::readRelativeSocPercent();
+  if (soc >= 0) return soc;
   uint16_t mv = readBatteryMv();
   if (mv < 2500) return -1;
   if (mv >= 4200) return 100;
   if (mv <= 3000) return 0;
   return (int)((mv - 3000) / 12);
+#else
+  uint16_t mv = readBatteryMv();
+  if (mv < 2500) return -1;
+  if (mv >= 4200) return 100;
+  if (mv <= 3000) return 0;
+  return (int)((mv - 3000) / 12);
+#endif
 }
 
 void send() {

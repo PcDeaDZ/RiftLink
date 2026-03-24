@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-firmware_1.5.20_|_app_1.5.20-888?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-firmware_1.5.21_|_app_1.5.21-888?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/license-See_project-888?style=flat-square" alt="License" />
 </p>
 

@@ -2,6 +2,7 @@
  * RiftLink Radio Layer — LoRa SX1262 (RadioLib)
  * Heltec V3/V4: NSS=8, RST=12, DIO1=14, BUSY=13, SPI: SCK=9, MISO=11, MOSI=10
  * Heltec V4: FEM (GC1109) — GPIO7 питание, GPIO2 enable, GPIO46 PA mode
+ * LilyGO T-Lora Pager: NSS=36, RST=47, DIO1=14, BUSY=48, SPI: SCK=35, MISO=33, MOSI=34 (общий с TFT)
  */
 
 #include "radio.h"
@@ -41,6 +42,15 @@ static void IRAM_ATTR onDio1Rise() {
 }
 
 // Heltec WiFi LoRa 32 V3/V4 pins (Meshtastic variant.h)
+#if defined(ARDUINO_LILYGO_T_LORA_PAGER)
+#define LORA_NSS   36
+#define LORA_RST   47
+#define LORA_DIO1  14
+#define LORA_BUSY  48
+#define LORA_SCK   35
+#define LORA_MISO  33
+#define LORA_MOSI  34
+#else
 #define LORA_NSS   8
 #define LORA_RST   12
 #define LORA_DIO1  14
@@ -48,6 +58,7 @@ static void IRAM_ATTR onDio1Rise() {
 #define LORA_SCK   9
 #define LORA_MISO  11
 #define LORA_MOSI  10
+#endif
 
 #ifdef ARDUINO_heltec_wifi_lora_32_V4
   #define LORA_PA_POWER  7   // VFEM_Ctrl — питание FEM
@@ -174,8 +185,11 @@ bool init() {
   // SPI: ESP32 default (18,19,23) != Heltec (9,11,10). Явно задаём пины.
   // Arduino 3.x: SPI.end() сбрасывает _spi, иначе begin() не переконфигурирует пины (V4 RX не работал без этого).
   // Paper: displayInit вызвал SPI.begin(EINK...). V4: WiFi/другое могло затронуть SPI.
+  // T-Lora Pager: общая SPI с ST7796 — не делаем SPI.end(), иначе ломается TFT после displayInit.
+#if !defined(ARDUINO_LILYGO_T_LORA_PAGER)
   SPI.end();
   delay(10);
+#endif
   SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_NSS);
 
 #ifdef ARDUINO_heltec_wifi_lora_32_V4
@@ -208,6 +222,9 @@ bool init() {
 
 #ifdef ARDUINO_heltec_wifi_lora_32_V4
   lora->setDio2AsRfSwitch(true);  // DIO2 управляет RF switch FEM
+#endif
+#if defined(ARDUINO_LILYGO_T_LORA_PAGER) && defined(TPAGER_LORA_DIO2_RF_SWITCH)
+  lora->setDio2AsRfSwitch(true);  // только если по схеме SX1262 DIO2 = RF switch
 #endif
 
   lora->setCRC(2);  // CRC 2 bytes

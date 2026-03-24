@@ -1,5 +1,5 @@
 {
-  "name": "RiftLink Heltec V3",
+  "name": "RiftLink LilyGO T-Lora Pager",
   "version": "1.5.21",
   "new_install_prompt_erase": true,
   "builds": [
@@ -7,7 +7,7 @@
       "chipFamily": "ESP32-S3",
       "parts": [
         {
-          "path": "../firmware/heltec_v3_full.bin",
+          "path": "../firmware/lilygo_t_lora_pager_full.bin",
           "offset": 0
         }
       ]

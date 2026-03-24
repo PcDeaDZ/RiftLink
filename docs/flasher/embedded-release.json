@@ -1,18 +1,18 @@
 {
-  "tag": "v1.5.20",
-  "firmwareVersion": "1.5.20",
-  "appVersion": "1.5.20",
-  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.20/RiftLink-1.5.20-arm64-v8a.apk",
+  "tag": "v1.5.21",
+  "firmwareVersion": "1.5.21",
+  "appVersion": "1.5.21",
+  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.21/RiftLink-1.5.21-arm64-v8a.apk",
   "notesRu": [
-    "Единая дизайн-система: токены типографики, отступов, иконок, теней и анимаций; глобальный textTheme в теме.",
-    "Заголовок AppBar и riftAppBar согласованы (navTitle 18).",
-    "Образы прошивки V3 / V4 / V3 Paper в этом флешере соответствуют версии выше.",
-    "Прямая ссылка на APK (опционально): apkDownloadUrl — после публикации в GitHub Releases; иначе кнопка ведёт на страницу релизов."
+    "LilyGO T-Lora Pager: XL9555, BQ27220, ST7796, энкодер, опции RGB/DIO2, OTA-окружение; исправлена ветка телеметрии батареи.",
+    "Веб-флешер: образы и манифесты 1.5.21 для Heltec V3/V4/V3 Paper и LilyGO T-Lora Pager.",
+    "Roadmap на странице флешера: маркированный список в §6.1 CUSTOM_PROTOCOL_PLAN.md.",
+    "Прямая ссылка на APK: apkDownloadUrl — после публикации GitHub Release; иначе откройте страницу релизов."
   ],
   "notesEn": [
-    "Unified design system: typography, spacing, icons, shadows, motion tokens; global textTheme.",
-    "AppBar / riftAppBar titles aligned (navTitle 18).",
-    "Firmware images (V3 / V4 / V3 Paper) bundled with this flasher match the version above.",
-    "Direct APK URL (optional): apkDownloadUrl after publishing; otherwise the button opens the Releases page."
+    "LilyGO T-Lora Pager: XL9555, BQ27220, ST7796, encoder, optional RGB/DIO2, OTA env; battery telemetry #if branch fix.",
+    "Web flasher: firmware images and manifests 1.5.21 for Heltec V3/V4/V3 Paper and LilyGO T-Lora Pager.",
+    "Flasher roadmap: bullet list in §6.1 of CUSTOM_PROTOCOL_PLAN.md.",
+    "APK: apkDownloadUrl after GitHub Release; otherwise use the Releases page."
   ]
 }

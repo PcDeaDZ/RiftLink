@@ -17,6 +17,7 @@ const STATIC_MANIFESTS = {
   "heltec-v3": "./manifests/heltec-v3.json",
   "heltec-v4": "./manifests/heltec-v4.json",
   "heltec-v3-paper": "./manifests/heltec-v3-paper.json",
+  "lilygo-t-lora-pager": "./manifests/lilygo-t-lora-pager.json",
 };
 
 const I18N = {
@@ -60,7 +61,7 @@ const I18N = {
       "При переходе между разными конфигурациями (например, V3/Paper) лучше соглашаться на Erase. Это удалит старые данные и снизит риск конфликтов.",
     faqQ3: "Прошивка дошла до конца, но устройство ведет себя странно.",
     faqA3:
-      "Выполните повторную прошивку с Erase и убедитесь, что выбрана правильная модель устройства (V3, V4 или Paper).",
+      "Выполните повторную прошивку с Erase и убедитесь, что выбрана правильная модель (V3, V4, Paper или LilyGO T-Lora Pager).",
     footerTitle: "Сообщество и поддержка",
     footerIssues: "Сообщить о проблеме",
     footerReleases: "Все релизы",
@@ -82,6 +83,7 @@ const I18N = {
       "heltec-v3": "Heltec WiFi LoRa 32 V3 (OLED)",
       "heltec-v4": "Heltec WiFi LoRa 32 V4 (OLED)",
       "heltec-v3-paper": "Heltec Wireless Paper (V3 Paper, E-Ink)",
+      "lilygo-t-lora-pager": "LilyGO T-Lora Pager (SX1262, ST7796)",
     },
   },
   en: {
@@ -124,7 +126,7 @@ const I18N = {
       "When switching between different configurations (for example V3/Paper), Erase is recommended to avoid old state conflicts.",
     faqQ3: "Flashing completed, but device behavior is unstable.",
     faqA3:
-      "Flash again with Erase enabled and make sure you selected the correct hardware model (V3, V4, or Paper).",
+      "Flash again with Erase enabled and make sure you selected the correct hardware model (V3, V4, Paper, or LilyGO T-Lora Pager).",
     footerTitle: "Community and support",
     footerIssues: "Report an issue",
     footerReleases: "All releases",
@@ -146,6 +148,7 @@ const I18N = {
       "heltec-v3": "Heltec WiFi LoRa 32 V3 (OLED)",
       "heltec-v4": "Heltec WiFi LoRa 32 V4 (OLED)",
       "heltec-v3-paper": "Heltec Wireless Paper (V3 Paper, E-Ink)",
+      "lilygo-t-lora-pager": "LilyGO T-Lora Pager (SX1262, ST7796)",
     },
   },
 };

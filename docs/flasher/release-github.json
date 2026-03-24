@@ -1,4 +1,4 @@
 {
-  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.20/RiftLink-1.5.20-arm64-v8a.apk",
-  "releaseBody": ""
+  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.21/RiftLink-1.5.21-arm64-v8a.apk",
+  "releaseBody": "- LilyGO T-Lora Pager: XL9555, BQ27220, ST7796, encoder, optional RGB/DIO2, OTA env; battery telemetry fix.\n- Web flasher: merged bins and manifests 1.5.21 for Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager.\n- Roadmap bullets in CUSTOM_PROTOCOL_PLAN §6.1 for flasher parser.\n- Synced firmware and app version 1.5.21."
 }

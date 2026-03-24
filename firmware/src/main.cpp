@@ -66,7 +66,14 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include "ws_server/ws_server.h"
 #include "log.h"
 
-#define BUTTON_PIN         0    // Heltec USER_SW
+#if defined(ARDUINO_LILYGO_T_LORA_PAGER)
+#include "board/lilygo_tpager.h"
+#define BUTTON_PIN 7   // энкодер center (wiki)
+#define LED_PIN 0      // нет отдельного LED как на Heltec; GPIO35 = SPI SCK на T-Pager
+#else
+#define BUTTON_PIN 0   // Heltec USER_SW
+#define LED_PIN 35     // Heltec V3/V4
+#endif
 #define MIN_PRESS_MS       80
 #if defined(USE_EINK)
 #define LONG_PRESS_MS      900  // e-ink: 500ms мало — пользователь ждёт отрисовку, часто ложно long
@@ -1823,8 +1830,6 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
   }
 }
 
-#define LED_PIN 35  // Heltec V3/V4
-
 /** Callback из radioSchedulerTask: после TX на SF12 — следующий RX слот на SF12 (V4). */
 void onRadioSchedulerTxSf12(void) {
   // Фиксированный SF: отдельный "подхват SF12 после TX" не нужен.
@@ -1844,6 +1849,9 @@ void setup() {
   Serial.begin(115200);
   delayYield(300);  // дать USB CDC / UART стабилизироваться
   Serial.println("[RiftLink] boot...");
+#if defined(ARDUINO_LILYGO_T_LORA_PAGER)
+  lilygoTpagerEarlyInit();
+#endif
   pinMode(BUTTON_PIN, INPUT_PULLUP);  // USER_SW — до displayInit, чтобы кнопка работала на Paper
   ledInit(LED_PIN);
 #if defined(USE_EINK)
@@ -1851,12 +1859,14 @@ void setup() {
   digitalWrite(VEXT_PIN, VEXT_ON_LEVEL);
   delayYield(300);  // стабилизация питания E-Ink
 #endif
+#if LED_PIN
   for (int i = 0; i < 3; i++) {
     digitalWrite(LED_PIN, HIGH);
     delayYield(100);
     digitalWrite(LED_PIN, LOW);
     delayYield(100);
   }
+#endif
   delayYield(200);
 
   // Default event loop до любого esp_wifi_* — иначе "failed to post WiFi event=2 ret=259" (WIFI_EVENT_259_ANALYSIS.md)

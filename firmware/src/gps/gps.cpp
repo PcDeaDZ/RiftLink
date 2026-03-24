@@ -3,6 +3,9 @@
  */
 
 #include "gps.h"
+#if defined(ARDUINO_LILYGO_T_LORA_PAGER)
+#include "board/lilygo_tpager.h"
+#endif
 #include <HardwareSerial.h>
 #include <TinyGPSPlus.h>
 #include <nvs.h>
@@ -34,6 +37,10 @@ static bool uartDriverHeapOk() {
 #define DEFAULT_V4_RX 44
 #define DEFAULT_V4_TX 43
 
+// LilyGO T-Lora Pager (wiki): GNSS RX=12, TX=4; питание GNSS — XL9555, не GPIO
+#define DEFAULT_TPAGER_RX 12
+#define DEFAULT_TPAGER_TX 4
+
 static int s_pinRx = -1;
 static int s_pinTx = -1;
 static int s_pinEn = -1;
@@ -48,10 +55,16 @@ static int16_t s_phoneAlt = 0;
 static uint32_t s_phoneSyncTime = 0;
 
 static void applyPower(bool on) {
+#if defined(ARDUINO_LILYGO_T_LORA_PAGER)
+  lilygoTpagerSetGnssPower(on);
+  s_enabled = on;
+  return;
+#else
   if (s_pinEn < 0) return;
   pinMode(s_pinEn, OUTPUT);
   digitalWrite(s_pinEn, on ? HIGH : LOW);
   s_enabled = on;
+#endif
 }
 
 static bool loadConfig() {
@@ -74,7 +87,11 @@ static bool loadConfig() {
 }
 
 static void setDefaults() {
-#ifdef ARDUINO_heltec_wifi_lora_32_V4
+#if defined(ARDUINO_LILYGO_T_LORA_PAGER)
+  s_pinRx = DEFAULT_TPAGER_RX;
+  s_pinTx = DEFAULT_TPAGER_TX;
+  s_pinEn = -1;
+#elif defined(ARDUINO_heltec_wifi_lora_32_V4)
   s_pinRx = DEFAULT_V4_RX;
   s_pinTx = DEFAULT_V4_TX;
   s_pinEn = DEFAULT_V4_EN;
