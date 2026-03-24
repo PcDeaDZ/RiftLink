@@ -74,6 +74,7 @@ public:
       cfg.pin_mosi = SPI_MOSI;
       cfg.pin_miso = SPI_MISO;
       cfg.pin_dc = TFT_DC;
+      _bus.config(cfg);
     }
     _panel.setBus(&_bus);
     {
@@ -94,6 +95,7 @@ public:
 #else
       cfg.rgb_order = false;
 #endif
+      _panel.config(cfg);
     }
     setPanel(&_panel);
   }

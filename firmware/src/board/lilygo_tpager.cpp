@@ -33,11 +33,16 @@ static bool writeReg8(uint8_t reg, uint8_t val) {
 }
 
 static bool readReg8(uint8_t reg, uint8_t* out) {
+  if (!out) return false;
   Wire.beginTransmission(kXl9555Addr);
-  Wire.write(reg);
-  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.write(reg) != 1) return false;
+  // STOP + отдельный read: на ESP32-Arduino repeated start (endTransmission(false))
+  // в связке с requestFrom иногда даёт LoadProhibited в hal i2c — см. ранний boot до UI.
+  if (Wire.endTransmission(true) != 0) return false;
+  delayMicroseconds(20);
   if (Wire.requestFrom((int)kXl9555Addr, 1) != 1) return false;
-  *out = Wire.read();
+  if (!Wire.available()) return false;
+  *out = (uint8_t)Wire.read();
   return true;
 }
 
@@ -60,12 +65,13 @@ static void setPort0BitLevel(uint8_t bit, bool high) {
 
 void lilygoTpagerEarlyInit() {
   Wire.begin(kPinSda, kPinScl);
-  Wire.setClock(400000);
+  Wire.setClock(100000);
   delay(20);
 
   Wire.beginTransmission(0x34);
   if (Wire.endTransmission() == 0) {
     Serial.println("[RiftLink] TCA8418: обнаружен (клавиатура — конфиг матрицы из LilyGoLib при необходимости)");
+    Serial.flush();
   }
 
   uint8_t probe = 0;
@@ -75,6 +81,7 @@ void lilygoTpagerEarlyInit() {
     return;
   }
   s_wireOk = true;
+  Wire.setClock(400000);
 
   setPort0BitAsOutput(kBitLoraPwr);
   setPort0BitAsOutput(kBitGnssPwr);
