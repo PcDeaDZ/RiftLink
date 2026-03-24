@@ -5,10 +5,12 @@
 # 📡 RiftLink — спецификация протокола
 
 > Формат пакетов, opcodes, шифрование, BLE, Serial
+>
+> Версия документа **0.3** (синхронизация с прошивкой **1.5.21**; актуальная строка версии в [`firmware/src/version.h`](../firmware/src/version.h)).
 
 <p align="center">
-  <img src="https://img.shields.io/badge/spec_version-0.2-888?style=flat-square" alt="Spec" />
-  <img src="https://img.shields.io/badge/firmware-1.3.6-E7352C?style=flat-square&logo=espressif" alt="Firmware" />
+  <img src="https://img.shields.io/badge/spec_version-0.3-888?style=flat-square" alt="Spec" />
+  <img src="https://img.shields.io/badge/firmware-1.5.21-E7352C?style=flat-square&logo=espressif" alt="Firmware" />
   <img src="https://img.shields.io/badge/LoRa-SX1262-00B0FF?style=flat-square&logo=lorawan" alt="LoRa" />
   <img src="https://img.shields.io/badge/X25519-ChaCha20-4CAF50?style=flat-square" alt="Crypto" />
 </p>

@@ -28,7 +28,7 @@
 
 ## 🎯 О проекте
 
-**RiftLink** — это полноценный mesh-протокол для устройств **Heltec WiFi LoRa 32** (V3, V4, Paper). Не форк Meshtastic, а самостоятельная реализация с собственным стеком: от формата пакетов до BLE API и мобильного приложения.
+**RiftLink** — это полноценный mesh-протокол для устройств **Heltec WiFi LoRa 32** (V3, V4, Paper) и **LilyGO T-Lora Pager** (ESP32-S3, SX1262, дисплей ST7796). Не форк Meshtastic, а самостоятельная реализация с собственным стеком: от формата пакетов до BLE API и мобильного приложения.
 
 ### Почему RiftLink?
 
@@ -51,6 +51,7 @@
 | **Heltec V3** | OLED 128×64 | `heltec_v3` |
 | **Heltec V4** | OLED 128×64, 16MB flash | `heltec_v4` |
 | **Heltec V3 Paper** | E-Ink 2.13" | `heltec_v3_paper` |
+| **LilyGO T-Lora Pager** | ST7796 TFT | `lilygo_t_lora_pager` |
 
 ---
 
@@ -190,7 +191,7 @@ irm https://raw.githubusercontent.com/PcDeaDZ/RiftLink/master/install.ps1 | iex
 ## 📚 Документация
 
 <p align="center">
-  <img src="https://img.shields.io/badge/docs-4_docs-888?style=flat-square" alt="Docs" />
+  <img src="https://img.shields.io/badge/docs-6_docs-888?style=flat-square" alt="Docs" />
   <img src="https://img.shields.io/badge/spec-Protocol_%7C_API-42A5F5?style=flat-square" alt="Spec" />
 </p>
 

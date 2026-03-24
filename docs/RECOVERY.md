@@ -6,6 +6,8 @@
 
 > Инструкция при «не включается» после прошивки
 
+Платы **вне Heltec** (например **LilyGO T-Lora Pager**) используют тот же **ESP32-S3**: при отсутствии загрузки попробуйте режим загрузчика по документации производителя, **esptool** / PlatformIO с `erase`, либо **веб-флешер** в браузере — см. [`WEB_FLASH_GITHUB.md`](WEB_FLASH_GITHUB.md) и каталог [`flasher/`](flasher/).
+
 <p align="center">
   <img src="https://img.shields.io/badge/Heltec-V3%20%7C%20V4%20%7C%20Paper-00B0FF?style=flat-square&logo=lorawan" alt="Heltec" />
   <img src="https://img.shields.io/badge/ESP32--S3-Bootloader-E7352C?style=flat-square&logo=espressif" alt="ESP32" />
