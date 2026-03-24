@@ -1,17 +1,17 @@
 {
-  "tag": "v1.5.21",
-  "firmwareVersion": "1.5.21",
-  "appVersion": "1.5.21",
-  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.21/RiftLink-1.5.21-arm64-v8a.apk",
+  "tag": "v1.5.22",
+  "firmwareVersion": "1.5.22",
+  "appVersion": "1.5.22",
+  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.22/RiftLink-1.5.22-arm64-v8a.apk",
   "notesRu": [
-    "LilyGO T-Lora Pager: XL9555, BQ27220, ST7796, энкодер, опции RGB/DIO2, OTA-окружение; исправлена ветка телеметрии батареи.",
-    "Веб-флешер: образы и манифесты 1.5.21 для Heltec V3/V4/V3 Paper и LilyGO T-Lora Pager.",
+    "Полная пересборка прошивок (Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager) и синхронизация версии приложения.",
+    "Веб-флешер: образы *_full.bin и манифесты 1.5.22 для GitHub Pages и релиза.",
     "Roadmap на странице флешера: маркированный список в §6.1 CUSTOM_PROTOCOL_PLAN.md.",
     "Прямая ссылка на APK: apkDownloadUrl — после публикации GitHub Release; иначе откройте страницу релизов."
   ],
   "notesEn": [
-    "LilyGO T-Lora Pager: XL9555, BQ27220, ST7796, encoder, optional RGB/DIO2, OTA env; battery telemetry #if branch fix.",
-    "Web flasher: firmware images and manifests 1.5.21 for Heltec V3/V4/V3 Paper and LilyGO T-Lora Pager.",
+    "Full rebuild of firmware (Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager) and synced app version.",
+    "Web flasher: *_full.bin images and manifests 1.5.22 for GitHub Pages and release.",
     "Flasher roadmap: bullet list in §6.1 of CUSTOM_PROTOCOL_PLAN.md.",
     "APK: apkDownloadUrl after GitHub Release; otherwise use the Releases page."
   ]

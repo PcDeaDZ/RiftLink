@@ -1,6 +1,6 @@
 {
   "name": "RiftLink LilyGO T-Lora Pager",
-  "version": "1.5.21",
+  "version": "1.5.22",
   "new_install_prompt_erase": true,
   "builds": [
     {

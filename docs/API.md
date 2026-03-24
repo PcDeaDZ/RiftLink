@@ -215,10 +215,10 @@ Groups V2 работает по `groupUid` и signed grants. Команды `gro
 ### 3.1 info — при подключении
 
 ```json
-{"evt":"info","id":"A1B2C3D4E5F60708","nickname":"Alice","region":"EU","freq":868.1,"power":14,"channel":0,"version":"1.5.21","groups":[{"groupUid":"B64_16_or_32B","channelId32":12345,"canonicalName":"Team Alpha","groupTag":"B64_8_or_16B","myRole":"admin","keyVersion":7}]}
+{"evt":"info","id":"A1B2C3D4E5F60708","nickname":"Alice","region":"EU","freq":868.1,"power":14,"channel":0,"version":"1.5.22","groups":[{"groupUid":"B64_16_or_32B","channelId32":12345,"canonicalName":"Team Alpha","groupTag":"B64_8_or_16B","myRole":"admin","keyVersion":7}]}
 ```
 
-`nickname` — опционально. `channel` — только для EU/UK (0–2). `neighbors` — массив Node ID (hex) видимых соседей. `version` — версия прошивки (например 1.5.21).  
+`nickname` — опционально. `channel` — только для EU/UK (0–2). `neighbors` — массив Node ID (hex) видимых соседей. `version` — версия прошивки (например 1.5.22).  
 `groups` — единственный список групп: объекты с полями `groupUid`, `channelId32`, `canonicalName`, `groupTag`, `myRole`, `keyVersion`, `revocationEpoch`, `ackApplied` (в снимке узла и в `evt:"groups"`).
 Для наблюдаемости SCF могут приходить поля `offlineCourierPending` (курьерские) и `offlineDirectPending` (обычные офлайн).
 

@@ -8,14 +8,14 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/doc_version-0.3-888?style=flat-square" alt="Doc" />
-  <img src="https://img.shields.io/badge/firmware-1.5.21-E7352C?style=flat-square&logo=espressif" alt="Firmware" />
+  <img src="https://img.shields.io/badge/firmware-1.5.22-E7352C?style=flat-square&logo=espressif" alt="Firmware" />
   <img src="https://img.shields.io/badge/platform-Heltec%2BLilyGO-00B0FF?style=flat-square&logo=lorawan" alt="Platform" />
   <img src="https://img.shields.io/badge/ESP32--S3-SX1262-4CAF50?style=flat-square" alt="Hardware" />
 </p>
 
 ---
 
-### 📌 Текущее состояние (прошивка 1.5.21)
+### 📌 Текущее состояние (прошивка 1.5.22)
 
 Основной функционал реализован: MSG, X25519 E2E, GROUP_MSG, офлайн-очередь, ROUTE_REQ/REPLY, VOICE_MSG, ACK/READ, LZ4, MSG_FRAG, LOCATION, TELEMETRY, OTA, регионы, invite/acceptInvite (QR). Валидация пакетов при RF-помехах. Поддержка V3 (OLED), V4 (OLED), V3 Paper (E-Ink), **LilyGO T-Lora Pager** (ST7796, BQ27220, энкодер, отдельный env `lilygo_t_lora_pager`). Веб-флешер: [`docs/flasher/`](flasher/) и [`WEB_FLASH_GITHUB.md`](WEB_FLASH_GITHUB.md).
 
