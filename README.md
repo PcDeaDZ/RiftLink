@@ -191,7 +191,7 @@ irm https://raw.githubusercontent.com/PcDeaDZ/RiftLink/master/install.ps1 | iex
 ## 📚 Документация
 
 <p align="center">
-  <img src="https://img.shields.io/badge/docs-6_docs-888?style=flat-square" alt="Docs" />
+  <img src="https://img.shields.io/badge/docs-7_docs-888?style=flat-square" alt="Docs" />
   <img src="https://img.shields.io/badge/spec-Protocol_%7C_API-42A5F5?style=flat-square" alt="Spec" />
 </p>
 
@@ -200,6 +200,7 @@ irm https://raw.githubusercontent.com/PcDeaDZ/RiftLink/master/install.ps1 | iex
 | [📋 CUSTOM_PROTOCOL_PLAN.md](docs/CUSTOM_PROTOCOL_PLAN.md) | Архитектура, спецификация, roadmap |
 | [📡 PROTOCOL.md](docs/PROTOCOL.md) | Формат пакетов, opcodes, BLE, Serial |
 | [📘 API.md](docs/API.md) | BLE/Serial API с примерами |
+| [⚖️ COMPARISON_MESHTASTIC.md](docs/COMPARISON_MESHTASTIC.md) | Сравнение RiftLink и Meshtastic (таблица) |
 | [🔧 RECOVERY.md](docs/RECOVERY.md) | Восстановление при «не включается» |
 | [🌐 WEB_FLASH_GITHUB.md](docs/WEB_FLASH_GITHUB.md) | GitHub Pages веб‑прошивка через ESP Web Tools |
 | [📋 CHANGELOG.md](CHANGELOG.md) | Журнал изменений по релизам |
