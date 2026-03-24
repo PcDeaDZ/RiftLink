@@ -7,6 +7,7 @@ import '../contacts/contacts_service.dart';
 import '../mesh_constants.dart';
 import 'chat_models.dart';
 import 'chat_repository.dart';
+import 'incoming_msg_resolution.dart';
 import 'msg_ingress_dedup.dart';
 
 class ChatEventIngestor {
@@ -185,15 +186,14 @@ class ChatEventIngestor {
   Future<void> _handle(RiftLinkEvent event) async {
     if (event is RiftLinkMsgEvent) {
       final from = _normalizeId(event.from);
+      final route = resolveIncomingMsgRoute(
+        fromNormalized: from,
+        evt: event,
+        localGroups: ble.lastInfo?.groups,
+      );
       final groupId = event.group ?? 0;
-      final rawGroupUid = event.groupUid?.trim().toUpperCase();
-      final hasGroupUid = rawGroupUid != null && rawGroupUid.isNotEmpty;
       final hasGroupId = groupId > kMeshBroadcastGroupId;
-      final isBroadcastByGroupId = !hasGroupUid && groupId == kMeshBroadcastGroupId;
-      final groupContext = hasGroupUid
-          ? rawGroupUid
-          : (hasGroupId ? 'UNRESOLVED_${event.group}' : null);
-      final scopeTag = isBroadcastByGroupId ? 'broadcast' : (groupContext ?? 'direct');
+      final scopeTag = route.isBroadcastMesh ? 'broadcast' : (route.groupContext ?? 'direct');
       final dedupKey = buildMsgIngressDedupKey(
         fromNormalized: from,
         scopeTag: scopeTag,
@@ -202,27 +202,23 @@ class ChatEventIngestor {
       );
       if (!_dedupTryAdd(dedupKey)) return;
 
-      final conversationId = isBroadcastByGroupId
-          ? ChatRepository.broadcastConversationId()
-          : (groupContext != null
-              ? ChatRepository.groupConversationIdByUid(groupContext)
-              : ChatRepository.directConversationId(from));
+      final conversationId = route.conversationId;
       debugPrint(
         '[BLE_CHAIN] stage=app_msg_state action=ingest evt=msg msgId=${event.msgId ?? 0} '
         'from=$from conv=$conversationId scope=$scopeTag',
       );
-      if (isBroadcastByGroupId) {
+      if (route.isBroadcastMesh) {
         await _ensureBroadcastConversation();
-      } else if (groupContext != null) {
-        if (hasGroupUid && hasGroupId) {
+      } else if (route.groupContext != null) {
+        if (hasGroupId && !route.groupContext!.startsWith('UNRESOLVED_')) {
           await repo.migrateUnresolvedGroupConversation(
-            channelId32: event.group!,
-            groupUid: groupContext,
+            channelId32: groupId,
+            groupUid: route.groupContext!,
           );
         }
         await _ensureConversationForGroupUid(
-          groupContext,
-          channelId32: event.group,
+          route.groupContext!,
+          channelId32: groupId > 0 ? groupId : null,
         );
       } else {
         await _ensureConversationForDirect(from);
@@ -232,8 +228,8 @@ class ChatEventIngestor {
           conversationId: conversationId,
           from: from,
           text: event.text,
-          groupId: hasGroupId ? event.group : (isBroadcastByGroupId ? kMeshBroadcastGroupId : null),
-          groupUid: groupContext,
+          groupId: hasGroupId ? groupId : (route.isBroadcastMesh ? kMeshBroadcastGroupId : null),
+          groupUid: route.groupContext,
           type: event.type,
           lane: event.lane,
           direction: MessageDirection.incoming,

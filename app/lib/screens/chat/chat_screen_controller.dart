@@ -11,8 +11,8 @@ import '../../ble/riftlink_ble.dart';
 import '../../chat/chat_models.dart';
 import '../../chat/outgoing_status_policy.dart';
 import '../../chat/chat_repository.dart';
+import '../../chat/incoming_msg_resolution.dart';
 import '../../connection/transport_reconnect_manager.dart';
-import '../../mesh_constants.dart';
 import '../../recent_devices/recent_devices_service.dart';
 import '../../voice/voice_service.dart';
 import 'chat_ui_models.dart';
@@ -47,11 +47,34 @@ bool _conversationIsGroupOrBroadcast(String? id) {
   return id.startsWith('groupv2:') || id.startsWith('broadcast:');
 }
 
+/// Канал группы для BLE `send` и [ChatMessage.groupId]: [ChatActionDeps.group] может быть 0
+/// после сброса в UI при обработке info, пока открыт чат `groupv2:`.
+int resolveGroupChannelForSend(ChatActionDeps deps, String conversationId) {
+  if (!conversationId.startsWith('groupv2:')) return deps.group;
+  final suffix = conversationId.substring('groupv2:'.length).trim();
+  if (suffix.startsWith('UNRESOLVED_')) {
+    final n = int.tryParse(suffix.substring('UNRESOLVED_'.length));
+    if (n != null && n > 1) return n;
+  }
+  if (deps.group > 1) return deps.group;
+  final uid = (deps.groupUid != null && deps.groupUid!.trim().isNotEmpty)
+      ? deps.groupUid!.trim().toUpperCase()
+      : suffix.toUpperCase();
+  if (uid.isEmpty) return deps.group;
+  final info = deps.ble.lastInfo;
+  if (info == null) return deps.group;
+  for (final g in info.groups) {
+    if (g.groupUid.toUpperCase() == uid) return g.channelId32;
+  }
+  return deps.group;
+}
+
 class ChatBleHandlerDeps {
   final bool isMounted;
   final List<ChatUiMessage> messages;
   final String? conversationId;
   final String nodeId;
+  final RiftLinkBle ble;
   final String broadcastTo;
   final AppLifecycleState appLifecycle;
   final Map<String, ChatUiVoiceRxAssembly> voiceChunks;
@@ -89,6 +112,7 @@ class ChatBleHandlerDeps {
     required this.messages,
     required this.conversationId,
     required this.nodeId,
+    required this.ble,
     required this.broadcastTo,
     required this.appLifecycle,
     required this.voiceChunks,
@@ -216,18 +240,12 @@ class ChatScreenController {
     if (!deps.isMounted) return;
     if (evt is RiftLinkMsgEvent) {
       final fromNorm = deps.normalizeId(evt.from);
-      final groupId = evt.group ?? 0;
-      final rawGroupUid = evt.groupUid?.trim().toUpperCase();
-      final hasGroupUid = rawGroupUid != null && rawGroupUid.isNotEmpty;
-      final hasGroupId = groupId > kMeshBroadcastGroupId;
-      final isBroadcastByGroupId = !hasGroupUid && groupId == kMeshBroadcastGroupId;
-      final incomingConv = isBroadcastByGroupId
-          ? ChatRepository.broadcastConversationId()
-          : (hasGroupUid
-              ? ChatRepository.groupConversationIdByUid(rawGroupUid!)
-              : (hasGroupId
-                  ? ChatRepository.groupConversationIdByUid('UNRESOLVED_$groupId')
-                  : ChatRepository.directConversationId(fromNorm)));
+      final route = resolveIncomingMsgRoute(
+        fromNormalized: fromNorm,
+        evt: evt,
+        localGroups: deps.ble.lastInfo?.groups,
+      );
+      final incomingConv = route.conversationId;
       final active = deps.conversationId;
       if (active == null || active.isEmpty) {
         // Guard early init window: do not paint events into an unbound chat UI.
@@ -685,7 +703,10 @@ class ChatScreenController {
       );
     }
 
-    final isGroupSend = deps.group > 1;
+    final groupChannel = resolveGroupChannelForSend(deps, conversationId);
+    final isGroupSend = conversationId.startsWith('groupv2:')
+        ? groupChannel > 1
+        : deps.group > 1;
     final toForMsg = isGroupSend ? null : (deps.unicastTo ?? deps.broadcastTo);
     var localMessageIndex = -1;
     deps.setState(() {
@@ -706,7 +727,7 @@ class ChatScreenController {
         conversationId: conversationId,
         from: deps.nodeId,
         to: toForMsg,
-        groupId: isGroupSend ? deps.group : null,
+        groupId: isGroupSend ? groupChannel : null,
         groupUid: deps.groupUid,
         text: text,
         type: trigger == null ? 'text' : 'timeCapsule',
@@ -719,7 +740,7 @@ class ChatScreenController {
     final ok = await deps.ble.send(
       text: text,
       to: deps.unicastTo,
-      group: isGroupSend ? deps.group : null,
+      group: isGroupSend ? groupChannel : null,
       ttlMinutes: ttlMinutes,
       lane: lane,
       trigger: trigger,

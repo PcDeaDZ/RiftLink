@@ -1524,7 +1524,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       if ((_groupUid == null || _group == 0) && _groupUid != null && _groupUid!.isNotEmpty) {
         _group = _resolveGroupIdByUid(_groupUid!);
       }
-      if (_group > 0 && !_groups.contains(_group)) _group = 0;
+      // Не сбрасывать канал при открытом чате groupv2 — иначе отправка уйдёт в broadcast.
+      final pinnedGroupChat = _conversationId != null && _conversationId!.startsWith('groupv2:');
+      if (_group > 0 && !_groups.contains(_group) && !pinnedGroupChat) _group = 0;
     });
     if (bleDev != null && resolvedId.isNotEmpty) {
       RecentDevicesService.addOrUpdate(
@@ -1582,6 +1584,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       messages: _messages,
       conversationId: _conversationId,
       nodeId: _nodeId,
+      ble: widget.ble,
       broadcastTo: _broadcastTo,
       appLifecycle: _appLifecycle,
       voiceChunks: _voiceChunks,
