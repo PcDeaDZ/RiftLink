@@ -1,4 +1,4 @@
 {
-  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.22/RiftLink-1.5.22-arm64-v8a.apk",
-  "releaseBody": "- Полная пересборка прошивок (Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager) и синхронизация версии приложения 1.5.22.\n- Веб-флешер: merged *_full.bin и манифесты 1.5.22 для GitHub Pages.\n- Документация и примеры API обновлены под версию 1.5.22."
+  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.23/RiftLink-1.5.23-arm64-v8a.apk",
+  "releaseBody": "- Полная пересборка прошивок (Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam) и синхронизация версии приложения 1.5.23.\n- Веб-флешер: merged *_full.bin и манифесты 1.5.23 для GitHub Pages.\n- VOICE_MSG: надёжность сборки, BLE notify, очереди TX; serial-диагностика приёма.\n- Документация и примеры API обновлены под версию 1.5.23."
 }

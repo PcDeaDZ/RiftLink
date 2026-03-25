@@ -18,6 +18,8 @@ bool ensureInit();
 /** WiFi доступен (init успешен)? */
 bool isAvailable();
 bool setCredentials(const char* ssid, const char* pass);
+/** SSID из NVS (STA), без поднятого WiFi — для отображения в BLE после перезагрузки. */
+bool getSavedSsid(char* out, size_t outLen);
 /** Запуск подключения STA с пред-проверкой SSID/auth. false = старт невозможен. */
 bool connect();
 void disconnect();

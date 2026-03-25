@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../ble/riftlink_ble.dart';
@@ -20,6 +22,7 @@ class ChatEventIngestor {
   final Set<String> _dedupKeys = <String>{};
   final Queue<String> _dedupFifo = Queue<String>();
   int _incomingNoIdSeq = 0;
+  final Map<String, _VoiceAssembly> _voiceAssembly = <String, _VoiceAssembly>{};
   final Map<String, int> _statusCounters = <String, int>{};
   int _statusEventsSinceDump = 0;
   DateTime _lastStatusDumpAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -56,6 +59,7 @@ class ChatEventIngestor {
     _processingQueue = false;
     _dedupKeys.clear();
     _dedupFifo.clear();
+    _voiceAssembly.clear();
     _incomingNoIdSeq = 0;
   }
 
@@ -418,17 +422,38 @@ class ChatEventIngestor {
 
     if (event is RiftLinkVoiceEvent) {
       final from = _normalizeId(event.from);
+      final assembly = _voiceAssembly.putIfAbsent(
+        from,
+        () => _VoiceAssembly(total: event.total),
+      );
+      if (assembly.total != event.total) {
+        assembly.total = event.total;
+        assembly.parts.clear();
+      }
+      assembly.parts[event.chunk] = event.data;
+      if (assembly.parts.length < event.total) return;
+
+      Uint8List? voiceBytes;
+      try {
+        final joined = List.generate(event.total, (i) => assembly.parts[i] ?? '').join();
+        voiceBytes = base64Decode(joined);
+      } catch (_) {
+        voiceBytes = null;
+      }
+      _voiceAssembly.remove(from);
+
       final conversationId = ChatRepository.directConversationId(from);
       await _ensureConversationForDirect(from);
       await repo.appendMessage(
         ChatMessage(
           conversationId: conversationId,
           from: from,
-          text: 'Voice message',
+          text: ChatRepository.voiceMessagePreviewToken,
           type: 'voice',
           direction: MessageDirection.incoming,
           status: MessageStatus.delivered,
           createdAtMs: DateTime.now().millisecondsSinceEpoch,
+          voiceData: voiceBytes,
         ),
         incrementUnread: true,
       );
@@ -508,5 +533,12 @@ class _QueuedBleEvent {
   final DateTime enqueuedAt;
 
   const _QueuedBleEvent(this.event, this.enqueuedAt);
+}
+
+class _VoiceAssembly {
+  int total;
+  final Map<int, String> parts = <int, String>{};
+
+  _VoiceAssembly({required this.total});
 }
 

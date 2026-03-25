@@ -21,8 +21,8 @@ void update();
 /** Есть подключённый клиент? */
 bool hasClient();
 
-/** Отправить JSON-событие всем подключённым клиентам. */
-void sendEvent(const char* json, int len);
+/** Отправить JSON-событие клиенту WebSocket. false при ошибке (в т.ч. сессия не найдена). */
+bool sendEvent(const char* json, int len);
 
 /** Установить callback для входящих JSON-команд. */
 void setOnCommand(void (*cb)(const char* json, size_t len));

@@ -155,7 +155,7 @@ bool isAvailable() {
 }
 
 bool setCredentials(const char* ssid, const char* pass) {
-  if (!s_available || !ssid || strlen(ssid) == 0) return false;
+  if (!ssid || strlen(ssid) == 0) return false;
 
   nvs_handle_t h;
   if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
@@ -165,6 +165,17 @@ bool setCredentials(const char* ssid, const char* pass) {
   nvs_commit(h);
   nvs_close(h);
   return true;
+}
+
+bool getSavedSsid(char* out, size_t outLen) {
+  if (!out || outLen == 0) return false;
+  out[0] = '\0';
+  nvs_handle_t h;
+  if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
+  size_t len = outLen;
+  const esp_err_t err = nvs_get_str(h, NVS_KEY_SSID, out, &len);
+  nvs_close(h);
+  return (err == ESP_OK && out[0] != '\0');
 }
 
 bool connect() {
@@ -260,7 +271,6 @@ void getStatus(char* ssidOut, size_t ssidLen, char* ipOut, size_t ipLen) {
 }
 
 bool hasCredentials() {
-  if (!s_available) return false;
   nvs_handle_t h;
   char ssid[8] = {0};
   size_t len = sizeof(ssid);

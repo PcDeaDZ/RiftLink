@@ -50,14 +50,17 @@ void notifyGps(bool present, bool enabled, bool hasFix, int rx, int tx, int en);
 void notifyPong(const uint8_t* from, int rssi = 0, uint16_t pingPktId = 0);
 /** Сбросить таймер ретраев OP_PING по эфиру при получении PONG от узла `from` (отправитель pong). */
 void clearPingRetryForPeer(const uint8_t* from);
-/** Результат самотестирования: radioOk, displayOk, batteryMv, heapFree */
+/** Результат самотестирования: radioOk, displayOk, batteryMv, heapFree (байты, ESP.getFreeHeap) */
 void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t heapFree, uint32_t cmdId = 0);
-/** Голосовое сообщение: from, data (Opus), dataLen. Отправляется чанками base64 */
-void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen);
+/** Голосовое сообщение: from, data (Opus), dataLen, msgId. Отправляется чанками base64 */
+void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen, uint32_t msgId = 0);
 /** evt "error" — уведомить приложение о сбое (code, msg) */
 void notifyError(const char* code, const char* msg);
 bool isConnected();
-/** Обработать JSON-команду (вызывается и из BLE onWrite, и из WebSocket). */
+/**
+ * Поставить JSON-команду в очередь; разбор и notify — в ble::update() (loop).
+ * Так же ведёт себя GATT TX: не вызывать тяжёлый парсер из httpd/NimBLE.
+ */
 void processCommand(const uint8_t* data, size_t len);
 
 /** 6-значный PIN для passkey pairing (отображается на экране). */

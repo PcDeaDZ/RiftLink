@@ -14,8 +14,9 @@
 #include <freertos/queue.h>
 #include <esp_heap_caps.h>
 
-#define PRIORITY_SLOTS 4
-#define NORMAL_SLOTS 8
+/** При burst HELLO/ACK/control пул TxRequest и основная очередь заполняются; fallback priority был 4 — массовый txreq_pool_empty. */
+#define PRIORITY_SLOTS 16
+#define NORMAL_SLOTS 16
 
 struct OverflowSlot {
   TxRequest req;

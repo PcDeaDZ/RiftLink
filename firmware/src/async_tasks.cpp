@@ -195,9 +195,9 @@ static QueueHandle_t s_txRequestQueue = nullptr;
 
 static constexpr size_t TX_REQUEST_QUEUE_LEN =
 #if defined(USE_EINK)
-    24;
+    48;
 #else
-    24;
+    48;
 #endif
 
 bool asyncInfraEnsure() {
@@ -407,7 +407,7 @@ static bool queueSendInternal(const uint8_t* buf, size_t len, uint8_t txSf, bool
 }
 
 #define DEFERRED_ACK_SLOTS 8   // broadcast: несколько соседей шлют ACK почти одновременно
-#define DEFERRED_SEND_SLOTS 24   // MSG copy2–3, broadcast 2–3, KEY/HELLO — при переполнении важен корректный klass у fallback
+#define DEFERRED_SEND_SLOTS 32   // MSG copy2–3, broadcast 2–3, KEY/HELLO — при переполнении важен корректный klass у fallback
 #define HEARD_RELAY_SIZE 8   // Managed flooding: отмена relay при услышанной ретрансляции
 struct DeferredSlot {
   TxRequest req;

@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -11,14 +13,19 @@ class ChatRepository {
   ChatRepository._();
   static final ChatRepository instance = ChatRepository._();
 
+  /// Маркер в БД (last_preview / text для voice). В UI показывать через l10n.tr('voice').
+  static const String voiceMessagePreviewToken = '__voice_preview__';
+
   Database? _db;
   String _activeNodeScope = _defaultNodeScope;
   String? _openedNodeScope;
+  /// Сериализация [init]: иначе два вызова открывают БД параллельно, а [setActiveNodeScope] закрывает [_db] во время ремонта.
+  Completer<void>? _initCompleter;
   final _conversationsController = StreamController<void>.broadcast();
 
   Stream<void> get conversationsChanged => _conversationsController.stream;
 
-  static const int _dbVersion = 3;
+  static const int _dbVersion = 4;
   static const String _defaultNodeScope = 'UNBOUND';
   static const String _dbFilePrefix = 'riftlink_chat_';
 
@@ -27,6 +34,12 @@ class ChatRepository {
       (v) => v.name == raw,
       orElse: () => MessageStatus.pending,
     );
+  }
+
+  /// Канонический файл чата: `riftlink_chat_<16HEX>.db` — один узел, любой транспорт (BLE / Wi‑Fi).
+  static bool isCanonicalNodeScope(String scope) {
+    final h = scope.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+    return RegExp(r'^[0-9A-F]{16}$').hasMatch(h);
   }
 
   static String normalizeNodeScope(String? raw) {
@@ -58,23 +71,127 @@ class ChatRepository {
     _conversationsController.add(null);
   }
 
+  /// После Wi‑Fi (или при появлении полного `id` узла): перенос истории из placeholder scope
+  /// (`wifi_*`, `UNBOUND`, remoteId, …) в `riftlink_chat_<16HEX>.db`, совпадающий с BLE.
+  Future<void> migrateToCanonicalNodeScopeIfNeeded(String fullNodeIdHex) async {
+    final target = normalizeNodeScope(fullNodeIdHex);
+    if (!isCanonicalNodeScope(target)) return;
+    if (_activeNodeScope == target) return;
+
+    final fromScope = _activeNodeScope;
+
+    final dir = await getApplicationDocumentsDirectory();
+    final fromPath = p.join(dir.path, _dbFileNameForScope(fromScope));
+    final fromFile = File(fromPath);
+    if (!fromFile.existsSync()) {
+      await setActiveNodeScope(target);
+      return;
+    }
+
+    Database? srcDb;
+    try {
+      srcDb = await openDatabase(fromPath, readOnly: true);
+      final convRows = await srcDb.query('conversations');
+      final msgRows = await srcDb.query('messages');
+      List<Map<String, Object?>> draftRows = const [];
+      List<Map<String, Object?>> pinRows = const [];
+      List<Map<String, Object?>> grRows = const [];
+      List<Map<String, Object?>> gmkRows = const [];
+      List<Map<String, Object?>> ggRows = const [];
+      try {
+        draftRows = await srcDb.query('drafts');
+      } catch (_) {}
+      try {
+        pinRows = await srcDb.query('conversation_pins');
+      } catch (_) {}
+      try {
+        grRows = await srcDb.query('group_rekey_sessions');
+      } catch (_) {}
+      try {
+        gmkRows = await srcDb.query('group_member_key_state');
+      } catch (_) {}
+      try {
+        ggRows = await srcDb.query('group_grants');
+      } catch (_) {}
+      await srcDb.close();
+      srcDb = null;
+
+      await setActiveNodeScope(target);
+      await init();
+      final db = _db;
+      if (db == null) return;
+
+      await db.transaction((txn) async {
+        for (final row in convRows) {
+          await txn.insert('conversations', row, conflictAlgorithm: ConflictAlgorithm.ignore);
+        }
+        for (final row in msgRows) {
+          final copy = Map<String, Object?>.from(row);
+          copy.remove('id');
+          await txn.insert('messages', copy, conflictAlgorithm: ConflictAlgorithm.ignore);
+        }
+        for (final row in draftRows) {
+          await txn.insert('drafts', row, conflictAlgorithm: ConflictAlgorithm.ignore);
+        }
+        for (final row in pinRows) {
+          final m = Map<String, Object?>.from(row);
+          m['scope'] = target;
+          await txn.insert('conversation_pins', m, conflictAlgorithm: ConflictAlgorithm.ignore);
+        }
+        for (final row in grRows) {
+          await txn.insert('group_rekey_sessions', row, conflictAlgorithm: ConflictAlgorithm.ignore);
+        }
+        for (final row in gmkRows) {
+          await txn.insert('group_member_key_state', row, conflictAlgorithm: ConflictAlgorithm.ignore);
+        }
+        for (final row in ggRows) {
+          await txn.insert('group_grants', row, conflictAlgorithm: ConflictAlgorithm.ignore);
+        }
+      });
+    } catch (_) {
+      await srcDb?.close();
+      await setActiveNodeScope(target);
+    }
+    _conversationsController.add(null);
+  }
+
   String _dbFileNameForScope(String scope) {
     return '$_dbFilePrefix$scope.db';
   }
 
   Future<void> init() async {
     if (_db != null && _openedNodeScope == _activeNodeScope) return;
+    if (_initCompleter != null) {
+      await _initCompleter!.future;
+      if (_db != null && _openedNodeScope == _activeNodeScope) return;
+    }
+    final done = Completer<void>();
+    _initCompleter = done;
+    try {
+      await _initOpenAndRepair();
+    } finally {
+      if (!done.isCompleted) done.complete();
+      _initCompleter = null;
+    }
+  }
+
+  Future<void> _initOpenAndRepair() async {
+    if (_db != null && _openedNodeScope == _activeNodeScope) return;
     if (_db != null) {
       await _db!.close();
       _db = null;
       _openedNodeScope = null;
     }
-    final dir = await getApplicationDocumentsDirectory();
-    final dbPath = p.join(dir.path, _dbFileNameForScope(_activeNodeScope));
-    _db = await openDatabase(
-      dbPath,
-      version: _dbVersion,
-      onCreate: (db, _) async {
+    Database? localDb;
+    for (var attempt = 0; attempt < 8; attempt++) {
+      final scopeAtStart = _activeNodeScope;
+      final dir = await getApplicationDocumentsDirectory();
+      final dbPath = p.join(dir.path, _dbFileNameForScope(scopeAtStart));
+      try {
+        localDb = await openDatabase(
+          dbPath,
+          version: _dbVersion,
+          onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE conversations (
             id TEXT PRIMARY KEY,
@@ -112,6 +229,7 @@ class ChatRepository {
             delete_at_ms INTEGER,
             relay_peers_json TEXT,
             relay_count INTEGER NOT NULL DEFAULT 0,
+            voice_data BLOB,
             FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
           )
         ''');
@@ -165,10 +283,29 @@ class ChatRepository {
           ''');
           await db.execute('CREATE INDEX IF NOT EXISTS idx_conversation_pins_scope ON conversation_pins(scope, pin_order)');
         }
+        if (oldVersion < 4) {
+          await db.execute('ALTER TABLE messages ADD COLUMN voice_data BLOB');
+        }
       },
-    );
-    await _repairMisclassifiedBroadcastGroup(_db!);
-    _openedNodeScope = _activeNodeScope;
+        );
+        await _repairMisclassifiedBroadcastGroup(localDb);
+        if (_activeNodeScope != scopeAtStart) {
+          await localDb.close();
+          localDb = null;
+          continue;
+        }
+        _db = localDb;
+        _openedNodeScope = _activeNodeScope;
+        return;
+      } catch (e) {
+        if (localDb != null) {
+          await localDb.close();
+          localDb = null;
+        }
+        rethrow;
+      }
+    }
+    throw StateError('ChatRepository: не удалось открыть БД после смены scope узла');
   }
 
   Future<void> _repairMisclassifiedBroadcastGroup(Database db) async {
@@ -357,7 +494,11 @@ class ChatRepository {
 
   Future<Database> get _database async {
     await init();
-    return _db!;
+    final db = _db;
+    if (db == null) {
+      throw StateError('ChatRepository: база недоступна после init');
+    }
+    return db;
   }
 
   static String directConversationId(String peerId) => 'direct:$peerId';
@@ -444,6 +585,7 @@ class ChatRepository {
         'delete_at_ms': message.deleteAtMs,
         'relay_peers_json': relayPeersToJson(message.relayPeers),
         'relay_count': message.relayCount,
+        'voice_data': message.voiceData,
       },
     );
 
@@ -476,7 +618,7 @@ class ChatRepository {
   }
 
   String _buildPreview(ChatMessage message) {
-    if (message.type == 'voice') return 'Voice message';
+    if (message.type == 'voice') return voiceMessagePreviewToken;
     if (message.type == 'location') return 'Location';
     return message.text;
   }
@@ -1199,6 +1341,7 @@ class ChatRepository {
       deleteAtMs: row['delete_at_ms'] as int?,
       relayPeers: relayPeersFromJson(row['relay_peers_json'] as String?),
       relayCount: (row['relay_count'] as int?) ?? 0,
+      voiceData: row['voice_data'] as Uint8List?,
     );
   }
 }

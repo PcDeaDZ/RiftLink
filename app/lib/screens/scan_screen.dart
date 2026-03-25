@@ -1,7 +1,9 @@
 import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../theme/app_theme.dart';
 import '../theme/design_tokens.dart';
@@ -26,8 +28,10 @@ import 'chats_list_screen.dart';
 import 'debug_screen.dart';
 
 class ScanScreen extends StatefulWidget {
-  const ScanScreen({super.key, this.initialMessage});
+  const ScanScreen({super.key, this.initialMessage, this.initialSnackKind});
   final String? initialMessage;
+  /// Если задан [initialMessage], стиль тоста (по умолчанию [AppSnackKind.error] — как раньше).
+  final AppSnackKind? initialSnackKind;
   @override
   State<ScanScreen> createState() => _ScanScreenState();
 }
@@ -67,9 +71,10 @@ String _formatBleError(BuildContext context, Object e) {
   return e.toString();
 }
 
-class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
+class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin, RouteAware {
   late RiftLinkBle _ble;
   bool _bleBound = false;
+  bool _routeObserverSubscribed = false;
   final Connectivity _connectivity = Connectivity();
   bool _scanning = false;
   bool _meshAnimationEnabled = true;
@@ -110,7 +115,11 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
     if (widget.initialMessage != null) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
-          showAppSnackBar(context, widget.initialMessage!, kind: AppSnackKind.error);
+          showAppSnackBar(
+            context,
+            widget.initialMessage!,
+            kind: widget.initialSnackKind ?? AppSnackKind.error,
+          );
         }
       });
     }
@@ -119,13 +128,30 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    if (!_routeObserverSubscribed) {
+      final route = ModalRoute.of(context);
+      if (route is PageRoute<void>) {
+        appRouteObserver.subscribe(this, route);
+        _routeObserverSubscribed = true;
+      }
+    }
     if (_bleBound) return;
     _ble = RiftLinkBleScope.of(context);
     _bleBound = true;
   }
 
   @override
+  void didPopNext() {
+    unawaited(_loadContactNicknames());
+    unawaited(_loadRecent());
+  }
+
+  @override
   void dispose() {
+    if (_routeObserverSubscribed) {
+      appRouteObserver.unsubscribe(this);
+      _routeObserverSubscribed = false;
+    }
     _scanSub?.cancel();
     _connectivitySub?.cancel();
     _wifiActionFlashTimer?.cancel();
@@ -302,6 +328,37 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
     showAppSnackBar(context, message);
   }
 
+  /// Перед BLE-сканом: на Android без включённой геолокации (GPS) поиск часто пустой.
+  /// Запрашиваем разрешение через Geolocator и короткий «прогрев» позиции для стабильного обнаружения.
+  Future<bool> _ensureLocationForBleScan() async {
+    if (kIsWeb) return true;
+    final isAndroid = defaultTargetPlatform == TargetPlatform.android;
+    if (isAndroid) {
+      final servicesOn = await Geolocator.isLocationServiceEnabled();
+      if (!servicesOn) {
+        if (mounted) _snack(context.l10n.tr('scan_location_services_off'));
+        return false;
+      }
+    }
+    var perm = await Geolocator.checkPermission();
+    if (perm == LocationPermission.denied) {
+      perm = await Geolocator.requestPermission();
+    }
+    if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) {
+      if (mounted) _snack(context.l10n.tr('loc_denied'));
+      return false;
+    }
+    try {
+      await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.low,
+          timeLimit: Duration(seconds: 2),
+        ),
+      );
+    } catch (_) {}
+    return true;
+  }
+
   Future<void> _startScan({String? connectToRemoteId, String? connectToDeviceName}) async {
     String displayName = (connectToDeviceName != null && connectToDeviceName.isNotEmpty)
         ? connectToDeviceName
@@ -319,6 +376,9 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
     try {
       if (!await FlutterBluePlus.isSupported) {
         throw Exception('Bluetooth not supported on this device');
+      }
+      if (!await _ensureLocationForBleScan()) {
+        return;
       }
       if (await Permission.bluetoothScan.isDenied) await Permission.bluetoothScan.request();
       if (await Permission.bluetoothConnect.isDenied) await Permission.bluetoothConnect.request();
@@ -431,6 +491,14 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
       final ok = await _ble.connectWifi(ip);
       if (!mounted) return;
       if (ok) {
+        final idRaw = _ble.lastInfo?.id;
+        if (idRaw != null && idRaw.isNotEmpty) {
+          await ChatRepository.instance.migrateToCanonicalNodeScopeIfNeeded(idRaw);
+          final norm = ChatRepository.normalizeNodeScope(idRaw);
+          if (ChatRepository.isCanonicalNodeScope(norm)) {
+            await RecentDevicesService.associateWifiNode(ip: ip, nodeId: norm, nickname: null);
+          }
+        }
         final bleClient = _ble;
         await RecentDevicesService.addRecentWifiIp(ip);
         if (mounted) {
@@ -1045,10 +1113,10 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                           final i = e.key;
                           final d = e.value;
                           final isConnecting = _connectingToRemoteId == d.remoteId;
-                          final hasNick = d.nodeId.isNotEmpty && _displayNodeLabel(d.nodeId) != d.nodeId.toUpperCase();
-                          final label = d.displayName.isNotEmpty
-                              ? d.displayName
-                              : (d.nodeId.isNotEmpty ? _displayNodeLabel(d.nodeId) : d.remoteId);
+                          final contactNick = d.nodeId.isNotEmpty
+                              ? ContactsService.contactNicknameIfDistinct(d.nodeId, _nickById)
+                              : null;
+                          final t = RecentDevicesService.displayTitles(d, contactNickname: contactNick);
                           return Padding(
                             padding: EdgeInsets.only(bottom: i < _recent.length - 1 ? AppSpacing.sm : 0),
                             child: Dismissible(
@@ -1069,7 +1137,7 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                                 return await showRiftConfirmDialog(
                                   context: context,
                                   title: l10n.tr('forget_device'),
-                                  message: l10n.tr('forget_device_confirm', {'name': d.displayName}),
+                                  message: l10n.tr('forget_device_confirm', {'name': t.title}),
                                   cancelText: l10n.tr('cancel'),
                                   confirmText: l10n.tr('delete'),
                                   danger: true,
@@ -1082,13 +1150,13 @@ class _ScanScreenState extends State<ScanScreen> with TickerProviderStateMixin {
                               },
                               child: _DeviceCard(
                                 icon: Icons.bluetooth,
-                                title: label,
-                                subtitle: hasNick ? null : (d.displayName != d.nodeId ? d.nodeId : null),
+                                title: t.title,
+                                subtitle: t.subtitle,
                                 isLoading: isConnecting,
                                 showDelete: false,
                                 onTap: _scanning ? null : () {
-                                  setState(() { _connectingToRemoteId = d.remoteId; _connectingToDeviceName = label; _scanning = true; _scanStoppedByUser = false; _results = []; _error = null; });
-                                  WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && _connectingToRemoteId == d.remoteId) _connectToRecent(d, displayLabel: label); });
+                                  setState(() { _connectingToRemoteId = d.remoteId; _connectingToDeviceName = t.title; _scanning = true; _scanStoppedByUser = false; _results = []; _error = null; });
+                                  WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && _connectingToRemoteId == d.remoteId) _connectToRecent(d, displayLabel: t.title); });
                                 },
                               ),
                             ),

@@ -9,6 +9,9 @@
 #if defined(ARDUINO_LILYGO_T_LORA_PAGER)
 #include "board/bq27220_tpager.h"
 #endif
+#if defined(ARDUINO_LILYGO_T_BEAM)
+#include "board/lilygo_tbeam.h"
+#endif
 #include "neighbors/neighbors.h"
 #include "node/node.h"
 #include "radio/radio.h"
@@ -20,7 +23,7 @@
 #include <string.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
-#if !defined(USE_EINK)
+#if !defined(USE_EINK) && !defined(ARDUINO_LILYGO_T_BEAM)
 #include <esp_adc/adc_oneshot.h>
 #include <esp_adc/adc_cali.h>
 #include <esp_adc/adc_cali_scheme.h>
@@ -44,7 +47,7 @@ static constexpr uint32_t BATTERY_CACHE_MS = 900;
 // ESP32-S3 occasionally aborts inside adc_oneshot HAL under runtime load.
 // Keep legacy Arduino ADC path as default to avoid hard crashes in displayTask.
 static constexpr bool kUseEspIdfOneshotAdc = false;
-#if !defined(USE_EINK)
+#if !defined(USE_EINK) && !defined(ARDUINO_LILYGO_T_BEAM)
 static adc_oneshot_unit_handle_t s_batAdcUnit = nullptr;
 static adc_cali_handle_t s_batAdcCali = nullptr;
 static bool s_batAdcCalibrated = false;
@@ -60,7 +63,7 @@ static constexpr uint32_t ADC_DIAG_LOG_INTERVAL_MS = 15000;
 
 namespace telemetry {
 
-#if !defined(USE_EINK)
+#if !defined(USE_EINK) && !defined(ARDUINO_LILYGO_T_BEAM)
 static bool configureBatteryAdcChannel() {
   if (s_batAdcUnit == nullptr) return false;
   adc_oneshot_chan_cfg_t chanCfg = {};
@@ -152,13 +155,10 @@ static bool reinitBatteryAdcIfNeeded(uint32_t nowMs, const char* reason) {
 void init() {
   if (!s_adcMutex) s_adcMutex = xSemaphoreCreateMutex();
 #if defined(ARDUINO_LILYGO_T_LORA_PAGER)
-  if (!s_adcMutex) s_adcMutex = xSemaphoreCreateMutex();
   (void)bq27220_tpager::probe();
-  s_inited = true;
-  return;
-#endif
-#if defined(USE_EINK)
-  // Paper path remains on Arduino ADC API.
+#elif defined(ARDUINO_LILYGO_T_BEAM)
+  // T-Beam: батарея через AXP2101 ADC, не GPIO ADC — ничего не нужно
+#elif defined(USE_EINK)
   analogReadResolution(12);
   pinMode(PAPER_ADC_CTRL, OUTPUT);
   digitalWrite(PAPER_ADC_CTRL, LOW);
@@ -192,6 +192,16 @@ uint16_t readBatteryMv() {
   s_lastBatteryMv = batMv;
   s_lastBatteryReadMs = nowMs;
   if (s_adcMutex) xSemaphoreGive(s_adcMutex);
+  return batMv;
+#elif defined(ARDUINO_LILYGO_T_BEAM)
+  if (!s_inited) return 0;
+  uint32_t nowMs = millis();
+  if (s_lastBatteryMv > 0 && (nowMs - s_lastBatteryReadMs) < BATTERY_CACHE_MS) {
+    return s_lastBatteryMv;
+  }
+  uint16_t batMv = lilygoTbeamReadBatteryMv();
+  s_lastBatteryMv = batMv;
+  s_lastBatteryReadMs = nowMs;
   return batMv;
 #else
   if (!s_inited) return 0;
@@ -301,6 +311,8 @@ uint16_t readBatteryMv() {
 bool isCharging() {
 #if defined(ARDUINO_LILYGO_T_LORA_PAGER)
   return bq27220_tpager::isCharging();
+#elif defined(ARDUINO_LILYGO_T_BEAM)
+  return lilygoTbeamIsCharging();
 #else
   uint16_t mv = readBatteryMv();
   return mv > 4200;

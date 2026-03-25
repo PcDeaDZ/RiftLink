@@ -111,7 +111,11 @@ void main() {
     });
 
     test('RiftLinkNeighborsEvent', () {
-      final evt = RiftLinkNeighborsEvent(neighbors: ['A1', 'B2']);
+      final evt = RiftLinkNeighborsEvent(
+        neighbors: ['A1', 'B2'],
+        nodeOverlay: RiftLinkInfoEvent(id: ''),
+        jsonKeysPresent: {},
+      );
       expect(evt.neighbors.length, 2);
     });
   });

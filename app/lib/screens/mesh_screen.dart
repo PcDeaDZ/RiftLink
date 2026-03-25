@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../app_navigator.dart';
 import '../ble/riftlink_ble.dart';
 import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
@@ -15,6 +16,46 @@ Color _rssiColor(AppPalette palette, int rssi) {
   if (rssi >= -85) return palette.success;
   if (rssi >= -100) return const Color(0xFFFFB300);
   return palette.error;
+}
+
+/// Как основные кнопки на экране групп ([groups_screen] empty / top actions): [FilledButton], primary, [AppRadius.md], высота 46.
+Widget _riftPrimaryFab(
+  BuildContext context, {
+  required VoidCallback onPressed,
+  required String tooltip,
+  required IconData icon,
+  required String heroTag,
+}) {
+  final p = context.palette;
+  const size = 46.0;
+  return Hero(
+    tag: heroTag,
+    child: Tooltip(
+      message: tooltip,
+      child: SizedBox(
+        width: size,
+        height: size,
+        child: FilledButton(
+          onPressed: onPressed,
+          style: FilledButton.styleFrom(
+            backgroundColor: p.primary,
+            foregroundColor: Colors.white,
+            disabledBackgroundColor: p.primary.withOpacity(0.3),
+            disabledForegroundColor: Colors.white.withOpacity(0.5),
+            padding: EdgeInsets.zero,
+            minimumSize: const Size(size, size),
+            maximumSize: const Size(size, size),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            visualDensity: VisualDensity.standard,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(AppRadius.md)),
+            elevation: AppElevation.fab,
+            shadowColor: const Color(0x40000000),
+          ),
+          child: Icon(icon, size: AppIconSize.sm),
+        ),
+      ),
+    ),
+  );
 }
 
 class MeshScreen extends StatefulWidget {
@@ -37,9 +78,10 @@ class MeshScreen extends StatefulWidget {
   State<MeshScreen> createState() => _MeshScreenState();
 }
 
-class _MeshScreenState extends State<MeshScreen> {
+class _MeshScreenState extends State<MeshScreen> with TickerProviderStateMixin {
   List<Map<String, dynamic>> _routes = [];
   StreamSubscription<RiftLinkEvent>? _sub;
+  late TabController _meshTabController;
   Map<String, String> _nickById = const {};
   bool _signalTestRunning = false;
   bool _signalTestAttempted = false;
@@ -168,6 +210,12 @@ class _MeshScreenState extends State<MeshScreen> {
   @override
   void initState() {
     super.initState();
+    _meshTabController = TabController(length: 2, vsync: this);
+    _meshTabController.addListener(() {
+      if (!mounted) return;
+      if (_meshTabController.indexIsChanging) return;
+      setState(() {});
+    });
     _applySnapshot(
       nodeId: widget.nodeId,
       neighbors: widget.neighbors,
@@ -246,9 +294,22 @@ class _MeshScreenState extends State<MeshScreen> {
 
   @override
   void dispose() {
+    _meshTabController.dispose();
     _sub?.cancel();
     _signalTimer?.cancel();
     super.dispose();
+  }
+
+  void _openMeshGraphFullscreen() {
+    final graph = _computeGraph();
+    Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (ctx) => _MeshGraphFullscreenScreen(
+          graph: graph,
+          nodeLabel: _labelForNode,
+        ),
+      ),
+    );
   }
 
   Future<void> _loadNicknames() async {
@@ -369,15 +430,14 @@ class _MeshScreenState extends State<MeshScreen> {
     final hasListData = _neighbors.isNotEmpty ||
         _routes.any((r) => ((r['dest'] as String?) ?? '').isNotEmpty);
 
-    return DefaultTabController(
-      length: 2,
-      child: Scaffold(
+    return Scaffold(
         backgroundColor: context.palette.surface,
         appBar: riftAppBar(
           context,
           title: l.tr('mesh_topology'),
           showBack: true,
           bottom: TabBar(
+            controller: _meshTabController,
             labelColor: context.palette.primary,
             unselectedLabelColor: context.palette.onSurfaceVariant,
             indicatorColor: context.palette.primary,
@@ -389,6 +449,16 @@ class _MeshScreenState extends State<MeshScreen> {
             ],
           ),
         ),
+        floatingActionButton: _meshTabController.index == 0
+            ? _riftPrimaryFab(
+                context,
+                onPressed: _openMeshGraphFullscreen,
+                tooltip: l.tr('mesh_graph_fullscreen'),
+                icon: Icons.open_in_full_rounded,
+                heroTag: 'mesh_graph_fullscreen_open',
+              )
+            : null,
+        floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
         body: Column(
           children: [
             AppSectionCard(
@@ -471,25 +541,9 @@ class _MeshScreenState extends State<MeshScreen> {
                   ],
                   SizedBox(height: AppSpacing.md),
                   Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
-                      Expanded(
-                        child: DropdownButtonFormField<String>(
-                          value: _traceTarget,
-                          decoration: InputDecoration(
-                            labelText: l.tr('mesh_select_node'),
-                            isDense: true,
-                          ),
-                          items: _traceCandidates()
-                              .map(
-                                (id) => DropdownMenuItem<String>(
-                                  value: id,
-                                  child: Text(_shortLabel(id)),
-                                ),
-                              )
-                              .toList(),
-                          onChanged: (v) => setState(() => _traceTarget = v),
-                        ),
-                      ),
+                      Expanded(child: _buildTraceTargetField(context)),
                       SizedBox(width: AppSpacing.sm),
                       FilledButton(
                         onPressed: _traceTarget == null ? null : _runTraceroute,
@@ -512,6 +566,7 @@ class _MeshScreenState extends State<MeshScreen> {
             ),
             Expanded(
               child: TabBarView(
+                controller: _meshTabController,
                 children: [
                   _GraphTab(
                     graph: graph,
@@ -530,7 +585,6 @@ class _MeshScreenState extends State<MeshScreen> {
             ),
           ],
         ),
-      ),
     );
   }
 
@@ -542,6 +596,216 @@ class _MeshScreenState extends State<MeshScreen> {
     }
     all.remove(_nodeId);
     return all.toList()..sort();
+  }
+
+  bool _traceNodeMatchesQuery(String id, String queryRaw) {
+    final q = queryRaw.trim().toLowerCase();
+    if (q.isEmpty) return true;
+    final label = _shortLabel(id).toLowerCase();
+    final hex = id.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toLowerCase();
+    final qHex = q.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toLowerCase();
+    if (label.contains(q)) return true;
+    if (qHex.isNotEmpty && hex.contains(qHex)) return true;
+    return false;
+  }
+
+  Future<String?> _showTraceTargetSheet(BuildContext context) async {
+    final candidates = _traceCandidates();
+    if (candidates.isEmpty) return null;
+    final l = context.l10n;
+    final p = context.palette;
+    final sheetMaxH = MediaQuery.of(context).size.height * 0.55;
+    return showAppModalBottomSheet<String>(
+      context: context,
+      backgroundColor: p.card,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(AppSpacing.xl)),
+      ),
+      isScrollControlled: true,
+      builder: (ctx) {
+        var query = '';
+        return StatefulBuilder(
+          builder: (ctx2, setModalState) {
+            final viewInsetBottom = MediaQuery.of(ctx2).viewInsets.bottom;
+            final filtered = candidates.where((id) => _traceNodeMatchesQuery(id, query)).toList();
+
+            Widget listBody;
+            if (filtered.isEmpty) {
+              listBody = Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(AppSpacing.xxl),
+                  child: Text(
+                    l.tr('mesh_trace_no_results'),
+                    textAlign: TextAlign.center,
+                    style: AppTypography.bodyBase().copyWith(
+                      color: p.onSurfaceVariant,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              );
+            } else {
+              listBody = ListView.separated(
+                padding: EdgeInsets.only(bottom: AppSpacing.sm),
+                itemCount: filtered.length,
+                separatorBuilder: (_, __) => Divider(height: 1, thickness: 1, color: p.divider),
+                itemBuilder: (ctx3, i) {
+                  final id = filtered[i];
+                  final sel = _traceTarget != null && _traceTarget!.toUpperCase() == id.toUpperCase();
+                  return ListTile(
+                    dense: true,
+                    selected: sel,
+                    selectedTileColor: p.primary.withOpacity(0.08),
+                    leading: Icon(Icons.router_outlined, color: sel ? p.primary : p.onSurfaceVariant, size: AppIconSize.lg),
+                    title: Text(
+                      _shortLabel(id),
+                      style: AppTypography.bodyLargeBase().copyWith(
+                        color: p.onSurface,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    subtitle: Text(
+                      id,
+                      style: AppTypography.captionBase().copyWith(
+                        color: p.onSurfaceVariant,
+                        fontFamily: 'monospace',
+                      ),
+                    ),
+                    onTap: () => Navigator.pop(ctx, id),
+                  );
+                },
+              );
+            }
+
+            return AnimatedPadding(
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              padding: EdgeInsets.only(bottom: viewInsetBottom),
+              child: SafeArea(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: sheetMaxH),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Padding(
+                        padding: EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.sm),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                l.tr('mesh_select_node'),
+                                style: AppTypography.labelBase().copyWith(
+                                  color: p.onSurface,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              icon: Icon(Icons.close_rounded, color: p.onSurfaceVariant.withOpacity(0.85)),
+                              onPressed: () => Navigator.pop(ctx),
+                              visualDensity: VisualDensity.compact,
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Padding(
+                        padding: EdgeInsets.fromLTRB(AppSpacing.lg, 0, AppSpacing.lg, AppSpacing.sm),
+                        child: TextField(
+                          autofocus: false,
+                          style: AppTypography.bodyBase().copyWith(color: p.onSurface),
+                          decoration: InputDecoration(
+                            hintText: l.tr('mesh_trace_search_hint'),
+                            hintStyle: AppTypography.bodyBase().copyWith(color: p.onSurfaceVariant.withOpacity(0.85)),
+                            prefixIcon: Icon(Icons.search_rounded, color: p.onSurfaceVariant, size: AppIconSize.lg),
+                            suffixIcon: query.isNotEmpty
+                                ? IconButton(
+                                    tooltip: l.tr('mesh_trace_clear_search'),
+                                    icon: Icon(Icons.clear_rounded, color: p.onSurfaceVariant, size: AppIconSize.md),
+                                    onPressed: () => setModalState(() => query = ''),
+                                  )
+                                : null,
+                            filled: true,
+                            fillColor: p.surfaceVariant.withOpacity(0.55),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(AppRadius.md),
+                              borderSide: BorderSide.none,
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(AppRadius.md),
+                              borderSide: BorderSide.none,
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(AppRadius.md),
+                              borderSide: BorderSide(color: p.primary.withOpacity(0.65), width: 1.2),
+                            ),
+                            isDense: true,
+                            contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm, vertical: AppSpacing.md),
+                          ),
+                          onChanged: (v) => setModalState(() => query = v),
+                        ),
+                      ),
+                      Divider(height: 1, thickness: 1, color: p.divider),
+                      Expanded(child: listBody),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildTraceTargetField(BuildContext context) {
+    final l = context.l10n;
+    final p = context.palette;
+    final candidates = _traceCandidates();
+    final enabled = candidates.isNotEmpty;
+    final display = _traceTarget == null ? l.tr('mesh_select_node') : _shortLabel(_traceTarget!);
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: enabled
+            ? () async {
+                final picked = await _showTraceTargetSheet(context);
+                if (picked != null && mounted) setState(() => _traceTarget = picked);
+              }
+            : null,
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md + 2, vertical: AppSpacing.md),
+          decoration: BoxDecoration(
+            color: p.surfaceVariant.withOpacity(enabled ? 0.55 : 0.38),
+            borderRadius: BorderRadius.circular(AppRadius.md),
+            border: Border.all(color: p.divider.withOpacity(0.45)),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  display,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppTypography.bodyLargeBase().copyWith(
+                    color: _traceTarget == null ? p.onSurfaceVariant : p.onSurface,
+                    fontWeight: _traceTarget == null ? FontWeight.w400 : FontWeight.w600,
+                  ),
+                ),
+              ),
+              SizedBox(width: AppSpacing.sm),
+              Icon(
+                Icons.keyboard_arrow_down_rounded,
+                color: p.onSurfaceVariant.withOpacity(enabled ? 1 : 0.45),
+                size: AppIconSize.xl,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   String _traceSummary(BuildContext context, String target) {
@@ -558,7 +822,7 @@ class _MeshScreenState extends State<MeshScreen> {
       if (idx >= 0) {
         final hopText = '${l.tr('mesh_trace_hops')}: ${_shortLabel(_nodeId)} -> ${_shortLabel(target)}';
         final rssi = idx < _neighborsRssi.length ? _neighborsRssi[idx] : 0;
-        final rssiText = rssi != 0 ? ' · RSSI $rssi dBm' : '';
+        final rssiText = rssi != 0 ? ' · ${l.tr('mesh_rssi_label')} $rssi dBm' : '';
         return '$hopText$rssiText · ${l.tr('mesh_route_hops')}: 1';
       }
       return l.tr('mesh_trace_no_route');
@@ -596,7 +860,7 @@ class _MeshScreenState extends State<MeshScreen> {
       }
       final rssi = i > 0 && (i - 1) < hopRssi.length ? hopRssi[i - 1] : 0;
       final label = _shortLabel(node);
-      rendered.add(rssi != 0 ? '$label ($rssi dBm)' : label);
+      rendered.add(rssi != 0 ? '$label ${l.tr('mesh_rssi_in_paren', {'value': '$rssi'})}' : label);
     }
     final next = (route['nextHop'] as String?) ?? '';
     final rssi = (route['rssi'] as num?)?.toInt() ?? 0;
@@ -609,15 +873,19 @@ class _MeshScreenState extends State<MeshScreen> {
     if (modemPreset != null) {
       modem = _modemPresetLabel(l, modemPreset);
     } else if (sf != null || bw != null || cr != null) {
-      modem = 'SF${sf ?? '?'} / BW${bw?.toStringAsFixed(1) ?? '?'} / CR${cr ?? '?'}';
+      modem = l.tr('mesh_modem_sf_bw_cr', {
+        'sf': '${sf ?? '?'}',
+        'bw': bw?.toStringAsFixed(1) ?? '?',
+        'cr': '${cr ?? '?'}',
+      });
     }
     final base = '${l.tr('mesh_trace_hops')}: ${rendered.join(' -> ')}';
     final details = <String>[
       if (next.isNotEmpty) '${l.tr('mesh_col_next')}: ${_shortLabel(next)}',
       '$hops ${l.tr('mesh_route_hops')}',
-      if (rssi != 0) 'RSSI $rssi dBm',
+      if (rssi != 0) '${l.tr('mesh_rssi_label')} $rssi dBm',
       if (modem != null) '${l.tr('mesh_modem')}: $modem',
-      if (trust != null) 'trust $trust',
+      if (trust != null) l.tr('mesh_route_trust', {'n': '$trust'}),
     ];
     return '$base\n${details.join(' · ')}';
   }
@@ -638,6 +906,93 @@ class _GraphData {
   final Map<String, _NP> nodes;
   final List<_Edge> edges;
   _GraphData(this.nodes, this.edges);
+}
+
+/// [freePan] — на весь экран без TabBarView: свободная панорама. Во вкладке с TabBarView — только вертикальная панорама, чтобы горизонтальный свайп переключал вкладки.
+class _MeshGraphInteractiveCanvas extends StatelessWidget {
+  final _GraphData graph;
+  final String Function(String) nodeLabel;
+  final bool freePan;
+
+  const _MeshGraphInteractiveCanvas({
+    required this.graph,
+    required this.nodeLabel,
+    this.freePan = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    return LayoutBuilder(
+      builder: (_, constraints) {
+        final size = Size(constraints.maxWidth, constraints.maxHeight);
+        final c = Offset(size.width / 2, size.height / 2);
+        return InteractiveViewer(
+          panAxis: freePan ? PanAxis.free : PanAxis.vertical,
+          minScale: 0.22,
+          maxScale: 3.2,
+          boundaryMargin: const EdgeInsets.all(200),
+          trackpadScrollCausesScale: true,
+          clipBehavior: Clip.hardEdge,
+          child: Align(
+            alignment: Alignment.center,
+            child: SizedBox(
+              width: size.width,
+              height: size.height,
+              child: CustomPaint(
+                size: size,
+                painter: _MeshPainter(
+                  nodes: graph.nodes,
+                  edges: graph.edges,
+                  center: c,
+                  palette: palette,
+                  nodeLabel: nodeLabel,
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _MeshGraphFullscreenScreen extends StatelessWidget {
+  final _GraphData graph;
+  final String Function(String) nodeLabel;
+
+  const _MeshGraphFullscreenScreen({
+    required this.graph,
+    required this.nodeLabel,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final l = context.l10n;
+    return Scaffold(
+      backgroundColor: context.palette.surface,
+      appBar: riftAppBar(
+        context,
+        title: l.tr('mesh_graph_fullscreen'),
+        showBack: true,
+      ),
+      floatingActionButton: _riftPrimaryFab(
+        context,
+        onPressed: () => Navigator.of(context).pop(),
+        tooltip: l.tr('mesh_graph_exit_fullscreen'),
+        icon: Icons.fullscreen_exit_rounded,
+        heroTag: 'mesh_graph_fullscreen_close',
+      ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
+      body: MeshBackgroundWrapper(
+        child: _MeshGraphInteractiveCanvas(
+          graph: graph,
+          nodeLabel: nodeLabel,
+          freePan: true,
+        ),
+      ),
+    );
+  }
 }
 
 class _GraphTab extends StatelessWidget {
@@ -702,21 +1057,10 @@ class _GraphTab extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: LayoutBuilder(
-              builder: (_, constraints) {
-                final size = Size(constraints.maxWidth, constraints.maxHeight);
-                final c = Offset(size.width / 2, size.height / 2);
-                return CustomPaint(
-                  size: size,
-                  painter: _MeshPainter(
-                    nodes: graph.nodes,
-                    edges: graph.edges,
-                    center: c,
-                    palette: context.palette,
-                    nodeLabel: nodeLabel,
-                  ),
-                );
-              },
+            child: _MeshGraphInteractiveCanvas(
+              graph: graph,
+              nodeLabel: nodeLabel,
+              freePan: false,
             ),
           ),
         ],
@@ -841,7 +1185,7 @@ class _ListTab extends StatelessWidget {
                                 ),
                               ),
                               subtitle: Text(
-                                '${l.tr('neighbors')} · RSSI ${i < neighborsRssi.length ? neighborsRssi[i] : '—'}',
+                                '${l.tr('neighbors')} · ${l.tr('mesh_rssi_label')} ${i < neighborsRssi.length ? neighborsRssi[i] : '—'}',
                                 style: AppTypography.chipBase().copyWith(
                                   color: context.palette.onSurfaceVariant.withOpacity(0.95),
                                   fontWeight: FontWeight.w400,
@@ -879,7 +1223,11 @@ class _ListTab extends StatelessWidget {
                                 if (modemPreset != null) {
                                   modem = _modemPresetLabel(l, modemPreset);
                                 } else if (sf != null || bw != null || cr != null) {
-                                  modem = 'SF${sf ?? '?'} / BW${bw?.toStringAsFixed(1) ?? '?'} / CR${cr ?? '?'}';
+                                  modem = l.tr('mesh_modem_sf_bw_cr', {
+                                    'sf': '${sf ?? '?'}',
+                                    'bw': bw?.toStringAsFixed(1) ?? '?',
+                                    'cr': '${cr ?? '?'}',
+                                  });
                                 }
                                 return ListTile(
                                   leading: CircleAvatar(
@@ -894,7 +1242,7 @@ class _ListTab extends StatelessWidget {
                                     ),
                                   ),
                                   subtitle: Text(
-                                    '${l.tr('mesh_col_next')}: ${next.isNotEmpty ? nodeLabel(next) : '—'} · $hops ${l.tr('mesh_route_hops')}${rssi != 0 ? ' · RSSI $rssi' : ''}${modem != null ? ' · ${l.tr('mesh_modem')}: $modem' : ''}${trust != null ? ' · trust $trust' : ''}',
+                                    '${l.tr('mesh_col_next')}: ${next.isNotEmpty ? nodeLabel(next) : '—'} · $hops ${l.tr('mesh_route_hops')}${rssi != 0 ? ' · ${l.tr('mesh_rssi_label')} $rssi' : ''}${modem != null ? ' · ${l.tr('mesh_modem')}: $modem' : ''}${trust != null ? ' · ${l.tr('mesh_route_trust', {'n': '$trust'})}' : ''}',
                                     style: AppTypography.chipBase().copyWith(
                                       color: context.palette.onSurfaceVariant.withOpacity(0.95),
                                       fontWeight: FontWeight.w400,

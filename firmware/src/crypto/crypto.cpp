@@ -117,7 +117,7 @@ bool decrypt(const uint8_t* cipher, size_t len, uint8_t* out, size_t* outLen) {
 
 static bool encryptWithKey(const uint8_t* key, const uint8_t* plain, size_t len,
                            uint8_t* out, size_t* outLen) {
-  if (len > 4096) return false;
+  if (len > 16384) return false;
   size_t need = NONCE_LEN + len + TAG_LEN;
   if (outLen && *outLen < need) return false;
 

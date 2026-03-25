@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -577,6 +578,7 @@ class ChatScreenController {
       assembly.lastUpdated = DateTime.now();
       if (assembly.parts.length == evt.total) {
         final parts = List.generate(evt.total, (i) => assembly.parts[i] ?? '');
+        final voiceMsgId = evt.msgId;
         try {
           final bytes = base64Decode(parts.join());
           final decoded = deps.decodeVoicePayload(bytes);
@@ -593,11 +595,15 @@ class ChatScreenController {
               voiceData: decoded.bytes,
               deleteAt: decoded.deleteAt,
               voiceProfileCode: decoded.voiceProfileCode,
+              msgId: voiceMsgId,
             ));
           });
           final active = deps.conversationId;
           if (active != null && active == ChatRepository.directConversationId(deps.normalizeId(evt.from))) {
             deps.markConversationRead(active);
+            if (voiceMsgId != null && voiceMsgId > 0) {
+              deps.ble.sendRead(from: evt.from, msgId: voiceMsgId);
+            }
           }
           deps.scrollToBottom();
         } catch (_) {
@@ -894,22 +900,52 @@ class ChatScreenController {
         (i + chunkSize < payload.length) ? i + chunkSize : payload.length,
       )));
     }
+    final conversationId = deps.activeConversationId();
+    final voiceText = '🎤 ${deps.tr('voice')} [${deps.voiceProfileLabel(deps.voiceProfileCode)}]';
+    var localMessageIndex = -1;
+    deps.setState(() {
+      deps.messages.add(ChatUiMessage(
+        from: deps.nodeId,
+        to: to,
+        text: voiceText,
+        isIncoming: false,
+        isVoice: true,
+        voiceData: bytes,
+        voiceProfileCode: deps.voiceProfileCode,
+      ));
+      localMessageIndex = deps.messages.length - 1;
+    });
+    deps.scrollToBottom();
+    await deps.repo.appendMessage(
+      ChatMessage(
+        conversationId: conversationId,
+        from: deps.nodeId,
+        to: to,
+        text: voiceText,
+        type: 'voice',
+        direction: MessageDirection.outgoing,
+        status: MessageStatus.pending,
+        createdAtMs: DateTime.now().millisecondsSinceEpoch,
+        voiceData: Uint8List.fromList(bytes),
+      ),
+    );
     final ok = await deps.ble.sendVoice(to: to, chunks: chunks);
-    if (!deps.isMounted()) return;
-    if (ok) {
-      deps.setState(() {
-        deps.messages.add(ChatUiMessage(
-          from: deps.nodeId,
-          text: '🎤 ${deps.tr('voice')} [${deps.voiceProfileLabel(deps.voiceProfileCode)}]',
-          isIncoming: false,
-          isVoice: true,
-          voiceProfileCode: deps.voiceProfileCode,
-        ));
-      });
-      deps.scrollToBottom();
+    if (!ok) {
+      if (deps.isMounted()) {
+        deps.setState(() {
+          if (localMessageIndex >= 0 && localMessageIndex < deps.messages.length) {
+            final m = deps.messages[localMessageIndex];
+            if (!m.isIncoming && m.msgId == null) {
+              deps.messages[localMessageIndex] = m.copyWith(
+                status: ChatUiMessageStatus.undelivered,
+              );
+            }
+          }
+        });
+        deps.showSnack(deps.tr('voice_send_error'));
+      }
       return;
     }
-    deps.showSnack(deps.tr('voice_send_error'));
   }
 
   Future<bool> startVoiceRecord(ChatUiVoiceAdaptivePlan plan) async {
@@ -949,6 +985,12 @@ class ChatScreenController {
           ok = await deps.ble.connect(device);
         }
         if (deps.isMounted() && ok) {
+          if (isWifi) {
+            final nodeId = deps.ble.lastInfo?.id;
+            if (nodeId != null && nodeId.isNotEmpty) {
+              await ChatRepository.instance.migrateToCanonicalNodeScopeIfNeeded(nodeId);
+            }
+          }
           await deps.onReconnectSuccess(isWifi ? (wifiIp ?? '') : remoteId!);
           deps.setReconnectState(reconnecting: false, attempt: attempt);
           deps.showReconnectSuccess();

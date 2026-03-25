@@ -30,12 +30,22 @@
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-#define SDA_PIN 17
-#define SCL_PIN 18
-#define OLED_RST 21
-#define VEXT_PIN 36
-#define VEXT_ON_LEVEL LOW
-#define BUTTON_PIN 0
+
+#if defined(ARDUINO_LILYGO_T_BEAM)
+  #define SDA_PIN 21
+  #define SCL_PIN 22
+  #define OLED_RST -1     // T-Beam: нет аппаратного RST на OLED
+  #define VEXT_PIN -1     // T-Beam: питание OLED через AXP2101, не GPIO
+  #define VEXT_ON_LEVEL LOW
+  #define BUTTON_PIN 38   // T-Beam V1.1: кнопка USER
+#else
+  #define SDA_PIN 17
+  #define SCL_PIN 18
+  #define OLED_RST 21
+  #define VEXT_PIN 36
+  #define VEXT_ON_LEVEL LOW
+  #define BUTTON_PIN 0
+#endif
 
 #define TAB_H 12
 #define CONTENT_Y 14
@@ -111,13 +121,16 @@ static void drawContentLine(int line, const char* s, bool useUtf8 = false) {
 void displayInit() {
   pinMode(BUTTON_PIN, INPUT_PULLUP);
 
+#if VEXT_PIN >= 0
   pinMode(VEXT_PIN, OUTPUT);
   digitalWrite(VEXT_PIN, VEXT_ON_LEVEL);
   delay(150);
+#endif
 
+#if !defined(ARDUINO_LILYGO_T_BEAM)
   Wire.begin(SDA_PIN, SCL_PIN);
+#endif
   disp = new Adafruit_SSD1306(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RST);
-  // false = не вызывать Wire.begin() из SSD1306 (уже инициализировали) — иначе W "Bus already started"
   if (!disp->begin(SSD1306_SWITCHCAPVCC, 0x3C, true, false)) {
     disp->begin(SSD1306_SWITCHCAPVCC, 0x3D, true, false);
   }

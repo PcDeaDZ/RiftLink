@@ -24,6 +24,7 @@
 #include "offline_queue/offline_queue.h"
 #include "frag/frag.h"
 #include "voice_frag/voice_frag.h"
+#include "voice_buffers/voice_buffers.h"
 #include "gps/gps.h"
 #include "telemetry/telemetry.h"
 #include "selftest/selftest.h"
@@ -43,6 +44,8 @@
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <esp_heap_caps.h>
+#include <esp_partition.h>
+#include <esp_ota_ops.h>
 #include <stdlib.h>
 #include <nvs.h>
 #include <esp_random.h>
@@ -317,14 +320,39 @@ struct PendingPingCmdId {
 };
 static PendingPingCmdId s_pendingPingCmdIds[8];
 
+/// cmdId из JSON: как у channelId32 — число может лежать в double/int64; только is<int>() даёт 0 и ломает cmd:info.
 static inline uint32_t parseCmdIdFromDoc(const JsonDocument& doc) {
-  if (!doc["cmdId"].is<uint32_t>() && !doc["cmdId"].is<int>() &&
-      !doc["cmdId"].is<int64_t>() && !doc["cmdId"].is<uint64_t>()) {
-    return 0;
+  JsonVariantConst v = doc["cmdId"];
+  if (v.isNull()) return 0;
+  if (v.is<const char*>()) {
+    const char* s = v.as<const char*>();
+    if (!s || !s[0]) return 0;
+    char* end = nullptr;
+    unsigned long ul = strtoul(s, &end, 10);
+    if (end == s) return 0;
+    if (ul > 4294967295UL) return 0;
+    return static_cast<uint32_t>(ul);
   }
-  uint64_t raw = doc["cmdId"] | 0;
-  if (raw == 0 || raw > 0xFFFFFFFFULL) return 0;
-  return (uint32_t)raw;
+  const double d = v.as<double>();
+  if (d < 1.0 || d > 4294967295.0) return 0;
+  return static_cast<uint32_t>(static_cast<uint64_t>(d + 0.5));
+}
+
+/** Команды без tracked-ответа в приложении — допускают отсутствие cmdId в JSON. */
+static bool bleJsonCmdAllowsMissingCmdId(const char* cmd) {
+  if (!cmd) return false;
+  if (strcmp(cmd, "send") == 0) return true;
+  if (strcmp(cmd, "sos") == 0) return true;
+  if (strcmp(cmd, "location") == 0) return true;
+  if (strcmp(cmd, "radioMode") == 0) return true;
+  if (strcmp(cmd, "lang") == 0) return true;
+  if (strcmp(cmd, "wifi") == 0) return true;
+  if (strcmp(cmd, "read") == 0) return true;
+  if (strcmp(cmd, "voice") == 0) return true;
+  if (strcmp(cmd, "signalTest") == 0) return true;
+  if (strcmp(cmd, "shutdown") == 0 || strcmp(cmd, "poweroff") == 0) return true;
+  if (strncmp(cmd, "bleOta", 6) == 0) return true;
+  return false;
 }
 
 static uint32_t s_activeCmdId = 0;
@@ -335,9 +363,19 @@ class ActiveCmdScope {
   ~ActiveCmdScope() { s_activeCmdId = 0; }
 };
 
+/// Запланировать evt:node: при cmdId>0 — привязка к tracked-запросу приложения.
+/// При cmdId==0 не затираем уже отложенный ненулевой s_pendingInfoCmdId (гонка: между cmd:info в очереди
+/// и notify пришёл другой триггер с «фоновым» refresh — иначе evt:node уходит без cmdId, UI остаётся без id).
 static inline void scheduleInfoNotify(uint32_t delayMs = 0, uint32_t cmdId = 0) {
   pendSet(PEND_INFO);
   if (cmdId != 0) s_pendingInfoCmdId = cmdId;
+  s_pendingInfoNotBeforeMs = millis() + delayMs;
+}
+
+/// Фоновое обновление info без сопоставления с cmd приложения (явно сбрасываем cmdId).
+static inline void scheduleInfoNotifyBackground(uint32_t delayMs = 0) {
+  pendSet(PEND_INFO);
+  s_pendingInfoCmdId = 0;
   s_pendingInfoNotBeforeMs = millis() + delayMs;
 }
 
@@ -415,11 +453,10 @@ static uint32_t pingAckWaitMs(uint8_t neighborSfHint) {
   return 2000 + (uint32_t)(sf - 6) * 500;
 }
 
-#define VOICE_BUF_MAX (voice_frag::MAX_VOICE_PLAIN + 1024)
-static uint8_t s_voiceBuf[VOICE_BUF_MAX];
 static size_t s_voiceBufLen = 0;
 static int s_voiceChunkTotal = -1;
 static uint8_t s_voiceTo[protocol::NODE_ID_LEN];
+static bool s_voiceBleLocked = false;
 
 static uint32_t s_emitInfoCmdId = 0;
 static uint32_t s_emitGroupsCmdId = 0;
@@ -571,6 +608,44 @@ static size_t bleNotifyMtu() {
 /** false = mutex / нет транспорта (payload не отправлен). */
 static bool notifyJsonToApp(const char* payload, size_t len) {
   if (!payload || len == 0) return false;
+
+  // Wi‑Fi: не использовать s_notifyMutex — он для почанкового BLE notify. Пока NimBLE/другая задача
+  // держит mutex, весь поток evt в приложение по WebSocket отбрасывался (notify_sent=0, notify_mutex_drop>0).
+  if (radio_mode::current() == radio_mode::WIFI) {
+    if (!ws_server::hasClient()) {
+      s_bleDiag.notifySkipNoTransport++;
+      char evtTag[24];
+      extractEvtForLog(payload, len, evtTag, sizeof(evtTag));
+      const char* evt = evtTag[0] ? evtTag : "unknown";
+      Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=skip reason=no_transport mode=wifi evt=%s len=%u\n",
+          evt, (unsigned)len);
+      bleDiagMaybeSnapshot("notify_skip", 1500);
+      return false;
+    }
+    char evtTag[24];
+    extractEvtForLog(payload, len, evtTag, sizeof(evtTag));
+    const char* evt = evtTag[0] ? evtTag : "unknown";
+    if (!ws_server::sendEvent(payload, (int)len)) {
+      s_bleDiag.notifySkipNoTransport++;
+      Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=skip reason=ws_send_fail mode=wifi evt=%s len=%u\n",
+          evt, (unsigned)len);
+      bleDiagMaybeSnapshot("notify_skip", 1500);
+      return false;
+    }
+    s_bleDiag.notifySent++;
+    s_bleDiag.notifyBytes += (uint32_t)len;
+    s_bleDiag.notifyChunks++;
+    Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=sent mode=wifi evt=%s len=%u\n",
+        evt, (unsigned)len);
+#if BLE_LOG_TX_JSON
+    Serial.print("[WS->APP] ");
+    Serial.write((const uint8_t*)payload, len);
+    Serial.println();
+#endif
+    bleDiagMaybeSnapshot("notify_wifi", 8000);
+    return true;
+  }
+
   bool locked = false;
   for (uint8_t attempt = 0; attempt < kNotifyMutexMaxAttempts; attempt++) {
     if (s_notifyMutex && xSemaphoreTake(s_notifyMutex, kNotifyMutexTryTicks) == pdTRUE) {
@@ -589,32 +664,12 @@ static bool notifyJsonToApp(const char* payload, size_t len) {
   extractEvtForLog(payload, len, evtTag, sizeof(evtTag));
   const char* evt = evtTag[0] ? evtTag : "unknown";
 
-  // WiFi mode: route to WebSocket (no size limit)
-  if (radio_mode::current() == radio_mode::WIFI) {
-    Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=send mode=wifi evt=%s len=%u\n",
-        evt, (unsigned)len);
-#if BLE_LOG_TX_JSON
-    Serial.print("[WS->APP] ");
-    Serial.write((const uint8_t*)payload, len);
-    Serial.println();
-#endif
-    ws_server::sendEvent(payload, (int)len);
-    s_bleDiag.notifySent++;
-    s_bleDiag.notifyBytes += (uint32_t)len;
-    s_bleDiag.notifyChunks++;
-    Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=sent mode=wifi evt=%s len=%u\n",
-        evt, (unsigned)len);
-    bleDiagMaybeSnapshot("notify_wifi", 8000);
-    xSemaphoreGive(s_notifyMutex);
-    return true;
-  }
-
   if (!pRxChar || !s_connected) {
     s_bleDiag.notifySkipNoTransport++;
+    xSemaphoreGive(s_notifyMutex);
     Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=skip reason=no_transport mode=%s evt=%s len=%u\n",
         transportModeTag(), evt, (unsigned)len);
     bleDiagMaybeSnapshot("notify_skip", 1500);
-    xSemaphoreGive(s_notifyMutex);
     return false;
   }
 
@@ -625,8 +680,11 @@ static bool notifyJsonToApp(const char* payload, size_t len) {
 #endif
 
   const size_t mtuChunk = bleNotifyMtu();
-  const size_t chunkMax = (mtuChunk < sizeof(s_notifyTxBuf)) ? mtuChunk : sizeof(s_notifyTxBuf);
-  if (mtuChunk > sizeof(s_notifyTxBuf)) {
+  // Резерв 1 байт под '\n' в последнем чанке: иначе при chunk==512 не добавляется '\n',
+  // склейка node+neighbors без разделителя → ложный jsonDecode на первом «}» и routes раньше node.
+  const size_t txCap = sizeof(s_notifyTxBuf) - 1u;
+  const size_t chunkMax = (mtuChunk < txCap) ? mtuChunk : txCap;
+  if (mtuChunk > txCap) {
 #if RIFTLINK_BLE_CHAIN_NOTIFY_LOG
     Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=clamp reason=tx_buf_limit mtuChunk=%u txBuf=%u\n",
         (unsigned)mtuChunk, (unsigned)sizeof(s_notifyTxBuf));
@@ -660,20 +718,39 @@ static bool notifyJsonToApp(const char* payload, size_t len) {
 #if RIFTLINK_BLE_NOTIFY_INTER_CHUNK_DELAY_MS > 0
       vTaskDelay(pdMS_TO_TICKS(RIFTLINK_BLE_NOTIFY_INTER_CHUNK_DELAY_MS));
 #else
-      taskYIELD();
+      // taskYIELD() — нулевая пауза; Android BLE controller теряет notify при быстрой отправке
+      // (notification без ACK, ограниченный буфер на приёмнике). 2 мс достаточно для drain.
+      vTaskDelay(pdMS_TO_TICKS(2));
 #endif
     }
   }
   s_bleDiag.notifySent++;
   s_bleDiag.notifyBytes += (uint32_t)len;
   s_bleDiag.notifyChunks += chunks;
+  xSemaphoreGive(s_notifyMutex);
 #if RIFTLINK_BLE_CHAIN_NOTIFY_LOG
   Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=sent mode=ble evt=%s len=%u chunks=%u\n",
       evt, (unsigned)len, (unsigned)chunks);
 #endif
   bleDiagMaybeSnapshot("notify_ble", 8000);
-  xSemaphoreGive(s_notifyMutex);
   return true;
+}
+
+/**
+ * Повтор notify при notify_mutex_busy: подряд node/neighbors/routes/groups в notifyInfo()
+ * иначе первые части волны теряются, на телефон первым доходит evt:routes без паспорта узла.
+ */
+static bool notifyJsonToAppBleRetry(const char* payload, size_t len) {
+  for (uint8_t attempt = 0; attempt < 16; attempt++) {
+    if (notifyJsonToApp(payload, len)) return true;
+    vTaskDelay(pdMS_TO_TICKS(4 + attempt * 4));
+  }
+  char evtTag[24]{};
+  extractEvtForLog(payload, len, evtTag, sizeof(evtTag));
+  const char* evt = evtTag[0] ? evtTag : "unknown";
+  Serial.printf("[BLE_CHAIN] stage=fw_notify_json action=drop reason=retries_exhausted evt=%s len=%u\n",
+      evt, (unsigned)len);
+  return false;
 }
 
 /** Очередь мелких evt (delivered/read/sent/…): при занятости notify mutex тяжёлым multi-chunk info
@@ -843,7 +920,7 @@ static BlsScanCallbacks s_blsScanCallbacks;
 #endif /* !RIFTLINK_DISABLE_BLS_N */
 
 /** Большой evt info — раньше String::reserve(1200); теперь BSS, без heap. */
-static constexpr size_t NOTIFY_INFO_JSON_CAP = 1280;
+static constexpr size_t NOTIFY_INFO_JSON_CAP = 2048;
 static char s_notifyInfoPayload[NOTIFY_INFO_JSON_CAP];
 /** Монотонный счётчик волн sync (node+neighbors+routes+groups) и отдельных evt. */
 static uint32_t s_bleSyncSeq = 0;
@@ -881,8 +958,51 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 
 static void bleHandleTxJson(const uint8_t* val, uint16_t len);
 
+/** Очередь нужна и в WiFi (JSON с WebSocket → ble::update); не удалять в ble::deinit(). */
+static bool ensureBleCmdQueue() {
+  if (s_bleCmdQueue) return true;
+  s_bleCmdQueue = xQueueCreate(kBleCmdQueueDepth, sizeof(BleCmdQueueItem));
+  if (!s_bleCmdQueue) {
+    Serial.println("[BLE] cmd queue alloc FAILED (ensure)");
+    return false;
+  }
+  return true;
+}
+
 /**
- * TX GATT: NimBLE вызывает writeEvent с буфером записи — парсим JSON по указателю,
+ * Очередь JSON из GATT TX и WebSocket — парсинг только в ble::update (loop).
+ * Иначе notifyJsonToApp → httpd_ws_send_frame из задачи httpd ломает сессию / даёт LoadProhibited.
+ */
+static bool bleEnqueueJsonCommand(const uint8_t* val, uint16_t len) {
+  if (!val || len == 0) return true;
+  if (len > BLE_ATT_MAX_JSON_BYTES) {
+    s_pendingOversizeCmdLen = len;
+    pendSet(PEND_OVERSIZE);
+    return true;
+  }
+  if (!ensureBleCmdQueue()) return false;
+  BleCmdQueueItem item{};
+  item.len = len;
+  memcpy(item.data, val, len);
+  if (xQueueSend(s_bleCmdQueue, &item, kBleCmdEnqueueTimeoutTicks) != pdTRUE) {
+    s_bleDiag.cmdDroppedQueueFull++;
+    static uint32_t s_lastCmdDropLogMs = 0;
+    uint32_t now = millis();
+    if (now - s_lastCmdDropLogMs >= 2000) {
+      s_lastCmdDropLogMs = now;
+      Serial.println("[BLE] cmd queue full, drop");
+      bleDiagMaybeSnapshot("cmd_drop", 1500);
+    }
+    return false;
+  }
+  s_bleDiag.cmdEnqueued++;
+  const uint32_t waiting = (uint32_t)uxQueueMessagesWaiting(s_bleCmdQueue);
+  if (waiting > s_bleDiag.cmdQueueHighWater) s_bleDiag.cmdQueueHighWater = waiting;
+  return true;
+}
+
+/**
+ * TX GATT: NimBLE вызывает writeEvent с буфером записи — кладём в очередь,
  * без getValue()/std::string и без копии NimBLEAttValue (deepCopy/realloc в библиотеке).
  */
 class RiftTxCharacteristic : public NimBLECharacteristic {
@@ -893,30 +1013,7 @@ class RiftTxCharacteristic : public NimBLECharacteristic {
  protected:
   void writeEvent(const uint8_t* val, uint16_t len, NimBLEConnInfo& connInfo) override {
     (void)connInfo;
-    if (!val || len == 0) return;
-    if (len > BLE_ATT_MAX_JSON_BYTES) {
-      s_pendingOversizeCmdLen = len;
-      pendSet(PEND_OVERSIZE);
-      return;
-    }
-    if (!s_bleCmdQueue) return;
-    BleCmdQueueItem item{};
-    item.len = len;
-    memcpy(item.data, val, len);
-    if (xQueueSend(s_bleCmdQueue, &item, kBleCmdEnqueueTimeoutTicks) != pdTRUE) {
-      s_bleDiag.cmdDroppedQueueFull++;
-      static uint32_t s_lastCmdDropLogMs = 0;
-      uint32_t now = millis();
-      if (now - s_lastCmdDropLogMs >= 2000) {
-        s_lastCmdDropLogMs = now;
-        Serial.println("[BLE] cmd queue full, drop");
-        bleDiagMaybeSnapshot("cmd_drop", 1500);
-      }
-    } else {
-      s_bleDiag.cmdEnqueued++;
-      const uint32_t waiting = (uint32_t)uxQueueMessagesWaiting(s_bleCmdQueue);
-      if (waiting > s_bleDiag.cmdQueueHighWater) s_bleDiag.cmdQueueHighWater = waiting;
-    }
+    bleEnqueueJsonCommand(val, len);
   }
 };
 
@@ -979,6 +1076,7 @@ static void notifyGroupMemberKeyStateV2(const char* groupUid, const char* member
   ev["memberId"] = memberId;
   ev["status"] = state;
   if (ackAt > 0) ev["ackAt"] = ackAt;
+  if (s_activeCmdId != 0) ev["cmdId"] = s_activeCmdId;
   char buf[220];
   size_t n = serializeJson(ev, buf);
   notifyJsonToApp(buf, n);
@@ -1110,6 +1208,10 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     const char* cmd = doc["cmd"];
     const uint32_t cmdId = parseCmdIdFromDoc(doc);
     if (!cmd) return;
+    if (!bleJsonCmdAllowsMissingCmdId(cmd) && cmdId == 0) {
+      ble::notifyError("missing_cmdId", "cmdId required");
+      return;
+    }
     ActiveCmdScope activeCmdScope(cmdId);
 
     if (strcmp(cmd, "bleOtaStart") == 0) {
@@ -1727,7 +1829,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       // Группа уже есть на этом узле (например тест: свой инвайт «сам себе») — не перезаписывать роль/ключ из payload инвайта.
       if (groups::getGroupV2(groupUid, nullptr, nullptr, 0, nullptr, 0, nullptr, nullptr, nullptr, nullptr)) {
         pendSet(PEND_GROUPS);
-        scheduleInfoNotify();
+        scheduleInfoNotifyBackground();
         notifyGroupStatusV2(groupUid, true);
         return;
       }
@@ -1746,7 +1848,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
         (void)groups::ackKeyAppliedV2(groupUid, appliedKv);
       }
       pendSet(PEND_GROUPS);
-      scheduleInfoNotify();
+      scheduleInfoNotifyBackground();
       notifyGroupStatusV2(groupUid);
       return;
     }
@@ -2077,8 +2179,15 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       const char* dataStr = doc["data"];
       int chunk = doc["chunk"] | -1;
       int total = doc["total"] | -1;
-      if (!toStr || !toStr[0] || !dataStr || chunk < 0 || total <= 0) return;
-      if (strlen(dataStr) > BLE_VOICE_CHUNK_B64_BUF) return;  // иначе не влезает в 512 B одной записи
+      if (!toStr || !toStr[0] || !dataStr || chunk < 0 || total <= 0) {
+        Serial.printf("[RiftLink] VOICE_RX_DROP chunk=%d/%d reason=missing_fields\n", chunk, total);
+        return;
+      }
+      if (strlen(dataStr) > BLE_VOICE_CHUNK_B64_BUF) {
+        Serial.printf("[RiftLink] VOICE_RX_DROP chunk=%d/%d reason=b64_too_long len=%u max=%u\n",
+            chunk, total, (unsigned)strlen(dataStr), (unsigned)BLE_VOICE_CHUNK_B64_BUF);
+        return;
+      }
 
       if (!parseFullNodeIdHex(toStr, s_voiceTo)) {
         ble::notifyError("voice_to_bad", "to must be full 16 hex node id");
@@ -2086,24 +2195,70 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
       }
 
       if (chunk == 0) {
+        if (!voice_buffers_init()) {
+          ble::notifyError("voice_init", "voice_buffers_init failed");
+          return;
+        }
+        if (!voice_buffers_acquire()) {
+          ble::notifyError("voice_oom", "voice buffer alloc failed");
+          return;
+        }
+        s_voiceBleLocked = true;
         s_voiceBufLen = 0;
         s_voiceChunkTotal = total;
+        Serial.printf("[RiftLink] VOICE_RX_START to=%s total=%d\n", toStr, total);
       }
-      if (s_voiceChunkTotal != total) return;
+      if (s_voiceChunkTotal != total) {
+        Serial.printf("[RiftLink] VOICE_RX_DROP chunk=%d reason=total_mismatch expected=%d got=%d\n",
+            chunk, s_voiceChunkTotal, total);
+        if (s_voiceBleLocked) {
+          voice_buffers_release();
+          s_voiceBleLocked = false;
+        }
+        s_voiceBufLen = 0;
+        s_voiceChunkTotal = -1;
+        return;
+      }
 
       size_t b64Len = strlen(dataStr);
-      size_t maxDec = VOICE_BUF_MAX - s_voiceBufLen;
+      const size_t plainCap = voice_buffers_plain_cap();
+      uint8_t* plain = voice_buffers_plain();
+      size_t maxDec = plainCap - s_voiceBufLen;
       size_t olen;
-      int r = mbedtls_base64_decode(s_voiceBuf + s_voiceBufLen, maxDec, &olen,
+      int r = mbedtls_base64_decode(plain + s_voiceBufLen, maxDec, &olen,
           (const unsigned char*)dataStr, b64Len);
       if (r == 0) {
         s_voiceBufLen += olen;
+      } else {
+        Serial.printf("[RiftLink] VOICE_RX_B64_ERR chunk=%d/%d b64err=%d\n", chunk, total, r);
       }
 
-      if (chunk == total - 1 && s_voiceBufLen > 0 && s_voiceBufLen <= voice_frag::MAX_VOICE_PLAIN) {
-        voice_frag::send(s_voiceTo, s_voiceBuf, s_voiceBufLen);
+      Serial.printf("[RiftLink] VOICE_RX chunk=%d/%d bufLen=%u\n", chunk, total, (unsigned)s_voiceBufLen);
+
+      if (chunk == total - 1) {
+        if (s_voiceBufLen > 0 && s_voiceBufLen <= voice_frag::MAX_VOICE_PLAIN) {
+          char toHex[17] = {0};
+          for (int i = 0; i < 8; i++) sprintf(toHex + i * 2, "%02X", s_voiceTo[i]);
+          bool hasKey = x25519_keys::hasKeyFor(s_voiceTo);
+          Serial.printf("[RiftLink] VOICE_TX_BEGIN to=%s len=%u hasKey=%d\n", toHex, (unsigned)s_voiceBufLen, (int)hasKey);
+          uint32_t voiceMsgId = 0;
+          bool ok = voice_frag::send(s_voiceTo, plain, s_voiceBufLen, &voiceMsgId);
+          if (ok && voiceMsgId != 0) {
+            ble::notifySent(s_voiceTo, voiceMsgId);
+          }
+          if (!ok) {
+            Serial.printf("[RiftLink] VOICE_SEND_FAIL to=%s len=%u hasKey=%d\n", toHex, (unsigned)s_voiceBufLen, (int)hasKey);
+            ble::notifyError("voice_send_fail", hasKey
+                ? "voice_frag::send failed (queue full or too large?)"
+                : "no pairwise key for peer — key exchange not completed");
+          }
+        }
         s_voiceBufLen = 0;
         s_voiceChunkTotal = -1;
+        if (s_voiceBleLocked) {
+          voice_buffers_release();
+          s_voiceBleLocked = false;
+        }
       }
       return;
     }
@@ -2112,7 +2267,7 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
 namespace ble {
 
 void processCommand(const uint8_t* data, size_t len) {
-  bleHandleTxJson(data, (uint16_t)(len > 0xFFFF ? 0xFFFF : len));
+  bleEnqueueJsonCommand(data, (uint16_t)(len > 0xFFFF ? 0xFFFF : len));
 }
 
 bool init() {
@@ -2143,13 +2298,9 @@ bool init() {
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
   NimBLEDevice::setSecurityPasskey(s_passkey);
   Serial.printf("[BLE] Passkey: %06u\n", (unsigned)s_passkey);
-  if (!s_bleCmdQueue) {
-    s_bleCmdQueue = xQueueCreate(kBleCmdQueueDepth, sizeof(BleCmdQueueItem));
-    if (!s_bleCmdQueue) {
-      Serial.println("[BLE] cmd queue alloc FAILED");
-      NimBLEDevice::deinit(true);
-      return false;
-    }
+  if (!ensureBleCmdQueue()) {
+    NimBLEDevice::deinit(true);
+    return false;
   }
   if (!s_notifyMutex) {
     s_notifyMutex = xSemaphoreCreateMutex();
@@ -2239,9 +2390,12 @@ void deinit() {
   pRxChar = nullptr;
   pServer = nullptr;
   NimBLEDevice::deinit(true);
+  // Не удаляем s_bleCmdQueue: после BLE→WiFi команды с WebSocket идут в ту же очередь и
+  // разбираются в ble::update(); иначе processCommand → enqueue всегда терпит неудачу (cmd_enq=0).
   if (s_bleCmdQueue) {
-    vQueueDelete(s_bleCmdQueue);
-    s_bleCmdQueue = nullptr;
+    BleCmdQueueItem discard{};
+    while (xQueueReceive(s_bleCmdQueue, &discard, 0) == pdTRUE) {
+    }
   }
   if (s_notifyMutex) {
     vSemaphoreDelete(s_notifyMutex);
@@ -2507,16 +2661,12 @@ void notifyTimeCapsuleReleased(const uint8_t* to, uint32_t msgId, uint8_t trigge
   notifyJsonToApp(buf, len);
 }
 
-/** Паспорт узла без массивов соседей/маршрутов/групп — один notify. */
-static void notifyNodeSnapshot(uint32_t seq, uint32_t cmdId) {
-  if (!hasActiveTransport()) return;
-  JsonDocument doc(&s_bleJsonAllocator);
-  doc["evt"] = "node";
-  doc["seq"] = seq;
-  if (cmdId != 0) doc["cmdId"] = cmdId;
+/// Поля паспорта узла (id, версия, регион, LoRa, питание, …) — без evt/seq/cmdId.
+/// Дублируются в evt:neighbors вместе с метриками, если длинный evt:node не доходит до телефона целиком.
+static void appendNodePassportFieldsToDoc(JsonDocument& doc) {
   const uint8_t* id = node::getId();
   char idHex[17] = {0};
-  for (int i = 0; i < 8; i++) snprintf(idHex + i*2, 3, "%02X", id[i]);
+  for (int i = 0; i < 8; i++) snprintf(idHex + i * 2, 3, "%02X", id[i]);
   doc["id"] = idHex;
   char nick[33];
   node::getNickname(nick, sizeof(nick));
@@ -2528,11 +2678,16 @@ static void notifyNodeSnapshot(uint32_t seq, uint32_t cmdId) {
     doc["channel"] = region::getChannel();
   }
   doc["radioMode"] = (radio_mode::current() == radio_mode::BLE) ? "ble" : "wifi";
-  doc["radioVariant"] = (radio_mode::currentWifiVariant() == radio_mode::STA) ? "sta" : "ap";
+  if (radio_mode::current() != radio_mode::BLE) {
+    doc["radioVariant"] = (radio_mode::currentWifiVariant() == radio_mode::STA) ? "sta" : "ap";
+  }
   doc["wifiConnected"] = wifi::isConnected();
   char wifiSsid[64] = {0};
   char wifiIp[24] = {0};
   wifi::getStatus(wifiSsid, sizeof(wifiSsid), wifiIp, sizeof(wifiIp));
+  if (!wifiSsid[0]) {
+    wifi::getSavedSsid(wifiSsid, sizeof(wifiSsid));
+  }
   if (wifiSsid[0]) doc["wifiSsid"] = wifiSsid;
   if (wifiIp[0]) doc["wifiIp"] = wifiIp;
   doc["espnowChannel"] = esp_now_slots::getChannel();
@@ -2562,10 +2717,60 @@ static void notifyNodeSnapshot(uint32_t seq, uint32_t cmdId) {
   doc["gpsFix"] = gps::hasFix();
   doc["powersave"] = powersave::isEnabled();
   doc["blePin"] = s_passkey;
+}
+
+/// Heap/CPU/flash/NVS — дублируются в evt:neighbors при волне info: при малом MTU evt:node
+/// режется на много notify и приложение может не склеить JSON, а evt:neighbors обычно короче.
+static void appendNodeSysMetricsToDoc(JsonDocument& doc) {
+  size_t heap_total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
+  if (heap_total == 0) {
+    heap_total = ESP.getHeapSize();
+  }
+  const size_t heap_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  doc["heapFree"] = (uint32_t)heap_free;
+  doc["heapTotal"] = (uint32_t)heap_total;
+  doc["heapMin"] = ESP.getMinFreeHeap();
+  doc["cpuMhz"] = (uint32_t)ESP.getCpuFreqMHz();
+
+  const uint32_t flash_sz = ESP.getFlashChipSize();
+  if (flash_sz > 0) {
+    doc["flashMb"] = (flash_sz + (1024U * 1024U) - 1U) / (1024U * 1024U);
+  }
+
+  const esp_partition_t* nvs_part =
+      esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, nullptr);
+  if (nvs_part) {
+    doc["nvsPartKb"] = (uint32_t)(nvs_part->size / 1024U);
+  }
+
+  nvs_stats_t nvs_st{};
+  if (nvs_get_stats("nvs", &nvs_st) == ESP_OK) {
+    doc["nvsUsedEnt"] = (uint32_t)nvs_st.used_entries;
+    doc["nvsFreeEnt"] = (uint32_t)nvs_st.free_entries;
+    doc["nvsTotalEnt"] = (uint32_t)nvs_st.total_entries;
+    doc["nvsNs"] = (uint32_t)nvs_st.namespace_count;
+  }
+
+  const esp_partition_t* app_part = esp_ota_get_running_partition();
+  if (app_part) {
+    doc["appPartKb"] = (uint32_t)(app_part->size / 1024U);
+  }
+}
+
+/** Паспорт узла без массивов соседей/маршрутов/групп — один notify. */
+static void notifyNodeSnapshot(uint32_t seq, uint32_t cmdId) {
+  if (!hasActiveTransport()) return;
+  JsonDocument doc(&s_bleJsonAllocator);
+  doc["evt"] = "node";
+  doc["seq"] = seq;
+  if (cmdId != 0) doc["cmdId"] = cmdId;
+  appendNodePassportFieldsToDoc(doc);
+
+  appendNodeSysMetricsToDoc(doc);
 
   size_t plen = serializeJson(doc, s_notifyInfoPayload, sizeof(s_notifyInfoPayload));
   if (plen == 0) return;
-  notifyJsonToApp(s_notifyInfoPayload, plen);
+  notifyJsonToAppBleRetry(s_notifyInfoPayload, plen);
 }
 
 static void notifyNeighborsWithSeq(uint32_t seq, uint32_t cmdId) {
@@ -2587,9 +2792,11 @@ static void notifyNeighborsWithSeq(uint32_t seq, uint32_t cmdId) {
     if (neighbors::getId(i, peerId)) hasKeyArr.add(x25519_keys::hasKeyFor(peerId));
     else hasKeyArr.add(false);
   }
-  char buf[320];
-  size_t len = serializeJson(doc, buf, sizeof(buf));
-  notifyJsonToApp(buf, len);
+  appendNodePassportFieldsToDoc(doc);
+  appendNodeSysMetricsToDoc(doc);
+  size_t len = serializeJson(doc, s_notifyInfoPayload, sizeof(s_notifyInfoPayload));
+  if (len == 0) return;
+  notifyJsonToAppBleRetry(s_notifyInfoPayload, len);
 }
 
 static void notifyRoutesWithSeq(uint32_t seq, uint32_t cmdId) {
@@ -2622,7 +2829,7 @@ static void notifyRoutesWithSeq(uint32_t seq, uint32_t cmdId) {
   }
   char buf[400];
   size_t len = serializeJson(doc, buf, sizeof(buf));
-  notifyJsonToApp(buf, len);
+  notifyJsonToAppBleRetry(buf, len);
 }
 
 static void notifyGroupsWithSeq(uint32_t seq, uint32_t cmdId) {
@@ -2660,7 +2867,7 @@ static void notifyGroupsWithSeq(uint32_t seq, uint32_t cmdId) {
   }
   char buf[768];
   size_t len = serializeJson(doc, buf, sizeof(buf));
-  notifyJsonToApp(buf, len);
+  notifyJsonToAppBleRetry(buf, len);
 }
 
 void notifyInfo() {
@@ -2668,10 +2875,16 @@ void notifyInfo() {
   s_emitInfoCmdId = 0;
   if (!hasActiveTransport()) return;
   const uint32_t seq = ++s_bleSyncSeq;
+  // Пауза между JSON-частями волны: Android BLE stack теряет быстрые notify (notification без ACK).
+  // При MTU ~80 один node (~500 B) = ~7 notify; без паузы ~30 notify за <10 ms — приёмник не успевает.
+  const bool isBle = (radio_mode::current() != radio_mode::WIFI);
   notifyNodeSnapshot(seq, cmdId);
-  notifyNeighborsWithSeq(seq, 0);
-  notifyRoutesWithSeq(seq, 0);
-  notifyGroupsWithSeq(seq, 0);
+  if (isBle) vTaskDelay(pdMS_TO_TICKS(6));
+  notifyNeighborsWithSeq(seq, cmdId);
+  if (isBle) vTaskDelay(pdMS_TO_TICKS(6));
+  notifyRoutesWithSeq(seq, cmdId);
+  if (isBle) vTaskDelay(pdMS_TO_TICKS(4));
+  notifyGroupsWithSeq(seq, cmdId);
 }
 
 void notifyInvite() {
@@ -2887,8 +3100,12 @@ void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t h
   notifyJsonToApp(buf, len);
 }
 
-void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen) {
-  if (!hasActiveTransport() || !data) return;
+void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen, uint32_t msgId) {
+  if (!hasActiveTransport() || !data) {
+    Serial.printf("[BLE_CHAIN] stage=fw_voice_notify action=skip reason=%s dataLen=%u msgId=%u\n",
+        !data ? "null_data" : "no_transport", (unsigned)dataLen, (unsigned)msgId);
+    return;
+  }
 
   const size_t CHUNK_RAW = BLE_VOICE_CHUNK_RAW_MAX;
   size_t totalChunks = (dataLen + CHUNK_RAW - 1) / CHUNK_RAW;
@@ -2896,15 +3113,23 @@ void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen) {
   char fromHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(fromHex + i*2, 3, "%02X", from[i]);
 
+  Serial.printf("[BLE_CHAIN] stage=fw_voice_notify action=begin from=%s dataLen=%u chunks=%u msgId=%u\n",
+      fromHex, (unsigned)dataLen, (unsigned)totalChunks, (unsigned)msgId);
+
+  uint32_t sentOk = 0, sentFail = 0;
   for (size_t i = 0; i < totalChunks; i++) {
     size_t off = i * CHUNK_RAW;
     size_t chunkLen = dataLen - off;
     if (chunkLen > CHUNK_RAW) chunkLen = CHUNK_RAW;
 
-    unsigned char b64[BLE_VOICE_CHUNK_B64_BUF + 1];
+    unsigned char b64[BLE_VOICE_CHUNK_B64_BUF + 2];
     size_t olen;
-    if (mbedtls_base64_encode(b64, sizeof(b64) - 1, &olen, data + off, chunkLen) != 0) break;
-    if (olen < sizeof(b64)) b64[olen] = '\0';
+    if (mbedtls_base64_encode(b64, sizeof(b64), &olen, data + off, chunkLen) != 0) {
+      Serial.printf("[BLE_CHAIN] stage=fw_voice_notify action=b64_fail chunk=%u/%u chunkLen=%u bufSz=%u\n",
+          (unsigned)i, (unsigned)totalChunks, (unsigned)chunkLen, (unsigned)sizeof(b64));
+      break;
+    }
+    b64[olen] = '\0';
 
     JsonDocument doc(&s_bleJsonAllocator);
     doc["evt"] = "voice";
@@ -2912,13 +3137,29 @@ void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen) {
     doc["chunk"] = (int)i;
     doc["total"] = (int)totalChunks;
     doc["data"] = (const char*)b64;
+    if (msgId != 0) doc["msgId"] = msgId;
 
     char buf[BLE_ATT_MAX_JSON_BYTES + 1];
     size_t len = serializeJson(doc, buf);
-    if (len > 0 && len <= BLE_ATT_MAX_JSON_BYTES) {
-      notifyJsonToApp(buf, len);
+    if (len == 0 || len > BLE_ATT_MAX_JSON_BYTES) {
+      Serial.printf("[BLE_CHAIN] stage=fw_voice_notify action=drop reason=json_oversize chunk=%u/%u jsonLen=%u limit=%u\n",
+          (unsigned)i, (unsigned)totalChunks, (unsigned)len, (unsigned)BLE_ATT_MAX_JSON_BYTES);
+      sentFail++;
+      continue;
+    }
+    if (notifyJsonToAppBleRetry(buf, len)) {
+      sentOk++;
+    } else {
+      Serial.printf("[BLE_CHAIN] stage=fw_voice_notify action=drop reason=notify_fail chunk=%u/%u\n",
+          (unsigned)i, (unsigned)totalChunks);
+      sentFail++;
+    }
+    if (i + 1 < totalChunks) {
+      vTaskDelay(pdMS_TO_TICKS(4));
     }
   }
+  Serial.printf("[BLE_CHAIN] stage=fw_voice_notify action=done from=%s msgId=%u ok=%u fail=%u total=%u\n",
+      fromHex, (unsigned)msgId, sentOk, sentFail, (unsigned)totalChunks);
 }
 
 static void pingRetryTick() {

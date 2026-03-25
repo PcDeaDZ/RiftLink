@@ -10,6 +10,8 @@ import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
 import '../locale_notifier.dart';
 import '../prefs/mesh_prefs.dart';
+import '../prefs/wifi_sta_prefs.dart';
+import '../app_navigator.dart';
 import '../theme/app_theme.dart';
 import '../theme/design_tokens.dart';
 import '../theme/theme_notifier.dart';
@@ -17,6 +19,7 @@ import '../widgets/app_primitives.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/app_snackbar.dart';
 import 'ota_screen.dart';
+import 'scan_screen.dart';
 
 // ─── utilities ─────────────────────────────────────────────────────────────
 
@@ -194,25 +197,32 @@ class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
     _loadContactNicknames();
     _sub = widget.ble.events.listen((evt) {
       if (!mounted) return;
-      if (evt is RiftLinkInfoEvent) _apply(evt);
-      else if (evt is RiftLinkRegionEvent) setState(() { _region = evt.region; _channel = evt.channel; });
-      else if (evt is RiftLinkGpsEvent) setState(() { _gpsPresent = evt.present; _gpsEnabled = evt.enabled; _gpsFix = evt.hasFix; });
+      if (evt is RiftLinkInfoEvent) {
+        _apply(evt);
+      } else if (evt is RiftLinkRegionEvent) {
+        setState(() { _region = evt.region; _channel = evt.channel; });
+      } else if (evt is RiftLinkGpsEvent) {
+        setState(() { _gpsPresent = evt.present; _gpsEnabled = evt.enabled; _gpsFix = evt.hasFix; });
+      } else if (evt is RiftLinkGroupStatusEvent) {
+        final li = widget.ble.lastInfo;
+        if (li != null) _apply(li);
+      }
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !widget.ble.isConnected) return;
+      if (!mounted || !widget.ble.isTransportConnected) return;
       final c = widget.ble.lastInfo;
       if (c != null) _apply(c);
       widget.ble.getInfo();
     });
     _infoPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      if (!mounted || !widget.ble.isConnected) return;
+      if (!mounted || !widget.ble.isTransportConnected) return;
       widget.ble.getInfo();
     });
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState s) {
-    if (s == AppLifecycleState.resumed && mounted && widget.ble.isConnected) {
+    if (s == AppLifecycleState.resumed && mounted && widget.ble.isTransportConnected) {
       final c = widget.ble.lastInfo;
       if (c != null) _apply(c);
       widget.ble.getInfo();
@@ -324,7 +334,7 @@ class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
 
   void _push(Widget page) {
     Navigator.push(context, MaterialPageRoute(builder: (_) => page)).then((_) {
-      if (mounted && widget.ble.isConnected) widget.ble.getInfo();
+      if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo();
     });
   }
 }
@@ -537,7 +547,7 @@ class _DevicePageState extends State<_DevicePage> {
         }
       }
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isConnected) widget.ble.getInfo(); });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo(); });
   }
 
   @override
@@ -547,7 +557,7 @@ class _DevicePageState extends State<_DevicePage> {
   Widget build(BuildContext context) {
     final l = context.l10n;
     final pal = context.palette;
-    final connected = widget.ble.isConnected;
+    final connected = widget.ble.isTransportConnected;
     final plain = _nodeIdForClipboard(_nodeId);
     final shown = _fmtId(_nodeId);
     final displayLabel = _nickCtrl.text.trim().isNotEmpty ? _nickCtrl.text.trim() : shown;
@@ -658,7 +668,7 @@ class _NetworkModemPageState extends State<_NetworkModemPage> {
         setState(() { _region = evt.region; _channel = evt.channel; });
       }
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isConnected) widget.ble.getInfo(); });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo(); });
   }
 
   @override
@@ -683,7 +693,7 @@ class _NetworkModemPageState extends State<_NetworkModemPage> {
   Widget build(BuildContext context) {
     final l = context.l10n;
     final pal = context.palette;
-    final conn = widget.ble.isConnected;
+    final conn = widget.ble.isTransportConnected;
     final regions = ['EU', 'RU', 'UK', 'US', 'AU'];
     final isEu = _region == 'EU' || _region == 'UK';
 
@@ -818,7 +828,7 @@ class _ConnectionPageState extends State<_ConnectionPage> {
         });
       }
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isConnected) widget.ble.getInfo(); });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo(); });
   }
 
   @override
@@ -826,43 +836,90 @@ class _ConnectionPageState extends State<_ConnectionPage> {
 
   Future<void> _toBle() async {
     final l = context.l10n;
-    if (!widget.ble.isConnected || _radioApplying) return;
+    if (!widget.ble.isTransportConnected || _radioApplying) return;
     setState(() => _radioApplying = true);
     final ok = await widget.ble.switchToBle();
+    if (!mounted) return;
     if (ok) {
-      await widget.ble.getInfo(force: true);
-      await Future<void>.delayed(const Duration(milliseconds: 350));
-      final li = widget.ble.lastInfo;
-      if (mounted) {
-        setState(() {
-          _radioSt = (li != null && li.radioMode == 'ble') ? l.tr('radio_mode_switched', {'mode': l.tr('radio_mode_ble')}) : l.tr('radio_mode_failed');
-          _radioErr = !(li != null && li.radioMode == 'ble');
-        });
-      }
-    } else { if (mounted) setState(() { _radioSt = l.tr('radio_mode_failed'); _radioErr = true; }); }
-    if (mounted) setState(() => _radioApplying = false);
+      // После команды узел гасит Wi‑Fi/WebSocket — getInfo по старому каналу недоступен; как при BLE→Wi‑Fi — на поиск.
+      await widget.ble.disconnect();
+      if (!mounted) return;
+      await appResetTo(
+        context,
+        ScanScreen(
+          initialMessage: l.tr('device_switched_ble_scan'),
+          initialSnackKind: AppSnackKind.neutral,
+        ),
+      );
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        _radioApplying = false;
+        _radioSt = l.tr('radio_mode_failed');
+        _radioErr = true;
+      });
+    }
   }
 
   Future<void> _toWifi() async {
     final l = context.l10n;
-    if (!widget.ble.isConnected || _radioApplying) return;
+    if (!widget.ble.isTransportConnected || _radioApplying) return;
     final ssid = _ssidCtrl.text.trim();
     if (ssid.isEmpty) { showAppSnackBar(context, l.tr('radio_mode_need_ssid')); return; }
     setState(() => _radioApplying = true);
     final ok = await widget.ble.switchToWifiSta(ssid: ssid, pass: _passCtrl.text);
     if (ok) {
+      unawaited(WifiStaPrefs.save(
+        nodeIdHex: _nodeIdForClipboard(widget.ble.lastInfo?.id ?? ''),
+        ssid: ssid,
+        pass: _passCtrl.text,
+      ));
       if (!widget.ble.isConnected) {
-        if (mounted) { showAppSnackBar(context, l.tr('radio_mode_switching_reconnect')); setState(() => _radioApplying = false); }
+        if (mounted) {
+          setState(() => _radioApplying = false);
+          await appResetTo(
+            context,
+            ScanScreen(
+              initialMessage: l.tr('device_switched_wifi_scan'),
+              initialSnackKind: AppSnackKind.neutral,
+            ),
+          );
+        }
         return;
       }
-      await widget.ble.getInfo(force: true);
-      await Future<void>.delayed(const Duration(milliseconds: 350));
-      final li = widget.ble.lastInfo;
+      for (var i = 0; i < 12; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        if (!widget.ble.isConnected) {
+          if (mounted) {
+            setState(() => _radioApplying = false);
+            await appResetTo(
+              context,
+              ScanScreen(
+                initialMessage: l.tr('device_switched_wifi_scan'),
+                initialSnackKind: AppSnackKind.neutral,
+              ),
+            );
+          }
+          return;
+        }
+        await widget.ble.getInfo(force: true);
+        final li = widget.ble.lastInfo;
+        if (li != null && li.radioMode == 'wifi' && li.radioVariant == 'sta') {
+          if (mounted) {
+            setState(() {
+              _radioSt = l.tr('radio_mode_switched', {'mode': l.tr('radio_mode_wifi_sta')});
+              _radioErr = false;
+              _radioApplying = false;
+            });
+          }
+          return;
+        }
+      }
       if (mounted) {
-        final success = li != null && li.radioMode == 'wifi' && li.radioVariant == 'sta';
         setState(() {
-          _radioSt = success ? l.tr('radio_mode_switched', {'mode': l.tr('radio_mode_wifi_sta')}) : l.tr('radio_mode_failed');
-          _radioErr = !success;
+          _radioSt = l.tr('radio_mode_wifi_switch_pending');
+          _radioErr = false;
         });
       }
     } else { if (mounted) setState(() { _radioSt = l.tr('radio_mode_failed'); _radioErr = true; }); }
@@ -873,7 +930,7 @@ class _ConnectionPageState extends State<_ConnectionPage> {
   Widget build(BuildContext context) {
     final l = context.l10n;
     final pal = context.palette;
-    final conn = widget.ble.isConnected;
+    final transportOk = widget.ble.isTransportConnected;
     final usingWifi = widget.ble.isWifiMode;
 
     return _SubpageScaffold(title: l.tr('connection'), children: [
@@ -888,7 +945,7 @@ class _ConnectionPageState extends State<_ConnectionPage> {
           ),
           const SizedBox(height: AppSpacing.sm + 2),
           FilledButton.tonalIcon(
-            onPressed: conn ? () async {
+            onPressed: transportOk ? () async {
               final ok = await widget.ble.regeneratePin();
               if (ok) await widget.ble.getInfo();
               HapticFeedback.lightImpact();
@@ -912,7 +969,7 @@ class _ConnectionPageState extends State<_ConnectionPage> {
           const SizedBox(height: AppSpacing.md),
           _SegmentedPickBar(leadingIcon: Icons.swap_horiz_rounded,
             labels: [l.tr('radio_mode_ble'), l.tr('radio_mode_wifi_sta')],
-            selectedIndex: _radioMode == 'wifi' ? 1 : 0, enabled: conn && !_radioApplying,
+            selectedIndex: _radioMode == 'wifi' ? 1 : 0, enabled: transportOk && !_radioApplying,
             onSelected: (i) async { if (i == 0) await _toBle(); else await _toWifi(); }),
           _AnimatedStatusChip(label: _radioSt, isError: _radioErr),
           AnimatedSize(duration: _kDur, curve: _kIn,
@@ -931,9 +988,25 @@ class _ConnectionPageState extends State<_ConnectionPage> {
           const SizedBox(height: AppSpacing.sm + 2),
           TextField(controller: _passCtrl, obscureText: true, style: TextStyle(color: pal.onSurface), decoration: InputDecoration(labelText: l.tr('wifi_password'))),
           const SizedBox(height: AppSpacing.md),
-          FilledButton.icon(onPressed: conn && !_radioApplying ? _toWifi : null,
+          FilledButton.icon(onPressed: transportOk && !_radioApplying ? _toWifi : null,
             icon: const Icon(Icons.wifi_find_rounded), label: Text(l.tr('radio_mode_connect_sta'))),
           if (_radioApplying) const Padding(padding: EdgeInsets.only(top: AppSpacing.sm + 2), child: LinearProgressIndicator(minHeight: 2)),
+          if (_radioMode == 'wifi') ...[
+            const SizedBox(height: AppSpacing.md),
+            AppSecondaryButton(
+              fullWidth: true,
+              onPressed: transportOk && !_radioApplying ? _toBle : null,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.bluetooth_rounded),
+                  SizedBox(width: AppSpacing.sm),
+                  Text(l.tr('radio_mode_back_to_ble')),
+                ],
+              ),
+            ),
+          ],
         ],
       )),
 
@@ -942,7 +1015,7 @@ class _ConnectionPageState extends State<_ConnectionPage> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (!usingWifi) ...[
-            FilledButton.icon(onPressed: conn ? () => showOtaDialog(context, widget.ble) : null,
+            FilledButton.icon(onPressed: transportOk ? () => showOtaDialog(context, widget.ble) : null,
               icon: const Icon(Icons.bluetooth_searching_rounded), label: Text(l.tr('firmware_update_ble'))),
             const SizedBox(height: AppSpacing.sm + 2),
             Text(l.tr('firmware_update_where_hint'), style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant)),
@@ -967,11 +1040,6 @@ class _ConnectionPageState extends State<_ConnectionPage> {
               Expanded(child: Text(l.tr('firmware_update_wifi_mode_ready'), style: AppTypography.chipBase().copyWith(color: pal.onSurfaceVariant))),
             ]),
           ],
-          const SizedBox(height: AppSpacing.md),
-          AppSecondaryButton(fullWidth: true, onPressed: conn && !_radioApplying && _radioMode != 'ble' ? _toBle : null,
-            child: Row(mainAxisAlignment: MainAxisAlignment.center, mainAxisSize: MainAxisSize.min, children: [
-              const Icon(Icons.bluetooth_rounded), SizedBox(width: AppSpacing.sm), Text(l.tr('radio_mode_back_to_ble')),
-            ])),
         ],
       )),
     ]);
@@ -1020,7 +1088,7 @@ class _SecurityPageState extends State<_SecurityPage> {
         setState(() { _invErr = true; _invSt = mapped; });
       }
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isConnected) widget.ble.getInfo(); });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo(); });
   }
 
   @override
@@ -1046,7 +1114,7 @@ class _SecurityPageState extends State<_SecurityPage> {
   Widget build(BuildContext context) {
     final l = context.l10n;
     final pal = context.palette;
-    final conn = widget.ble.isConnected;
+    final conn = widget.ble.isTransportConnected;
 
     return _SubpageScaffold(title: l.tr('settings_security_title'), children: [
       _PageCard(title: l.tr('e2e_invite'), subtitle: l.tr('e2e_invite_hint'), child: Column(
@@ -1173,7 +1241,7 @@ class _EnergyThemePageState extends State<_EnergyThemePage> {
       if (evt is RiftLinkInfoEvent) setState(() { _ps = evt.powersave; _gpsPresent = evt.gpsPresent; _gpsOn = evt.gpsEnabled; _gpsFix = evt.gpsFix; });
       else if (evt is RiftLinkGpsEvent) setState(() { _gpsPresent = evt.present; _gpsOn = evt.enabled; _gpsFix = evt.hasFix; });
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isConnected) widget.ble.getInfo(); });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo(); });
   }
 
   @override
@@ -1183,7 +1251,7 @@ class _EnergyThemePageState extends State<_EnergyThemePage> {
   Widget build(BuildContext context) {
     final l = context.l10n;
     final pal = context.palette;
-    final conn = widget.ble.isConnected;
+    final conn = widget.ble.isTransportConnected;
 
     return _SubpageScaffold(title: l.tr('settings_energy_title'), children: [
       _PageCard(title: l.tr('settings_energy_title'), subtitle: l.tr('settings_energy_hint'), child: Column(
@@ -1304,7 +1372,7 @@ class _DiagnosticsPageState extends State<_DiagnosticsPage> {
       }
     });
     _loadVoicePrefs();
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isConnected) widget.ble.getInfo(); });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo(); });
   }
 
   @override

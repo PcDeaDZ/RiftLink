@@ -122,4 +122,16 @@ class ContactsService {
     final nick = nickById[id] ?? (id.length >= 8 ? nickById[id.substring(0, 8)] : null);
     return (nick != null && nick.isNotEmpty) ? nick : id;
   }
+
+  /// Никнейм из контактов для отображения рядом с [RecentDevice], без подстановки Node ID.
+  /// `null`, если записи нет или текст совпадает с нормализованным id (тогда берётся только id).
+  static String? contactNicknameIfDistinct(String nodeId, Map<String, String> nickById) {
+    final id = _normalizeId(nodeId);
+    if (id.isEmpty) return null;
+    final nick = nickById[id] ?? (id.length >= 8 ? nickById[id.substring(0, 8)] : null);
+    if (nick == null || nick.trim().isEmpty) return null;
+    final t = nick.trim();
+    if (t.toUpperCase() == id) return null;
+    return t;
+  }
 }

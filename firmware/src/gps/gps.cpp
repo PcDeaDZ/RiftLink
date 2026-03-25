@@ -6,6 +6,9 @@
 #if defined(ARDUINO_LILYGO_T_LORA_PAGER)
 #include "board/lilygo_tpager.h"
 #endif
+#if defined(ARDUINO_LILYGO_T_BEAM)
+#include "board/lilygo_tbeam.h"
+#endif
 #include <HardwareSerial.h>
 #include <TinyGPSPlus.h>
 #include <nvs.h>
@@ -41,6 +44,10 @@ static bool uartDriverHeapOk() {
 #define DEFAULT_TPAGER_RX 12
 #define DEFAULT_TPAGER_TX 4
 
+// LilyGO T-Beam V1.1/V1.2: NEO-6M GPS, UART RX=34 (ESP←GPS), TX=12 (ESP→GPS); питание через AXP2101
+#define DEFAULT_TBEAM_RX 34
+#define DEFAULT_TBEAM_TX 12
+
 static int s_pinRx = -1;
 static int s_pinTx = -1;
 static int s_pinEn = -1;
@@ -57,6 +64,10 @@ static uint32_t s_phoneSyncTime = 0;
 static void applyPower(bool on) {
 #if defined(ARDUINO_LILYGO_T_LORA_PAGER)
   lilygoTpagerSetGnssPower(on);
+  s_enabled = on;
+  return;
+#elif defined(ARDUINO_LILYGO_T_BEAM)
+  lilygoTbeamSetGpspower(on);
   s_enabled = on;
   return;
 #else
@@ -91,6 +102,10 @@ static void setDefaults() {
   s_pinRx = DEFAULT_TPAGER_RX;
   s_pinTx = DEFAULT_TPAGER_TX;
   s_pinEn = -1;
+#elif defined(ARDUINO_LILYGO_T_BEAM)
+  s_pinRx = DEFAULT_TBEAM_RX;
+  s_pinTx = DEFAULT_TBEAM_TX;
+  s_pinEn = -1;  // питание GPS через AXP2101, не GPIO
 #elif defined(ARDUINO_heltec_wifi_lora_32_V4)
   s_pinRx = DEFAULT_V4_RX;
   s_pinTx = DEFAULT_V4_TX;

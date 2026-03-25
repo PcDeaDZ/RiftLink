@@ -13,11 +13,17 @@
 #include <esp_heap_caps.h>
 #include <esp_system.h>
 #include <Arduino.h>
+#include <WiFi.h>
 #include <cstring>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <nvs_flash.h>
 
 namespace radio_mode {
+
+static constexpr const char* kNvsNs = "riftlink";
+/// 0 = при старте оставаться на BLE (даже если в NVS есть SSID); 1 = пробовать Wi‑Fi STA.
+static constexpr const char* kNvsBootRadio = "boot_radio";
 
 static Mode s_mode = BLE;
 static bool s_switching = false;
@@ -31,6 +37,7 @@ static char s_pendingSsid[64] = {0};
 static char s_pendingPass[64] = {0};
 static bool s_staConnectPending = false;
 static uint32_t s_staConnectDeadlineMs = 0;
+static uint32_t s_staConnectStartedMs = 0;
 static volatile bool s_bleInitTaskDone = false;
 static volatile bool s_bleInitTaskOk = false;
 static bool s_bleInitInProgress = false;
@@ -38,6 +45,40 @@ static uint32_t s_bleInitStartedMs = 0;
 static uint8_t s_bleInitRetryCount = 0;
 static constexpr uint32_t BLE_INIT_TIMEOUT_MS = 12000;
 static constexpr uint32_t BLE_INIT_TASK_STACK = 6144;
+
+/// Явное переключение в BLE — писать boot_radio=0; false при откате STA→BLE (фоллбек), NVS не трогаем.
+static bool s_persistBlePreferredOnReady = true;
+
+static void persistPreferredBootMode(Mode m) {
+  nvs_handle_t h;
+  if (nvs_open(kNvsNs, NVS_READWRITE, &h) != ESP_OK) return;
+  const uint8_t v = (m == WIFI) ? 1u : 0u;
+  nvs_set_u8(h, kNvsBootRadio, v);
+  nvs_commit(h);
+  nvs_close(h);
+}
+
+static void finishBleSwitchPersistIfNeeded() {
+  if (s_persistBlePreferredOnReady) {
+    persistPreferredBootMode(BLE);
+  }
+  s_persistBlePreferredOnReady = true;
+}
+
+bool bootShouldTryWifi() {
+  nvs_handle_t h;
+  if (nvs_open(kNvsNs, NVS_READONLY, &h) != ESP_OK) {
+    return wifi::hasCredentials();
+  }
+  uint8_t v = 0;
+  const esp_err_t err = nvs_get_u8(h, kNvsBootRadio, &v);
+  nvs_close(h);
+  if (err != ESP_OK) {
+    // Миграция: ключа не было — как в старых сборках: есть SSID → пробуем Wi‑Fi.
+    return wifi::hasCredentials();
+  }
+  return v == 1u;
+}
 
 static void bleInitTask(void* arg) {
   (void)arg;
@@ -67,6 +108,28 @@ Mode current() { return s_mode; }
 WifiVariant currentWifiVariant() { return s_wifiVariant; }
 bool isSwitching() { return s_switching; }
 
+/** Остановить STA, поставить в очередь возврат в BLE (после неудачного Wi‑Fi). */
+static void queueBleRestoreAfterWifiStaFailed(const char* reason) {
+  Serial.printf("[BLE_CHAIN] stage=fw_mode_switch action=to_wifi_fail reason=%s fallback=to_ble\n", reason);
+  Serial.printf("[RadioMode] %s — switching back to BLE\n", reason);
+  s_staConnectPending = false;
+  s_staConnectDeadlineMs = 0;
+  s_staConnectStartedMs = 0;
+  esp_now_slots::deinit();
+  wifi::deinit();
+  s_mode = WIFI;
+  s_wifiVariant = STA;
+  // Фоллбек: не записывать в NVS «BLE» — пользователь не выбирал, при следующей загрузке снова пробуем Wi‑Fi.
+  s_persistBlePreferredOnReady = false;
+  s_pendingTarget = BLE;
+  s_pendingVariant = STA;
+  s_pendingSsid[0] = '\0';
+  s_pendingPass[0] = '\0';
+  __sync_synchronize();
+  s_pendingSwitch = true;
+  s_switching = false;
+}
+
 static void doSwitchToWifi(WifiVariant variant, const char* ssid, const char* pass) {
   s_switching = true;
   Serial.printf("[BLE_CHAIN] stage=fw_mode_switch action=to_wifi_start mode=ble->wifi heap=%u\n",
@@ -79,6 +142,11 @@ static void doSwitchToWifi(WifiVariant variant, const char* ssid, const char* pa
     Serial.println("[RadioMode] STA requested without SSID and no saved credentials");
     s_switching = false;
     return;
+  }
+
+  // Сохранить SSID/пароль в NVS до init WiFi — после перезагрузки узла connect() подхватит креды.
+  if (ssid && ssid[0]) {
+    wifi::setCredentials(ssid, pass);
   }
 
   // 1) Сразу гасим BLE, чтобы освободить RAM перед WiFi init.
@@ -94,28 +162,15 @@ static void doSwitchToWifi(WifiVariant variant, const char* ssid, const char* pa
   }
 
   // 3) STA flow
-  if (ssid && ssid[0]) {
-    wifi::setCredentials(ssid, pass);
-  }
   if (!wifi::connect()) {
-    Serial.println("[BLE_CHAIN] stage=fw_mode_switch action=to_wifi_fail reason=sta_connect_start");
-    Serial.println("[RadioMode] STA connect start refused, restoring BLE");
-    wifi::deinit();
-    s_mode = WIFI;
-    s_wifiVariant = STA;
-    s_pendingTarget = BLE;
-    s_pendingVariant = STA;
-    s_pendingSsid[0] = '\0';
-    s_pendingPass[0] = '\0';
-    __sync_synchronize();
-    s_pendingSwitch = true;
-    s_switching = false;
+    queueBleRestoreAfterWifiStaFailed("sta_connect_start refused");
     return;
   }
   // Неблокирующее ожидание подключения: loop/UI/кнопки продолжают работать.
   s_mode = WIFI;
   s_wifiVariant = STA;
   s_staConnectPending = true;
+  s_staConnectStartedMs = millis();
   s_staConnectDeadlineMs = millis() + 10000;
   Serial.printf("[BLE_CHAIN] stage=fw_mode_switch action=to_wifi_pending deadlineMs=%u\n",
       (unsigned)s_staConnectDeadlineMs);
@@ -127,6 +182,7 @@ static void doSwitchToBle() {
   s_switching = true;
   s_staConnectPending = false;
   s_staConnectDeadlineMs = 0;
+  s_staConnectStartedMs = 0;
   s_bleInitRetryCount = 0;
   Serial.printf("[BLE_CHAIN] stage=fw_mode_switch action=to_ble_start mode=wifi->ble heap=%u\n",
       (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -157,6 +213,7 @@ static void doSwitchToBle() {
       s_mode = BLE;
       s_wifiVariant = STA;
       s_switching = false;
+      finishBleSwitchPersistIfNeeded();
       Serial.printf("[RadioMode] BLE init direct OK, heap=%u\n",
           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       return;
@@ -192,13 +249,15 @@ void update() {
       char usedSsid[64] = {0};
       wifi::getStatus(usedSsid, sizeof(usedSsid), ip, sizeof(ip));
       esp_now_slots::init();
-      ws_server::start();
       cmd_handler::init();
+      ws_server::start();
       s_mode = WIFI;
       s_wifiVariant = STA;
       s_staConnectPending = false;
       s_staConnectDeadlineMs = 0;
+      s_staConnectStartedMs = 0;
       s_switching = false;
+      persistPreferredBootMode(WIFI);
       Serial.printf("[BLE_CHAIN] stage=fw_mode_switch action=to_wifi_ready ip=%s heap=%u\n",
           ip[0] ? ip : "0.0.0.0",
           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -207,22 +266,16 @@ void update() {
           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       return;
     }
+    // Быстрый откат: сеть недоступна / отказ STA без ожидания полного таймаута.
+    if ((int32_t)(millis() - s_staConnectStartedMs) >= 2500) {
+      const wl_status_t st = WiFi.status();
+      if (st == WL_NO_SSID_AVAIL || st == WL_CONNECT_FAILED) {
+        queueBleRestoreAfterWifiStaFailed("sta status (no AP / connect failed)");
+        return;
+      }
+    }
     if ((int32_t)(millis() - s_staConnectDeadlineMs) >= 0) {
-      Serial.println("[BLE_CHAIN] stage=fw_mode_switch action=to_wifi_timeout fallback=to_ble");
-      Serial.println("[RadioMode] STA connect failed, switching back to BLE");
-      s_staConnectPending = false;
-      s_staConnectDeadlineMs = 0;
-      esp_now_slots::deinit();
-      wifi::deinit();
-      s_mode = WIFI;
-      s_wifiVariant = STA;
-      s_pendingTarget = BLE;
-      s_pendingVariant = STA;
-      s_pendingSsid[0] = '\0';
-      s_pendingPass[0] = '\0';
-      __sync_synchronize();
-      s_pendingSwitch = true;
-      s_switching = false;
+      queueBleRestoreAfterWifiStaFailed("sta_connect timeout");
       return;
     }
     return;
@@ -246,6 +299,7 @@ void update() {
           s_mode = BLE;
           s_wifiVariant = STA;
           s_switching = false;
+          finishBleSwitchPersistIfNeeded();
           Serial.printf("[RadioMode] BLE init direct OK, heap=%u\n",
               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
           return;
@@ -258,6 +312,7 @@ void update() {
       s_mode = BLE;
       s_wifiVariant = STA;
       s_switching = false;
+      finishBleSwitchPersistIfNeeded();
       Serial.printf("[BLE_CHAIN] stage=fw_mode_switch action=to_ble_ready heap=%u\n",
           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
       Serial.printf("[RadioMode] Now in BLE mode, heap=%u\n",
@@ -280,6 +335,7 @@ void update() {
         s_mode = BLE;
         s_wifiVariant = STA;
         s_switching = false;
+        finishBleSwitchPersistIfNeeded();
         Serial.printf("[RadioMode] BLE init direct OK, heap=%u\n",
             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
         return;

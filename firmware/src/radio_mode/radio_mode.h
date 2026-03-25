@@ -36,4 +36,11 @@ bool switchTo(Mode target, WifiVariant variant = STA,
 /** Вызвать из loop() — обработка отложенных переключений. */
 void update();
 
+/**
+ * Старт: пробовать поднять Wi‑Fi STA (если есть креды), если в NVS сохранён предпочтительный режим Wi‑Fi.
+ * Явный выбор BLE в приложении пишется в NVS и имеет приоритет над наличием SSID.
+ * Если ключа boot_radio ещё нет (старые прошивки) — поведение как раньше: при SSID в NVS пробуем Wi‑Fi.
+ */
+bool bootShouldTryWifi();
+
 }  // namespace radio_mode

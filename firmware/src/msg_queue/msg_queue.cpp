@@ -22,6 +22,7 @@
 #include "bls_n/bls_n.h"
 #include "esp_now_slots/esp_now_slots.h"
 #include "x25519_keys/x25519_keys.h"
+#include "voice_frag/voice_frag.h"
 #include <Arduino.h>
 #include <esp_random.h>
 #include <string.h>
@@ -616,7 +617,9 @@ void onAckBatchReceived(const uint8_t* from, const uint8_t* payload, size_t payl
     memcpy(&msgId, payload + 1 + i * MSG_ID_LEN, MSG_ID_LEN);
     uint8_t singlePayload[MSG_ID_LEN];
     memcpy(singlePayload, &msgId, MSG_ID_LEN);
-    if (onAckReceived(from, singlePayload, MSG_ID_LEN, false, true, true) && onDelivered) {
+    const bool mqAck = onAckReceived(from, singlePayload, MSG_ID_LEN, false, true, true);
+    const bool voiceAck = !mqAck && voice_frag::matchAck(from, msgId);
+    if (onDelivered && (mqAck || voiceAck)) {
       onDelivered(from, msgId, rssi);
     }
   }

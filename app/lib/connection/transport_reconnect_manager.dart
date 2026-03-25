@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import '../ble/riftlink_ble.dart';
+import '../chat/chat_repository.dart';
 import '../recent_devices/recent_devices_service.dart';
 import 'reconnect_overlay_controller.dart';
 
@@ -136,8 +137,10 @@ class TransportReconnectManager {
         return;
       }
 
-      // Долгая тишина на BLE-событиях: LoRa в UART может идти, а в телефон ничего не приходит — не спешим.
-      const idleThreshold = Duration(seconds: 25);
+      // Долгая тишина на BLE: LoRa в UART может идти, а в телефон ничего не приходит — не спешим.
+      // Wi‑Fi WebSocket без notify: короче порог — иначе при выключенном узле полуоткрытый TCP долго «жив».
+      final idleThreshold =
+          _ble.isWifiMode ? const Duration(seconds: 10) : const Duration(seconds: 25);
       // Ждём завершения getInfo дольше, чем timeout запроса (5s): длинный multi-chunk notify блокирует ответ.
       const probeTimeout = Duration(seconds: 12);
       final idleFor = now.difference(_lastTransportActivityAt);
@@ -153,7 +156,13 @@ class TransportReconnectManager {
             _lastTransportActivityAt = DateTime.now();
             return;
           }
-          // Таймаут/ошибка getInfo ≠ разрыв GATT: при занятом notify ответ может не уложиться.
+          // Wi‑Fi: таймаут getInfo почти всегда мёртвый узел / полуоткрытый TCP, не «занят notify».
+          if (_ble.isWifiMode && _ble.isTransportConnected) {
+            _ble.abandonWifiSession();
+            unawaited(triggerReconnect(reason: 'wifi_probe_failed'));
+            return;
+          }
+          // BLE: таймаут getInfo ≠ разрыв GATT — при занятом notify ответ может не уложиться.
           if (_ble.isTransportConnected) {
             _lastTransportActivityAt = DateTime.now();
             return;
@@ -167,6 +176,11 @@ class TransportReconnectManager {
       if (probeAt != null && now.difference(probeAt) >= probeTimeout) {
         _probePending = false;
         _probeAt = null;
+        if (_ble.isWifiMode && _ble.isTransportConnected) {
+          _ble.abandonWifiSession();
+          unawaited(triggerReconnect(reason: 'wifi_probe_timeout'));
+          return;
+        }
         if (_ble.isTransportConnected) {
           _lastTransportActivityAt = DateTime.now();
           return;
@@ -248,8 +262,14 @@ class TransportReconnectManager {
   }
 
   Future<void> _reconnectWithRetry() async {
-    final isWifi = _ble.isWifiMode;
-    final wifiIp = _ble.lastInfo?.wifiIp?.trim();
+    // После abandonWifiSession _isWifiMode=false, но узел по-прежнему только по WebSocket.
+    // IP храним в lastWifiReconnectIp (не в lastInfo — disconnect обнуляет кэш).
+    final wifiIpSaved = _ble.lastWifiReconnectIp?.trim();
+    final wifiIpLive = _ble.wifiIp?.trim();
+    final wifiIp = (wifiIpSaved != null && wifiIpSaved.isNotEmpty)
+        ? wifiIpSaved
+        : ((wifiIpLive != null && wifiIpLive.isNotEmpty) ? wifiIpLive : null);
+    final isWifi = _ble.isWifiMode || (wifiIp != null && wifiIp.isNotEmpty);
     String? remoteId = _ble.device?.remoteId.toString() ?? _ble.lastBleRemoteId;
 
     if (!isWifi && (remoteId == null || remoteId.isEmpty)) {
@@ -325,6 +345,12 @@ class TransportReconnectManager {
           );
         })().timeout(_connectAttemptTimeout, onTimeout: () => false);
         if (ok) {
+          if (isWifi) {
+            final nodeId = _ble.lastInfo?.id;
+            if (nodeId != null && nodeId.isNotEmpty) {
+              await ChatRepository.instance.migrateToCanonicalNodeScopeIfNeeded(nodeId);
+            }
+          }
           final elapsedMs = DateTime.now().difference(attemptStartedAt).inMilliseconds;
           final remainingMs = baseAttemptDurationMs - elapsedMs;
           if (remainingMs > 0) {

@@ -1,6 +1,35 @@
 # Журнал изменений RiftLink
 
-Формат: версия **прошивки и приложения** синхронизированы по семантике релиза (например `1.5.22`).
+Формат: версия **прошивки и приложения** синхронизированы по семантике релиза (например `1.5.23`).
+
+---
+
+## 1.5.23 — 2026-03-25
+
+### Прошивка (все платы)
+
+- **VOICE_MSG**: убран лишний гейт `ble::isConnected()` при приёме — в режиме **Wi‑Fi + WebSocket** приложение не считалось «подключённым» по BLE, сборка голоса не выполнялась и сообщение не доходило; доставка по-прежнему ограничена `hasActiveTransport()` внутри `notifyVoice()`.
+- **TX**: увеличены пул/очередь `TxRequest` (**48**), слоты **send_overflow** (priority **16** / normal **16**, раньше 4/8), **DEFERRED_SEND_SLOTS 32** — при burst HELLO (`0x03`) и CAD не срывать очередь в `txreq_pool_empty` и `deferred fallback txRequestQueue full, drop copy` (страдали в т.ч. фрагменты голоса).
+- **VOICE reassembly** (`voice_frag::onFragment`): добавлена **битовая маска** уникальных фрагментов + корректный расчёт `encLen` по длине **последнего** фрагмента (`part==total`). Раньше дубликат того же фрагмента увеличивал счётчик `partsReceived` → ложное «все части собраны» с нулями в буфере → `decryptFrom` ломался; `encLen` считался по `chunkLen` **последнего обработанного** пакета, а не по последнему номеру части.
+- **VOICE slots**: **2 слота** сборки (было 1) + таймаут **15 с** (было 60) + **evict oldest** при нехватке слотов вместо безусловного `no_slot` дропа. Один слот с потерянным фрагментом блокировал приём **всех** голосовых сообщений до истечения таймаута.
+- **VOICE BLE notify** (`ble::notifyVoice`): **исправлен off-by-one в `mbedtls_base64_encode`** — буфер передавался на 1 байт меньше требуемого (`sizeof(b64)-1` = 400, нужно 401 для null-терминатора) → `b64_fail` на первом же чанке → **ни один голосовой чанк не доходил до приложения**; переход на `notifyJsonToAppBleRetry` с retry; **inter-chunk delay 4 ms** между JSON-чанками; подробная диагностика.
+- **serial-диагностика VOICE_MSG на приёмнике**: `VOICE_FRAG` (`FRAG_RX`, `FRAG_RX_OK`, `FRAG_COMPLETE`, `FRAG_DECRYPT_FAIL` и др.) и `BLE_CHAIN stage=fw_handle_voice` в `handlePacket` — расследование неполной сборки фрагментов и ошибок дешифрования без «немого» отклонения пакетов.
+
+### Прошивка: LilyGO T-Beam V1.1/V1.2
+
+- Новое окружение **`lilygo_t_beam`** (ESP32, SX1262, OLED SSD1306, NEO-6M GPS, AXP2101 PMU) + **`lilygo_t_beam_ota`**.
+- **Board JSON** (`boards/lilygo_t_beam.json`): ESP32 240 MHz, 8MB flash, PSRAM.
+- **AXP2101 PMU** (`board/lilygo_tbeam.cpp`): управление питанием LoRa (ALDO2), GPS (ALDO3); чтение напряжения батареи и статуса зарядки через I2C.
+- **Дисплей**: общий `ui/display.cpp` с условной компиляцией пинов T-Beam (SDA=21, SCL=22, без VEXT/RST).
+- **Радио**: пины SX1262 (NSS=18, RST=23, DIO1=33, BUSY=32, SPI: SCK=5, MISO=19, MOSI=27); XTAL вместо TCXO.
+- **GPS**: NEO-6M UART (RX=34, TX=12); питание через AXP2101 вместо GPIO.
+- **Телеметрия**: батарея через AXP2101 ADC (обход ESP-IDF ADC oneshot API, отсутствующего на ESP32).
+- **sdkconfig.tbeam.defaults** для ESP32 BTDM coexistence (справочный файл).
+
+### Сборка и публикация
+
+- Синхронизированы **`firmware/src/version.h`**, **`app/pubspec.yaml`** (**1.5.23+9**), манифесты веб-флешера, **`embedded-release.json`**, **`release-github.json`**, README, PROTOCOL, CUSTOM_PROTOCOL_PLAN, API.
+- APK для GitHub Releases: **`RiftLink-1.5.23-arm64-v8a.apk`** (после сборки и загрузки в релиз **v1.5.23**). Образы `*_full.bin` в **`docs/flasher/firmware/`** — обновить после локальной сборки прошивок.
 
 ---
 
@@ -11,6 +40,11 @@
 - Полная пересборка прошивок: **Heltec V3**, **V4**, **V3 Paper**, **LilyGO T-Lora Pager**; обновлены образы `*_full.bin` в **`docs/flasher/firmware/`** и поле **`version`** в манифестах веб-флешера.
 - Версия приложения **1.5.22+8**; синхронизированы **`firmware/src/version.h`**, **`embedded-release.json`**, **`release-github.json`**, README, PROTOCOL, CUSTOM_PROTOCOL_PLAN, API.
 - APK для GitHub Releases: **`RiftLink-1.5.22-arm64-v8a.apk`** (после сборки и загрузки в релиз **v1.5.22**).
+
+### Состояние узла (прошивка и приложение)
+
+- Прошивка: в JSON `evt:node` добавлены поля internal heap (`heapFree`, `heapTotal`, `heapMin`), `cpuMhz`, `flashMb`, `appPartKb`, размер партиции NVS и счётчики `nvs_get_stats` (`nvsUsedEnt`, `nvsFreeEnt`, `nvsTotalEnt`, `nvsNs`); увеличен буфер сериализации снимка узла.
+- Приложение: лист «Состояние узла» выводит прошивку, кучу, частоту ЦПУ, Flash, раздел приложения и NVS; шит с прокруткой; на старых прошивках новые поля — «—».
 
 ---
 

@@ -41,6 +41,34 @@ class RecentDevicesService {
   static String _normalizeNodeId(String raw) =>
       raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
   static bool _isFullNodeId(String id) => id.length == 16;
+
+  /// Заголовок и подпись для списков: 1) ник из [RecentDevice.nickname], 2) иначе ник из контактов,
+  /// 3) иначе только Node ID (без второй строки). При (1) и (2) вторая строка — Node ID.
+  ///
+  /// [contactNickname] — только имя из контактов ([ContactsService.contactNicknameIfDistinct]),
+  /// не результат [ContactsService.displayNodeLabel] (там подставляется id).
+  static ({String title, String? subtitle}) displayTitles(
+    RecentDevice d, {
+    String? contactNickname,
+  }) {
+    final idShow = _normalizeNodeId(d.nodeId);
+    final fromRecent = d.nickname?.trim();
+    if (fromRecent != null && fromRecent.isNotEmpty) {
+      return (title: fromRecent, subtitle: _isFullNodeId(idShow) ? idShow : null);
+    }
+    final fromContacts = contactNickname?.trim();
+    if (_isFullNodeId(idShow) &&
+        fromContacts != null &&
+        fromContacts.isNotEmpty &&
+        fromContacts.toUpperCase() != idShow) {
+      return (title: fromContacts, subtitle: idShow);
+    }
+    if (idShow.isNotEmpty) {
+      return (title: idShow, subtitle: null);
+    }
+    return (title: d.remoteId, subtitle: null);
+  }
+
   static final RegExp _ipv4 = RegExp(
     r'^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$',
   );

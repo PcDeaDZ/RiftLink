@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/scheduler.dart';
@@ -21,6 +22,7 @@ import '../locale_notifier.dart';
 import '../theme/app_theme.dart';
 import '../theme/design_tokens.dart';
 import '../mesh_constants.dart';
+import '../constants/voice_limits.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/app_primitives.dart';
 import '../widgets/app_snackbar.dart';
@@ -123,7 +125,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   _VoiceAdaptivePlan _voicePlan = const _VoiceAdaptivePlan(
     profileCode: 2,
     bitRate: 32000,
-    maxBytes: 15360,
+    maxBytes: kMaxVoicePlainBytes,
     chunkSize: 240,
   );
   DateTime? _voiceRecordStartTime;
@@ -429,6 +431,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     });
   }
 
+  /// Один раз при открытии личного чата или смене получателя ([force]=true). Без периодического опроса в фоне.
   void _scheduleDirectPeerAutoPing({bool force = false}) {
     if (_chatContextType() != ChatContextType.direct) return;
     final peer = _activeDirectPeerId();
@@ -582,6 +585,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       deleteAt: m.deleteAtMs != null ? DateTime.fromMillisecondsSinceEpoch(m.deleteAtMs!) : null,
       isLocation: m.type == 'location',
       isVoice: m.type == 'voice',
+      voiceData: m.voiceData != null ? m.voiceData!.toList() : null,
     );
   }
 
@@ -664,7 +668,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
           _neighborsHasKey.length != _neighbors.length ||
           _neighborsHasKey.any((k) => !k);
       if (needRefresh) widget.ble.getInfo();
-      _scheduleDirectPeerAutoPing();
+      // Онлайн собеседника в личке проверяем только при входе в чат / смене получателя, не в цикле.
     });
     // GPS sync от телефона: UTC + координаты для beacon-sync (устройство без GPS)
     _gpsSyncTimer = Timer.periodic(const Duration(seconds: 15), (_) => _sendGpsSyncFromPhone());
@@ -745,7 +749,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _appLifecycle = state;
     if (state == AppLifecycleState.resumed) {
-      _scheduleDirectPeerAutoPing();
       _reconcileNeighborsFromBleCache();
       unawaited(_reloadMessagesFromRepository());
     }
@@ -900,20 +903,20 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   Widget _buildSwitchItem(BuildContext ctx, RecentDevice d) {
     final l = context.l10n;
     final idNorm = _normNodeId(d.nodeId);
-    final nick = idNorm.isNotEmpty ? _nicknameForId(idNorm) : null;
-    final title = nick ??
-        (d.displayName.isNotEmpty ? d.displayName : (idNorm.isNotEmpty ? idNorm : d.remoteId));
+    final contactNick = idNorm.isNotEmpty ? _nicknameForId(idNorm) : null;
+    final t = RecentDevicesService.displayTitles(d, contactNickname: contactNick);
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         ListTile(
           leading: Icon(Icons.bluetooth, color: context.palette.primary),
-          title: Text(title, style: TextStyle(color: context.palette.onSurface, fontWeight: FontWeight.w500)),
-          subtitle: nick == null && d.displayName != d.nodeId
+          title: Text(t.title, style: TextStyle(color: context.palette.onSurface, fontWeight: FontWeight.w500)),
+          subtitle: t.subtitle != null
               ? Text(
-                  d.nodeId,
-                  style: AppTypography.monoSmallBase().copyWith(
+                  t.subtitle!,
+                  style: AppTypography.chipBase().copyWith(
                     color: context.palette.onSurfaceVariant,
+                    fontFamily: 'monospace',
                   ),
                 )
               : null,
@@ -936,10 +939,13 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   Future<void> _confirmForgetAndPop(BuildContext ctx, RecentDevice d) async {
     final l = context.l10n;
+    final idNorm = _normNodeId(d.nodeId);
+    final contactNick = idNorm.isNotEmpty ? _nicknameForId(idNorm) : null;
+    final titles = RecentDevicesService.displayTitles(d, contactNickname: contactNick);
     final confirm = await showRiftConfirmDialog(
       context: ctx,
       title: l.tr('forget_device'),
-      message: l.tr('forget_device_confirm', {'name': d.displayName}),
+      message: l.tr('forget_device_confirm', {'name': titles.title}),
       cancelText: l.tr('cancel'),
       confirmText: l.tr('delete'),
       danger: true,
@@ -1152,6 +1158,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                       _group = 0;
                       _groupUid = null;
                     });
+                    if (_unicastTo != null) {
+                      _scheduleDirectPeerAutoPing(force: true);
+                    }
                   },
                   onLongPress: hasKey ? () => _showAddContactDialog(idNorm) : null,
                 ),
@@ -1178,6 +1187,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                       _group = 0;
                       _groupUid = null;
                     });
+                    _scheduleDirectPeerAutoPing(force: true);
                   },
                   onLongPress: () => _showAddContactDialog(id),
                 ),
@@ -1431,12 +1441,12 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         ? -100.0
         : rssiValues.reduce((a, b) => a + b) / rssiValues.length;
     if ((_sf ?? 12) >= 11 || _neighbors.length <= 1 || avgRssi <= -95.0) {
-      return const _VoiceAdaptivePlan(profileCode: 3, bitRate: 16000, maxBytes: 15360, chunkSize: 180);
+      return const _VoiceAdaptivePlan(profileCode: 3, bitRate: 16000, maxBytes: kMaxVoicePlainBytes, chunkSize: 180);
     }
     if ((_sf ?? 12) >= 10 || avgRssi <= -82.0) {
-      return const _VoiceAdaptivePlan(profileCode: 2, bitRate: 32000, maxBytes: 15360, chunkSize: 240);
+      return const _VoiceAdaptivePlan(profileCode: 2, bitRate: 32000, maxBytes: kMaxVoicePlainBytes, chunkSize: 240);
     }
-    return const _VoiceAdaptivePlan(profileCode: 1, bitRate: 64000, maxBytes: 15360, chunkSize: 300);
+    return const _VoiceAdaptivePlan(profileCode: 1, bitRate: 64000, maxBytes: kMaxVoicePlainBytes, chunkSize: 300);
   }
 
   String _voiceProfileLabel(int code) {
@@ -1688,7 +1698,9 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       },
       onErrorEvent: (event) {
         var msg = event.msg;
-        if (event.code == 'invite_peer_key_mismatch') {
+        if (event.code == 'voice_send_fail') {
+          msg = context.l10n.tr('voice_send_fail');
+        } else if (event.code == 'invite_peer_key_mismatch') {
           msg = context.l10n.tr('invite_status_mismatch');
         } else if (event.code == 'invite_token_bad_length' || event.code == 'invite_token_bad_format') {
           msg = context.l10n.tr('invite_status_token_bad');
@@ -2643,10 +2655,6 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   // ── Input bar: одна панель. При записи — кнопка растёт на месте, слева таймер и свайп. ──
 
-  void _showVoiceRestrictionSnack() {
-    _showSnack(context.l10n.tr('voice_only_direct_chat'));
-  }
-
   Widget _buildInputBar(AppLocalizations l) {
     final matrix = _featureMatrix();
     final elapsed = _voiceRecordStartTime != null
@@ -2786,19 +2794,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                                         size: 36,
                                         iconSize: AppIconSize.sm,
                                       )
-                            : _TtlTapButton(
-                                onTap: connected
-                                    ? (matrix.canVoice
-                                        ? _toggleVoiceRecord
-                                        : _showVoiceRestrictionSnack)
-                                    : null,
-                                onLongPress: connected && matrix.canVoice
-                                    ? _onVoiceLongPress
-                                    : null,
-                                icon: Icons.mic,
-                                size: 36,
-                                iconSize: AppIconSize.md,
-                              ),
+                            : matrix.canVoice
+                                ? _TtlTapButton(
+                                    onTap: connected ? _toggleVoiceRecord : null,
+                                    onLongPress: connected ? _onVoiceLongPress : null,
+                                    icon: Icons.mic,
+                                    size: 36,
+                                    iconSize: AppIconSize.md,
+                                  )
+                                : const SizedBox(width: 36, height: 36),
                     ),
                   ),
                 ],
@@ -2815,18 +2819,25 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   Widget _buildMessageBubble(_Msg m) {
     final mine = !m.isIncoming;
     final l = context.l10n;
+    final canCopy = !m.isVoice && m.text.isNotEmpty;
     return Align(
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.only(bottom: AppSpacing.sm),
-        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md + 2, vertical: AppSpacing.sm),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
-        decoration: BoxDecoration(
-          color: mine ? context.palette.primary.withOpacity(0.25) : context.palette.card,
-          borderRadius: BorderRadius.circular(AppRadius.lg),
-          border: Border.all(color: mine ? context.palette.primary : context.palette.divider),
-        ),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      child: GestureDetector(
+        onLongPress: canCopy ? () {
+          HapticFeedback.mediumImpact();
+          Clipboard.setData(ClipboardData(text: m.text));
+          _showSnack(l.tr('copied'));
+        } : null,
+        child: Container(
+          margin: const EdgeInsets.only(bottom: AppSpacing.sm),
+          padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md + 2, vertical: AppSpacing.sm),
+          constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
+          decoration: BoxDecoration(
+            color: mine ? context.palette.primary.withOpacity(0.25) : context.palette.card,
+            borderRadius: BorderRadius.circular(AppRadius.lg),
+            border: Border.all(color: mine ? context.palette.primary : context.palette.divider),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
           if (m.isIncoming && m.from.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(bottom: AppSpacing.xs / 2),
@@ -2855,34 +2866,62 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                 ),
               ),
             ),
-          Row(mainAxisSize: MainAxisSize.min, children: [
-            Flexible(
-              child: Text(
-                m.text,
-                style: AppTypography.bodyLargeBase().copyWith(color: context.palette.onSurface),
+          if (m.isVoice && m.voiceData != null)
+            _VoiceBubbleContent(
+              playbackSessionKey: Object.hash(
+                m.at.microsecondsSinceEpoch,
+                m.from,
+                m.msgId ?? 0,
+                Object.hashAll(m.voiceData!),
               ),
-            ),
-            if (!m.isIncoming)
-              Padding(
-                padding: const EdgeInsets.only(left: AppSpacing.sm),
-                child: _buildOutgoingDeliveryStatus(m),
-              ),
-            if (m.isIncoming && m.rssi != null && m.rssi != 0)
-              Padding(
-                padding: const EdgeInsets.only(left: AppSpacing.sm),
-                child: Text(
-                  '${m.rssi}dBm',
-                  style: AppTypography.microBase().copyWith(
-                    color: context.palette.onSurfaceVariant,
-                  ),
+              voiceData: m.voiceData!,
+              voiceProfileCode: m.voiceProfileCode,
+              mine: mine,
+              status: mine ? m.status : null,
+              statusWidget: mine ? _buildOutgoingDeliveryStatus(m) : null,
+              rssi: m.isIncoming ? m.rssi : null,
+            )
+          else if (m.isVoice && m.voiceData == null)
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.mic_off_rounded, size: 16, color: context.palette.onSurfaceVariant),
+              const SizedBox(width: AppSpacing.xs),
+              Text(
+                context.l10n.tr('voice'),
+                style: AppTypography.bodyLargeBase().copyWith(
+                  color: context.palette.onSurfaceVariant,
+                  fontStyle: FontStyle.italic,
                 ),
               ),
-            if (m.isVoice && m.voiceData != null) IconButton(
-              icon: Icon(Icons.play_circle_outline, color: context.palette.primary, size: AppIconSize.lg),
-              onPressed: () async { if (m.voiceData != null && m.voiceData!.isNotEmpty) await VoiceService.play(m.voiceData!); },
-              tooltip: context.l10n.tr('play'), padding: EdgeInsets.zero, constraints: const BoxConstraints(),
-            ),
-          ]),
+              if (!m.isIncoming)
+                Padding(
+                  padding: const EdgeInsets.only(left: AppSpacing.sm),
+                  child: _buildOutgoingDeliveryStatus(m),
+                ),
+            ])
+          else
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              Flexible(
+                child: Text(
+                  m.text,
+                  style: AppTypography.bodyLargeBase().copyWith(color: context.palette.onSurface),
+                ),
+              ),
+              if (!m.isIncoming)
+                Padding(
+                  padding: const EdgeInsets.only(left: AppSpacing.sm),
+                  child: _buildOutgoingDeliveryStatus(m),
+                ),
+              if (m.isIncoming && m.rssi != null && m.rssi != 0)
+                Padding(
+                  padding: const EdgeInsets.only(left: AppSpacing.sm),
+                  child: Text(
+                    '${m.rssi}dBm',
+                    style: AppTypography.microBase().copyWith(
+                      color: context.palette.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+            ]),
           const SizedBox(height: AppSpacing.xs / 2),
           Text(
             m.isIncoming
@@ -2893,6 +2932,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
             ),
           ),
         ]),
+        ),
       ),
     );
   }
@@ -2947,6 +2987,307 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     );
   }
 
+}
+
+// ── Voice bubble (waveform + Play/Pause + duration) ──
+
+class _VoiceBubbleContent extends StatefulWidget {
+  /// Уникален на сообщение (не только по байтам аудио), иначе совпадение ключа с другим пузырьком.
+  final Object playbackSessionKey;
+  final List<int> voiceData;
+  final int? voiceProfileCode;
+  final bool mine;
+  final ChatUiMessageStatus? status;
+  final Widget? statusWidget;
+  final int? rssi;
+
+  const _VoiceBubbleContent({
+    required this.playbackSessionKey,
+    required this.voiceData,
+    this.voiceProfileCode,
+    required this.mine,
+    this.status,
+    this.statusWidget,
+    this.rssi,
+  });
+
+  @override
+  State<_VoiceBubbleContent> createState() => _VoiceBubbleContentState();
+}
+
+class _VoiceBubbleContentState extends State<_VoiceBubbleContent> with SingleTickerProviderStateMixin {
+  StreamSubscription<VoicePlaybackState>? _sub;
+  VoicePlaybackState _playback = const VoicePlaybackState();
+  late Object _playbackSessionKey;
+  late List<double> _waveformBars;
+  late Duration _estimatedDuration;
+  /// Сглаживание дискретных onProgress (~100 ms) для плавной полоски.
+  late AnimationController _progressSmooth;
+
+  @override
+  void initState() {
+    super.initState();
+    _playbackSessionKey = widget.playbackSessionKey;
+    _waveformBars = _generateDecorativeWaveform(widget.voiceData, 32);
+    _estimatedDuration = VoiceService.estimateDuration(
+      widget.voiceData,
+      voiceProfileCode: widget.voiceProfileCode,
+    );
+    _progressSmooth = AnimationController(vsync: this, duration: const Duration(milliseconds: 260));
+    _progressSmooth.addListener(() {
+      if (mounted) setState(() {});
+    });
+    _sub = VoiceService.playbackStream.listen((state) {
+      if (!mounted) return;
+      final isOurs = VoiceService.currentPlaybackKey == _playbackSessionKey;
+      // Для нашего трека принимаем любое состояние потока (в т.ч. пустое при старте/сбросе),
+      // иначе после повторного Play локально остаётся progress≈1 и полоска «залипает».
+      if (isOurs) {
+        setState(() => _playback = state);
+        final t = _voicePlaybackSmoothTarget(state);
+        _progressSmooth.animateTo(
+          t,
+          duration: const Duration(milliseconds: 260),
+          curve: Curves.easeOutCubic,
+        );
+      } else if (_playback.isPlaying || _playback.progress > 0) {
+        _progressSmooth.stop();
+        _progressSmooth.value = 0;
+        setState(() => _playback = const VoicePlaybackState());
+      }
+    });
+  }
+
+  @override
+  void didUpdateWidget(_VoiceBubbleContent oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.playbackSessionKey != widget.playbackSessionKey) {
+      if (VoiceService.currentPlaybackKey == _playbackSessionKey) {
+        VoiceService.stopPlay();
+      }
+      _playbackSessionKey = widget.playbackSessionKey;
+      _waveformBars = _generateDecorativeWaveform(widget.voiceData, 32);
+      _estimatedDuration = VoiceService.estimateDuration(
+        widget.voiceData,
+        voiceProfileCode: widget.voiceProfileCode,
+      );
+      _playback = const VoicePlaybackState();
+      _progressSmooth.stop();
+      _progressSmooth.value = 0;
+      setState(() {});
+    }
+  }
+
+  @override
+  void dispose() {
+    _progressSmooth.dispose();
+    if (VoiceService.currentPlaybackKey == _playbackSessionKey) {
+      VoiceService.stopPlay();
+    }
+    _sub?.cancel();
+    super.dispose();
+  }
+
+  /// Цель для полоски: плеер часто не шлёт ровно 1.0 — доводим до конца по позиции/доле.
+  static double _voicePlaybackSmoothTarget(VoicePlaybackState s) {
+    final d = s.duration;
+    if (d <= Duration.zero) return s.progress.clamp(0.0, 1.0);
+    final dm = d.inMilliseconds;
+    final pm = s.position.inMilliseconds;
+    final ratio = pm / dm;
+    final g = s.progress.clamp(0.0, 1.0);
+    final best = ratio > g ? ratio : g;
+    if (best >= 0.985 || pm >= dm - 2) return 1.0;
+    return best.clamp(0.0, 1.0);
+  }
+
+  static List<double> _generateDecorativeWaveform(List<int> data, int barCount) {
+    if (data.length < 2) {
+      return List.filled(barCount, 0.5);
+    }
+    final step = data.length / barCount;
+    int seed = data.length ^ 0x5A3C;
+    for (int i = 0; i < data.length; i += math.max(1, data.length ~/ 32)) {
+      seed = (seed * 31 + data[i]) & 0x7FFFFFFF;
+    }
+    final rng = math.Random(seed);
+    return List.generate(barCount, (i) {
+      final idx = (i * step).toInt().clamp(0, data.length - 1);
+      final sample = data[idx] / 255.0;
+      final noise = rng.nextDouble() * 0.3;
+      return (0.15 + sample * 0.55 + noise).clamp(0.15, 1.0);
+    });
+  }
+
+  String _formatDuration(Duration d) {
+    final totalSec = d.inSeconds;
+    final min = totalSec ~/ 60;
+    final sec = totalSec % 60;
+    return '$min:${sec.toString().padLeft(2, '0')}';
+  }
+
+  String _formatSize(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    final kb = bytes / 1024;
+    return '${kb.toStringAsFixed(1)} KB';
+  }
+
+  void _togglePlayback() {
+    final ours = VoiceService.currentPlaybackKey == _playbackSessionKey;
+    final playing = VoiceService.isPlaying;
+    if (playing && ours) {
+      VoiceService.stopPlay();
+    } else {
+      _progressSmooth.stop();
+      _progressSmooth.value = 0;
+      setState(() => _playback = const VoicePlaybackState());
+      VoiceService.playWithProgress(
+        widget.voiceData,
+        key: _playbackSessionKey,
+        voiceProfileCode: widget.voiceProfileCode,
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final isThisTrack = VoiceService.currentPlaybackKey == _playbackSessionKey;
+    final playerGoing = VoiceService.isPlaying;
+    // После остановки плеера isPlaying=false, но финальный кадр progress=1 ещё должен отрисоваться.
+    final rawSmooth = _progressSmooth.value.clamp(0.0, 1.0);
+    final showBar = isThisTrack && (playerGoing || rawSmooth > 0.002);
+    final barProgress = showBar ? (rawSmooth >= 0.995 ? 1.0 : rawSmooth) : 0.0;
+    final showPause = isThisTrack && playerGoing;
+    final displayDuration = showBar && _playback.duration > Duration.zero
+        ? _playback.duration
+        : _estimatedDuration;
+    final displayDm = displayDuration.inMilliseconds;
+    final displayPosition = showBar && displayDm > 0
+        ? Duration(
+            milliseconds: (barProgress * displayDm).round().clamp(0, displayDm),
+          )
+        : Duration.zero;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            GestureDetector(
+              onTap: _togglePlayback,
+              child: Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: palette.primary.withOpacity(0.15),
+                ),
+                child: Icon(
+                  showPause ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                  color: palette.primary,
+                  size: 22,
+                ),
+              ),
+            ),
+            const SizedBox(width: AppSpacing.sm),
+            Flexible(
+              child: SizedBox(
+                height: 28,
+                child: CustomPaint(
+                  painter: _WaveformPainter(
+                    bars: _waveformBars,
+                    progress: barProgress,
+                    activeColor: palette.primary,
+                    inactiveColor: palette.onSurfaceVariant.withOpacity(0.3),
+                  ),
+                  size: const Size(double.infinity, 28),
+                ),
+              ),
+            ),
+            if (widget.mine && widget.statusWidget != null)
+              Padding(
+                padding: const EdgeInsets.only(left: AppSpacing.sm),
+                child: widget.statusWidget!,
+              ),
+            if (!widget.mine && widget.rssi != null && widget.rssi != 0)
+              Padding(
+                padding: const EdgeInsets.only(left: AppSpacing.sm),
+                child: Text(
+                  '${widget.rssi}dBm',
+                  style: AppTypography.microBase().copyWith(
+                    color: palette.onSurfaceVariant,
+                  ),
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: AppSpacing.xs / 2),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              showBar
+                  ? '${_formatDuration(displayPosition)} / ${_formatDuration(displayDuration)}'
+                  : _formatDuration(displayDuration),
+              style: AppTypography.microBase().copyWith(
+                color: palette.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(width: AppSpacing.sm),
+            Text(
+              _formatSize(widget.voiceData.length),
+              style: AppTypography.microBase().copyWith(
+                color: palette.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _WaveformPainter extends CustomPainter {
+  final List<double> bars;
+  final double progress;
+  final Color activeColor;
+  final Color inactiveColor;
+
+  _WaveformPainter({
+    required this.bars,
+    required this.progress,
+    required this.activeColor,
+    required this.inactiveColor,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (bars.isEmpty) return;
+    final barWidth = 2.5;
+    final gap = (size.width - bars.length * barWidth) / (bars.length - 1).clamp(1, bars.length);
+    final activePaint = Paint()..color = activeColor..strokeCap = StrokeCap.round;
+    final inactivePaint = Paint()..color = inactiveColor..strokeCap = StrokeCap.round;
+    final progressX = progress * size.width;
+
+    for (int i = 0; i < bars.length; i++) {
+      final x = i * (barWidth + gap) + barWidth / 2;
+      final h = bars[i] * size.height * 0.85;
+      final top = (size.height - h) / 2;
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(x - barWidth / 2, top, barWidth, h),
+        const Radius.circular(1.5),
+      );
+      canvas.drawRRect(rect, x <= progressX ? activePaint : inactivePaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_WaveformPainter old) =>
+      old.progress != progress || old.activeColor != activeColor;
 }
 
 typedef _St = ChatUiMessageStatus;

@@ -52,6 +52,7 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include "wifi/wifi.h"
 #include "locale/locale.h"
 #include "voice_frag/voice_frag.h"
+#include "voice_buffers/voice_buffers.h"
 #include "gps/gps.h"
 #include "selftest/selftest.h"
 #include "powersave/powersave.h"
@@ -70,6 +71,10 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include "board/lilygo_tpager.h"
 #define BUTTON_PIN 7   // энкодер center (wiki)
 #define LED_PIN 0      // нет отдельного LED как на Heltec; GPIO35 = SPI SCK на T-Pager
+#elif defined(ARDUINO_LILYGO_T_BEAM)
+#include "board/lilygo_tbeam.h"
+#define BUTTON_PIN 38  // T-Beam V1.1/V1.2: кнопка USER
+#define LED_PIN 4      // T-Beam: встроенный LED
 #else
 #define BUTTON_PIN 0   // Heltec USER_SW
 #define LED_PIN 35     // Heltec V3/V4
@@ -550,9 +555,8 @@ void getNextRxSlotParams(uint8_t* sfOut, uint32_t* slotMsOut) {
 #endif
 }
 
-// Буферы для handlePacket (packetTask) — s_fragOutBuf/s_voiceOutBuf слишком велики для стека
+// Буферы для handlePacket (packetTask) — слишком велики для стека
 static uint8_t s_fragOutBuf[frag::MAX_MSG_PLAIN];
-static uint8_t s_voiceOutBuf[voice_frag::MAX_VOICE_PLAIN + 1024];
 
 static bool s_lastButton = false;
 static uint32_t s_pressStart = 0;
@@ -934,6 +938,27 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     }
     if (parseRes.status == protocol::ParseStatus::len_mismatch) {
       s_rxLenMismatchCount++;
+    }
+    // Short buffers: collision tail, noise, or truncated RX — cannot reconstruct missing bytes in SW.
+    // Rate-limit UART: one summary line per window instead of hex on every fragment.
+    {
+      static uint32_t s_parseShortWindowCount = 0;
+      static uint32_t s_parseShortLastLogMs = 0;
+      constexpr uint32_t kParseShortLogPeriodMs = 5000;
+      if (len <= 32) {
+        s_parseShortWindowCount++;
+        const uint32_t nowMs = millis();
+        if (s_parseShortLastLogMs != 0 && (nowMs - s_parseShortLastLogMs) < kParseShortLogPeriodMs) {
+          return;
+        }
+        RIFTLINK_DIAG("PARSE",
+            "event=RX_PARSE_SHORT_SUMMARY n=%lu window~%ums last_status=%s (trunc/collision/noise; not recoverable) len_mismatch_total=%lu",
+            (unsigned long)s_parseShortWindowCount, (unsigned)kParseShortLogPeriodMs,
+            protocol::parseStatusToString(parseRes.status), (unsigned long)s_rxLenMismatchCount);
+        s_parseShortWindowCount = 0;
+        s_parseShortLastLogMs = nowMs;
+        return;
+      }
     }
     RIFTLINK_DIAG("PARSE", "event=RX_PARSE_FAIL status=%s len=%u expected=%u off=%u op=0x%02X pktId=%u rssi=%d sf=%u len_mismatch_total=%lu",
         protocol::parseStatusToString(parseRes.status), (unsigned)len, (unsigned)parseRes.expectedLen,
@@ -1471,6 +1496,9 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         memcpy(&msgId, ackPlain, msg_queue::MSG_ID_LEN);
         if (msg_queue::onAckReceived(hdr.from, ackPlain, ackPlainLen, false, true, true)) {
           ble::notifyDelivered(hdr.from, msgId, rssi);
+        } else if (voice_frag::matchAck(hdr.from, msgId)) {
+          ble::notifyDelivered(hdr.from, msgId, rssi);
+          RIFTLINK_DIAG("ACK", "event=VOICE_ACK_MATCHED from=%02X%02X msgId=%u", hdr.from[0], hdr.from[1], (unsigned)msgId);
         }
       }
       break;
@@ -1813,17 +1841,34 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       }
       break;
 
-    case protocol::OP_VOICE_MSG:
-      if (payloadLen >= 6 && node::isForMe(hdr.to) && ble::isConnected()) {
+    case protocol::OP_VOICE_MSG: {
+      bool forMe = node::isForMe(hdr.to);
+      RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_voice action=enter from=%02X%02X payloadLen=%u isForMe=%u",
+          hdr.from[0], hdr.from[1], (unsigned)payloadLen, (unsigned)forMe);
+      if (payloadLen >= 6 && forMe) {
         size_t outLen = 0;
-        if (voice_frag::onFragment(hdr.from, hdr.to, payload, payloadLen,
-                                  s_voiceOutBuf, sizeof(s_voiceOutBuf), &outLen)) {
+        uint32_t voiceMsgId = 0;
+        bool assembled = voice_frag::onFragment(hdr.from, hdr.to, payload, payloadLen,
+                nullptr, voice_buffers_plain_cap(), &outLen, &voiceMsgId);
+        if (assembled) {
+          RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_voice action=assembled from=%02X%02X msgId=%u outLen=%u",
+              hdr.from[0], hdr.from[1], (unsigned)voiceMsgId, (unsigned)outLen);
           if (outLen > 0) {
-            ble::notifyVoice(hdr.from, s_voiceOutBuf, outLen);
+            ble::notifyVoice(hdr.from, voice_buffers_plain(), outLen, voiceMsgId);
+            if (voiceMsgId != 0) {
+              uint8_t txSf = neighbors::rssiToSfOrthogonal(hdr.from);
+              if (txSf == 0) txSf = 12;
+              ack_coalesce::add(hdr.from, voiceMsgId, txSf);
+            }
           }
+          voice_buffers_release();
         }
+      } else if (!forMe) {
+        RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_handle_voice action=skip reason=not_for_me from=%02X%02X to=%02X%02X",
+            hdr.from[0], hdr.from[1], hdr.to[0], hdr.to[1]);
       }
       break;
+    }
 
     default:
       break;
@@ -1851,6 +1896,8 @@ void setup() {
   Serial.println("[RiftLink] boot...");
 #if defined(ARDUINO_LILYGO_T_LORA_PAGER)
   lilygoTpagerEarlyInit();
+#elif defined(ARDUINO_LILYGO_T_BEAM)
+  lilygoTbeamEarlyInit();
 #endif
   pinMode(BUTTON_PIN, INPUT_PULLUP);  // USER_SW — до displayInit, чтобы кнопка работала на Paper
   ledInit(LED_PIN);
@@ -1889,8 +1936,9 @@ void setup() {
     // Меньше порог → больше аллокаций в SPIRAM до NimBLE/Wi‑Fi; после async остаётся internal под UART (GPS)
     heap_caps_malloc_extmem_enable(128);
   }
-  // Time-sharing: WiFi НЕ запускается при загрузке (Mode A: BLE-only, ~55K free heap).
-  // WiFi инициализируется on-demand через radio_mode::switchTo(WIFI).
+  // По умолчанию BLE поднимается при boot; переход в Wi‑Fi при старте — только если в NVS
+  // boot_radio=1 и есть STA-креды (см. radio_mode::bootShouldTryWifi). Явный выбор BLE в приложении
+  // пишет boot_radio=0, SSID при этом может оставаться сохранённым.
   locale::init();
   displayInit();
   Serial.printf("[RiftLink] Heap after displayInit: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -1917,6 +1965,7 @@ static void runBootStateMachine() {
   node::init();
   region::init();
   crypto::init();
+  voice_buffers_init();
   x25519_keys::init();
   if (!radio::init()) {
     RIFTLINK_LOG_ERR("[RiftLink] Radio init FAILED\n");
@@ -1990,9 +2039,17 @@ static void runBootStateMachine() {
   }
   memoryDiagLog("async_infra");
   asyncMemoryDiagLogStacks();
-  // ESP-NOW и WiFi connect — только в WiFi-режиме (Mode B), не при загрузке.
+  // ESP-NOW tick — в loop только в WiFi-режиме; при сохранённых STA-кредах переход в Wi-Fi ставится выше.
   memoryDiagLog("boot_done");
   gps::init();
+  if (radio_mode::bootShouldTryWifi() && wifi::hasCredentials()) {
+    Serial.println("[RiftLink] Boot: NVS prefers Wi‑Fi and STA credentials present — switching to Wi‑Fi first");
+    if (!radio_mode::switchTo(radio_mode::WIFI, radio_mode::STA, nullptr, nullptr)) {
+      Serial.println("[RiftLink] Boot: Wi-Fi switch request not queued (busy)");
+    }
+  } else if (wifi::hasCredentials()) {
+    Serial.println("[RiftLink] Boot: STA credentials in NVS, but preferred mode is BLE — staying on BLE until user switches");
+  }
   displayShowScreenForceFull(0);
   s_bootTime = millis();
   s_lastKeyRetry = millis() + (node::getId()[0] % 16) * 500;

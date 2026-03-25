@@ -16,6 +16,13 @@ class WifiTransport implements RiftLinkTransport {
   final _jsonController = StreamController<String>.broadcast();
   String? _ip;
 
+  /// Вызывается при обрыве сокета со стороны узла/сети (не при [disconnect]).
+  /// Колбэк сбрасывает Wi‑Fi‑режим в приложении и шлёт evt в UI — иначе ждут только таймаут cmd.
+  void Function()? onConnectionLost;
+
+  bool _manualDisconnect = false;
+  bool _lostNotified = false;
+
   String? get ip => _ip;
 
   @override
@@ -37,25 +44,31 @@ class WifiTransport implements RiftLinkTransport {
       return false;
     }
 
+    // Ускоряет обнаружение «полуоткрытого» TCP, когда узел выключили без FIN/RST.
+    _socket!.pingInterval = const Duration(seconds: 15);
+
     _socketSub = _socket!.listen(
       (data) {
+        // Один WebSocket-текстовый фрейм = один кусок потока (как BLE notify). Не режем по '\n':
+        // внутри JSON-строк полей могут быть переводы строк — split ломает разбор.
+        // Склейка фрагментов и NDJSON — в RiftLinkBle._feedRxChunk / _drainRxAccum.
         if (data is String) {
-          // May contain multiple JSON objects separated by newlines
-          for (final line in data.split('\n')) {
-            final trimmed = line.trim();
-            if (trimmed.isNotEmpty) {
-              _jsonController.add(trimmed);
-            }
+          if (data.isNotEmpty) _jsonController.add(data);
+        } else if (data is List<int>) {
+          if (data.isNotEmpty) {
+            _jsonController.add(utf8.decode(data, allowMalformed: true));
           }
         }
       },
       onDone: () {
         if (kDebugMode) debugPrint('WifiTransport: WebSocket closed');
         _socket = null;
+        _notifyConnectionLost();
       },
       onError: (e) {
         if (kDebugMode) debugPrint('WifiTransport: WebSocket error: $e');
         _socket = null;
+        _notifyConnectionLost();
       },
     );
 
@@ -85,11 +98,22 @@ class WifiTransport implements RiftLinkTransport {
     }
   }
 
+  void _notifyConnectionLost() {
+    if (_manualDisconnect || _lostNotified) return;
+    _lostNotified = true;
+    final cb = onConnectionLost;
+    onConnectionLost = null;
+    cb?.call();
+  }
+
   @override
   Future<void> disconnect() async {
+    _manualDisconnect = true;
     await _socketSub?.cancel();
     _socketSub = null;
     try { await _socket?.close(); } catch (_) {}
     _socket = null;
+    _manualDisconnect = false;
+    _lostNotified = false;
   }
 }

@@ -93,7 +93,7 @@ extern QueueHandle_t displayQueue;
 #include "ptr_pool.h"
 
 inline constexpr size_t PACKET_POOL_SIZE = 16;
-inline constexpr size_t TX_REQUEST_POOL_SIZE = 24;
+inline constexpr size_t TX_REQUEST_POOL_SIZE = 48;
 
 extern PtrPool<PacketQueueItem, PACKET_POOL_SIZE> packetPool;
 extern PtrPool<TxRequest, TX_REQUEST_POOL_SIZE> txRequestPool;

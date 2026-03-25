@@ -220,7 +220,7 @@ Future<void> showRiftSelftestDialog(
                     _selftestMetric(
                       context,
                       Icons.memory_rounded,
-                      l.tr('selftest_heap', {'kb': '${evt.heapFree}'}),
+                      l.tr('selftest_heap', {'kb': (evt.heapFree / 1024).toStringAsFixed(1)}),
                     ),
                   ],
                   if (lastInfo != null) ...[

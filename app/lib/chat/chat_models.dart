@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 enum ConversationKind { direct, group, broadcast }
 
@@ -83,6 +84,7 @@ class ChatMessage {
   final int? deleteAtMs;
   final List<String> relayPeers;
   final int relayCount;
+  final Uint8List? voiceData;
 
   const ChatMessage({
     this.id,
@@ -104,6 +106,7 @@ class ChatMessage {
     this.deleteAtMs,
     this.relayPeers = const [],
     this.relayCount = 0,
+    this.voiceData,
   });
 
   ChatMessage copyWith({
@@ -126,6 +129,7 @@ class ChatMessage {
     int? deleteAtMs,
     List<String>? relayPeers,
     int? relayCount,
+    Uint8List? voiceData,
   }) {
     return ChatMessage(
       id: id ?? this.id,
@@ -147,6 +151,7 @@ class ChatMessage {
       deleteAtMs: deleteAtMs ?? this.deleteAtMs,
       relayPeers: relayPeers ?? this.relayPeers,
       relayCount: relayCount ?? this.relayCount,
+      voiceData: voiceData ?? this.voiceData,
     );
   }
 }

@@ -1,18 +1,18 @@
 {
-  "tag": "v1.5.22",
-  "firmwareVersion": "1.5.22",
-  "appVersion": "1.5.22",
-  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.22/RiftLink-1.5.22-arm64-v8a.apk",
+  "tag": "v1.5.23",
+  "firmwareVersion": "1.5.23",
+  "appVersion": "1.5.23",
+  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.23/RiftLink-1.5.23-arm64-v8a.apk",
   "notesRu": [
-    "Полная пересборка прошивок (Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager) и синхронизация версии приложения.",
-    "Веб-флешер: образы *_full.bin и манифесты 1.5.22 для GitHub Pages и релиза.",
-    "Roadmap на странице флешера: маркированный список в §6.1 CUSTOM_PROTOCOL_PLAN.md.",
+    "Голос (VOICE_MSG): исправления сборки фрагментов, BLE notify, очереди TX; LilyGO T-Beam — новые окружения.",
+    "Веб-флешер: образы *_full.bin и манифесты 1.5.23 для GitHub Pages и релиза.",
+    "Serial-диагностика приёма голоса (VOICE_FRAG, fw_handle_voice) для отладки доставки.",
     "Прямая ссылка на APK: apkDownloadUrl — после публикации GitHub Release; иначе откройте страницу релизов."
   ],
   "notesEn": [
-    "Full rebuild of firmware (Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager) and synced app version.",
-    "Web flasher: *_full.bin images and manifests 1.5.22 for GitHub Pages and release.",
-    "Flasher roadmap: bullet list in §6.1 of CUSTOM_PROTOCOL_PLAN.md.",
+    "Voice (VOICE_MSG): fragment reassembly, BLE notify, TX queue fixes; LilyGO T-Beam new environments.",
+    "Web flasher: *_full.bin images and manifests 1.5.23 for GitHub Pages and release.",
+    "Serial diagnostics for voice RX (VOICE_FRAG, fw_handle_voice) for delivery debugging.",
     "APK: apkDownloadUrl after GitHub Release; otherwise use the Releases page."
   ]
 }

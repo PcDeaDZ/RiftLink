@@ -22,6 +22,7 @@ import '../chat/chat_repository.dart';
 import '../mesh_constants.dart';
 import '../utils/group_invite_normalize.dart';
 import '../connection/transport_reconnect_manager.dart';
+import '../recent_devices/recent_devices_service.dart';
 import 'contacts_screen.dart';
 import 'chat_screen.dart';
 import 'groups_screen.dart';
@@ -39,6 +40,13 @@ const EdgeInsets _kMenuItemPadding = EdgeInsets.symmetric(horizontal: 10);
 const VisualDensity _kMenuItemDensity = VisualDensity(horizontal: 0, vertical: -1);
 const IconData _kContactsPageIcon = Icons.contacts_outlined;
 const IconData _kGroupsPageIcon = Icons.groups_outlined;
+
+String _localizedLastPreview(String raw, AppLocalizations l) {
+  if (raw == ChatRepository.voiceMessagePreviewToken || raw == 'Voice message') {
+    return l.tr('voice');
+  }
+  return raw;
+}
 
 class ChatsListScreen extends StatefulWidget {
   final RiftLinkBle ble;
@@ -79,6 +87,40 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
 
   String _normNodeId(String raw) =>
       raw.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
+
+  String _fullNodeId16(String raw) {
+    final n = _normNodeId(raw);
+    return n.length == 16 ? n : '';
+  }
+
+  /// Ник и Node ID в «недавние» — как в [ChatScreen._onInfoEvent], иначе при открытых только списке/настройках запись не обновляется.
+  void _persistRecentDeviceFromInfo(RiftLinkInfoEvent evt) {
+    final nick = evt.nickname?.isNotEmpty == true ? evt.nickname : null;
+    final bleDev = widget.ble.device;
+    var resolvedId = _fullNodeId16(evt.id.isNotEmpty ? evt.id : (widget.ble.lastInfo?.id ?? ''));
+    if (resolvedId.isEmpty && bleDev != null) {
+      resolvedId = _fullNodeId16(RiftLinkBle.nodeIdHintFromDevice(bleDev) ?? '');
+    }
+    if (resolvedId.isEmpty) return;
+
+    if (bleDev != null) {
+      unawaited(RecentDevicesService.addOrUpdate(
+        remoteId: bleDev.remoteId.toString(),
+        nodeId: resolvedId,
+        nickname: nick,
+      ));
+    }
+    if (widget.ble.isWifiMode) {
+      final wifiIp = widget.ble.wifiIp;
+      if (wifiIp != null && wifiIp.isNotEmpty) {
+        unawaited(RecentDevicesService.associateWifiNode(
+          ip: wifiIp,
+          nodeId: resolvedId,
+          nickname: nick,
+        ));
+      }
+    }
+  }
 
   /// Совпадение id в [RiftLinkPongEvent] с ожидаемым (полный 16 hex vs короткий префикс).
   bool _pongFromMatchesPending(String pendingNorm, String fromNorm) {
@@ -165,6 +207,7 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     _bleSub = widget.ble.events.listen((evt) {
       if (!mounted) return;
       if (evt is RiftLinkInfoEvent) {
+        _persistRecentDeviceFromInfo(evt);
         setState(() {
           _neighborIds = evt.neighbors.map((e) => e.toUpperCase()).toSet();
           // Полный снимок после склейки в [RiftLinkBle] — источник истины; оверрайды
@@ -965,97 +1008,248 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
     return valid.first;
   }
 
+  /// Значение (title) и подпись (subtitle) для блока кучи в листе «Состояние узла».
+  (String, String) _nodeStatusHeapParts(RiftLinkInfoEvent? li, AppLocalizations l) {
+    final hf = li?.heapFreeBytes;
+    final ht = li?.heapTotalBytes;
+    if (hf == null || ht == null || ht <= 0) {
+      return ('—', l.tr('node_status_heap'));
+    }
+    final usedPct = ((ht - hf) * 100 / ht).round().clamp(0, 100);
+    final hm = li?.heapMinFreeBytes;
+    final title = l.tr('node_status_heap_title_compact', {
+      'free': (hf / 1024).toStringAsFixed(1),
+      'total': (ht / 1024).toStringAsFixed(1),
+      'used': '$usedPct',
+    });
+    final sub = StringBuffer(l.tr('node_status_heap'));
+    if (hm != null) {
+      sub
+        ..write(' · ')
+        ..write(l.tr('node_status_heap_min_short', {'min': (hm / 1024).toStringAsFixed(1)}));
+    }
+    return (title, sub.toString());
+  }
+
+  (String, String) _nodeStatusNvsParts(RiftLinkInfoEvent? li, AppLocalizations l) {
+    final kb = li?.nvsPartitionKb;
+    if (kb == null) return ('—', l.tr('node_status_nvs'));
+    final u = li?.nvsEntriesUsed;
+    final t = li?.nvsEntriesTotal;
+    final ns = li?.nvsNamespaceCount;
+    final title = (u != null && t != null)
+        ? l.tr('node_status_nvs_title_compact', {'kb': '$kb', 'used': '$u', 'total': '$t'})
+        : l.tr('node_status_nvs_kb_simple', {'kb': '$kb'});
+    final subtitle = ns != null
+        ? l.tr('node_status_nvs_subtitle_ns', {'ns': '$ns'})
+        : l.tr('node_status_nvs');
+    return (title, subtitle);
+  }
+
+  Widget _nodeStatusSheetTile(
+    BuildContext context, {
+    required IconData icon,
+    required String valueLine,
+    required String labelLine,
+    Color? iconColor,
+  }) {
+    final p = context.palette;
+    return ListTile(
+      dense: true,
+      visualDensity: VisualDensity.compact,
+      minLeadingWidth: 40,
+      contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: 4),
+      leading: Icon(icon, size: 22, color: iconColor ?? p.onSurfaceVariant),
+      title: Text(
+        valueLine,
+        style: TextStyle(
+          color: p.onSurface,
+          fontWeight: FontWeight.w600,
+          fontSize: 15,
+        ),
+      ),
+      subtitle: Text(
+        labelLine,
+        style: TextStyle(
+          color: p.onSurfaceVariant,
+          fontSize: 12.5,
+          height: 1.25,
+        ),
+      ),
+    );
+  }
+
+  Widget _nodeStatusSectionHeader(BuildContext context, String text, {bool first = false}) {
+    final p = context.palette;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        AppSpacing.lg,
+        first ? AppSpacing.xs : AppSpacing.md,
+        AppSpacing.lg,
+        AppSpacing.xs,
+      ),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          text,
+          style: AppTypography.captionBase().copyWith(
+            color: p.onSurfaceVariant,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 0.35,
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _showNodeStatusSheet() async {
     final l = context.l10n;
     final li = widget.ble.lastInfo;
-    final connected = widget.ble.isConnected;
+    final linkUp = widget.ble.isTransportConnected;
+    final useWifi = widget.ble.isWifiMode;
     final bestRssi = _bestNeighborRssi(li);
     final batteryMv = li?.batteryMv;
     final batteryPercent = li?.batteryPercent;
     final charging = li?.charging ?? false;
-    final batteryText = batteryMv == null || batteryMv <= 0
-        ? '—'
-        : (batteryPercent != null
-            ? '$batteryPercent% (${(batteryMv / 1000.0).toStringAsFixed(2)}V)'
-            : '${(batteryMv / 1000.0).toStringAsFixed(2)}V');
-    final rows = <(IconData, String, String, Color?)>[
-      (
-        connected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
-        l.tr('node_status_ble_link'),
-        connected
-            ? l.tr('node_status_ble_link_connected')
-            : l.tr('node_status_ble_link_disconnected'),
-        connected ? context.palette.success : null,
-      ),
-      (
-        charging ? Icons.battery_charging_full : Icons.battery_std,
-        l.tr('settings_energy_node'),
-        batteryText,
-        batteryMv != null && batteryMv > 0 ? _batteryColorForMv(batteryMv) : null,
-      ),
-      (
-        Icons.radar_rounded,
-        l.tr('node_status_rssi'),
-        bestRssi != null ? '$bestRssi dBm' : '—',
-        null,
-      ),
-      (
-        Icons.memory_rounded,
-        l.tr('settings_firmware_version'),
-        (li?.version?.trim().isNotEmpty ?? false) ? li!.version!.trim() : '—',
-        null,
-      ),
-      (
-        Icons.outbox_rounded,
-        l.tr('offline_pending'),
-        '${li?.offlinePending ?? 0}',
-        null,
-      ),
-      (
-        Icons.gps_fixed_rounded,
-        l.tr('gps_section'),
-        (li?.gpsEnabled ?? false)
-            ? ((li?.gpsFix ?? false) ? l.tr('gps_fix_yes') : l.tr('gps_fix_no'))
-            : l.tr('node_status_gps_disabled'),
-        null,
-      ),
-    ];
+    final heapParts = _nodeStatusHeapParts(li, l);
+    final nvsParts = _nodeStatusNvsParts(li, l);
+
+    late final String batteryTitle;
+    late final String batterySubtitle;
+    if (batteryMv == null || batteryMv <= 0) {
+      batteryTitle = '—';
+      batterySubtitle = l.tr('node_status_battery');
+    } else {
+      final voltStr = '${(batteryMv / 1000.0).toStringAsFixed(2)} V';
+      if (batteryPercent != null) {
+        batteryTitle = '$batteryPercent%';
+        final subParts = <String>[l.tr('node_status_battery')];
+        if (charging) subParts.add(l.tr('node_status_charging'));
+        subParts.add(voltStr);
+        batterySubtitle = subParts.join(' · ');
+      } else {
+        batteryTitle = voltStr;
+        batterySubtitle = charging
+            ? '${l.tr('node_status_battery')} · ${l.tr('node_status_charging')}'
+            : l.tr('node_status_battery');
+      }
+    }
+
+    final fw =
+        (li?.version?.trim().isNotEmpty ?? false) ? li!.version!.trim() : '—';
+    final gpsTitle = (li?.gpsEnabled ?? false)
+        ? ((li?.gpsFix ?? false) ? l.tr('gps_fix_yes') : l.tr('gps_fix_no'))
+        : l.tr('node_status_gps_disabled');
+
     await showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) {
         final p = ctx.palette;
+        final maxH = MediaQuery.sizeOf(ctx).height * 0.88;
+        final connIcon = useWifi
+            ? (linkUp ? Icons.wifi_rounded : Icons.wifi_off_rounded)
+            : (linkUp ? Icons.bluetooth_connected : Icons.bluetooth_disabled);
+        final connColor = linkUp ? p.success : null;
         return SafeArea(
           child: Container(
+            constraints: BoxConstraints(maxHeight: maxH),
             decoration: BoxDecoration(
               color: p.card,
               borderRadius: const BorderRadius.vertical(top: Radius.circular(AppSpacing.lg)),
             ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.sm),
-                  child: Text(
-                    l.tr('node_status_title'),
-                    style: AppTypography.navTitleBase().copyWith(color: p.onSurface),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.sm),
+                    child: Text(
+                      l.tr('node_status_title'),
+                      style: AppTypography.navTitleBase().copyWith(color: p.onSurface),
+                    ),
                   ),
-                ),
-                ...rows.map((r) => ListTile(
-                      dense: true,
-                      leading: Icon(r.$1, color: r.$4 ?? p.onSurfaceVariant),
-                      title: Text(r.$2, style: TextStyle(color: p.onSurfaceVariant)),
-                      trailing: Text(
-                        r.$3,
-                        style: TextStyle(
-                          color: p.onSurface,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    )),
-                const SizedBox(height: AppSpacing.sm),
-              ],
+                  _nodeStatusSectionHeader(ctx, l.tr('node_status_section_overview'), first: true),
+                  _nodeStatusSheetTile(
+                    ctx,
+                    icon: connIcon,
+                    valueLine: linkUp ? l.tr('ble_status_connected') : l.tr('node_status_ble_link_disconnected'),
+                    labelLine: useWifi ? l.tr('transport_wifi') : l.tr('transport_ble'),
+                    iconColor: connColor,
+                  ),
+                  _nodeStatusSheetTile(
+                    ctx,
+                    icon: charging ? Icons.battery_charging_full : Icons.battery_std,
+                    valueLine: batteryTitle,
+                    labelLine: batterySubtitle,
+                    iconColor: batteryMv != null && batteryMv > 0 ? _batteryColorForMv(batteryMv) : null,
+                  ),
+                  _nodeStatusSheetTile(
+                    ctx,
+                    icon: Icons.radar_rounded,
+                    valueLine: bestRssi != null ? '$bestRssi dBm' : '—',
+                    labelLine: l.tr('node_status_rssi'),
+                  ),
+                  _nodeStatusSheetTile(
+                    ctx,
+                    icon: Icons.system_update_outlined,
+                    valueLine: fw,
+                    labelLine: l.tr('node_status_firmware'),
+                  ),
+                  _nodeStatusSheetTile(
+                    ctx,
+                    icon: Icons.outbox_rounded,
+                    valueLine: '${li?.offlinePending ?? 0}',
+                    labelLine: l.tr('offline_pending'),
+                  ),
+                  _nodeStatusSheetTile(
+                    ctx,
+                    icon: Icons.gps_fixed_rounded,
+                    valueLine: gpsTitle,
+                    labelLine: l.tr('gps_section'),
+                  ),
+                  _nodeStatusSectionHeader(ctx, l.tr('node_status_section_system')),
+                  _nodeStatusSheetTile(
+                    ctx,
+                    icon: Icons.memory_rounded,
+                    valueLine: heapParts.$1,
+                    labelLine: heapParts.$2,
+                  ),
+                  _nodeStatusSheetTile(
+                    ctx,
+                    icon: Icons.speed_rounded,
+                    valueLine: li?.cpuMhz != null
+                        ? l.tr('node_status_cpu_value', {'mhz': '${li!.cpuMhz}'})
+                        : '—',
+                    labelLine: l.tr('node_status_cpu'),
+                  ),
+                  _nodeStatusSheetTile(
+                    ctx,
+                    icon: Icons.storage_rounded,
+                    valueLine: li?.flashChipMb != null
+                        ? l.tr('node_status_flash_value', {'mb': '${li!.flashChipMb}'})
+                        : '—',
+                    labelLine: l.tr('node_status_flash'),
+                  ),
+                  _nodeStatusSheetTile(
+                    ctx,
+                    icon: Icons.folder_open_rounded,
+                    valueLine: li?.appPartitionKb != null
+                        ? l.tr('node_status_app_part_value', {'kb': '${li!.appPartitionKb}'})
+                        : '—',
+                    labelLine: l.tr('node_status_app_part'),
+                  ),
+                  _nodeStatusSheetTile(
+                    ctx,
+                    icon: Icons.dns_rounded,
+                    valueLine: nvsParts.$1,
+                    labelLine: nvsParts.$2,
+                  ),
+                  const SizedBox(height: AppSpacing.sm),
+                ],
+              ),
             ),
           ),
         );
@@ -1119,7 +1313,15 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
           powersave: li?.powersave ?? false,
           offlinePending: li?.offlinePending,
           batteryMv: li?.batteryMv,
-          onNicknameChanged: (_) {},
+          onNicknameChanged: (n) async {
+            final dev = widget.ble.device;
+            if (dev == null) return;
+            final trimmed = n.trim();
+            await RecentDevicesService.updateNickname(
+              dev.remoteId.toString(),
+              trimmed.isEmpty ? null : trimmed,
+            );
+          },
           onRegionChanged: (_, __) {},
           onSfChanged: (_) {},
           onPowersaveChanged: (_) {},
@@ -2456,9 +2658,8 @@ class _ConversationTile extends StatelessWidget {
       if (v2RoleText != null) v2RoleText,
       if (v2KeyText != null) v2KeyText,
     ].join(' · ');
-    final subtitleText = (conversation.lastMessagePreview ?? '').trim().isNotEmpty
-        ? (conversation.lastMessagePreview ?? '')
-        : statusText;
+    final rawPreview = (conversation.lastMessagePreview ?? '').trim();
+    final subtitleText = rawPreview.isNotEmpty ? _localizedLastPreview(rawPreview, l) : statusText;
     return AnimatedSlide(
       offset: animateArchive ? const Offset(0.08, 0) : Offset.zero,
       duration: const Duration(milliseconds: 220),
@@ -2875,7 +3076,7 @@ class _DrawerConversationTile extends StatelessWidget {
           subtitle: conversation.lastMessagePreview == null || conversation.lastMessagePreview!.isEmpty
               ? null
               : Text(
-                  conversation.lastMessagePreview!,
+                  _localizedLastPreview(conversation.lastMessagePreview!, context.l10n),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: AppTypography.chipBase().copyWith(color: p.onSurfaceVariant),

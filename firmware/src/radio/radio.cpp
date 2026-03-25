@@ -41,7 +41,7 @@ static void IRAM_ATTR onDio1Rise() {
   s_dio1IrqCount.fetch_add(1, std::memory_order_relaxed);
 }
 
-// Heltec WiFi LoRa 32 V3/V4 pins (Meshtastic variant.h)
+// LoRa SX1262 pins per board variant
 #if defined(ARDUINO_LILYGO_T_LORA_PAGER)
 #define LORA_NSS   36
 #define LORA_RST   47
@@ -50,7 +50,16 @@ static void IRAM_ATTR onDio1Rise() {
 #define LORA_SCK   35
 #define LORA_MISO  33
 #define LORA_MOSI  34
+#elif defined(ARDUINO_LILYGO_T_BEAM)
+#define LORA_NSS   18
+#define LORA_RST   23
+#define LORA_DIO1  33
+#define LORA_BUSY  32
+#define LORA_SCK   5
+#define LORA_MISO  19
+#define LORA_MOSI  27
 #else
+// Heltec WiFi LoRa 32 V3/V4 (Meshtastic variant.h)
 #define LORA_NSS   8
 #define LORA_RST   12
 #define LORA_DIO1  14
@@ -69,7 +78,11 @@ static void IRAM_ATTR onDio1Rise() {
 #define LORA_BW    125.0f
 #define LORA_SF    7
 #define LORA_CR    5
-#define TCXO_VOLTAGE 1.8f   // SX1262 TCXO 1.8V (V3/V4)
+#if defined(ARDUINO_LILYGO_T_BEAM)
+  #define TCXO_VOLTAGE 0.0f   // T-Beam V1.1/V1.2: XTAL (не TCXO); 0 = отключить TCXO mode
+#else
+  #define TCXO_VOLTAGE 1.8f   // SX1262 TCXO 1.8V (Heltec V3/V4, LilyGO T-Pager)
+#endif
 
 static const radio::ModemConfig MODEM_PRESETS[] = {
   /* SPEED     */ { 7,  250.0f, 5},
@@ -182,10 +195,10 @@ static void applyModemToChip(uint8_t sf, float bw, uint8_t cr) {
 namespace radio {
 
 bool init() {
-  // SPI: ESP32 default (18,19,23) != Heltec (9,11,10). Явно задаём пины.
-  // Arduino 3.x: SPI.end() сбрасывает _spi, иначе begin() не переконфигурирует пины (V4 RX не работал без этого).
-  // Paper: displayInit вызвал SPI.begin(EINK...). V4: WiFi/другое могло затронуть SPI.
+  // SPI: явно задаём пины LoRa. Arduino 3.x: SPI.end() сбрасывает _spi, иначе begin()
+  // не переконфигурирует пины (V4 RX не работал без этого).
   // T-Lora Pager: общая SPI с ST7796 — не делаем SPI.end(), иначе ломается TFT после displayInit.
+  // T-Beam ESP32: SPI default (18,19,23) совпадает с LoRa — SPI.end() безопасен.
 #if !defined(ARDUINO_LILYGO_T_LORA_PAGER)
   SPI.end();
   delay(10);

@@ -10,13 +10,16 @@ import '../ble/riftlink_ble.dart';
 import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
 import '../prefs/mesh_prefs.dart';
+import '../prefs/wifi_sta_prefs.dart';
 import '../theme/app_theme.dart';
 import '../theme/design_tokens.dart';
 import '../theme/theme_notifier.dart';
 import '../widgets/app_primitives.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/app_snackbar.dart';
+import '../app_navigator.dart';
 import 'ota_screen.dart';
+import 'scan_screen.dart';
 
 /// Форматирует hex ID для отображения (группы по 4 символа). Копирование — без пробелов.
 String _formatNodeIdDisplay(String raw) {
@@ -705,6 +708,10 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
       _wifiConnected = evt.wifiConnected;
       _wifiSsid = evt.wifiSsid;
       _wifiIp = evt.wifiIp;
+      final w = evt.wifiSsid?.trim();
+      if (w != null && w.isNotEmpty && _wifiSsidController.text.trim().isEmpty) {
+        _wifiSsidController.text = w;
+      }
       if (evt.espNowChannel != null && evt.espNowChannel! >= 1 && evt.espNowChannel! <= 13) {
         _espNowChannel = evt.espNowChannel!;
       }
@@ -819,12 +826,25 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
       }
     });
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
       if (!widget.ble.isConnected) return;
       final cached = widget.ble.lastInfo;
       if (cached != null) _applyRiftLinkInfo(cached);
       widget.ble.getInfo();
+      final id = _nodeIdForClipboard(_nodeIdLive);
+      if (id.isNotEmpty) {
+        final saved = await WifiStaPrefs.load(id);
+        if (mounted &&
+            saved != null &&
+            saved.ssid.isNotEmpty &&
+            _wifiSsidController.text.trim().isEmpty) {
+          setState(() {
+            _wifiSsidController.text = saved.ssid;
+            _wifiPassController.text = saved.pass;
+          });
+        }
+      }
       _infoRetryTimer?.cancel();
       _infoRetryTimer = Timer(const Duration(milliseconds: 700), () {
         if (!mounted || !widget.ble.isConnected || _infoReceivedSinceOpen) return;
@@ -1002,28 +1022,30 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
   }
 
   Future<void> _switchRadioToBle() async {
-    if (!widget.ble.isConnected || _radioModeApplying) return;
+    if (!widget.ble.isTransportConnected || _radioModeApplying) return;
     setState(() => _radioModeApplying = true);
     final ok = await widget.ble.switchToBle();
+    if (!mounted) return;
     if (ok) {
-      await widget.ble.getInfo(force: true);
-      await Future<void>.delayed(const Duration(milliseconds: 350));
-      final li = widget.ble.lastInfo;
-      if (mounted) {
-        if (li != null && li.radioMode == 'ble') {
-          _snack(context.l10n.tr('radio_mode_switched', {'mode': context.l10n.tr('radio_mode_ble')}));
-        } else {
-          _snack(context.l10n.tr('radio_mode_failed'));
-        }
-      }
-    } else {
-      if (mounted) _snack(context.l10n.tr('radio_mode_failed'));
+      await widget.ble.disconnect();
+      if (!mounted) return;
+      await appResetTo(
+        context,
+        ScanScreen(
+          initialMessage: context.l10n.tr('device_switched_ble_scan'),
+          initialSnackKind: AppSnackKind.neutral,
+        ),
+      );
+      return;
     }
-    if (mounted) setState(() => _radioModeApplying = false);
+    if (mounted) {
+      setState(() => _radioModeApplying = false);
+      _snack(context.l10n.tr('radio_mode_failed'));
+    }
   }
 
   Future<void> _switchRadioToWifiSta() async {
-    if (!widget.ble.isConnected || _radioModeApplying) return;
+    if (!widget.ble.isTransportConnected || _radioModeApplying) return;
     final ssid = _wifiSsidController.text.trim();
     if (ssid.isEmpty) {
       _snack(context.l10n.tr('radio_mode_need_ssid'));
@@ -1032,20 +1054,51 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     setState(() => _radioModeApplying = true);
     final ok = await widget.ble.switchToWifiSta(ssid: ssid, pass: _wifiPassController.text);
     if (ok) {
+      unawaited(WifiStaPrefs.save(
+        nodeIdHex: _nodeIdForClipboard(_nodeIdLive),
+        ssid: ssid,
+        pass: _wifiPassController.text,
+      ));
       if (!widget.ble.isConnected) {
-        if (mounted) _snack(context.l10n.tr('radio_mode_switching_reconnect'));
-        if (mounted) setState(() => _radioModeApplying = false);
+        if (mounted) {
+          setState(() => _radioModeApplying = false);
+          await appResetTo(
+            context,
+            ScanScreen(
+              initialMessage: context.l10n.tr('device_switched_wifi_scan'),
+              initialSnackKind: AppSnackKind.neutral,
+            ),
+          );
+        }
         return;
       }
-      await widget.ble.getInfo(force: true);
-      await Future<void>.delayed(const Duration(milliseconds: 350));
-      final li = widget.ble.lastInfo;
-      if (mounted) {
-        if (li != null && li.radioMode == 'wifi' && li.radioVariant == 'sta') {
-          _snack(context.l10n.tr('radio_mode_switched', {'mode': context.l10n.tr('radio_mode_wifi_sta')}));
-        } else {
-          _snack(context.l10n.tr('radio_mode_failed'));
+      for (var i = 0; i < 12; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 200));
+        if (!widget.ble.isConnected) {
+          if (mounted) {
+            setState(() => _radioModeApplying = false);
+            await appResetTo(
+              context,
+              ScanScreen(
+                initialMessage: context.l10n.tr('device_switched_wifi_scan'),
+                initialSnackKind: AppSnackKind.neutral,
+              ),
+            );
+          }
+          return;
         }
+        await widget.ble.getInfo(force: true);
+        final li = widget.ble.lastInfo;
+        if (li != null && li.radioMode == 'wifi' && li.radioVariant == 'sta') {
+          if (mounted) {
+            _snack(context.l10n.tr('radio_mode_switched', {'mode': context.l10n.tr('radio_mode_wifi_sta')}));
+          }
+          if (mounted) setState(() => _radioModeApplying = false);
+          return;
+        }
+      }
+      if (mounted) {
+        _snack(context.l10n.tr('radio_mode_wifi_switch_pending'));
       }
     } else {
       if (mounted) _snack(context.l10n.tr('radio_mode_failed'));
@@ -1059,6 +1112,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     final regions = ['EU', 'RU', 'UK', 'US', 'AU'];
     final isEu = _region == 'EU' || _region == 'UK';
     final connected = widget.ble.isConnected;
+    final linkUp = widget.ble.isTransportConnected;
     final usingWifiTransport = widget.ble.isWifiMode;
     final idPlain = _nodeIdForClipboard(_nodeIdLive);
     final idShown = _formatNodeIdDisplay(_nodeIdLive);
@@ -1316,7 +1370,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                     ),
                     const SizedBox(height: AppSpacing.sm + 2),
                     FilledButton.tonalIcon(
-                      onPressed: connected
+                      onPressed: linkUp
                           ? () async {
                               final ok = await widget.ble.regeneratePin();
                               if (ok) await widget.ble.getInfo();
@@ -1361,7 +1415,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         l.tr('radio_mode_wifi_sta'),
                       ],
                       selectedIndex: _radioMode == 'wifi' ? 1 : 0,
-                      enabled: connected && !_radioModeApplying,
+                      enabled: linkUp && !_radioModeApplying,
                       onSelected: (i) async {
                         if (i == 0) {
                           await _switchRadioToBle();
@@ -1424,7 +1478,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                     ),
                     const SizedBox(height: AppSpacing.md),
                     FilledButton.icon(
-                      onPressed: connected && !_radioModeApplying ? _switchRadioToWifiSta : null,
+                      onPressed: linkUp && !_radioModeApplying ? _switchRadioToWifiSta : null,
                       icon: const Icon(Icons.wifi_find_rounded),
                       label: Text(l.tr('radio_mode_connect_sta')),
                     ),
@@ -1455,7 +1509,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                             child: Text('${i + 1}'),
                           ),
                         ),
-                        onChanged: connected
+                        onChanged: linkUp
                             ? (v) async {
                                 if (v == null) return;
                                 if (await widget.ble.setEspNowChannel(v)) {
@@ -1475,7 +1529,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                         value: _espNowAdaptive,
                         activeThumbColor: context.palette.primary,
                         activeTrackColor: context.palette.primary.withOpacity(0.45),
-                        onChanged: connected
+                        onChanged: linkUp
                             ? (v) async {
                                 if (await widget.ble.setEspNowAdaptive(v)) {
                                   setState(() => _espNowAdaptive = v);
@@ -1497,7 +1551,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                   children: [
                     if (!usingWifiTransport) ...[
                       FilledButton.icon(
-                        onPressed: connected
+                        onPressed: linkUp
                             ? () => showOtaDialog(context, widget.ble)
                             : null,
                         icon: const Icon(Icons.bluetooth_searching_rounded),
@@ -1569,7 +1623,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                     const SizedBox(height: AppSpacing.md),
                     AppSecondaryButton(
                       fullWidth: true,
-                      onPressed: connected && !_radioModeApplying && _radioMode != 'ble'
+                      onPressed: linkUp && !_radioModeApplying && _radioMode != 'ble'
                           ? _switchRadioToBle
                           : null,
                       child: Row(

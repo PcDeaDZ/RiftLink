@@ -12,8 +12,7 @@ class GroupSecurityResponseError implements Exception {
   String toString() => 'GroupSecurityResponseError($cmd, cmdId=$cmdId, $code: $msg)';
 }
 
-/// Сопоставление ответов по `cmdId` в JSON. Исключение: `evt:pong` без `cmdId` (прошивка)
-/// сопоставляется с pending `ping` по полю `from` и аргументу `to` команды.
+/// Сопоставление ответов по полю `cmdId` в JSON (> 0). Прошивка обязана повторять `cmdId` из запроса.
 typedef RouterTrace = void Function(String message);
 typedef RouterSendCommand = Future<bool> Function(Map<String, dynamic> payload);
 typedef RouterCommandIdFactory = int Function();
@@ -82,6 +81,11 @@ class TransportResponseRouter {
     int retries = 0,
     int sendAttempts = 1,
   }) {
+    // Прошивка: один s_pendingInfoCmdId — волна node/neighbors отдаётся только с последним cmd:info.
+    // Иначе старые tracked info висят до таймаута, пока по эфиру идут evt с новым cmdId.
+    if (cmd == 'info') {
+      _supersedePendingInfoRequests();
+    }
     final body = <String, dynamic>{...(payload ?? const <String, dynamic>{})};
     body['cmd'] = cmd;
     final raw = body['cmdId'];
@@ -105,6 +109,24 @@ class TransportResponseRouter {
         'stage=router action=request_sent cmd=$cmd cmdId=$cmdId retries=$retries send_attempts=${req.sendAttempts}');
     _sendPending(req);
     return TransportRequestTicket(cmdId: cmdId, response: completer.future);
+  }
+
+  /// Снять ожидание старых `cmd:info`: на узле остаётся один актуальный cmdId на волну.
+  void _supersedePendingInfoRequests() {
+    final staleIds = <int>[];
+    for (final e in _pending.entries) {
+      if (e.value.cmd == 'info') {
+        staleIds.add(e.key);
+      }
+    }
+    for (final id in staleIds) {
+      final req = _pending.remove(id);
+      req?.timer?.cancel();
+      if (req != null && !req.completer.isCompleted) {
+        _trace?.call('stage=router action=request_superseded cmd=info cmdId=${req.cmdId} reason=new_info_request');
+        req.completer.completeError(StateError('info_superseded:${req.cmdId}'));
+      }
+    }
   }
 
   void _sendPending(_PendingRequest req) {
@@ -145,16 +167,13 @@ class TransportResponseRouter {
     }
   }
 
+  static const Set<String> _kInfoWaveEvts = {'node', 'neighbors', 'routes', 'groups'};
+  /// Предел «скользящего» продления таймера по частям волны (после — только обработка evt, без нового Timer).
+  static const Duration _kInfoWaveSlidingCap = Duration(seconds: 35);
+
   void _onResponse(Map<String, dynamic> json) {
     final evt = json['evt']?.toString() ?? 'unknown';
     final cmdId = _readCmdId(json);
-
-    // evt:pong с эфира часто без cmdId (прошивка не всегда вложила в JSON), а sendTrackedRequest(ping)
-    // ждёт pong — иначе событие отбрасывалось здесь и тикет никогда не завершался.
-    if (evt == 'pong' && (cmdId == null || cmdId <= 0)) {
-      if (_tryCompletePongWithoutCmdId(json)) return;
-    }
-
     if (cmdId == null || cmdId <= 0) return;
     final req = _pending[cmdId];
     if (req == null) {
@@ -166,72 +185,20 @@ class TransportResponseRouter {
       }
       return;
     }
+    // Волна cmd:info — несколько notify подряд; node может прийти после routes/groups (очередь BLE / main loop).
+    // Продлеваем окно ожидания «якоря» (node|neighbors в expectedEvents), пока идут части одной волны.
+    if (req.cmd == 'info' && _kInfoWaveEvts.contains(evt)) {
+      final sinceStart = DateTime.now().difference(req.startedAt);
+      final anchor = evt == 'node' || evt == 'neighbors';
+      if (anchor || sinceStart < _kInfoWaveSlidingCap) {
+        req.timer?.cancel();
+        req.timer = Timer(req.timeout, () => _onTimeout(req.cmdId));
+        _trace?.call(
+          'stage=router action=info_wave_timer_reset cmdId=$cmdId evt=$evt since_start_ms=${sinceStart.inMilliseconds}',
+        );
+      }
+    }
     _dispatchMatchedRequest(req, json, evt, cmdId);
-  }
-
-  /// Pong без cmdId: сопоставить с ожидающим `ping` по полю `from` ↔ payload `to`.
-  bool _tryCompletePongWithoutCmdId(Map<String, dynamic> json) {
-    final pongFrom = json['from']?.toString();
-    final candidates =
-        _pending.values.where((r) => r.cmd == 'ping' && r.expectedEvents.contains('pong')).toList();
-    if (candidates.isEmpty) {
-      _trace?.call('stage=router action=pong_no_cmdId skip reason=no_pending_ping');
-      return false;
-    }
-    _PendingRequest? req;
-    if (candidates.length == 1) {
-      final r = candidates.single;
-      final pingTo = r.payload['to']?.toString();
-      if (pingTo != null &&
-          pingTo.isNotEmpty &&
-          pongFrom != null &&
-          pongFrom.isNotEmpty &&
-          !_pingTargetMatchesFrom(pingTo, pongFrom)) {
-        _trace?.call('stage=router action=pong_no_cmdId skip reason=peer_mismatch');
-        return false;
-      }
-      req = r;
-    } else {
-      final matching = candidates
-          .where((r) => _pingTargetMatchesFrom(r.payload['to']?.toString(), pongFrom))
-          .toList();
-      if (matching.isEmpty) {
-        _trace?.call(
-            'stage=router action=pong_no_cmdId skip reason=no_peer_match pending=${candidates.length}');
-        return false;
-      }
-      if (matching.length == 1) {
-        req = matching.single;
-      } else {
-        matching.sort((a, b) => b.startedAt.compareTo(a.startedAt));
-        req = matching.first;
-        _trace?.call(
-            'stage=router action=pong_no_cmdId pick_latest among=${matching.length}');
-      }
-    }
-
-    final merged = Map<String, dynamic>.from(json);
-    merged['cmdId'] = req.cmdId;
-    _trace?.call('stage=router action=pong_no_cmdId matched cmdId=${req.cmdId}');
-    _dispatchMatchedRequest(req, merged, 'pong', req.cmdId);
-    return true;
-  }
-
-  static String _normPingHex(String? s) {
-    if (s == null) return '';
-    return s.replaceAll(RegExp(r'[^0-9A-Fa-f]'), '').toUpperCase();
-  }
-
-  /// Полный 16 hex vs префикс — как в списке чатов / mesh.
-  static bool _pingTargetMatchesFrom(String? pingTo, String? pongFrom) {
-    final a = _normPingHex(pingTo);
-    final b = _normPingHex(pongFrom);
-    if (a.isEmpty || b.isEmpty) return false;
-    if (a == b) return true;
-    if (a.length >= 8 && b.length >= 8) {
-      return a.startsWith(b) || b.startsWith(a);
-    }
-    return false;
   }
 
   void _dispatchMatchedRequest(_PendingRequest req, Map<String, dynamic> json, String evt, int cmdId) {

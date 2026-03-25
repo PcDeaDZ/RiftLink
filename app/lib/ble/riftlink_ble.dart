@@ -14,6 +14,14 @@ import '../transport/transport_response_router.dart'
 import '../transport/wifi_transport.dart';
 import '../utils/group_invite_normalize.dart';
 
+/// Волна ответа на `cmd:info`: node + neighbors + routes + groups с одним `seq`/`cmdId`.
+/// Tracked-команду завершает первое событие из этого набора с подходящим `cmdId` (см. [TransportResponseRouter]).
+/// Завершение tracked `cmd:info` в [TransportResponseRouter]: только якоря с паспортом узла.
+/// (Полная волна на прошивке: node → neighbors → routes → groups — см. merge в [_emitParsedJson].)
+/// `routes`/`groups` не должны закрывать запрос — иначе Completer срабатывает на первом `evt:routes`,
+/// а `id` в UI остаётся пустым, пока `node`/`neighbors` ещё в пути или потеряны.
+const Set<String> kInfoTrackedResponseEvents = {'node', 'neighbors'};
+
 class RiftLinkBle {
   static const serviceUuid = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
   static const charTxUuid = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
@@ -76,6 +84,7 @@ class RiftLinkBle {
       'drop_json_to_event=${_diagCounters['drop_json_to_event'] ?? 0} '
       'drop_parse_ndjson=${_diagCounters['drop_parse_ndjson'] ?? 0} '
       'drop_parse_extracted=${_diagCounters['drop_parse_extracted'] ?? 0} '
+      'rx_tail_byte_mismatch=${_diagCounters['rx_tail_byte_mismatch'] ?? 0} '
       'prelisten_drop=${_diagCounters['prelisten_drop'] ?? 0}',
     );
   }
@@ -324,7 +333,11 @@ class RiftLinkBle {
       );
       return true;
     } catch (e) {
-      _trace('stage=app_rr action=request_fail cmd=$cmd err=$e');
+      if (e is StateError && e.message.startsWith('info_superseded')) {
+        _trace('stage=app_rr action=request_superseded cmd=$cmd err=$e');
+      } else {
+        _trace('stage=app_rr action=request_fail cmd=$cmd err=$e');
+      }
       if (e is GroupSecurityResponseError) {
         _lastGroupSecurityError = e;
       }
@@ -412,6 +425,7 @@ class RiftLinkBle {
           await getRoutes();
         } catch (_) {}
       }());
+      _wifiReconnectIp = null;
       return true;
     } finally {
       if (!internalReconnect) {
@@ -425,6 +439,8 @@ class RiftLinkBle {
   }
 
   /// Запросить снимок узла (`cmd: info` → волна `evt:node` + neighbors/routes/groups с общим `seq`).
+  /// На прошивке один `s_pendingInfoCmdId` — новый запрос затирает предыдущий; [TransportResponseRouter]
+  /// снимает старые ожидающие `info`, иначе они таймаутятся при новом cmdId.
   /// Централизованный throttle, чтобы экраны не спамили устройству.
   Future<bool> getInfo({bool force = false}) async {
     if (!isTransportConnected) {
@@ -451,8 +467,8 @@ class RiftLinkBle {
           _lastInfoRequestAt = DateTime.now();
           await _requestCommand(
             cmd: 'info',
-            expectedEvents: const {'node'},
-            timeout: const Duration(seconds: 5),
+            expectedEvents: kInfoTrackedResponseEvents,
+            timeout: const Duration(seconds: 12),
           );
         });
         return true;
@@ -463,8 +479,8 @@ class RiftLinkBle {
       _lastInfoRequestAt = now;
       return _requestCommand(
         cmd: 'info',
-        expectedEvents: const {'node'},
-        timeout: const Duration(seconds: 5),
+        expectedEvents: kInfoTrackedResponseEvents,
+        timeout: const Duration(seconds: 12),
       );
     }
 
@@ -482,8 +498,8 @@ class RiftLinkBle {
       _lastInfoRequestAt = now;
       return _requestCommand(
         cmd: 'info',
-        expectedEvents: const {'node'},
-        timeout: const Duration(seconds: 5),
+        expectedEvents: kInfoTrackedResponseEvents,
+        timeout: const Duration(seconds: 12),
       );
     }
 
@@ -501,8 +517,8 @@ class RiftLinkBle {
       _lastInfoRequestAt = DateTime.now();
       await _requestCommand(
         cmd: 'info',
-        expectedEvents: const {'node'},
-        timeout: const Duration(seconds: 5),
+        expectedEvents: kInfoTrackedResponseEvents,
+        timeout: const Duration(seconds: 12),
       );
     });
     return true;
@@ -522,6 +538,7 @@ class RiftLinkBle {
     await _disconnectWifi();
     _isWifiMode = false;
     _wifiIp = null;
+    _wifiReconnectIp = null;
     await _stopRxDispatcher();
     if (_device != null) {
       await _device!.disconnect();
@@ -620,6 +637,15 @@ class RiftLinkBle {
     _drainRxAccum();
   }
 
+  /// База для частичных evt (`neighbors` / `routes` / `groups`): сначала [_compositeInfo], иначе [lastInfo] с непустым id.
+  RiftLinkInfoEvent _baseForPartialMerge() {
+    final c = _compositeInfo;
+    if (c != null) return c;
+    final l = _lastInfo;
+    if (l != null && l.id.isNotEmpty) return l;
+    return RiftLinkInfoEvent(id: '');
+  }
+
   /// Склейка `evt:node` с предыдущими кусками (соседи/маршруты/группы остаются из кэша).
   RiftLinkInfoEvent _mergeFromNode(RiftLinkInfoEvent n) {
     final p = _compositeInfo ?? RiftLinkInfoEvent(id: n.id.isNotEmpty ? n.id : '');
@@ -666,59 +692,85 @@ class RiftLinkBle {
       blePin: n.blePin ?? p.blePin,
       espNowChannel: n.espNowChannel ?? p.espNowChannel,
       espNowAdaptive: n.espNowAdaptive,
+      heapFreeBytes: n.heapFreeBytes ?? p.heapFreeBytes,
+      heapTotalBytes: n.heapTotalBytes ?? p.heapTotalBytes,
+      heapMinFreeBytes: n.heapMinFreeBytes ?? p.heapMinFreeBytes,
+      cpuMhz: n.cpuMhz ?? p.cpuMhz,
+      flashChipMb: n.flashChipMb ?? p.flashChipMb,
+      appPartitionKb: n.appPartitionKb ?? p.appPartitionKb,
+      nvsPartitionKb: n.nvsPartitionKb ?? p.nvsPartitionKb,
+      nvsEntriesUsed: n.nvsEntriesUsed ?? p.nvsEntriesUsed,
+      nvsEntriesFree: n.nvsEntriesFree ?? p.nvsEntriesFree,
+      nvsEntriesTotal: n.nvsEntriesTotal ?? p.nvsEntriesTotal,
+      nvsNamespaceCount: n.nvsNamespaceCount ?? p.nvsNamespaceCount,
     );
   }
 
   RiftLinkInfoEvent _mergeFromNeighbors(RiftLinkNeighborsEvent n) {
-    final p = _compositeInfo ?? RiftLinkInfoEvent(id: '');
+    final p = _baseForPartialMerge();
+    final o = n.nodeOverlay;
+    final k = n.jsonKeysPresent;
+    bool has(String key) => k.contains(key);
+
     return RiftLinkInfoEvent(
-      cmdId: p.cmdId,
-      id: p.id,
-      nickname: p.nickname,
-      hasNicknameField: p.hasNicknameField,
-      hasChannelField: p.hasChannelField,
-      hasOfflinePendingField: p.hasOfflinePendingField,
-      hasOfflineCourierPendingField: p.hasOfflineCourierPendingField,
-      hasOfflineDirectPendingField: p.hasOfflineDirectPendingField,
-      region: p.region,
-      freq: p.freq,
-      power: p.power,
-      channel: p.channel,
-      version: p.version,
-      radioMode: p.radioMode,
-      radioVariant: p.radioVariant,
-      wifiConnected: p.wifiConnected,
-      wifiSsid: p.wifiSsid,
-      wifiIp: p.wifiIp,
+      cmdId: o.cmdId ?? p.cmdId,
+      id: o.id.isNotEmpty ? o.id : p.id,
+      nickname: has('nickname') ? o.nickname : p.nickname,
+      hasNicknameField: p.hasNicknameField || o.hasNicknameField,
+      hasChannelField: has('channel') ? o.hasChannelField : p.hasChannelField,
+      hasOfflinePendingField: has('offlinePending') ? o.hasOfflinePendingField : p.hasOfflinePendingField,
+      hasOfflineCourierPendingField: has('offlineCourierPending') ? o.hasOfflineCourierPendingField : p.hasOfflineCourierPendingField,
+      hasOfflineDirectPendingField: has('offlineDirectPending') ? o.hasOfflineDirectPendingField : p.hasOfflineDirectPendingField,
+      region: has('region') ? o.region : p.region,
+      freq: has('freq') ? o.freq : p.freq,
+      power: has('power') ? o.power : p.power,
+      channel: has('channel') ? o.channel : p.channel,
+      version: has('version') ? o.version : p.version,
+      radioMode: has('radioMode') ? o.radioMode : p.radioMode,
+      radioVariant: has('radioVariant') ? o.radioVariant : p.radioVariant,
+      wifiConnected: has('wifiConnected') ? o.wifiConnected : p.wifiConnected,
+      wifiSsid: has('wifiSsid') ? o.wifiSsid : p.wifiSsid,
+      wifiIp: has('wifiIp') ? o.wifiIp : p.wifiIp,
       neighbors: n.neighbors,
       neighborsRssi: n.rssi,
       neighborsHasKey: n.hasKey,
       groups: p.groups,
       routes: p.routes,
-      sf: p.sf,
-      bw: p.bw,
-      cr: p.cr,
-      modemPreset: p.modemPreset,
-      offlinePending: p.offlinePending,
-      offlineCourierPending: p.offlineCourierPending,
-      offlineDirectPending: p.offlineDirectPending,
-      batteryMv: p.batteryMv,
-      batteryPercent: p.batteryPercent,
-      charging: p.charging,
-      timeHour: p.timeHour,
-      timeMinute: p.timeMinute,
-      gpsPresent: p.gpsPresent,
-      gpsEnabled: p.gpsEnabled,
-      gpsFix: p.gpsFix,
-      powersave: p.powersave,
-      blePin: p.blePin,
-      espNowChannel: p.espNowChannel,
-      espNowAdaptive: p.espNowAdaptive,
+      sf: has('sf') ? o.sf : p.sf,
+      bw: has('bw') ? o.bw : p.bw,
+      cr: has('cr') ? o.cr : p.cr,
+      modemPreset: has('modemPreset') ? o.modemPreset : p.modemPreset,
+      offlinePending: has('offlinePending') ? o.offlinePending : p.offlinePending,
+      offlineCourierPending: has('offlineCourierPending') ? o.offlineCourierPending : p.offlineCourierPending,
+      offlineDirectPending: has('offlineDirectPending') ? o.offlineDirectPending : p.offlineDirectPending,
+      batteryMv: has('batteryMv') || has('battery') ? o.batteryMv : p.batteryMv,
+      batteryPercent: has('batteryPercent') ? o.batteryPercent : p.batteryPercent,
+      charging: has('charging') ? o.charging : p.charging,
+      timeHour: has('timeHour') ? o.timeHour : p.timeHour,
+      timeMinute: has('timeMinute') ? o.timeMinute : p.timeMinute,
+      gpsPresent: has('gpsPresent') ? o.gpsPresent : p.gpsPresent,
+      gpsEnabled: has('gpsEnabled') ? o.gpsEnabled : p.gpsEnabled,
+      gpsFix: has('gpsFix') ? o.gpsFix : p.gpsFix,
+      powersave: has('powersave') ? o.powersave : p.powersave,
+      blePin: has('blePin') ? o.blePin : p.blePin,
+      espNowChannel: has('espNowChannel') || has('espnowChannel') ? o.espNowChannel : p.espNowChannel,
+      espNowAdaptive: has('espNowAdaptive') || has('espnowAdaptive') ? o.espNowAdaptive : p.espNowAdaptive,
+      heapFreeBytes: has('heapFree') ? o.heapFreeBytes : p.heapFreeBytes,
+      heapTotalBytes: has('heapTotal') ? o.heapTotalBytes : p.heapTotalBytes,
+      heapMinFreeBytes: has('heapMin') ? o.heapMinFreeBytes : p.heapMinFreeBytes,
+      cpuMhz: has('cpuMhz') ? o.cpuMhz : p.cpuMhz,
+      flashChipMb: has('flashMb') ? o.flashChipMb : p.flashChipMb,
+      appPartitionKb: has('appPartKb') ? o.appPartitionKb : p.appPartitionKb,
+      nvsPartitionKb: has('nvsPartKb') ? o.nvsPartitionKb : p.nvsPartitionKb,
+      nvsEntriesUsed: has('nvsUsedEnt') ? o.nvsEntriesUsed : p.nvsEntriesUsed,
+      nvsEntriesFree: has('nvsFreeEnt') ? o.nvsEntriesFree : p.nvsEntriesFree,
+      nvsEntriesTotal: has('nvsTotalEnt') ? o.nvsEntriesTotal : p.nvsEntriesTotal,
+      nvsNamespaceCount: has('nvsNs') ? o.nvsNamespaceCount : p.nvsNamespaceCount,
     );
   }
 
   RiftLinkInfoEvent _mergeFromRoutes(RiftLinkRoutesEvent r) {
-    final p = _compositeInfo ?? RiftLinkInfoEvent(id: '');
+    final p = _baseForPartialMerge();
     return RiftLinkInfoEvent(
       cmdId: p.cmdId,
       id: p.id,
@@ -762,6 +814,17 @@ class RiftLinkBle {
       blePin: p.blePin,
       espNowChannel: p.espNowChannel,
       espNowAdaptive: p.espNowAdaptive,
+      heapFreeBytes: p.heapFreeBytes,
+      heapTotalBytes: p.heapTotalBytes,
+      heapMinFreeBytes: p.heapMinFreeBytes,
+      cpuMhz: p.cpuMhz,
+      flashChipMb: p.flashChipMb,
+      appPartitionKb: p.appPartitionKb,
+      nvsPartitionKb: p.nvsPartitionKb,
+      nvsEntriesUsed: p.nvsEntriesUsed,
+      nvsEntriesFree: p.nvsEntriesFree,
+      nvsEntriesTotal: p.nvsEntriesTotal,
+      nvsNamespaceCount: p.nvsNamespaceCount,
     );
   }
 
@@ -770,7 +833,7 @@ class RiftLinkBle {
   /// волна `evt:node` с пустым `groups:` — без этого слёта в [lastInfo] список остаётся пустым
   /// и [RiftLinkInfoEvent] затирает экран групп.
   RiftLinkInfoEvent _mergeFromGroupStatus(RiftLinkGroupStatusEvent s) {
-    final p = _compositeInfo ?? RiftLinkInfoEvent(id: '');
+    final p = _baseForPartialMerge();
     final gid = s.channelId32;
     if (gid == null || gid <= 1 || s.groupUid.trim().isEmpty) return p;
 
@@ -843,11 +906,22 @@ class RiftLinkBle {
       blePin: p.blePin,
       espNowChannel: p.espNowChannel,
       espNowAdaptive: p.espNowAdaptive,
+      heapFreeBytes: p.heapFreeBytes,
+      heapTotalBytes: p.heapTotalBytes,
+      heapMinFreeBytes: p.heapMinFreeBytes,
+      cpuMhz: p.cpuMhz,
+      flashChipMb: p.flashChipMb,
+      appPartitionKb: p.appPartitionKb,
+      nvsPartitionKb: p.nvsPartitionKb,
+      nvsEntriesUsed: p.nvsEntriesUsed,
+      nvsEntriesFree: p.nvsEntriesFree,
+      nvsEntriesTotal: p.nvsEntriesTotal,
+      nvsNamespaceCount: p.nvsNamespaceCount,
     );
   }
 
   RiftLinkInfoEvent _mergeFromGroups(RiftLinkGroupsEvent g) {
-    final p = _compositeInfo ?? RiftLinkInfoEvent(id: '');
+    final p = _baseForPartialMerge();
     // Узел: notifyInfo() шлёт подряд evt:node → neighbors → routes → groups; у первого
     // evt:groups поле cmdId часто отсутствует (ответ на волну info, не на cmd: groups).
     // Пустой массив без cmdId — подозрительный снимок (гонка/NVS) → не затираем кэш.
@@ -911,6 +985,17 @@ class RiftLinkBle {
       blePin: p.blePin,
       espNowChannel: p.espNowChannel,
       espNowAdaptive: p.espNowAdaptive,
+      heapFreeBytes: p.heapFreeBytes,
+      heapTotalBytes: p.heapTotalBytes,
+      heapMinFreeBytes: p.heapMinFreeBytes,
+      cpuMhz: p.cpuMhz,
+      flashChipMb: p.flashChipMb,
+      appPartitionKb: p.appPartitionKb,
+      nvsPartitionKb: p.nvsPartitionKb,
+      nvsEntriesUsed: p.nvsEntriesUsed,
+      nvsEntriesFree: p.nvsEntriesFree,
+      nvsEntriesTotal: p.nvsEntriesTotal,
+      nvsNamespaceCount: p.nvsNamespaceCount,
     );
   }
 
@@ -967,6 +1052,8 @@ class RiftLinkBle {
             );
           }
         }
+        // Монолитный evt:info часто без heap/flash/NVS — не затираем метрики предыдущего evt:node.
+        evt = _mergeSystemMetricsFromPrevious(evt, p);
         _compositeInfo = evt;
       } else {
         _compositeInfo = _mergeFromNode(evt);
@@ -1021,6 +1108,8 @@ class RiftLinkBle {
   void _stripToFirstAsciiBraceByte() {
     final i = _rxAccum.indexWhere((b) => b == 0x7B);
     if (i < 0) {
+      // Фрагмент без `{` — ждём следующий notify (склейка по MTU), не затираем короткий буфер.
+      if (_rxAccum.length < 4096) return;
       _rxAccum.clear();
       return;
     }
@@ -1037,14 +1126,18 @@ class RiftLinkBle {
     }
   }
 
-  /// NDJSON: после каждого JSON на прошивке — `\n` (или `\r\n`). Тогда границы не зависят от MTU.
-  /// Внутри строковых полей неэкранированный `\n` ломает разбор — экранировать или не использовать.
-  String? _tryDrainNewlineDelimitedJson(String s) {
-    if (!s.contains('\n')) return null;
-    final lastNl = s.lastIndexOf('\n');
-    final complete = s.substring(0, lastNl + 1);
-    final tail = s.substring(lastNl + 1);
-    for (final line in complete.split('\n')) {
+  /// NDJSON: после каждого JSON на прошивке — `\n` (или `\r\n`).
+  ///
+  /// Важно: префикс до последнего `0x0A` режем **только по байтам** [raw], декодируем его в строку
+  /// и парсим строки. Нельзя брать `s.lastIndexOf('\\n')` по полному [utf8.decode] буфера: индекс
+  /// символа в [String] не совпадает с байтовым смещением при кириллице в JSON — тогда
+  /// `removeRange` по `lastIndexOf(0x0A)` съедал не тот префикс и первым эмитился evt:routes.
+  int? _tryDrainNewlineDelimitedJsonBytes(List<int> raw) {
+    final lastNl = raw.lastIndexOf(0x0A);
+    if (lastNl < 0) return null;
+    final completeBytes = raw.sublist(0, lastNl + 1);
+    final text = utf8.decode(completeBytes, allowMalformed: true);
+    for (final line in text.split('\n')) {
       final lineNoCr = line.trim().replaceAll('\r', '');
       if (lineNoCr.isEmpty) continue;
       try {
@@ -1057,12 +1150,24 @@ class RiftLinkBle {
           }
         }
       } catch (e) {
-        if (kDebugMode) debugPrint('RiftLinkBle: NDJSON parse error: $e');
-        _trace('stage=app_parse action=parse_error reason=ndjson err=$e');
-        _diagInc('drop_parse_ndjson');
+        // Несколько корневых JSON подряд без \n между объектами: `}{` — jsonDecode падает,
+        // иначе теряются evt:node / neighbors, остаётся только следующая строка (routes).
+        var emitted = 0;
+        final remainder = _tryEmitFromConcatenated(lineNoCr, (Map<String, dynamic> m) {
+          emitted++;
+          _lastRxIncompleteLogLen = 0;
+          _emitParsedJson(m);
+        });
+        if (emitted == 0) {
+          if (kDebugMode) debugPrint('RiftLinkBle: NDJSON parse error: $e');
+          _trace('stage=app_parse action=parse_error reason=ndjson err=$e');
+          _diagInc('drop_parse_ndjson');
+        } else if (remainder.trim().isNotEmpty) {
+          _trace('stage=app_parse action=ndjson_concat_tail len=${remainder.length}');
+        }
       }
     }
-    return tail;
+    return lastNl + 1;
   }
 
   /// Разбор RX: отрезка мусора до первого `{` по **байтам** (не ждём целого UTF-8),
@@ -1077,6 +1182,7 @@ class RiftLinkBle {
       final s = _decodeUtf8Lenient(_rxAccum);
       final i0 = s.indexOf('{');
       if (i0 < 0) {
+        if (_rxAccum.length < 4096) return;
         _rxAccum.clear();
         return;
       }
@@ -1092,21 +1198,42 @@ class RiftLinkBle {
       }
 
       final t = s;
-      final ndTail = _tryDrainNewlineDelimitedJson(t);
-      if (ndTail != null) {
-        final lastNlByte = _rxAccum.lastIndexOf(0x0A);
-        if (lastNlByte >= 0) {
-          _rxAccum.removeRange(0, lastNlByte + 1);
-        } else {
-          _rxAccum
-            ..clear()
-            ..addAll(utf8.encode(ndTail));
+      // Склейка двух JSON без \n между ними: `}{`. NDJSON по lastIndexOf(0x0A) тогда может
+      // съесть не тот префикс (старый \n в буфере) — сначала разбираем concat, не NDJSON.
+      var skipNdjson = false;
+      for (var i = 0; i + 1 < _rxAccum.length; i++) {
+        if (_rxAccum[i] == 0x7D && _rxAccum[i + 1] == 0x7B) {
+          skipNdjson = true;
+          break;
         }
-        if (ndTail.isEmpty) return;
+      }
+      final ndConsumed = skipNdjson ? null : _tryDrainNewlineDelimitedJsonBytes(_rxAccum);
+      if (ndConsumed != null) {
+        _rxAccum.removeRange(0, ndConsumed);
         continue;
       }
 
-      // Один полный объект в буфере (самый частый случай).
+      // Сначала склейка нескольких корневых JSON (`}{` без \n). Если раньше вызывать jsonDecode(t) на
+      // всём буфере, один полный короткий объект (например routes) очищает _rxAccum и теряется хвост волны info.
+      final tail = _tryEmitFromConcatenated(s, _emitParsedJson);
+      if (tail.length < s.length) {
+        _lastRxIncompleteLogLen = 0;
+        final prefix = s.substring(0, s.length - tail.length);
+        final off = _byteOffsetForDecodedPrefixMatch(_rxAccum, s, prefix);
+        if (off != null) {
+          _rxAccum.removeRange(0, off);
+        } else {
+          _trace('stage=app_rx action=rx_tail_fallback reason=byte_prefix_mismatch tail_len=${tail.length} raw_len=${_rxAccum.length}');
+          _diagInc('rx_tail_byte_mismatch');
+          _rxAccum
+            ..clear()
+            ..addAll(utf8.encode(tail));
+        }
+        if (tail.isEmpty) return;
+        continue;
+      }
+
+      // Один полный объект в буфере (редкий путь, если concat ничего не извлёк).
       try {
         final decoded = jsonDecode(t);
         if (decoded is Map) {
@@ -1115,7 +1242,6 @@ class RiftLinkBle {
           _rxAccum.clear();
           return;
         }
-        // Массив объектов на корне — без этого разбор молча зависел от экстрактора по скобкам.
         if (decoded is List) {
           _lastRxIncompleteLogLen = 0;
           for (final e in decoded) {
@@ -1130,9 +1256,7 @@ class RiftLinkBle {
           debugPrint('RiftLinkBle: RX json root is ${decoded.runtimeType}, trying brace extract');
         }
       } catch (e) {
-        // Неполный JSON или несколько объектов подряд — разбираем ниже
         if (kDebugMode && s.length < 256) debugPrint('RiftLinkBle: single-object parse: $e');
-        // Длинный JSON групп по BLE всегда может резаться по MTU — до следующего notify это норма, не спамим BLE_CHAIN.
         final isFragment =
             s.length > 120 &&
             e is FormatException &&
@@ -1141,55 +1265,24 @@ class RiftLinkBle {
           _trace('stage=app_parse action=single_object_retry err=$e len=${s.length}');
         }
       }
-
-      final objs = _extractTopLevelJsonObjects(s);
-      if (objs.objects.isEmpty) {
-        // Неполный первый объект (обрезка по границе notify) — ищем любой полный объект с позиции `{`.
-        final tail = _tryEmitFromConcatenated(s, _emitParsedJson);
-        if (tail.length < s.length) {
-          _lastRxIncompleteLogLen = 0;
-          _rxAccum
-            ..clear()
-            ..addAll(utf8.encode(tail));
-          if (tail.isEmpty) return;
-          continue;
-        }
-        if (kDebugMode && t.length >= 64) {
-          if (t.length - _lastRxIncompleteLogLen >= 300 || _lastRxIncompleteLogLen == 0) {
-            _lastRxIncompleteLogLen = t.length;
-            debugPrint(
-              'RiftLinkBle: RX no complete JSON yet len=${t.length} (waiting for more notify) head=${_rxDebugPreview(t)}',
-            );
-          }
-        }
-        if (_rxAccum.length > 4096) {
-          final retained = retainRxTailFromLastBraceBytes(_rxAccum, maxRetain: 4096);
-          _trace('stage=app_rx action=retain reason=large_partial before=${_rxAccum.length} after=${retained.length}');
-          _diagInc('rx_retain_large_partial');
-          _diagMaybeDump('rx_retain_large_partial');
-          _rxAccum
-            ..clear()
-            ..addAll(retained);
-        }
-        return;
-      }
-      _lastRxIncompleteLogLen = 0;
-      for (final raw in objs.objects) {
-        try {
-          final decoded = jsonDecode(raw);
-          if (decoded is! Map) continue;
-          _emitParsedJson(Map<String, dynamic>.from(decoded as Map));
-        } catch (e) {
-          if (kDebugMode) debugPrint('RiftLinkBle: extracted object parse error: $e');
-          _trace('stage=app_parse action=parse_error reason=extracted_object err=$e');
-          _diagInc('drop_parse_extracted');
+      if (kDebugMode && t.length >= 64) {
+        if (t.length - _lastRxIncompleteLogLen >= 300 || _lastRxIncompleteLogLen == 0) {
+          _lastRxIncompleteLogLen = t.length;
+          debugPrint(
+            'RiftLinkBle: RX no complete JSON yet len=${t.length} (waiting for more notify) head=${_rxDebugPreview(t)}',
+          );
         }
       }
-      final tailBytes = utf8.encode(objs.tail);
-      _rxAccum
-        ..clear()
-        ..addAll(tailBytes);
-      if (tailBytes.isEmpty) return;
+      if (_rxAccum.length > 4096) {
+        final retained = retainRxTailFromLastBraceBytes(_rxAccum, maxRetain: 4096);
+        _trace('stage=app_rx action=retain reason=large_partial before=${_rxAccum.length} after=${retained.length}');
+        _diagInc('rx_retain_large_partial');
+        _diagMaybeDump('rx_retain_large_partial');
+        _rxAccum
+          ..clear()
+          ..addAll(retained);
+      }
+      return;
     }
   }
 
@@ -1537,7 +1630,7 @@ class RiftLinkBle {
     } on TimeoutException {
       // Ранний выход: ответ по эфиру может прийти через секунды; роутер всё ещё ждёт до [timeout].
       // Иначе через ~20 с completer завершится с TimeoutException без слушателя → необработанная ошибка в Zone.
-      unawaited(ticket.response.catchError((_) {}));
+      unawaited(ticket.response.catchError((_) => <String, dynamic>{}));
       return ticket.cmdId;
     } catch (e) {
       final s = e.toString();
@@ -1561,12 +1654,24 @@ class RiftLinkBle {
   /// IP address used for the current WiFi connection (null if BLE).
   String? get wifiIp => _wifiIp;
 
+  /// Последний успешный IP WebSocket (`connectWifi`), не сбрасывается при [abandonWifiSession].
+  /// Нужен [TransportReconnectManager], чтобы после обрыва снова вызывать `connectWifi`, а не BLE.
+  String? _wifiReconnectIp;
+  String? get lastWifiReconnectIp => _wifiReconnectIp;
+
   /// Переключить в WiFi STA-режим (подключение к сети)
-  Future<bool> switchToWifiSta({required String ssid, required String pass}) =>
-      _sendCmd({'cmd': 'radioMode', 'mode': 'wifi', 'variant': 'sta', 'ssid': ssid, 'pass': pass});
+  ///
+  /// Узел гасит BLE — без подавления [TransportReconnectManager] сработает ложный «связь потеряна».
+  /// Возобновление авто‑reconnect: успешный [connectWifi] или ручное [connect] по BLE.
+  Future<bool> switchToWifiSta({required String ssid, required String pass}) async {
+    transportReconnectManager?.suppressAutoReconnectUntilNextConnection();
+    return _sendCmd({'cmd': 'radioMode', 'mode': 'wifi', 'variant': 'sta', 'ssid': ssid, 'pass': pass});
+  }
 
   /// Переключить обратно в BLE
   Future<bool> switchToBle() async {
+    // Разрыв WebSocket при уходе узла с Wi‑Fi — тоже не считаем «потерей» до следующего connect().
+    transportReconnectManager?.suppressAutoReconnectUntilNextConnection();
     // Важно: radioMode устройства и локальный флаг _isWifiMode не эквивалентны.
     // Команду нужно отправлять всегда, иначе UI может думать, что режим сменился, а устройство останется в WiFi.
     final ok = await _sendCmd({'cmd': 'radioMode', 'mode': 'ble'});
@@ -1587,31 +1692,78 @@ class RiftLinkBle {
     }
     _isWifiMode = true;
     _wifiIp = ip;
-    _wifiRxSub = _wifiTransport!.rawJsonStream.listen((raw) {
-      _trace('stage=app_rx action=ws_raw mode=wifi len=${raw.length}');
-      try {
-        final decoded = jsonDecode(raw);
-        if (decoded is Map) {
-          _emitParsedJson(Map<String, dynamic>.from(decoded as Map));
-        }
-      } catch (e) {
-        if (kDebugMode) debugPrint('RiftLinkBle: WiFi JSON parse error: $e');
-        _trace('stage=app_parse action=parse_error mode=wifi reason=json err=$e');
-      }
-    });
+    _wifiReconnectIp = ip;
+    _wifiTransport!.onConnectionLost = _onWifiSocketLost;
+    // Тот же путь, что и BLE: склейка чанков, NDJSON и извлечение по скобкам — иначе Wi‑Fi ломается
+    // на длинных evt/фрагментах и на нескольких JSON подряд без разделителя.
+    _rxAccum.clear();
+    _rxAccumTimeout?.cancel();
+    _wifiRxSub = _wifiTransport!.rawJsonStream.listen(
+      (raw) {
+        _trace('stage=app_rx action=ws_chunk mode=wifi len=${raw.length}');
+        _feedRxChunk(utf8.encode(raw));
+      },
+      onError: (Object e, StackTrace st) {
+        if (kDebugMode) debugPrint('RiftLinkBle: WiFi stream error: $e\n$st');
+        _trace('stage=app_rx action=error mode=wifi err=$e');
+      },
+    );
+    // После BLE недавний getInfo(force) попадает под forceMinGap 900 мс и откладывает реальный
+    // запрос таймером — по новому WebSocket cmd:info не уходит, в UI «нет данных».
+    _queuedInfoTimer?.cancel();
+    _queuedInfoTimer = null;
+    _hasQueuedInfoRequest = false;
+    _lastInfoRequestAt = null;
     // Wi-Fi transport does not push initial state automatically like BLE connect flow.
-    // Request baseline payload right after WS attach.
-    await Future<void>.delayed(const Duration(milliseconds: 120));
-    await getInfo(force: true);
+    // Request baseline payload right after WS attach (чуть больше задержки — очередь cmd на узле после смены режима).
+    await Future<void>.delayed(const Duration(milliseconds: 280));
+    var infoOk = await getInfo(force: true);
+    if (!infoOk) {
+      await Future<void>.delayed(const Duration(milliseconds: 900));
+      await getInfo(force: true);
+    }
     await Future<void>.delayed(const Duration(milliseconds: 80));
     await getGroups();
     await getRoutes();
+    unawaited(
+      Future<void>.delayed(const Duration(milliseconds: 450), () {
+        transportReconnectManager?.resumeAutoReconnect();
+      }),
+    );
     return true;
   }
 
+  /// Обрыв WebSocket (узел ушёл с Wi‑Fi, TCP закрыт) — без этого UI ждёт только таймаут cmd (например info).
+  void _onWifiSocketLost() => _teardownWifiLink('socket_lost');
+
+  /// Watchdog / полуоткрытый TCP: принудительно сбросить Wi‑Fi‑сессию (как потерю связи).
+  /// Иначе [TransportReconnectManager] видит «transport connected» до минут TCP и не показывает overlay.
+  void abandonWifiSession() => _teardownWifiLink('abandon_session');
+
+  void _teardownWifiLink(String action) {
+    if (!_isWifiMode) return;
+    _trace('stage=app_wifi action=$action');
+    _wifiTransport?.onConnectionLost = null;
+    _responseRouter.cancelAll();
+    unawaited(_wifiRxSub?.cancel() ?? Future<void>.value());
+    _wifiRxSub = null;
+    final t = _wifiTransport;
+    _wifiTransport = null;
+    _isWifiMode = false;
+    final lastIp = _wifiIp;
+    _wifiIp = null;
+    if (!_eventBus.isClosed) {
+      _eventBus.add(RiftLinkWifiEvent(connected: false, ssid: '', ip: lastIp ?? ''));
+    }
+    unawaited(t?.disconnect() ?? Future<void>.value());
+  }
+
   Future<void> _disconnectWifi() async {
+    _wifiTransport?.onConnectionLost = null;
     await _wifiRxSub?.cancel();
     _wifiRxSub = null;
+    _rxAccumTimeout?.cancel();
+    _rxAccum.clear();
     await _wifiTransport?.disconnect();
     _wifiTransport = null;
   }
@@ -1864,49 +2016,30 @@ String? _trimmedStringOrNull(dynamic v) {
   return s.isEmpty ? null : s;
 }
 
-({List<String> objects, String tail}) _extractTopLevelJsonObjects(String s) {
-  final out = <String>[];
-  var inStr = false;
-  var esc = false;
-  var depth = 0;
-  int? start;
-  var lastConsumed = 0;
-
-  for (var i = 0; i < s.length; i++) {
-    final ch = s.codeUnitAt(i);
-    if (inStr) {
-      if (esc) {
-        esc = false;
-        continue;
+/// Сколько байт [raw] соответствует префиксу [prefix] из [full] (оба из одного lenient decode).
+/// Сначала канонический UTF-8 префикса — совпадает с «сырыми» байтами почти всегда; иначе линейный
+/// поиск (изолированный decode префикса может отличаться от decode всего буфера на границе UTF-8).
+int? _byteOffsetForDecodedPrefixMatch(List<int> raw, String full, String prefix) {
+  if (prefix.isEmpty) return 0;
+  if (prefix.length > full.length || !full.startsWith(prefix)) return null;
+  try {
+    final enc = utf8.encode(prefix);
+    if (enc.length <= raw.length) {
+      var same = true;
+      for (var i = 0; i < enc.length; i++) {
+        if (raw[i] != enc[i]) {
+          same = false;
+          break;
+        }
       }
-      if (ch == 0x5C) {
-        esc = true;
-      } else if (ch == 0x22) {
-        inStr = false;
-      }
-      continue;
+      if (same) return enc.length;
     }
-    if (ch == 0x22) {
-      inStr = true;
-      continue;
-    }
-    if (ch == 0x7B) {
-      if (depth == 0) start = i;
-      depth++;
-      continue;
-    }
-    if (ch == 0x7D && depth > 0) {
-      depth--;
-      if (depth == 0 && start != null) {
-        out.add(s.substring(start, i + 1));
-        lastConsumed = i + 1;
-        start = null;
-      }
-    }
+  } catch (_) {}
+  for (var b = 1; b <= raw.length; b++) {
+    final d = utf8.decode(raw.sublist(0, b), allowMalformed: true);
+    if (d == prefix) return b;
   }
-
-  final tail = lastConsumed > 0 ? s.substring(lastConsumed) : s;
-  return (objects: out, tail: tail);
+  return null;
 }
 
 /// Индекс закрывающей `}` для `{` в [openIndex]; учитывает строки и экранирование. null если неполный.
@@ -1945,6 +2078,9 @@ int? _indexOfMatchingBrace(String s, int openIndex) {
 /// Из буфера с конкатенированным/обрезанным JSON извлекает полные **корневые** уведомления (`evt` в корне).
 /// Вложенные `{...}` (routes и т.д.) не трогаем — иначе портим буфер при обрезанном `info`.
 /// Если ничего не извлечено — возвращаем [s] целиком (ожидаем следующий notify).
+///
+/// Важно: при **неполной** первой «{» (длинный `evt:node` обрезан по MTU) **нельзя** искать следующую «{»:
+/// иначе первой окажется полная пара скобок у короткого `evt:routes`, а узел потеряется для merge/UI.
 String _tryEmitFromConcatenated(String s, void Function(Map<String, dynamic>) emit) {
   var tailStart = 0;
   var searchPos = 0;
@@ -1953,8 +2089,8 @@ String _tryEmitFromConcatenated(String s, void Function(Map<String, dynamic>) em
     if (pos < 0) break;
     final end = _indexOfMatchingBrace(s, pos);
     if (end == null) {
-      searchPos = pos + 1;
-      continue;
+      // Ждём следующий notify — не делаем searchPos = pos + 1 (ломало порядок info-волны).
+      return s.substring(tailStart);
     }
     try {
       final decoded = jsonDecode(s.substring(pos, end + 1));
@@ -1966,9 +2102,17 @@ String _tryEmitFromConcatenated(String s, void Function(Map<String, dynamic>) em
           searchPos = end + 1;
           continue;
         }
+        // Полный объект без корневого evt — сдвигаемся за закрывающую «}», не на pos+1.
+        searchPos = end + 1;
+        continue;
       }
-    } catch (_) {}
-    searchPos = pos + 1;
+      searchPos = end + 1;
+      continue;
+    } catch (_) {
+      // jsonDecode упал при «закрытой» паре скобок: не делаем searchPos=pos+1 — иначе
+      // следующая «{» (evt:routes/groups) эмитится раньше, чем доберётся обрезанный node.
+      return s.substring(tailStart);
+    }
   }
   return s.substring(tailStart);
 }
@@ -2058,6 +2202,84 @@ List<String> _parseNeighborIdList(dynamic raw) {
   return [];
 }
 
+/// Поля как в evt:node / evt:info; для evt:neighbors с тем же набором ключей (дубль паспорта на прошивке).
+RiftLinkInfoEvent riftLinkInfoEventFromNodeJson(Map<String, dynamic> json) {
+  final neighbors = _parseNeighborIdList(json['neighbors']);
+  final rssiList = json['neighborsRssi'] ?? json['rssi'];
+  final neighborsRssi = rssiList is List ? (rssiList as List).map(_jsonInt).toList() : <int>[];
+  final hasKeyList = json['neighborsHasKey'] ?? json['hasKey'];
+  final neighborsHasKey = hasKeyList is List
+      ? (hasKeyList as List).map((e) => e == true || e == 1).toList()
+      : <bool>[];
+  final groups = _parseGroupInfoList(json['groups']);
+  final routesList = json['routes'];
+  final routes = <Map<String, dynamic>>[];
+  if (routesList is List) {
+    for (final r in routesList) {
+      if (r is Map) {
+        routes.add(_normalizeRouteMap(r as Map));
+      }
+    }
+  }
+  final idRaw = json['id'] ?? json['nodeId'];
+  final idStr = idRaw == null ? '' : idRaw.toString();
+  return RiftLinkInfoEvent(
+    cmdId: _jsonIntNullable(json['cmdId']),
+    id: idStr,
+    nickname: _trimmedStringOrNull(json['nickname']),
+    hasNicknameField: json.containsKey('nickname'),
+    hasChannelField: json.containsKey('channel'),
+    hasOfflinePendingField: json.containsKey('offlinePending'),
+    hasOfflineCourierPendingField: json.containsKey('offlineCourierPending'),
+    hasOfflineDirectPendingField: json.containsKey('offlineDirectPending'),
+    region: _regionCodeOrDefault(json['region']),
+    freq: _jsonDouble(json['freq']),
+    power: _jsonIntDefault(json['power'], 14),
+    channel: _jsonIntNullable(json['channel']),
+    version: json['version']?.toString(),
+    radioMode: json['radioMode']?.toString() ?? 'ble',
+    radioVariant: json['radioVariant']?.toString(),
+    wifiConnected: json['wifiConnected'] == true || json['wifiConnected'] == 1,
+    wifiSsid: _trimmedStringOrNull(json['wifiSsid']),
+    wifiIp: _trimmedStringOrNull(json['wifiIp']),
+    neighbors: neighbors,
+    neighborsRssi: neighborsRssi,
+    neighborsHasKey: neighborsHasKey,
+    groups: groups,
+    routes: routes,
+    sf: _jsonIntNullable(json['sf']),
+    bw: _jsonDoubleNullable(json['bw']),
+    cr: _jsonIntNullable(json['cr']),
+    modemPreset: _jsonIntNullable(json['modemPreset']),
+    offlinePending: _jsonIntNullable(json['offlinePending']),
+    offlineCourierPending: _jsonIntNullable(json['offlineCourierPending']),
+    offlineDirectPending: _jsonIntNullable(json['offlineDirectPending']),
+    batteryMv: _jsonIntNullable(json['batteryMv']) ?? _jsonIntNullable(json['battery']),
+    batteryPercent: _jsonIntNullable(json['batteryPercent']),
+    charging: json['charging'] == true || json['charging'] == 1,
+    timeHour: _jsonIntNullable(json['timeHour']),
+    timeMinute: _jsonIntNullable(json['timeMinute']),
+    gpsPresent: json['gpsPresent'] == true || json['gpsPresent'] == 1,
+    gpsEnabled: json['gpsEnabled'] == true || json['gpsEnabled'] == 1,
+    gpsFix: json['gpsFix'] == true || json['gpsFix'] == 1,
+    powersave: json['powersave'] == true || json['powersave'] == 1,
+    blePin: _jsonIntNullable(json['blePin']),
+    espNowChannel: _jsonIntNullable(json['espNowChannel']) ?? _jsonIntNullable(json['espnowChannel']),
+    espNowAdaptive: json['espNowAdaptive'] == true || json['espNowAdaptive'] == 1 || json['espnowAdaptive'] == true || json['espnowAdaptive'] == 1,
+    heapFreeBytes: _jsonIntNullable(json['heapFree']),
+    heapTotalBytes: _jsonIntNullable(json['heapTotal']),
+    heapMinFreeBytes: _jsonIntNullable(json['heapMin']),
+    cpuMhz: _jsonIntNullable(json['cpuMhz']),
+    flashChipMb: _jsonIntNullable(json['flashMb']),
+    appPartitionKb: _jsonIntNullable(json['appPartKb']),
+    nvsPartitionKb: _jsonIntNullable(json['nvsPartKb']),
+    nvsEntriesUsed: _jsonIntNullable(json['nvsUsedEnt']),
+    nvsEntriesFree: _jsonIntNullable(json['nvsFreeEnt']),
+    nvsEntriesTotal: _jsonIntNullable(json['nvsTotalEnt']),
+    nvsNamespaceCount: _jsonIntNullable(json['nvsNs']),
+  );
+}
+
 /// Парсинг одного JSON-уведомления с RX (вынесено из потока для единого диспетчера).
 RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
   final evtRaw = json['evt'];
@@ -2109,69 +2331,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     );
   }
   if (evt == 'info' || evt == 'node') {
-    final neighbors = _parseNeighborIdList(json['neighbors']);
-    final rssiList = json['neighborsRssi'];
-    final neighborsRssi = rssiList is List ? (rssiList as List).map(_jsonInt).toList() : <int>[];
-    final hasKeyList = json['neighborsHasKey'];
-    final neighborsHasKey = hasKeyList is List
-        ? (hasKeyList as List).map((e) => e == true || e == 1).toList()
-        : <bool>[];
-    final groups = _parseGroupInfoList(json['groups']);
-    final routesList = json['routes'];
-    final routes = <Map<String, dynamic>>[];
-    if (routesList is List) {
-      for (final r in routesList) {
-        if (r is Map) {
-          routes.add(_normalizeRouteMap(r as Map));
-        }
-      }
-    }
-    final idRaw = json['id'] ?? json['nodeId'];
-    final idStr = idRaw == null ? '' : idRaw.toString();
-    return RiftLinkInfoEvent(
-      cmdId: _jsonIntNullable(json['cmdId']),
-      id: idStr,
-      nickname: _trimmedStringOrNull(json['nickname']),
-      hasNicknameField: json.containsKey('nickname'),
-      hasChannelField: json.containsKey('channel'),
-      hasOfflinePendingField: json.containsKey('offlinePending'),
-      hasOfflineCourierPendingField: json.containsKey('offlineCourierPending'),
-      hasOfflineDirectPendingField: json.containsKey('offlineDirectPending'),
-      region: _regionCodeOrDefault(json['region']),
-      freq: _jsonDouble(json['freq']),
-      power: _jsonIntDefault(json['power'], 14),
-      channel: _jsonIntNullable(json['channel']),
-      version: json['version']?.toString(),
-      radioMode: json['radioMode']?.toString() ?? 'ble',
-      radioVariant: json['radioVariant']?.toString(),
-      wifiConnected: json['wifiConnected'] == true || json['wifiConnected'] == 1,
-      wifiSsid: _trimmedStringOrNull(json['wifiSsid']),
-      wifiIp: _trimmedStringOrNull(json['wifiIp']),
-      neighbors: neighbors,
-      neighborsRssi: neighborsRssi,
-      neighborsHasKey: neighborsHasKey,
-      groups: groups,
-      routes: routes,
-      sf: _jsonIntNullable(json['sf']),
-      bw: _jsonDoubleNullable(json['bw']),
-      cr: _jsonIntNullable(json['cr']),
-      modemPreset: _jsonIntNullable(json['modemPreset']),
-      offlinePending: _jsonIntNullable(json['offlinePending']),
-      offlineCourierPending: _jsonIntNullable(json['offlineCourierPending']),
-      offlineDirectPending: _jsonIntNullable(json['offlineDirectPending']),
-      batteryMv: _jsonIntNullable(json['batteryMv']) ?? _jsonIntNullable(json['battery']),
-      batteryPercent: _jsonIntNullable(json['batteryPercent']),
-      charging: json['charging'] == true || json['charging'] == 1,
-      timeHour: _jsonIntNullable(json['timeHour']),
-      timeMinute: _jsonIntNullable(json['timeMinute']),
-      gpsPresent: json['gpsPresent'] == true || json['gpsPresent'] == 1,
-      gpsEnabled: json['gpsEnabled'] == true || json['gpsEnabled'] == 1,
-      gpsFix: json['gpsFix'] == true || json['gpsFix'] == 1,
-      powersave: json['powersave'] == true || json['powersave'] == 1,
-      blePin: _jsonIntNullable(json['blePin']),
-      espNowChannel: _jsonIntNullable(json['espNowChannel']) ?? _jsonIntNullable(json['espnowChannel']),
-      espNowAdaptive: json['espNowAdaptive'] == true || json['espNowAdaptive'] == 1 || json['espnowAdaptive'] == true || json['espnowAdaptive'] == 1,
-    );
+    return riftLinkInfoEventFromNodeJson(json);
   }
   if (evt == 'routes') {
     final routesList = json['routes'];
@@ -2278,10 +2438,13 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     final hasKey = hasKeyList is List
         ? (hasKeyList as List).map((e) => e == true || e == 1).toList()
         : <bool>[];
+    final keysPresent = json.keys.toSet();
     return RiftLinkNeighborsEvent(
       neighbors: neighbors,
       rssi: rssi,
       hasKey: hasKey,
+      nodeOverlay: riftLinkInfoEventFromNodeJson(json),
+      jsonKeysPresent: keysPresent,
     );
   }
   if (evt == 'pong') {
@@ -2316,6 +2479,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       chunk: (json['chunk'] as num?)?.toInt() ?? 0,
       total: (json['total'] as num?)?.toInt() ?? 1,
       data: json['data'] as String? ?? '',
+      msgId: _jsonIntNullable(json['msgId']),
     );
   }
   if (evt == 'bleOtaReady') {
@@ -2550,6 +2714,18 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
   final int? blePin;
   final int? espNowChannel;
   final bool espNowAdaptive;
+  /// Internal DRAM heap (bytes), с `evt:node` / прошивка ≥ с полями heapFree/heapTotal.
+  final int? heapFreeBytes;
+  final int? heapTotalBytes;
+  final int? heapMinFreeBytes;
+  final int? cpuMhz;
+  final int? flashChipMb;
+  final int? appPartitionKb;
+  final int? nvsPartitionKb;
+  final int? nvsEntriesUsed;
+  final int? nvsEntriesFree;
+  final int? nvsEntriesTotal;
+  final int? nvsNamespaceCount;
   RiftLinkInfoEvent({
     this.cmdId,
     required this.id,
@@ -2593,6 +2769,17 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
     this.blePin,
     this.espNowChannel,
     this.espNowAdaptive = false,
+    this.heapFreeBytes,
+    this.heapTotalBytes,
+    this.heapMinFreeBytes,
+    this.cpuMhz,
+    this.flashChipMb,
+    this.appPartitionKb,
+    this.nvsPartitionKb,
+    this.nvsEntriesUsed,
+    this.nvsEntriesFree,
+    this.nvsEntriesTotal,
+    this.nvsNamespaceCount,
   });
 }
 
@@ -2671,6 +2858,7 @@ class RiftLinkSelftestEvent extends RiftLinkEvent {
   final int batteryMv;
   final int? batteryPercent;
   final bool charging;
+  /// Свободная куча в **байтах** (`evt.selftest` / прошивка `ESP.getFreeHeap()`).
   final int heapFree;
   RiftLinkSelftestEvent({
     required this.radioOk,
@@ -2787,7 +2975,17 @@ class RiftLinkNeighborsEvent extends RiftLinkEvent {
   final List<String> neighbors;
   final List<int> rssi;
   final List<bool> hasKey;  // true = можно отправить
-  RiftLinkNeighborsEvent({required this.neighbors, this.rssi = const [], this.hasKey = const []});
+  /// Те же поля, что в evt:node (прошивка дублирует паспорт + метрики в evt:neighbors при малом MTU).
+  final RiftLinkInfoEvent nodeOverlay;
+  /// Какие ключи были в JSON — чтобы не затирать кэш значениями по умолчанию из парсера.
+  final Set<String> jsonKeysPresent;
+  RiftLinkNeighborsEvent({
+    required this.neighbors,
+    this.rssi = const [],
+    this.hasKey = const [],
+    required this.nodeOverlay,
+    required this.jsonKeysPresent,
+  });
 }
 
 class RiftLinkRegionEvent extends RiftLinkEvent {
@@ -2852,11 +3050,13 @@ class RiftLinkVoiceEvent extends RiftLinkEvent {
   final int chunk;
   final int total;
   final String data;  // base64
+  final int? msgId;
   RiftLinkVoiceEvent({
     required this.from,
     required this.chunk,
     required this.total,
     required this.data,
+    this.msgId,
   });
 }
 
@@ -2896,6 +3096,66 @@ List<RiftLinkGroupInfo> _mergeGroupListWithPrevious(
         return g.mergedWithPrevious(pr);
       })
       .toList();
+}
+
+/// Сохраняет снимок узла из [p], если в [n] не пришли системные поля (монолитный `evt:info` с топологией).
+RiftLinkInfoEvent _mergeSystemMetricsFromPrevious(RiftLinkInfoEvent n, RiftLinkInfoEvent? p) {
+  if (p == null) return n;
+  return RiftLinkInfoEvent(
+    cmdId: n.cmdId,
+    id: n.id,
+    nickname: n.nickname,
+    hasNicknameField: n.hasNicknameField,
+    hasChannelField: n.hasChannelField,
+    hasOfflinePendingField: n.hasOfflinePendingField,
+    hasOfflineCourierPendingField: n.hasOfflineCourierPendingField,
+    hasOfflineDirectPendingField: n.hasOfflineDirectPendingField,
+    region: n.region,
+    freq: n.freq,
+    power: n.power,
+    channel: n.channel,
+    version: n.version,
+    radioMode: n.radioMode,
+    radioVariant: n.radioVariant,
+    wifiConnected: n.wifiConnected,
+    wifiSsid: n.wifiSsid,
+    wifiIp: n.wifiIp,
+    neighbors: n.neighbors,
+    neighborsRssi: n.neighborsRssi,
+    neighborsHasKey: n.neighborsHasKey,
+    groups: n.groups,
+    routes: n.routes,
+    sf: n.sf,
+    bw: n.bw,
+    cr: n.cr,
+    modemPreset: n.modemPreset,
+    offlinePending: n.offlinePending,
+    offlineCourierPending: n.offlineCourierPending,
+    offlineDirectPending: n.offlineDirectPending,
+    batteryMv: n.batteryMv ?? p.batteryMv,
+    batteryPercent: n.batteryPercent ?? p.batteryPercent,
+    charging: n.charging,
+    timeHour: n.timeHour ?? p.timeHour,
+    timeMinute: n.timeMinute ?? p.timeMinute,
+    gpsPresent: n.gpsPresent,
+    gpsEnabled: n.gpsEnabled,
+    gpsFix: n.gpsFix,
+    powersave: n.powersave,
+    blePin: n.blePin ?? p.blePin,
+    espNowChannel: n.espNowChannel ?? p.espNowChannel,
+    espNowAdaptive: n.espNowAdaptive,
+    heapFreeBytes: n.heapFreeBytes ?? p.heapFreeBytes,
+    heapTotalBytes: n.heapTotalBytes ?? p.heapTotalBytes,
+    heapMinFreeBytes: n.heapMinFreeBytes ?? p.heapMinFreeBytes,
+    cpuMhz: n.cpuMhz ?? p.cpuMhz,
+    flashChipMb: n.flashChipMb ?? p.flashChipMb,
+    appPartitionKb: n.appPartitionKb ?? p.appPartitionKb,
+    nvsPartitionKb: n.nvsPartitionKb ?? p.nvsPartitionKb,
+    nvsEntriesUsed: n.nvsEntriesUsed ?? p.nvsEntriesUsed,
+    nvsEntriesFree: n.nvsEntriesFree ?? p.nvsEntriesFree,
+    nvsEntriesTotal: n.nvsEntriesTotal ?? p.nvsEntriesTotal,
+    nvsNamespaceCount: n.nvsNamespaceCount ?? p.nvsNamespaceCount,
+  );
 }
 
 RiftLinkInfoEvent _copyInfoReplacingGroups(RiftLinkInfoEvent e, List<RiftLinkGroupInfo> groups) {
@@ -2942,5 +3202,16 @@ RiftLinkInfoEvent _copyInfoReplacingGroups(RiftLinkInfoEvent e, List<RiftLinkGro
     blePin: e.blePin,
     espNowChannel: e.espNowChannel,
     espNowAdaptive: e.espNowAdaptive,
+    heapFreeBytes: e.heapFreeBytes,
+    heapTotalBytes: e.heapTotalBytes,
+    heapMinFreeBytes: e.heapMinFreeBytes,
+    cpuMhz: e.cpuMhz,
+    flashChipMb: e.flashChipMb,
+    appPartitionKb: e.appPartitionKb,
+    nvsPartitionKb: e.nvsPartitionKb,
+    nvsEntriesUsed: e.nvsEntriesUsed,
+    nvsEntriesFree: e.nvsEntriesFree,
+    nvsEntriesTotal: e.nvsEntriesTotal,
+    nvsNamespaceCount: e.nvsNamespaceCount,
   );
 }
