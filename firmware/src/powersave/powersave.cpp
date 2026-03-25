@@ -76,7 +76,7 @@ void deepSleep() {
   displaySleep();
   ble::deinit();
   // GPIO0 (USER_SW, active LOW) = wake source
-  esp_sleep_enable_ext1_wakeup(1ULL << GPIO_NUM_0, ESP_EXT1_WAKEUP_ANY_LOW);
+  esp_sleep_enable_ext1_wakeup(1ULL << GPIO_NUM_0, ESP_EXT1_WAKEUP_ALL_LOW);
   esp_deep_sleep_start();
 }
 

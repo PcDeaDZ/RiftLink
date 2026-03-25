@@ -29,13 +29,19 @@ def copy_to_out(target, source, env):
     pt = os.path.join(build_dir, "partitions.bin")
     if os.path.exists(bl) and os.path.exists(pt):
         merged = os.path.join(out_dir, f"{env_name}_full.bin")
+        # ESP32 (классика): bootloader @ 0x1000; ESP32-S3: @ 0x0 — иначе merge-bin для T-Beam и т.п. ломается.
+        chip = "esp32s3"
+        bl_off, pt_off, app_off = "0x0", "0x8000", "0x10000"
+        if env_name.startswith("lilygo_t_beam"):
+            chip = "esp32"
+            bl_off = "0x1000"
         try:
             subprocess.run([
-                sys.executable, "-m", "esptool", "--chip", "esp32s3",
+                sys.executable, "-m", "esptool", "--chip", chip,
                 "merge-bin", "-o", merged, "--flash-mode", "dio",
-                "0x0", bl, "0x8000", pt, "0x10000", src
+                bl_off, bl, pt_off, pt, app_off, src
             ], check=True, capture_output=True)
-            print(f"[out] {env_name}/{env_name}_full.bin (merged, flash at 0x0)")
+            print(f"[out] {env_name}/{env_name}_full.bin (merged, chip={chip})")
         except subprocess.CalledProcessError as e:
             print(f"[out] merge skipped: {e}")
 

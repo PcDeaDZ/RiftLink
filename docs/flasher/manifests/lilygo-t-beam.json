@@ -1,0 +1,16 @@
+{
+  "name": "RiftLink LilyGO T-Beam",
+  "version": "1.5.23",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        {
+          "path": "../firmware/lilygo_t_beam_full.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}
