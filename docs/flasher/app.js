@@ -55,6 +55,12 @@ const I18N = {
     title: "Web Flash Tool",
     subtitle:
       "Прошивка устройств через браузер с выбором модели и автоматической загрузкой правильного manifest.",
+    productLine: "Прошивка и восстановление",
+    workflowEyebrow: "Процесс установки",
+    navAriaLabel: "Ссылки на репозиторий и документацию",
+    langAriaLabel: "Язык интерфейса",
+    footerFinePrint:
+      "RiftLink — официальная веб-утилита прошивки. Технология ESP Web Tools (ESPHome). Используйте поддерживаемый браузер и кабель с передачей данных.",
     flashStepsAria: "Шаги прошивки",
     releaseKpisAria: "Версии последнего релиза",
     step1: "Выберите модель устройства",
@@ -130,6 +136,12 @@ const I18N = {
     title: "Web Flash Tool",
     subtitle:
       "Flash RiftLink devices from browser with model selection and automatic manifest loading.",
+    productLine: "Firmware & recovery",
+    workflowEyebrow: "Installation flow",
+    navAriaLabel: "Repository and documentation links",
+    langAriaLabel: "Interface language",
+    footerFinePrint:
+      "RiftLink — official web flashing utility. Powered by ESP Web Tools (ESPHome). Use a supported browser and a data-capable USB cable.",
     flashStepsAria: "Flashing steps",
     releaseKpisAria: "Latest release versions",
     step1: "Pick your hardware model",
@@ -222,9 +234,14 @@ const aboutFeature2TitleEl = document.getElementById("aboutFeature2Title");
 const aboutFeature2TextEl = document.getElementById("aboutFeature2Text");
 const aboutFeature3TitleEl = document.getElementById("aboutFeature3Title");
 const aboutFeature3TextEl = document.getElementById("aboutFeature3Text");
-const linkGithubEl = document.getElementById("linkGithub");
-const linkReleasesEl = document.getElementById("linkReleases");
-const linkDocsEl = document.getElementById("linkDocs");
+const navGithubEl = document.getElementById("navGithub");
+const navReleasesEl = document.getElementById("navReleases");
+const navDocsEl = document.getElementById("navDocs");
+const siteNavEl = document.getElementById("siteNav");
+const productLineEl = document.getElementById("productLine");
+const workflowEyebrowEl = document.getElementById("workflowEyebrow");
+const footerFinePrintEl = document.getElementById("footerFinePrint");
+const langSwitchEl = document.getElementById("langSwitch");
 const roadmapTitleEl = document.getElementById("roadmapTitle");
 const roadmapLeadEl = document.getElementById("roadmapLead");
 const roadmapListEl = document.getElementById("roadmapList");
@@ -527,9 +544,15 @@ async function loadEmbeddedRelease() {
 
 function renderLanguage() {
   document.documentElement.lang = currentLang;
+  document.title = `RiftLink — ${t("title")}`;
   if (embeddedReleaseRaw) {
     releaseState.notes = embeddedNotesForLang();
   }
+  if (productLineEl) productLineEl.textContent = t("productLine");
+  if (workflowEyebrowEl) workflowEyebrowEl.textContent = t("workflowEyebrow");
+  if (footerFinePrintEl) footerFinePrintEl.textContent = t("footerFinePrint");
+  if (siteNavEl) siteNavEl.setAttribute("aria-label", t("navAriaLabel"));
+  if (langSwitchEl) langSwitchEl.setAttribute("aria-label", t("langAriaLabel"));
   if (titleTextEl) titleTextEl.textContent = t("title");
   if (subtitleTextEl) subtitleTextEl.textContent = t("subtitle");
   if (deviceLabelEl) deviceLabelEl.textContent = t("deviceLabel");
@@ -546,9 +569,9 @@ function renderLanguage() {
   if (aboutFeature2TextEl) aboutFeature2TextEl.textContent = t("aboutFeature2Text");
   if (aboutFeature3TitleEl) aboutFeature3TitleEl.textContent = t("aboutFeature3Title");
   if (aboutFeature3TextEl) aboutFeature3TextEl.textContent = t("aboutFeature3Text");
-  if (linkGithubEl) linkGithubEl.textContent = t("linkGithub");
-  if (linkReleasesEl) linkReleasesEl.textContent = t("linkReleases");
-  if (linkDocsEl) linkDocsEl.textContent = t("linkDocs");
+  if (navGithubEl) navGithubEl.textContent = t("linkGithub");
+  if (navReleasesEl) navReleasesEl.textContent = t("linkReleases");
+  if (navDocsEl) navDocsEl.textContent = t("linkDocs");
   if (roadmapTitleEl) roadmapTitleEl.textContent = t("roadmapTitle");
   if (roadmapLeadEl) roadmapLeadEl.textContent = t("roadmapLead");
   if (whatsNewTitleEl) whatsNewTitleEl.textContent = t("whatsNewTitle");
