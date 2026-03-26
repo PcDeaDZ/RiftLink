@@ -171,25 +171,33 @@ function drawStaticMesh(ctx, width, height, points, allPoints, edges) {
   }
 }
 
-function drawPulses(ctx, t, pulses) {
-  const soft = `rgba(61, 139, 253, ${PULSE_OPACITY * 0.88})`;
-  const bright = `rgba(100, 180, 255, ${Math.min(0.95, PULSE_OPACITY * 1.35)})`;
-  const tt = t * PULSE_TIME_SCALE;
-  for (const p of pulses) {
-    const u = (Math.sin(tt * p.speed + p.phase) * 0.5 + 0.5) ** 1.05;
-    const x = p.a.x + (p.b.x - p.a.x) * u;
-    const y = p.a.y + (p.b.y - p.a.y) * u;
-    ctx.beginPath();
-    ctx.arc(x, y, PULSE_RADIUS * (p.bright ? 1.1 : 0.95), 0, Math.PI * 2);
-    ctx.fillStyle = p.bright ? bright : soft;
-    ctx.fill();
+/** Если по рёбрам мало точек — добавляем синтетические (всегда видимая анимация) */
+function ensureSyntheticPulses(pulses, width, height) {
+  if (pulses.length >= 8) return;
+  const n = 12 - pulses.length;
+  for (let i = 0; i < n; i += 1) {
+    const x1 = (width * (0.08 + i * 0.07)) % Math.max(width * 0.85, 100);
+    const y1 = height * (0.12 + (i % 5) * 0.16);
+    const x2 = x1 + 80 + (i % 3) * 40;
+    const y2 = y1 + 60 + (i % 2) * 30;
+    pulses.push({
+      a: { x: x1, y: y1 },
+      b: { x: Math.min(width - 4, x2), y: Math.min(height - 4, y2) },
+      speed: 1.2 + (i % 4) * 0.35,
+      phase: i * 0.9,
+      bright: i % 2 === 0,
+    });
   }
 }
 
 function initMeshBackground(canvas) {
   if (!canvas || !(canvas instanceof HTMLCanvasElement)) return () => {};
 
+  /** Декоративный фон: при reduce — только слабее/медленнее, не «выключатель» */
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const motionScale = reducedMotion ? 0.55 : 1;
+  const timeScale = reducedMotion ? 1.4 : PULSE_TIME_SCALE;
+
   const ctxMain = canvas.getContext("2d", { alpha: true });
   if (!ctxMain) return () => {};
 
@@ -201,10 +209,20 @@ function initMeshBackground(canvas) {
   let dpr = 1;
   let running = true;
 
+  function viewportSize() {
+    const iw = Math.max(1, window.innerWidth || 0);
+    const sh = document.documentElement.scrollHeight || 0;
+    const ih = window.innerHeight || 0;
+    const ch = document.documentElement.clientHeight || 0;
+    const h0 = Math.max(sh, ih, ch, 1);
+    return { w: iw, h: h0 };
+  }
+
   function resize() {
     dpr = Math.min(window.devicePixelRatio || 1, 2);
-    w = window.innerWidth;
-    h = Math.max(document.documentElement.scrollHeight, window.innerHeight);
+    const vp = viewportSize();
+    w = vp.w;
+    h = vp.h;
     canvas.width = Math.floor(w * dpr);
     canvas.height = Math.floor(h * dpr);
     canvas.style.width = `${w}px`;
@@ -225,12 +243,22 @@ function initMeshBackground(canvas) {
     offCtx.clearRect(0, 0, w, h);
     drawStaticMesh(offCtx, w, h, points, allPoints, edges);
 
-    if (!reducedMotion) {
-      pulses = pickPulseEdges(edges, w, h);
-    } else {
-      pulses = [];
-      ctxMain.clearRect(0, 0, w, h);
-      ctxMain.drawImage(offscreen, 0, 0);
+    pulses = pickPulseEdges(edges, w, h);
+    ensureSyntheticPulses(pulses, w, h);
+  }
+
+  function drawPulsesWithMotion(ctx, t, pulseList) {
+    const soft = `rgba(61, 139, 253, ${PULSE_OPACITY * 0.88 * motionScale})`;
+    const bright = `rgba(120, 200, 255, ${Math.min(0.95, PULSE_OPACITY * 1.35 * motionScale)})`;
+    const tt = t * timeScale;
+    for (const p of pulseList) {
+      const u = (Math.sin(tt * p.speed + p.phase) * 0.5 + 0.5) ** 1.05;
+      const x = p.a.x + (p.b.x - p.a.x) * u;
+      const y = p.a.y + (p.b.y - p.a.y) * u;
+      ctx.beginPath();
+      ctx.arc(x, y, PULSE_RADIUS * (p.bright ? 1.1 : 0.95) * (0.85 + 0.15 * motionScale), 0, Math.PI * 2);
+      ctx.fillStyle = p.bright ? bright : soft;
+      ctx.fill();
     }
   }
 
@@ -243,9 +271,9 @@ function initMeshBackground(canvas) {
     ctxMain.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctxMain.clearRect(0, 0, w, h);
     ctxMain.drawImage(offscreen, 0, 0);
-    if (!reducedMotion && pulses.length > 0) {
+    if (pulses.length > 0) {
       const t = timeMs * 0.001;
-      drawPulses(ctxMain, t, pulses);
+      drawPulsesWithMotion(ctxMain, t, pulses);
     }
     if (running && !document.hidden) {
       raf = requestAnimationFrame(frame);
@@ -255,12 +283,18 @@ function initMeshBackground(canvas) {
   function onVisibility() {
     if (document.hidden) {
       cancelAnimationFrame(raf);
-    } else if (!reducedMotion && running) {
+    } else if (running) {
       raf = requestAnimationFrame(frame);
     }
   }
 
-  resize();
+  function boot() {
+    resize();
+    raf = requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(boot);
+
   let ro = null;
   if (typeof ResizeObserver !== "undefined") {
     ro = new ResizeObserver(() => {
@@ -270,10 +304,6 @@ function initMeshBackground(canvas) {
   }
   window.addEventListener("resize", resize, { passive: true });
   document.addEventListener("visibilitychange", onVisibility);
-
-  if (!reducedMotion) {
-    raf = requestAnimationFrame(frame);
-  }
 
   return function destroy() {
     running = false;

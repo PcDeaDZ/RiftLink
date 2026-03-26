@@ -72,6 +72,25 @@ body {
   background: radial-gradient(ellipse 120% 80% at 50% -20%, rgba(61, 139, 253, 0.11), transparent 52%),
     radial-gradient(ellipse 90% 55% at 100% 85%, rgba(61, 139, 253, 0.05), transparent 48%),
     radial-gradient(ellipse 70% 50% at 0% 100%, rgba(90, 100, 120, 0.06), transparent 50%);
+  animation: bg-gradient-breathe 14s ease-in-out infinite;
+}
+
+@keyframes bg-gradient-breathe {
+  0%,
+  100% {
+    opacity: 1;
+    filter: brightness(1);
+  }
+  50% {
+    opacity: 0.88;
+    filter: brightness(1.06);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bg-gradient {
+    animation-duration: 22s;
+  }
 }
 
 .bg-grid {
