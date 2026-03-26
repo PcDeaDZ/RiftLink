@@ -81,6 +81,49 @@ void add(const uint8_t* from, uint32_t msgId, uint8_t txSf) {
   unlockState();
 }
 
+bool hasPendingForPeer(const uint8_t* peer) {
+  if (!s_inited || !peer) return false;
+  if (!lockState()) return false;
+  bool found = false;
+  for (int i = 0; i < ACK_COALESCE_ENTRIES; i++) {
+    if (!s_entries[i].inUse || s_entries[i].count == 0) continue;
+    if (memcmp(s_entries[i].from, peer, protocol::NODE_ID_LEN) == 0) {
+      found = true;
+      break;
+    }
+  }
+  unlockState();
+  return found;
+}
+
+bool consumeForPeer(const uint8_t* peer, uint32_t* outIds, uint8_t maxIds, uint8_t* outCount) {
+  if (outCount) *outCount = 0;
+  if (!s_inited || !peer || !outIds || maxIds == 0 || !outCount) return false;
+  if (!lockState()) return false;
+  bool ok = false;
+  for (int i = 0; i < ACK_COALESCE_ENTRIES; i++) {
+    AckEntry* e = &s_entries[i];
+    if (!e->inUse || e->count == 0) continue;
+    if (memcmp(e->from, peer, protocol::NODE_ID_LEN) != 0) continue;
+    uint8_t take = (e->count < maxIds) ? e->count : maxIds;
+    for (uint8_t j = 0; j < take; j++) outIds[j] = e->msgIds[j];
+    *outCount = take;
+    if (take < e->count) {
+      uint8_t left = e->count - take;
+      memmove(e->msgIds, e->msgIds + take, left * sizeof(uint32_t));
+      e->count = left;
+      e->firstAddTime = millis();
+    } else {
+      e->count = 0;
+      e->inUse = false;
+    }
+    ok = true;
+    break;
+  }
+  unlockState();
+  return ok && (*outCount > 0);
+}
+
 static uint8_t currentTxFree() {
   if (asyncIsRadioFsmV2Enabled()) {
     return asyncTxQueueFree();

@@ -62,7 +62,7 @@ size_t buildPacket(uint8_t* buf, size_t maxLen,
 }
 
 static bool isValidOpcode(uint8_t op) {
-  return (op >= 0x01 && op <= 0x14) || op == OP_PONG || op == OP_PING;
+  return (op >= 0x01 && op <= 0x17) || op == OP_PONG || op == OP_PING;
 }
 
 static bool isAll(const uint8_t* id, uint8_t v) {
@@ -196,6 +196,9 @@ bool parsePacketEx(const uint8_t* buf, size_t len, PacketHeader* hdr,
             break;
           case OP_ROUTE_REPLY:
           case OP_NACK:
+          case OP_ACK_SELECTIVE:
+          case OP_FRAG_CTRL:
+          case OP_PARITY:
             directionOk = !candidateResult.isBroadcast;
             break;
           default:
@@ -263,6 +266,9 @@ size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadca
       return (payloadLen == 0) ? hdrLen : 0;
     case OP_ACK:
     case OP_ACK_BATCH:
+    case OP_ACK_SELECTIVE:
+    case OP_FRAG_CTRL:
+    case OP_PARITY:
       return 0;  // ACK v2 payload может быть зашифрован и переменной длины
     case OP_READ:
       return (payloadLen == 4) ? (hdrLen + 4) : 0;
@@ -312,6 +318,21 @@ bool getExpectedPayloadRange(uint8_t opcode, size_t* minOut, size_t* maxOut) {
       // v1 ACK_BATCH оставляем в parser для диагностики/explicit reject.
       *minOut = 5;
       *maxOut = 96;
+      return true;
+    case OP_ACK_SELECTIVE:
+      // encrypted control: type(1) + selector + bitmap
+      *minOut = 6;
+      *maxOut = 96;
+      return true;
+    case OP_FRAG_CTRL:
+      // encrypted control for fragment status / resend
+      *minOut = 8;
+      *maxOut = 96;
+      return true;
+    case OP_PARITY:
+      // adaptive redundancy packet
+      *minOut = 12;
+      *maxOut = MAX_PAYLOAD;
       return true;
     case OP_KEY_EXCHANGE:
       *minOut = *maxOut = 32;

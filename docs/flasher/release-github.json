@@ -1,4 +1,4 @@
 {
-  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.23/RiftLink-1.5.23-arm64-v8a.apk",
-  "releaseBody": "- Полная пересборка прошивок (Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam) и синхронизация версии приложения 1.5.23.\n- Веб-флешер: merged *_full.bin и манифесты 1.5.23 для GitHub Pages.\n- VOICE_MSG: надёжность сборки, BLE notify, очереди TX; serial-диагностика приёма.\n- Документация и примеры API обновлены под версию 1.5.23."
+  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.25/RiftLink-1.5.25-arm64-v8a.apk",
+  "releaseBody": "- Релиз **1.5.25**: прошивки Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam, FakeTech V5 (сборка); приложение **1.5.25+11**.\n- Веб-флешер: `docs/flasher/firmware/*_full.bin`, манифесты **1.5.25**, `embedded-release.json`.\n- **Heltec V3 Paper (E-Ink)**: доработки `display_paper` — ghosting/SPI/вкладки (см. CHANGELOG).\n- Документация: README, PROTOCOL, API, CUSTOM_PROTOCOL_PLAN, WEB_FLASH_GITHUB."
 }

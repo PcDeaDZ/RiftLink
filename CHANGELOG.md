@@ -1,6 +1,31 @@
 # Журнал изменений RiftLink
 
-Формат: версия **прошивки и приложения** синхронизированы по семантике релиза (например `1.5.23`).
+Формат: версия **прошивки и приложения** синхронизированы по семантике релиза (например `1.5.25`).
+
+---
+
+## 1.5.25 — 2026-03-26
+
+### Прошивка: Heltec V3 Paper (E-Ink, `display_paper.cpp`)
+
+- **Ghosting / наложение:** отдельный счётчик `s_msgPartialStreak` и `EINK_MSG_PARTIAL_BEFORE_FULL` (на вкладке сообщений при необходимости только full LUT); общий счётчик `s_fastRefreshCount` и `EINK_LIMIT_FASTREFRESH` для остальных вкладок — после N успешных fast/partial подряд принудительный full.
+- **«Съехавшая» картинка:** для полного кадра всегда **`setFullWindow()`**; режим fast/full задаётся аргументом `display(fastLut)`, без полноэкранного `setPartialWindow(0,0,w,h)` (на SSD16xx давало артефакты). Опция **`EINK_FORCE_FULL_LUT`** — при необходимости отключить быстрый LUT полностью.
+- **Надёжность SPI:** `doDisplay()` возвращает **`bool`**; хеш кадра, `s_lastDisplayEnd`, `s_lastWasFullRefresh` и счётчики partial обновляются **только после успешной** отрисовки; при таймауте mutex/SPI состояние wake не «теряется» и панель не остаётся в рассинхроне с логикой.
+- **Смена вкладок:** принудительный «первый full» после **ухода с вкладки сообщений** на другую (`onPaperTabSwitch`); убрано поведение «каждое короткое нажатие = full» (раньше счётчик выставлялся при любой смене вкладки на не-MSG).
+- **Флаги redraw:** `s_needRedrawInfo` / `s_needRedrawMsg` сбрасываются только если отрисовка реально прошла (или успешный fallback).
+
+### Сборка, веб-флешер и приложение
+
+- Версии: **`firmware/src/version.h`** → **1.5.25**, **`app/pubspec.yaml`** → **1.5.25+11**.
+- Пересборка PlatformIO: **heltec_v3**, **heltec_v3_paper**, **heltec_v4**, **lilygo_t_lora_pager** — merged `*_full.bin` скопированы в **`docs/flasher/firmware/`**; **faketec_v5** — сборка OK (артефакт в `firmware/out/faketec_v5/`, не в веб-флешере).
+- **LilyGO T-Beam** (`lilygo_t_beam`): в текущей конфигурации линковка **не проходит** (overflow сегмента `.dram0.bss` / DRAM) — файл **`docs/flasher/firmware/lilygo_t_beam_full.bin`** в репозитории **не заменялся** на новую сборку до отдельной оптимизации RAM; манифест обновлён по **версии** 1.5.25 для единообразия веб-флешера.
+- **`protocol::keyExchangeTotalLen`**: выражение в одном `return` для совместимости **constexpr** на toolchain FakeTech (nRF52), иначе ошибка компиляции.
+- **`docs/flasher/embedded-release.json`**, **`release-github.json`**: тег **v1.5.25**, заметки RU/EN для блока «Что нового» на странице флешера; URL APK под GitHub Release (после публикации артефакта **`RiftLink-1.5.25-arm64-v8a.apk`**).
+- Сборка Android APK: **`flutter build apk`** (release).
+
+### Документация
+
+- Обновлены **README** (версия, таблица плат с **LilyGO T-Beam**, ссылка на веб-флешер), **PROTOCOL**, **API**, **CUSTOM_PROTOCOL_PLAN** (текущее состояние 1.5.25, блок «Что нового», пункт roadmap для парсера веб-флешера), **WEB_FLASH_GITHUB** (список плат, скрипт версий, описание Roadmap/embedded-release).
 
 ---
 

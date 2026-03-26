@@ -8,6 +8,7 @@
 #include "radio.h"
 #include "region/region.h"
 #include "duty_cycle/duty_cycle.h"
+#include "neighbors/neighbors.h"
 #include "log.h"
 #include "async_queues.h"
 #include "async_tasks.h"
@@ -104,13 +105,19 @@ const char* radio::modemPresetName(radio::ModemPreset p) {
 
 // CSMA/CA: CAD перед TX, Binary Exponential Backoff (BEB) при занятом канале
 // См. docs/plans/CHANNEL_ACCESS_ANALYSIS.md
-// CW увеличен для плотных сетей — больше слотов, меньше коллизий
 #define CAD_SLOT_TIME_MS  4
 #define CAD_CW_MIN        8
-#define CAD_CW_MAX        128
 #define CAD_MAX_RETRIES   5
-#define CAD_BEB_MAX       5   // макс. экспонента: CW = min(CW_MIN*2^n, CW_MAX)
-#define BEB_DECAY_MS      8000  // без congestion 8 с → CW уменьшается на 1
+#define CAD_BEB_MAX       5
+#define BEB_DECAY_MS      8000
+
+static uint32_t adaptiveCwMax() {
+  int n = neighbors::getCount();
+  if (n <= 2) return 16;
+  if (n <= 4) return 32;
+  if (n <= 6) return 64;
+  return 128;
+}
 
 static Module* mod = nullptr;
 static std::atomic<uint8_t> s_cadBusyCount{0};  // BEB: растёт при busy/NACK/undelivered, сброс при успешной TX
@@ -189,6 +196,8 @@ static void applyModemToChip(uint8_t sf, float bw, uint8_t cr) {
   lora->setSpreadingFactor(sf);
   lora->setBandwidth(bw);
   lora->setCodingRate(cr);
+  uint16_t preamble = (sf >= 10) ? 16 : 8;
+  lora->setPreambleLength(preamble);
   s_hwSf = sf;
 }
 
@@ -226,8 +235,8 @@ bool init() {
   uint8_t initSf; float initBw; uint8_t initCr;
   loadModemFromNvs(initSf, initBw, initCr, s_preset);
 
-  // Preamble 16 (как Meshtastic) — больше времени на синхронизацию RX, меньше потерь при «просыпании»
-  int16_t st = lora->begin(freq, initBw, initSf, initCr, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, power, 16, TCXO_VOLTAGE, false);
+  uint16_t preamble = (initSf >= 10) ? 16 : 8;
+  int16_t st = lora->begin(freq, initBw, initSf, initCr, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, power, preamble, TCXO_VOLTAGE, false);
   if (st != RADIOLIB_ERR_NONE) {
     Serial.printf("[RiftLink] Radio init failed: code=%d (проверьте антенну и питание)\n", st);
     return false;
@@ -347,7 +356,8 @@ bool sendDirectInternal(const uint8_t* data, size_t len, char* reasonBuf, size_t
       // BEB: CW = min(CW_MIN * 2^s_cadBusyCount, CW_MAX)
       uint8_t c = s_cadBusyCount.load(std::memory_order_relaxed);
       uint32_t cw = CAD_CW_MIN * (1u << (c < CAD_BEB_MAX ? c : CAD_BEB_MAX));
-      if (cw > CAD_CW_MAX) cw = CAD_CW_MAX;
+      uint32_t cwMax = adaptiveCwMax();
+      if (cw > cwMax) cw = cwMax;
       if (c < 255) {
         s_cadBusyCount.store(c + 1, std::memory_order_relaxed);
         s_lastCongestionTime.store((uint32_t)millis(), std::memory_order_relaxed);
@@ -600,6 +610,8 @@ void applyHardwareSpreadingFactor(uint8_t sf) {
   if (!lora || sf < 7 || sf > 12) return;
   if (sf == s_hwSf) return;
   lora->setSpreadingFactor(sf);
+  uint16_t preamble = (sf >= 10) ? 16 : 8;
+  lora->setPreambleLength(preamble);
   s_hwSf = sf;
 }
 
@@ -610,6 +622,8 @@ void applyHardwareModem(uint8_t sf, float bw, uint8_t cr) {
   lora->setSpreadingFactor(sf);
   lora->setBandwidth(bw);
   lora->setCodingRate(cr);
+  uint16_t preamble = (sf >= 10) ? 16 : 8;
+  lora->setPreambleLength(preamble);
   s_hwSf = sf;
 }
 

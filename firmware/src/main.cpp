@@ -101,7 +101,7 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #define HELLO_DROP_RETRY_MS 350
 #define HELLO_QUIET_AFTER_KEY_MS 2500  // после KEY дать эфиру окно под ответный KEY
 #define HANDSHAKE_TRAFFIC_QUIET_MS 3000  // на время handshake приглушаем HELLO/telemetry
-#define HELLO_STALE_KEY_REFRESH_MS 15000  // HELLO после заметной паузы: возможный reboot peer, push KEY refresh
+#define HELLO_STALE_KEY_REFRESH_MS 10000  // Короче: после ребута соседа «тишина» HELLO часто 10–14с; иначе живой узел долго не шлёт force KEY
 static uint32_t s_lastHelloAirMs = 0;
 static uint32_t s_nextHelloAfterDropMs = 0;
 static uint32_t s_handshakeQuietUntilMs = 0;
@@ -133,7 +133,8 @@ static uint32_t lastGpsLoc = 0;
 static uint32_t s_zeroNeighSince = 0;  // для HELLO backoff при 0 соседях: 8s -> 15s -> 30s
 static uint32_t s_oneNeighSince = 0;   // bootstrap при 1 соседе: HELLO чаще первые 2 минуты
 static uint32_t s_bootTime = 0;       // millis() при старте — агрессивный discovery первые 2 мин
-static uint32_t s_lastKeyRetry = 0;   // retry KEY_EXCHANGE каждые 30с для соседей без ключа
+static uint32_t s_lastKeyRetry = 0;   // retry KEY_EXCHANGE для соседей без ключа (интервал зависит от числа соседей)
+static int s_keyRetryRoundRobin = 0;   // при нескольких соседях без ключа — не клеймить только idx=0
 // Фиксированный SF: задаётся пользователем через BLE-команду "sf", значение по умолчанию = 7.
 static const uint8_t SF_DEFAULT = 7;
 static uint32_t s_loopCooldownUntil = 0;  // вместо delay(10) — throttle OTA и конец loop
@@ -1026,6 +1027,28 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     rxNoiseMaybeLogSummary(nowRxMs);
     return;
   }
+  // Fast-path prefilter before heavy crypto branches.
+  switch (hdr.opcode) {
+    case protocol::OP_MSG:
+    case protocol::OP_MSG_BATCH:
+    case protocol::OP_GROUP_MSG:
+    case protocol::OP_VOICE_MSG:
+    case protocol::OP_TELEMETRY:
+    case protocol::OP_LOCATION:
+    case protocol::OP_ACK:
+    case protocol::OP_ACK_BATCH:
+    case protocol::OP_ACK_SELECTIVE:
+    case protocol::OP_FRAG_CTRL:
+    case protocol::OP_PARITY:
+      if (!protocol::isEncrypted(hdr)) {
+        RIFTLINK_DIAG("PARSE", "event=RX_DROP_FAST reason=missing_encrypted_flag op=0x%02X from=%02X%02X",
+            (unsigned)hdr.opcode, hdr.from[0], hdr.from[1]);
+        return;
+      }
+      break;
+    default:
+      break;
+  }
 
   // OP_XOR_RELAY: попытка декодировать (если есть один из пакетов в кэше)
   if (hdr.opcode == protocol::OP_XOR_RELAY) {
@@ -1256,6 +1279,56 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       }
       break;
 
+    case protocol::OP_ACK_SELECTIVE:
+      if (!node::isForMe(hdr.to) || node::isBroadcast(hdr.to)) {
+        RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=selective_bad_direction from=%02X%02X", hdr.from[0], hdr.from[1]);
+        break;
+      }
+      if (!protocol::isEncrypted(hdr)) {
+        RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=selective_unencrypted from=%02X%02X", hdr.from[0], hdr.from[1]);
+        break;
+      }
+      if (payloadLen > 0) {
+        uint8_t selPlain[64];
+        size_t selPlainLen = sizeof(selPlain);
+        if (!crypto::decryptFrom(hdr.from, payload, payloadLen, selPlain, &selPlainLen) || selPlainLen < 5) {
+          RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=selective_decrypt_fail from=%02X%02X len=%u",
+              hdr.from[0], hdr.from[1], (unsigned)payloadLen);
+          break;
+        }
+        uint8_t selType = selPlain[0];
+        if (selType == 1) {
+          uint16_t batchPktId = (uint16_t)selPlain[1] | ((uint16_t)selPlain[2] << 8);
+          uint16_t ackBitmap = (uint16_t)selPlain[3] | ((uint16_t)selPlain[4] << 8);
+          msg_queue::onSelectiveAckReceived(hdr.from, batchPktId, ackBitmap, rssi, ble::notifyDelivered);
+        }
+      }
+      break;
+
+    case protocol::OP_FRAG_CTRL:
+      if (!node::isForMe(hdr.to) || node::isBroadcast(hdr.to)) break;
+      if (!protocol::isEncrypted(hdr) || payloadLen == 0) break;
+      {
+        uint8_t ctrlPlain[64];
+        size_t ctrlPlainLen = sizeof(ctrlPlain);
+        if (!crypto::decryptFrom(hdr.from, payload, payloadLen, ctrlPlain, &ctrlPlainLen) || ctrlPlainLen < 10) break;
+        if (ctrlPlain[0] == 0x01) {
+          uint32_t fragMsgId = 0;
+          memcpy(&fragMsgId, ctrlPlain + 1, 4);
+          uint8_t total = ctrlPlain[5];
+          uint32_t mask = (uint32_t)ctrlPlain[6] |
+              ((uint32_t)ctrlPlain[7] << 8) |
+              ((uint32_t)ctrlPlain[8] << 16) |
+              ((uint32_t)ctrlPlain[9] << 24);
+          frag::onFragCtrl(hdr.from, fragMsgId, total, mask);
+        }
+      }
+      break;
+
+    case protocol::OP_PARITY:
+      // v3 adaptive redundancy helper frame: currently used for delivery robustness telemetry path.
+      break;
+
     case protocol::OP_SF_BEACON:
       // SF beacon не используется в режиме фиксированного SF.
       break;
@@ -1355,8 +1428,25 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
             if (txSf == 0) txSf = 12;
             ack_coalesce::add(hdr.from, msgId, txSf);
             // Unicast: ACK only. ECHO witness is reserved for broadcast/group paths.
-            msg = (const char*)(decBuf + msg_queue::MSG_ID_LEN);
-            msgLen = decLen - msg_queue::MSG_ID_LEN;
+            size_t msgOff = msg_queue::MSG_ID_LEN;
+            if (decLen > msgOff) {
+              uint8_t flags = decBuf[msgOff++];
+              if ((flags & 0x01) != 0 && decLen >= msgOff + 1) {
+                uint8_t piggyCount = decBuf[msgOff++];
+                for (uint8_t pi = 0; pi < piggyCount && decLen >= msgOff + msg_queue::MSG_ID_LEN; pi++) {
+                  uint32_t piggyMsgId = 0;
+                  memcpy(&piggyMsgId, decBuf + msgOff, msg_queue::MSG_ID_LEN);
+                  msgOff += msg_queue::MSG_ID_LEN;
+                  uint8_t singlePayload[msg_queue::MSG_ID_LEN];
+                  memcpy(singlePayload, &piggyMsgId, msg_queue::MSG_ID_LEN);
+                  if (msg_queue::onAckReceived(hdr.from, singlePayload, msg_queue::MSG_ID_LEN, false, true, true)) {
+                    ble::notifyDelivered(hdr.from, piggyMsgId, rssi);
+                  }
+                }
+              }
+            }
+            msg = (const char*)(decBuf + msgOff);
+            msgLen = (decLen > msgOff) ? (decLen - msgOff) : 0;
           } else {
             if (protocol::isAckReq(hdr) && isBroadcastMsg) {
               RIFTLINK_DIAG("ACK", "event=ACK_SUPPRESSED type=op_msg mode=broadcast_echo_only from=%02X%02X",
@@ -1397,9 +1487,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
     case protocol::OP_MSG_BATCH:
       if (payloadLen >= 1 && node::isForMe(hdr.to)) {
         uint8_t count = payload[0];
-        if (count >= 1 && count <= 4) {
-          uint32_t ackMsgIds[4];
-          uint8_t ackCount = 0;
+        if (count >= 1 && count <= 8) {
+          uint16_t ackBitmap = 0;
           size_t off = 1;
           for (uint8_t i = 0; i < count && off + 2 <= payloadLen; i++) {
             uint16_t encLen = (uint16_t)payload[off] | ((uint16_t)payload[off + 1] << 8);
@@ -1421,12 +1510,26 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
               memcpy(decBuf, tmpBuf, d);
               decLen = d;
             }
-            if (decLen >= msg_queue::MSG_ID_LEN) {
+            if (decLen >= (msg_queue::MSG_ID_LEN + 1)) {
               size_t msgOff = 0;
               uint32_t msgId = 0;
               memcpy(&msgId, decBuf + msgOff, msg_queue::MSG_ID_LEN);
               msgOff += msg_queue::MSG_ID_LEN;
-              if (ackCount < 4) ackMsgIds[ackCount++] = msgId;
+              uint8_t flags = decBuf[msgOff++];
+              if ((flags & 0x01) != 0 && decLen >= msgOff + 1) {
+                uint8_t piggyCount = decBuf[msgOff++];
+                for (uint8_t pi = 0; pi < piggyCount && decLen >= msgOff + msg_queue::MSG_ID_LEN; pi++) {
+                  uint32_t piggyMsgId = 0;
+                  memcpy(&piggyMsgId, decBuf + msgOff, msg_queue::MSG_ID_LEN);
+                  msgOff += msg_queue::MSG_ID_LEN;
+                  uint8_t singlePayload[msg_queue::MSG_ID_LEN];
+                  memcpy(singlePayload, &piggyMsgId, msg_queue::MSG_ID_LEN);
+                  if (msg_queue::onAckReceived(hdr.from, singlePayload, msg_queue::MSG_ID_LEN, false, true, true)) {
+                    ble::notifyDelivered(hdr.from, piggyMsgId, rssi);
+                  }
+                }
+              }
+              ackBitmap |= (uint16_t)(1u << i);
               size_t msgLen = decLen - msgOff;
               if (msgLen < 256 && !ucDedupSeen(hdr.from, msgId)) {
                 ucDedupAdd(hdr.from, msgId);
@@ -1444,27 +1547,28 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
               }
             }
           }
-          if (ackCount > 0) {
-            uint8_t ackBatchPayload[1 + 4 * 4];
-            ackBatchPayload[0] = ackCount;
-            for (uint8_t j = 0; j < ackCount; j++)
-              memcpy(ackBatchPayload + 1 + j * msg_queue::MSG_ID_LEN, &ackMsgIds[j], msg_queue::MSG_ID_LEN);
-            size_t ackBatchPlainLen = 1 + ackCount * msg_queue::MSG_ID_LEN;
-            uint8_t ackBatchEnc[1 + 4 * 4 + crypto::OVERHEAD];
-            size_t ackBatchEncLen = sizeof(ackBatchEnc);
-            if (!crypto::encryptFor(hdr.from, ackBatchPayload, ackBatchPlainLen, ackBatchEnc, &ackBatchEncLen)) {
-              RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=encrypt_fail from=%02X%02X type=batch",
+          if (ackBitmap != 0 && hdr.pktId != 0) {
+            uint8_t ackSelPlain[5];
+            ackSelPlain[0] = 1;  // batch selective ack
+            ackSelPlain[1] = (uint8_t)(hdr.pktId & 0xFF);
+            ackSelPlain[2] = (uint8_t)(hdr.pktId >> 8);
+            ackSelPlain[3] = (uint8_t)(ackBitmap & 0xFF);
+            ackSelPlain[4] = (uint8_t)(ackBitmap >> 8);
+            uint8_t ackSelEnc[5 + crypto::OVERHEAD];
+            size_t ackSelEncLen = sizeof(ackSelEnc);
+            if (!crypto::encryptFor(hdr.from, ackSelPlain, sizeof(ackSelPlain), ackSelEnc, &ackSelEncLen)) {
+              RIFTLINK_DIAG("ACK", "event=ACK_REJECT reason=encrypt_fail from=%02X%02X type=selective",
                   hdr.from[0], hdr.from[1]);
               break;
             }
             uint8_t ackPkt[protocol::PAYLOAD_OFFSET + 96];
             size_t ackLen = protocol::buildPacket(ackPkt, sizeof(ackPkt),
-                node::getId(), hdr.from, 31, protocol::OP_ACK_BATCH,
-                ackBatchEnc, ackBatchEncLen, true, false);
+                node::getId(), hdr.from, 31, protocol::OP_ACK_SELECTIVE,
+                ackSelEnc, ackSelEncLen, true, false);
             if (ackLen > 0) {
               uint8_t txSf = neighbors::rssiToSfOrthogonal(hdr.from);
               if (txSf == 0) txSf = 12;
-              queueDeferredAck(ackPkt, ackLen, txSf, 50);
+              queueDeferredAck(ackPkt, ackLen, txSf, 30);
             }
           }
         }
@@ -1814,7 +1918,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       break;
 
     case protocol::OP_MSG_FRAG:
-      if (payloadLen >= 6) {
+      if (payloadLen >= frag::FRAG_HEADER_LEN) {
         size_t outLen = 0;
         uint32_t fragMsgId = 0;
         if (frag::onFragment(hdr.from, hdr.to, payload, payloadLen,
@@ -1997,8 +2101,8 @@ static void runBootStateMachine() {
   clock_drift::init();
   bls_n::init();
   packet_fusion::init();
-  packet_fusion::setOnBatchSent([](const uint8_t* to, const uint32_t* msgIds, int count) {
-    msg_queue::registerBatchSent(to, msgIds, count);
+  packet_fusion::setOnBatchSent([](const uint8_t* to, const uint32_t* msgIds, int count, uint16_t batchPktId) {
+    msg_queue::registerBatchSent(to, msgIds, count, batchPktId);
   });
   packet_fusion::setOnSingleFlush([](const uint8_t* to, uint32_t msgId, const uint8_t* pkt, size_t pktLen, uint8_t txSf) {
     return msg_queue::registerPendingFromFusion(to, msgId, pkt, pktLen, txSf);
@@ -2332,10 +2436,13 @@ void loop() {
     }
   }
 
-  // Retry KEY_EXCHANGE: каждые 45–60с — меньше flood, MSG успевают проходить
+  // Retry KEY_EXCHANGE: плотные сети — редко (45–75с), 1–2 соседа — чаще (после ребута иначе «минуты без ключа»).
   #define KEY_RETRY_BASE_MS  45000
   #define KEY_RETRY_JITTER_MS 15000
   #define KEY_RETRY_EXTRA_JITTER_MS 3000
+  #define KEY_RETRY_SMALL_MESH_BASE_MS 12000
+  #define KEY_RETRY_SMALL_MESH_JITTER_MS 4000
+  #define KEY_RETRY_SMALL_MESH_EXTRA_JITTER_MS 1500
   static uint32_t s_keyRetryCooldownUntil = 0;  // без блокировки loop
   if (millis() - s_lastDiagSnapshotMs >= 60000) {
     s_lastDiagSnapshotMs = millis();
@@ -2345,20 +2452,29 @@ void loop() {
         (unsigned)powersave::isEnabled(), (unsigned)powersave::canSleep());
   }
   if (millis() >= s_lastKeyRetry && millis() >= s_keyRetryCooldownUntil) {
-    uint32_t phase = (node::getId()[0] % 16) * 500;  // 0–8 с смещение по ID
-    uint32_t extraJitter = esp_random() % KEY_RETRY_EXTRA_JITTER_MS;
-    s_lastKeyRetry = millis() + KEY_RETRY_BASE_MS + (esp_random() % KEY_RETRY_JITTER_MS) + phase + extraJitter;
     int n = neighbors::getCount();
-    RIFTLINK_DIAG("KEY", "event=KEY_RETRY_TICK neighbors=%d next_retry_in_ms=%lu cooldown_until=%lu",
-        n, (unsigned long)(s_lastKeyRetry - millis()), (unsigned long)s_keyRetryCooldownUntil);
-    for (int i = 0; i < n; i++) {
-      uint8_t peerId[protocol::NODE_ID_LEN];
-      if (neighbors::getId(i, peerId) && !x25519_keys::hasKeyFor(peerId)) {
-        RIFTLINK_DIAG("KEY", "event=KEY_RETRY_TARGET peer=%02X%02X idx=%d",
-            peerId[0], peerId[1], i);
-        x25519_keys::sendKeyExchange(peerId, false, false, "retry");
-        s_keyRetryCooldownUntil = millis() + 800 + (esp_random() % 400);  // 0.8–1.2 с, без delay()
-        break;
+    const bool smallMesh = (n <= 2);
+    uint32_t base = smallMesh ? KEY_RETRY_SMALL_MESH_BASE_MS : KEY_RETRY_BASE_MS;
+    uint32_t jitSpan = smallMesh ? KEY_RETRY_SMALL_MESH_JITTER_MS : KEY_RETRY_JITTER_MS;
+    uint32_t extraSpan = smallMesh ? KEY_RETRY_SMALL_MESH_EXTRA_JITTER_MS : KEY_RETRY_EXTRA_JITTER_MS;
+    uint32_t phase = smallMesh ? ((node::getId()[0] % 8) * 200u) : ((node::getId()[0] % 16) * 500u);
+    uint32_t extraJitter = esp_random() % extraSpan;
+    s_lastKeyRetry = millis() + base + (esp_random() % jitSpan) + phase + extraJitter;
+    RIFTLINK_DIAG("KEY", "event=KEY_RETRY_TICK neighbors=%d next_retry_in_ms=%lu cooldown_until=%lu small_mesh=%u",
+        n, (unsigned long)(s_lastKeyRetry - millis()), (unsigned long)s_keyRetryCooldownUntil, (unsigned)smallMesh);
+    if (n > 0) {
+      s_keyRetryRoundRobin %= n;
+      for (int k = 0; k < n; k++) {
+        int i = (s_keyRetryRoundRobin + k) % n;
+        uint8_t peerId[protocol::NODE_ID_LEN];
+        if (neighbors::getId(i, peerId) && !x25519_keys::hasKeyFor(peerId)) {
+          RIFTLINK_DIAG("KEY", "event=KEY_RETRY_TARGET peer=%02X%02X idx=%d rr=%d",
+              peerId[0], peerId[1], i, s_keyRetryRoundRobin);
+          x25519_keys::sendKeyExchange(peerId, false, false, "retry");
+          s_keyRetryRoundRobin = (i + 1) % n;
+          s_keyRetryCooldownUntil = millis() + 800 + (esp_random() % 400);  // 0.8–1.2 с, без delay()
+          break;
+        }
       }
     }
   }

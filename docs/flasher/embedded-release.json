@@ -1,18 +1,21 @@
 {
-  "tag": "v1.5.23",
-  "firmwareVersion": "1.5.23",
-  "appVersion": "1.5.23",
-  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.23/RiftLink-1.5.23-arm64-v8a.apk",
+  "tag": "v1.5.25",
+  "firmwareVersion": "1.5.25",
+  "appVersion": "1.5.25",
+  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.25/RiftLink-1.5.25-arm64-v8a.apk",
   "notesRu": [
-    "Голос (VOICE_MSG): исправления сборки фрагментов, BLE notify, очереди TX; LilyGO T-Beam — новые окружения.",
-    "Веб-флешер: образы *_full.bin и манифесты 1.5.23 для GitHub Pages и релиза.",
-    "Serial-диагностика приёма голоса (VOICE_FRAG, fw_handle_voice) для отладки доставки.",
-    "Прямая ссылка на APK: apkDownloadUrl — после публикации GitHub Release; иначе откройте страницу релизов."
+    "Веб-флешер (ESP Web Tools): образы *_full.bin и манифесты 1.5.25 для Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam; GitHub Pages и релиз.",
+    "Heltec V3 Paper (E-Ink): стабильность UI — анти-ghosting (отдельный счётчик partial для вкладки сообщений, общий EINK_LIMIT_FASTREFRESH для остальных вкладок), всегда setFullWindow вместо полноэкранного setPartialWindow, doDisplay() возвращает успех только после реального display(), флаги wake/full и хеш кадра не сбрасываются при сбое SPI.",
+    "Paper: опционально EINK_FORCE_FULL_LUT; первый full после ухода с вкладки «Сообщения» на другую (без принудительного full на каждое короткое нажатие между MAIN/INFO/NET).",
+    "Синхронизация версий: firmware/src/version.h, app 1.5.25+11, PROTOCOL/API/CUSTOM_PROTOCOL_PLAN/README, CHANGELOG.",
+    "LilyGO T-Beam: образ в docs/flasher/firmware при линковочном overflow DRAM не пересобирался — нужна отдельная оптимизация; манифест на 1.5.25 для единой версии страницы.",
+    "APK: загрузите RiftLink-1.5.25-arm64-v8a.apk в GitHub Release v1.5.25; иначе ссылка apkDownloadUrl заработает после публикации релиза."
   ],
   "notesEn": [
-    "Voice (VOICE_MSG): fragment reassembly, BLE notify, TX queue fixes; LilyGO T-Beam new environments.",
-    "Web flasher: *_full.bin images and manifests 1.5.23 for GitHub Pages and release.",
-    "Serial diagnostics for voice RX (VOICE_FRAG, fw_handle_voice) for delivery debugging.",
-    "APK: apkDownloadUrl after GitHub Release; otherwise use the Releases page."
+    "Web flasher (ESP Web Tools): *_full.bin images and manifests 1.5.25 for Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam; GitHub Pages and release.",
+    "Heltec V3 Paper (E-Ink): UI stability — anti-ghosting (separate partial streak for MSG tab, global refresh counter for other tabs), always setFullWindow, doDisplay() reports success only after real refresh, no stale state on SPI failure.",
+    "Paper: optional EINK_FORCE_FULL_LUT; one full refresh after leaving Messages tab (not on every tab switch).",
+    "Version sync: firmware version.h, app 1.5.25+11, docs and CHANGELOG.",
+    "APK: upload RiftLink-1.5.25-arm64-v8a.apk to GitHub Release v1.5.25."
   ]
 }

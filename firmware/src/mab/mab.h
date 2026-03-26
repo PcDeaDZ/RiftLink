@@ -1,6 +1,6 @@
 /**
  * MAB — Multi-Armed Bandit для выбора задержки retry
- * Действия: delay_short, delay_medium, delay_long
+ * Действия: delay_fast, delay_short, delay_medium, delay_long
  * Награда: +1 при ACK, −1 при NACK/undelivered
  */
 
@@ -10,7 +10,7 @@
 
 namespace mab {
 
-constexpr int NUM_ARMS = 3;
+constexpr int NUM_ARMS = 4;
 
 void init();
 

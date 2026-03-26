@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-firmware_1.5.23_|_app_1.5.23-888?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-firmware_1.5.25_|_app_1.5.25-888?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/license-See_project-888?style=flat-square" alt="License" />
 </p>
 
@@ -52,6 +52,9 @@
 | **Heltec V4** | OLED 128×64, 16MB flash | `heltec_v4` |
 | **Heltec V3 Paper** | E-Ink 2.13" | `heltec_v3_paper` |
 | **LilyGO T-Lora Pager** | ST7796 TFT | `lilygo_t_lora_pager` |
+| **LilyGO T-Beam** V1.1/V1.2 | OLED SSD1306, GPS | `lilygo_t_beam` |
+
+Текущий релиз прошивки и приложения: **1.5.25** (см. [`firmware/src/version.h`](firmware/src/version.h), [`app/pubspec.yaml`](app/pubspec.yaml), [`CHANGELOG.md`](CHANGELOG.md)). Веб-прошивка из браузера: [`docs/flasher/`](docs/flasher/) → [`WEB_FLASH_GITHUB.md`](docs/WEB_FLASH_GITHUB.md).
 
 ---
 

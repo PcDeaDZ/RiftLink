@@ -8,16 +8,18 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/doc_version-0.3-888?style=flat-square" alt="Doc" />
-  <img src="https://img.shields.io/badge/firmware-1.5.23-E7352C?style=flat-square&logo=espressif" alt="Firmware" />
+  <img src="https://img.shields.io/badge/firmware-1.5.25-E7352C?style=flat-square&logo=espressif" alt="Firmware" />
   <img src="https://img.shields.io/badge/platform-Heltec%2BLilyGO-00B0FF?style=flat-square&logo=lorawan" alt="Platform" />
   <img src="https://img.shields.io/badge/ESP32--S3-SX1262-4CAF50?style=flat-square" alt="Hardware" />
 </p>
 
 ---
 
-### 📌 Текущее состояние (прошивка 1.5.23)
+### 📌 Текущее состояние (прошивка 1.5.25)
 
 Основной функционал реализован: MSG, X25519 E2E, GROUP_MSG, офлайн-очередь, ROUTE_REQ/REPLY, VOICE_MSG (в т.ч. надёжная сборка фрагментов, BLE notify с retry, serial-диагностика приёма), ACK/READ, LZ4, MSG_FRAG, LOCATION, TELEMETRY, OTA, регионы, invite/acceptInvite (QR). Валидация пакетов при RF-помехах. Поддержка V3 (OLED), V4 (OLED), V3 Paper (E-Ink), **LilyGO T-Lora Pager** (ST7796, BQ27220, энкодер, отдельный env `lilygo_t_lora_pager`), окружения **LilyGO T-Beam**. Веб-флешер: [`docs/flasher/`](flasher/) и [`WEB_FLASH_GITHUB.md`](WEB_FLASH_GITHUB.md).
+
+**Что нового в 1.5.25:** веб-флешер (ESP Web Tools) и образы `*_full.bin` приведены к одной версии с прошивкой и приложением; **Heltec V3 Paper** — доработка слоя E-Ink (`display_paper`): меньше ghosting и артефактов при смене вкладок, корректная работа при занятости SPI, без лишнего полного обновления на каждое нажатие. Подробности — [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
@@ -387,7 +389,8 @@ Opcodes: 0x01 MSG, 0x02 ACK, 0x03 HELLO, 0x04 ROUTE_REQ, 0x05 ROUTE_REPLY, 0x06 
 
 Список для веб-флешера (парсер `docs/flasher/app.js` — только строки `- …` в этом разделе):
 
-- Опциональная ретрансляция потерянных фрагментов VOICE_MSG на mesh-уровне (после полевых тестов и serial-диагностики 1.5.23).
+- Релиз **1.5.25**: веб-флешер и манифесты для всех поддерживаемых ESP-плат; заметки «Что нового» в `embedded-release.json`.
+- Опциональная ретрансляция потерянных фрагментов VOICE_MSG на mesh-уровне (после полевых тестов и serial-диагностики 1.5.25).
 - Скрытие вкладки GPS, если модуль не обнаружен (`gps::isPresent()`).
 - Автоотключение при низком заряде (пороги 5/15/30%).
 - Отображение RSSI соседей на экране.

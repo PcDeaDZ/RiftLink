@@ -256,7 +256,8 @@ void onNodeOnline(const uint8_t* nodeId) {
     if (len > 0) {
       uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(nodeId));
       char reasonBuf[40];
-      bool queued = queueTxPacket(pkt, len, txSf, isCritical,
+      // Всегда priority: иначе data-пакет застревает за ACK-reserve / overflow_norm (офлайн так и «не уходит»).
+      bool queued = queueTxPacket(pkt, len, txSf, true,
           isCritical ? TxRequestClass::critical : TxRequestClass::data,
           reasonBuf, sizeof(reasonBuf));
       if (queued) {
@@ -270,6 +271,10 @@ void onNodeOnline(const uint8_t* nodeId) {
             nodeId[0], nodeId[1], reasonBuf[0] ? reasonBuf : "?");
       }
     } else {
+      if (!isCourier) {
+        RIFTLINK_DIAG("OFFLINE", "event=OFFLINE_BUILD_FAIL to=%02X%02X op=0x%02X pl=%u max_payload=%u",
+            m->to[0], m->to[1], (unsigned)m->opcode, (unsigned)m->payloadLen, (unsigned)protocol::MAX_PAYLOAD);
+      }
       m->inUse = false;
       modified = true;
     }
@@ -309,7 +314,8 @@ int getDirectPendingCount() {
 }
 
 void update() {
-  // Сохранение перенесено в nvsTask — loop не блокируется
+  // Сохранение перенесено в nvsTask — loop не блокируется.
+  // Flush по-прежнему по HELLO (onNodeOnline); редкий sweep опасен: при OFFLINE_TX_DEFER даст дубликаты в deferred.
 }
 
 }  // namespace offline_queue

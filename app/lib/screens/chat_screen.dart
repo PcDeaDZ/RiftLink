@@ -248,7 +248,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     return null;
   }
 
-  /// Личный чат: отправка текста только при известном pairwise-ключе (evt `hasKey` для этого соседа).
+  /// Личный чат: текст и голос (LoRa) только при pairwise-ключе — иначе шифрование/приём с той же стороны.
   /// Если собеседника нет в списке соседей — не блокируем (нет явного `hasKey: false`).
   bool get _canSendPrivateText {
     if (_chatContextType() != ChatContextType.direct) return true;
@@ -1989,6 +1989,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
 
   // Запуск записи с заданным TTL (0 = без TTL)
   Future<void> _startVoiceRecord({required int ttlMinutes}) async {
+    if (_chatContextType() == ChatContextType.direct && !_canSendPrivateText) {
+      _showSnack(context.l10n.tr('waiting_key'));
+      return;
+    }
     FocusScope.of(context).unfocus();
     try {
       final plan = _selectVoicePlan();
@@ -2032,6 +2036,10 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
   // Long-press на микрофон: выбор TTL → старт записи
   Future<void> _onVoiceLongPress() async {
     if (!widget.ble.isTransportConnected || _voiceRecording) return;
+    if (_chatContextType() == ChatContextType.direct && !_canSendPrivateText) {
+      _showSnack(context.l10n.tr('waiting_key'));
+      return;
+    }
     final ttl = await _pickVoiceTtlDialog();
     if (ttl == null || !mounted) return;
     await _startVoiceRecord(ttlMinutes: ttl);
@@ -2795,13 +2803,15 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
                                         iconSize: AppIconSize.sm,
                                       )
                             : matrix.canVoice
-                                ? _TtlTapButton(
-                                    onTap: connected ? _toggleVoiceRecord : null,
-                                    onLongPress: connected ? _onVoiceLongPress : null,
-                                    icon: Icons.mic,
-                                    size: 36,
-                                    iconSize: AppIconSize.md,
-                                  )
+                                ? !_canSendPrivateText
+                                    ? const SizedBox(width: 36, height: 36)
+                                    : _TtlTapButton(
+                                        onTap: connected ? _toggleVoiceRecord : null,
+                                        onLongPress: connected ? _onVoiceLongPress : null,
+                                        icon: Icons.mic,
+                                        size: 36,
+                                        iconSize: AppIconSize.md,
+                                      )
                                 : const SizedBox(width: 36, height: 36),
                     ),
                   ),

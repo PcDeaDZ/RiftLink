@@ -72,7 +72,10 @@ static uint32_t s_pressStart = 0;
 static uint32_t s_lastDisplayEnd = 0;     // когда последний display() завершился
 static uint32_t s_previousRunMs = 0;      // Meshtastic: для rate limiting (когда последний раз обновили)
 static uint32_t s_lastActivityTime = 0;   // активность (сообщения, смена экрана)
-static uint32_t s_fastRefreshCount = 0;   // подряд partial — после EINK_LIMIT_FASTREFRESH делаем full
+/** Подряд успешных fast/partial на вкладках НЕ MSG; при >= EINK_LIMIT_FASTREFRESH следующий кадр — full. */
+static uint32_t s_fastRefreshCount = 0;
+/** Только MSG: подряд partial до full (см. EINK_MSG_PARTIAL_BEFORE_FULL), отдельно от s_fastRefreshCount. */
+static uint32_t s_msgPartialStreak = 0;
 static uint32_t s_previousImageHash = 0;  // хеш последнего отображённого контента (пропуск дубликатов)
 static uint32_t s_fullRefreshCount = 0;   // счётчик full refresh — периодический reinit
 static bool s_lastWasFullRefresh = false; // после full+hibernate первый REDRAW — двойной partial
@@ -89,8 +92,23 @@ static char s_lastMsgText[64] = {0};
 // Meshtastic-style rate limiting (EInkDynamicDisplay)
 #define EINK_RATE_LIMIT_BACKGROUND_MS  30000  // BACKGROUND: min 30s между обновлениями
 #define EINK_RATE_LIMIT_RESPONSIVE_MS  1000   // RESPONSIVE (кнопка, сообщение): min 1s
-#define EINK_LIMIT_FASTREFRESH         8      // после N partial — принудительный full (против ghosting)
+/*
+ * Partial → full (анти-ghosting):
+ * - Общий счётчик: s_fastRefreshCount на вкладках MAIN/INFO/NET/GPS/SYS (не MSG).
+ *   После EINK_LIMIT_FASTREFRESH подряд успешных fast/partial на ЭТОЙ вкладке следующий кадр — full
+ *   (см. usePartialForTab / applyPartialStreakAfter). После full счётчик обнуляется.
+ * - MSG отдельно: s_msgPartialStreak и EINK_MSG_PARTIAL_BEFORE_FULL (0 = на MSG всегда full).
+ * - Только выход с MSG: onPaperTabSwitch() ставит s_fastRefreshCount = EINK_LIMIT_FASTREFRESH,
+ *   чтобы первый кадр на другой вкладке был full (иначе не накладывался контент MSG). Обычная смена вкладок — без этого.
+ */
+#define EINK_LIMIT_FASTREFRESH         4      // порог «подряд partial» на не-MSG → затем принудительный full
+/** На вкладке сообщений: сколько подряд допустимо fast/partial до full. 0 = только full (минимум ghosting, дольше обновление). */
+#define EINK_MSG_PARTIAL_BEFORE_FULL   0
 #define EINK_COOLDOWN_HW_MS            600    // аппаратный минимум между display() — иначе зависает
+/** 1 = не использовать fast LUT (всегда display(false)): медленнее, но если картинка «плывёт» даже с setFullWindow */
+#ifndef EINK_FORCE_FULL_LUT
+#define EINK_FORCE_FULL_LUT 0
+#endif
 #define EINK_IDLE_HIBERNATE_MS         30000  // 30 с неактивности → hibernate (панель не потребляет)
 #define EINK_REINIT_AFTER_N            3      // только FC1: каждые N full refresh — RST+init. BN/B73: hibernate() уже даёт reinit при wake
 #define PICKER_CONFIRM_MS              8000   // авто-принятие в пикерах (lang, region, powersave): e-ink медленный
@@ -209,6 +227,32 @@ static uint32_t computeContentHash(int tab) {
   return h;
 }
 
+/** При уходе с вкладки сообщений: первый кадр на новой вкладке — full (счётчик → порог). Иначе смена вкладок — как обычно (partial по лимиту). */
+static void onPaperTabSwitch(int prevTab, int newTab) {
+  if (prevTab == newTab) return;
+  if (display_tabs::contentForTab(prevTab) == display_tabs::CT_MSG &&
+      display_tabs::contentForTab(newTab) != display_tabs::CT_MSG) {
+    s_msgPartialStreak = 0;
+    s_fastRefreshCount = EINK_LIMIT_FASTREFRESH;  // следующий draw на не-MSG — full, не каждый клик
+  }
+}
+
+static bool usePartialForTab(display_tabs::ContentTab ct) {
+  if (ct == display_tabs::CT_MSG)
+    return s_msgPartialStreak < EINK_MSG_PARTIAL_BEFORE_FULL;
+  return s_fastRefreshCount < EINK_LIMIT_FASTREFRESH;
+}
+
+static void applyPartialStreakAfter(display_tabs::ContentTab ct, bool usePartial) {
+  if (ct == display_tabs::CT_MSG) {
+    if (usePartial) s_msgPartialStreak++;
+    else s_msgPartialStreak = 0;
+  } else {
+    if (usePartial) s_fastRefreshCount++;
+    else s_fastRefreshCount = 0;
+  }
+}
+
 static void ensureCooldownBeforeDisplay();
 #if defined(ESP32) && EINK_USE_GLOBAL_SPI
 static bool selectDisplaySPI();
@@ -250,29 +294,37 @@ static void doDisplayHibernate(bool wasFull) {
   else if (dispB73) dispB73->epd2.hibernate();
 }
 
-static void doDisplay(bool partial) {
+/** @return false если SPI/mutex недоступны — вызывающий не должен обновлять хеш/timestamps/s_lastWasFullRefresh */
+static bool doDisplay(bool partial) {
   s_panelHibernating = false;  // display() разбудит панель если была в hibernate
 #if defined(ESP32) && EINK_USE_GLOBAL_SPI
-  if (!selectDisplaySPI()) return;  // нет mutex — не рисуем на чужом SPI
+  if (!selectDisplaySPI()) return false;  // нет mutex — не рисуем на чужом SPI
 #endif
-  if (!partial) maybeDisplayReinit();
-  if (dispBN) {
-    if (partial) dispBN->setPartialWindow(0, 0, dispBN->width(), dispBN->height());
-    else dispBN->setFullWindow();
-    dispBN->display(partial);
-  } else if (dispFC1) {
-    if (partial) dispFC1->setPartialWindow(0, 0, dispFC1->width(), dispFC1->height());
-    else dispFC1->setFullWindow();
-    dispFC1->display(partial);
-  } else if (dispB73) {
-    if (partial) dispB73->setPartialWindow(0, 0, dispB73->width(), dispB73->height());
-    else dispB73->setFullWindow();
-    dispB73->display(partial);
+  if (!dispBN && !dispFC1 && !dispB73) {
+#if defined(ESP32) && EINK_USE_GLOBAL_SPI
+    releaseDisplaySPI();
+#endif
+    return false;
   }
-  doDisplayHibernate(!partial);
+  const bool fastLut = partial && (EINK_FORCE_FULL_LUT == 0);
+  if (!fastLut) maybeDisplayReinit();
+  // Всегда full window при отрисовке всего буфера: setPartialWindow(0,0,w,h)+display()
+  // на SSD16xx даёт артефакты «съехавшей» картинки; fast/full LUT — аргумент display(fastLut).
+  if (dispBN) {
+    dispBN->setFullWindow();
+    dispBN->display(fastLut);
+  } else if (dispFC1) {
+    dispFC1->setFullWindow();
+    dispFC1->display(fastLut);
+  } else if (dispB73) {
+    dispB73->setFullWindow();
+    dispB73->display(fastLut);
+  }
+  doDisplayHibernate(!fastLut);
 #if defined(ESP32) && EINK_USE_GLOBAL_SPI
   releaseDisplaySPI();
 #endif
+  return true;
 }
 
 /** 30 с неактивности → hibernate (панель не потребляет). Проверяем s_panelHibernating — не вызывать повторно. */
@@ -512,8 +564,9 @@ void displayText(int x, int y, const char* text) {
 
 void displayShow() {
   ensureCooldownBeforeDisplay();
-  doDisplay(false);
+  if (!doDisplay(false)) return;
   s_fastRefreshCount = 0;
+  s_msgPartialStreak = 0;
   s_lastDisplayEnd = millis();
 }
 
@@ -530,8 +583,9 @@ void displayShowWarning(const char* line1, const char* line2, uint32_t durationM
   disp->drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, GxEPD_BLACK);
   drawTruncRaw(8, 40, line1, MAX_LINE_CHARS);
   if (line2) drawTruncRaw(8, 60, line2, MAX_LINE_CHARS);
-  doDisplay(false);
+  if (!doDisplay(false)) return;
   s_fastRefreshCount = 0;
+  s_msgPartialStreak = 0;
   s_lastDisplayEnd = millis();
   uint32_t start = millis();
   while (millis() - start < durationMs) {
@@ -552,8 +606,9 @@ void displayShowBootScreen() {
   snprintf(ver, sizeof(ver), "v%s", RIFTLINK_VERSION);
   disp->setCursor(4, SCREEN_HEIGHT - 18);
   disp->print(ver);
-  doDisplay(false);
+  if (!doDisplay(false)) return;
   s_fastRefreshCount = 0;
+  s_msgPartialStreak = 0;
   s_lastDisplayEnd = millis();
 }
 
@@ -584,6 +639,7 @@ bool displayShowLanguagePicker() {
   if (!disp) return false;
   delay(200);
   s_fastRefreshCount = 0;
+  s_msgPartialStreak = 0;
   int pickLang = locale::getLang();
   uint32_t lastPress = millis();
   const uint32_t CONFIRM_MS = PICKER_CONFIRM_MS;
@@ -600,16 +656,22 @@ bool displayShowLanguagePicker() {
     disp->print(pickLang == LANG_RU ? "[RU]" : " RU ");
     drawTruncRaw(4, 95, locale::getForLang("short_long_hint", pickLang), 30);
     bool usePartial = (s_fastRefreshCount < EINK_LIMIT_FASTREFRESH);
+    bool drew = false;
     if (s_lastWasFullRefresh) {
-      s_hibernateFromIdle = false;
-      s_lastWasFullRefresh = false;
-      doDisplay(false);
-      s_fastRefreshCount = 0;
+      drew = doDisplay(false);
+      if (drew) {
+        s_hibernateFromIdle = false;
+        s_lastWasFullRefresh = false;
+        s_fastRefreshCount = 0;
+        s_msgPartialStreak = 0;
+      }
     } else {
-      doDisplay(usePartial);
-      if (usePartial) s_fastRefreshCount++; else s_fastRefreshCount = 0;
+      drew = doDisplay(usePartial);
+      if (drew) {
+        if (usePartial) s_fastRefreshCount++; else s_fastRefreshCount = 0;
+      }
     }
-    s_lastDisplayEnd = millis();
+    if (drew) s_lastDisplayEnd = millis();
     while (millis() - lastPress < CONFIRM_MS) {
       yield();
       uint32_t elapsed = millis() - lastPress;
@@ -630,6 +692,7 @@ bool displayShowLanguagePicker() {
 lang_done:
   locale::setLang(pickLang);
   s_fastRefreshCount = 0;
+  s_msgPartialStreak = 0;
   s_previousImageHash = 0;
   yield();
   delay(100);
@@ -642,6 +705,7 @@ bool displayShowRegionPicker() {
   if (nPresets <= 0) return false;  // защита от div-by-zero
   delay(200);
   s_fastRefreshCount = 0;
+  s_msgPartialStreak = 0;
   int pickIdx = 0;
   for (int i = 0; i < nPresets; i++) {
     if (strcasecmp(region::getPresetCode(i), region::getCode()) == 0) {
@@ -673,16 +737,22 @@ bool displayShowRegionPicker() {
     }
     drawTruncRaw(4, 95, locale::getForDisplay("short_long_hint"), 30);
     bool usePartial = (s_fastRefreshCount < EINK_LIMIT_FASTREFRESH);
+    bool drew = false;
     if (s_lastWasFullRefresh) {
-      s_hibernateFromIdle = false;
-      s_lastWasFullRefresh = false;
-      doDisplay(false);
-      s_fastRefreshCount = 0;
+      drew = doDisplay(false);
+      if (drew) {
+        s_hibernateFromIdle = false;
+        s_lastWasFullRefresh = false;
+        s_fastRefreshCount = 0;
+        s_msgPartialStreak = 0;
+      }
     } else {
-      doDisplay(usePartial);
-      if (usePartial) s_fastRefreshCount++; else s_fastRefreshCount = 0;
+      drew = doDisplay(usePartial);
+      if (drew) {
+        if (usePartial) s_fastRefreshCount++; else s_fastRefreshCount = 0;
+      }
     }
-    s_lastDisplayEnd = millis();
+    if (drew) s_lastDisplayEnd = millis();
     while (millis() - lastPress < CONFIRM_MS) {
       yield();
       uint32_t elapsed = millis() - lastPress;
@@ -703,6 +773,7 @@ bool displayShowRegionPicker() {
 region_done:
   region::setRegion(region::getPresetCode(pickIdx));
   s_fastRefreshCount = 0;
+  s_msgPartialStreak = 0;
   s_previousImageHash = 0;
   yield();
   delay(100);
@@ -760,8 +831,7 @@ static void displayShowModemPicker() {
     disp->setCursor((SCREEN_WIDTH - tw) / 2, 95);
     disp->print(hint);
 
-    doDisplay(true);
-    s_lastDisplayEnd = millis();
+    if (doDisplay(true)) s_lastDisplayEnd = millis();
 
     while (millis() - lastPress < CONFIRM_MS) {
       int pt = waitButtonPressWithType(CONFIRM_MS - (millis() - lastPress));
@@ -777,6 +847,7 @@ static void displayShowModemPicker() {
 modem_done_paper:
   if (pickIdx < 4) radio::requestModemPreset((radio::ModemPreset)pickIdx);
   s_fastRefreshCount = 0;
+  s_msgPartialStreak = 0;
   s_previousImageHash = 0;
 }
 
@@ -793,8 +864,7 @@ static void displayRunModemScan() {
   disp->print(t);
   disp->setCursor((SCREEN_WIDTH - 48) / 2, 55);
   disp->print("~36s ...");
-  doDisplay(false);
-  s_lastDisplayEnd = millis();
+  if (doDisplay(false)) s_lastDisplayEnd = millis();
 
   selftest::ScanResult res[6];
   int found = selftest::modemScan(res, 6);
@@ -822,10 +892,12 @@ static void displayRunModemScan() {
       disp->print(buf);
     }
   }
-  doDisplay(false);
-  s_lastDisplayEnd = millis();
-  s_fastRefreshCount = 0;
-  s_previousImageHash = 0;
+  if (doDisplay(false)) {
+    s_lastDisplayEnd = millis();
+    s_fastRefreshCount = 0;
+    s_msgPartialStreak = 0;
+    s_previousImageHash = 0;
+  }
   for (int i = 0; i < 50; i++) { delay(100); yield(); }
 }
 
@@ -1063,22 +1135,27 @@ static bool performDisplayUpdate(int tab, bool isResponsive, bool forceUpdate = 
     return false;
   }
 
-  // Partial везде; каждые EINK_LIMIT_FASTREFRESH — full для очистки ghosting
-  bool usePartial = (s_fastRefreshCount < EINK_LIMIT_FASTREFRESH);
+  // Partial; на MSG — свой счётчик (частые смены текста → чаще full против ghosting)
+  bool usePartial = usePartialForTab(ct);
+  bool ok = false;
   if (s_lastWasFullRefresh) {
-    // wake из сна: всегда full — иначе ghosting
-    s_hibernateFromIdle = false;
-    s_lastWasFullRefresh = false;
-    s_previousImageHash = 0;
+    // wake из сна: всегда full — иначе ghosting (флаги сбрасываем только после успешного display)
     ensureCooldownBeforeDisplay();
-    doDisplay(false);
-    s_fastRefreshCount = 0;
+    ok = doDisplay(false);
+    if (ok) {
+      s_hibernateFromIdle = false;
+      s_lastWasFullRefresh = false;
+      s_fastRefreshCount = 0;
+      s_msgPartialStreak = 0;
+      s_previousImageHash = 0;
+    }
   } else {
     ensureCooldownBeforeDisplay();
-    doDisplay(usePartial);
-    if (usePartial) s_fastRefreshCount++;
-    else s_fastRefreshCount = 0;
+    ok = doDisplay(usePartial);
+    if (ok) applyPartialStreakAfter(ct, usePartial);
   }
+
+  if (!ok) return false;
 
   s_lastDisplayEnd = millis();
   s_previousRunMs = now;
@@ -1087,37 +1164,45 @@ static bool performDisplayUpdate(int tab, bool isResponsive, bool forceUpdate = 
   return true;
 }
 
-static void drawScreen(int tab, bool forceFull = false) {
+static bool drawScreen(int tab, bool forceFull = false) {
   drawScreenContent(tab);
+  display_tabs::ContentTab ct = display_tabs::contentForTab(tab);
   // powersave: всегда full, не зависеть от s_lastWasFullRefresh — иначе вторая смена вкладки перестаёт рисоваться
+  bool ok = false;
   if (forceFull) {
-    s_hibernateFromIdle = false;
-    s_lastWasFullRefresh = false;
-    s_previousImageHash = 0;
     ensureCooldownBeforeDisplay();
-    doDisplay(false);
-    s_fastRefreshCount = 0;
-  } else {
-    bool usePartial = (s_fastRefreshCount < EINK_LIMIT_FASTREFRESH);
-    if (s_lastWasFullRefresh) {
-      // wake из сна: всегда full — иначе ghosting
+    ok = doDisplay(false);
+    if (ok) {
       s_hibernateFromIdle = false;
       s_lastWasFullRefresh = false;
-      s_previousImageHash = 0;
-      ensureCooldownBeforeDisplay();
-      doDisplay(false);
       s_fastRefreshCount = 0;
+      s_msgPartialStreak = 0;
+      s_previousImageHash = 0;
+    }
+  } else {
+    bool usePartial = usePartialForTab(ct);
+    if (s_lastWasFullRefresh) {
+      ensureCooldownBeforeDisplay();
+      ok = doDisplay(false);
+      if (ok) {
+        s_hibernateFromIdle = false;
+        s_lastWasFullRefresh = false;
+        s_fastRefreshCount = 0;
+        s_msgPartialStreak = 0;
+        s_previousImageHash = 0;
+      }
     } else {
       ensureCooldownBeforeDisplay();
-      doDisplay(usePartial);
-      if (usePartial) s_fastRefreshCount++;
-      else s_fastRefreshCount = 0;
+      ok = doDisplay(usePartial);
+      if (ok) applyPartialStreakAfter(ct, usePartial);
     }
   }
+  if (!ok) return false;
   s_lastDisplayEnd = millis();
   s_previousRunMs = millis();
   s_previousImageHash = computeContentHash(tab);
   s_lastActivityTime = millis();  // отрисовка — активность (откладывает hibernate)
+  return true;
 }
 
 void displaySetButtonPolledExternally(bool on) {
@@ -1140,18 +1225,20 @@ void displayShowScreen(int screen) {
   s_lastActivityTime = millis();
   int nTabs = display_tabs::getTabCount();
   if (screen >= nTabs) screen = nTabs - 1;
+  onPaperTabSwitch(s_currentScreen, screen);
   s_currentScreen = screen;
   s_previousRunMs = 0;
   bool forceFull = powersave::isEnabled();  // режим экономии: full → hibernate после каждой вкладки
-  drawScreen(s_currentScreen, forceFull);
+  (void)drawScreen(s_currentScreen, forceFull);
 }
 
 void displayShowScreenForceFull(int screen) {
   int nTabs = display_tabs::getTabCount();
   if (screen >= nTabs) screen = nTabs - 1;
+  onPaperTabSwitch(s_currentScreen, screen);
   s_currentScreen = screen;
   s_previousRunMs = 0;
-  drawScreen(s_currentScreen, true);  // full refresh — против ghosting при смене вкладки
+  (void)drawScreen(s_currentScreen, true);  // full refresh — против ghosting при смене вкладки
 }
 
 int displayGetCurrentScreen() {
@@ -1168,6 +1255,7 @@ static int displayShowPopupMenu(const char* items[], int count) {
   if (!disp || count <= 0) return -1;
   delay(200);
   s_fastRefreshCount = 0;
+  s_msgPartialStreak = 0;
   int selected = 0;
   int scrollOff = 0;
   uint32_t lastPress = millis();
@@ -1202,16 +1290,22 @@ static int displayShowPopupMenu(const char* items[], int count) {
       disp->fillTriangle(SCREEN_WIDTH - 8, CONTENT_Y + CONTENT_H - 3, SCREEN_WIDTH - 12, CONTENT_Y + CONTENT_H - 8, SCREEN_WIDTH - 4, CONTENT_Y + CONTENT_H - 8, GxEPD_BLACK);
 
     bool usePartial = (s_fastRefreshCount < EINK_LIMIT_FASTREFRESH);
+    bool drew = false;
     if (s_lastWasFullRefresh) {
-      s_hibernateFromIdle = false;
-      s_lastWasFullRefresh = false;
-      doDisplay(false);
-      s_fastRefreshCount = 0;
+      drew = doDisplay(false);
+      if (drew) {
+        s_hibernateFromIdle = false;
+        s_lastWasFullRefresh = false;
+        s_fastRefreshCount = 0;
+        s_msgPartialStreak = 0;
+      }
     } else {
-      doDisplay(usePartial);
-      if (usePartial) s_fastRefreshCount++; else s_fastRefreshCount = 0;
+      drew = doDisplay(usePartial);
+      if (drew) {
+        if (usePartial) s_fastRefreshCount++; else s_fastRefreshCount = 0;
+      }
     }
-    s_lastDisplayEnd = millis();
+    if (drew) s_lastDisplayEnd = millis();
 
     while (millis() - lastPress < MENU_TIMEOUT_MS) {
       yield();
@@ -1286,7 +1380,8 @@ void displayOnLongPress(int screen) {
   s_menuActive = false;
   s_previousImageHash = 0;
   s_fastRefreshCount = 0;
-  drawScreen(s_currentScreen, true);
+  s_msgPartialStreak = 0;
+  (void)drawScreen(s_currentScreen, true);
 }
 
 bool displayUpdate() {
@@ -1310,7 +1405,9 @@ bool displayUpdate() {
       if (isShort) {
         s_lastActivityTime = millis();
         ensureCooldownBeforeDisplay();
+        int prevTab = s_currentScreen;
         s_currentScreen = displayGetNextScreen(s_currentScreen);
+        onPaperTabSwitch(prevTab, s_currentScreen);
         bool forceFull = powersave::isEnabled();  // режим экономии: full → hibernate после каждой вкладки
         if (forceFull) drawScreen(s_currentScreen, true);
         else if (!performDisplayUpdate(s_currentScreen, true, true)) drawScreen(s_currentScreen, false);
@@ -1323,16 +1420,15 @@ bool displayUpdate() {
 
   // Обновляем только если пользователь на вкладке с этими данными — иначе смысла нет
   if (s_needRedrawInfo) {
-    s_needRedrawInfo = false;
-    if (!performDisplayUpdate(s_currentScreen, true, true)) {
-      drawScreen(s_currentScreen, powersave::isEnabled());
+    if (performDisplayUpdate(s_currentScreen, true, true) ||
+        drawScreen(s_currentScreen, powersave::isEnabled())) {
+      s_needRedrawInfo = false;
     }
     return false;
   }
   if (s_needRedrawMsg && display_tabs::contentForTab(s_currentScreen) == display_tabs::CT_MSG) {
-    if (performDisplayUpdate(s_currentScreen, true, true)) s_needRedrawMsg = false;
-    else {
-      drawScreen(s_currentScreen, powersave::isEnabled());  // fallback при cooldown — ждём и рисуем
+    if (performDisplayUpdate(s_currentScreen, true, true) ||
+        drawScreen(s_currentScreen, powersave::isEnabled())) {
       s_needRedrawMsg = false;
     }
     return false;

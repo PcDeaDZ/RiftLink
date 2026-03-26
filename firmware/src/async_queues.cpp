@@ -17,9 +17,9 @@ PtrPool<TxRequest, TX_REQUEST_POOL_SIZE> txRequestPool;
 
 static constexpr size_t PACKET_QUEUE_LEN =
 #if defined(USE_EINK)
-    16;
+    24;
 #else
-    16;
+    32;
 #endif
 static constexpr size_t SEND_QUEUE_LEN =
 #if defined(USE_EINK)

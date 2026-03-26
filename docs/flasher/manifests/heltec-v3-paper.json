@@ -1,6 +1,6 @@
 {
   "name": "RiftLink Heltec V3 Paper",
-  "version": "1.5.23",
+  "version": "1.5.25",
   "new_install_prompt_erase": true,
   "builds": [
     {

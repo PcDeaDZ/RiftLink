@@ -14,23 +14,23 @@
 #include "async_tasks.h"
 #include <string.h>
 
-#define FUSION_BUF_SIZE 4
+#define FUSION_BUF_SIZE 8
 struct FusionEntry {
   uint8_t to[protocol::NODE_ID_LEN];
-  uint8_t plain[4][120];  // ttl?+msgId+text
-  size_t plainLen[4];
-  uint32_t msgId[4];
-  bool compressed[4];
-  uint16_t pktId[4];
+  uint8_t plain[packet_fusion::MAX_BATCH][120];
+  size_t plainLen[packet_fusion::MAX_BATCH];
+  uint32_t msgId[packet_fusion::MAX_BATCH];
+  bool compressed[packet_fusion::MAX_BATCH];
+  uint16_t pktId[packet_fusion::MAX_BATCH];
   uint8_t count;
   uint32_t firstAddTime;
   bool inUse;
 };
 
-#define FUSION_SLOTS 1
+#define FUSION_SLOTS 4
 static FusionEntry s_fusion[FUSION_SLOTS];
 static bool s_inited = false;
-static void (*s_onBatchSent)(const uint8_t* to, const uint32_t* msgIds, int count) = nullptr;
+static void (*s_onBatchSent)(const uint8_t* to, const uint32_t* msgIds, int count, uint16_t batchPktId) = nullptr;
 static bool (*s_onSingleFlush)(const uint8_t* to, uint32_t msgId, const uint8_t* pkt, size_t pktLen, uint8_t txSf) = nullptr;
 
 namespace packet_fusion {
@@ -116,23 +116,24 @@ static void flushEntry(FusionEntry* e) {
     }
     if (off > 1) {
       uint8_t pkt[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD];
+      uint16_t batchPktId = e->pktId[0];
       size_t pktLen = protocol::buildPacket(pkt, sizeof(pkt),
           node::getId(), e->to, 31, protocol::OP_MSG_BATCH,
-          batchPayload, off, false, false);
+          batchPayload, off, false, false, false, protocol::CHANNEL_DEFAULT, batchPktId);
       if (pktLen > 0) {
         pkt_cache::addBatch(e->to, e->pktId, e->count, pkt, pktLen);
         if (bls_n::shouldDeferTx(e->to) || esp_now_slots::shouldDeferTx(e->to)) return;  // retry next flush
         if (bls_n::sendRtsBeforeLora(e->to, pktLen)) delay(50);
         if (esp_now_slots::sendRtsBeforeLora(e->to, pktLen)) delay(50);
         (void)queueTxPacket(pkt, pktLen, txSf, false, TxRequestClass::data);
-        if (s_onBatchSent) s_onBatchSent(e->to, e->msgId, e->count);
+        if (s_onBatchSent) s_onBatchSent(e->to, e->msgId, e->count, batchPktId);
       }
     }
   }
   e->inUse = false;
 }
 
-void setOnBatchSent(void (*cb)(const uint8_t* to, const uint32_t* msgIds, int count)) {
+void setOnBatchSent(void (*cb)(const uint8_t* to, const uint32_t* msgIds, int count, uint16_t batchPktId)) {
   s_onBatchSent = cb;
 }
 

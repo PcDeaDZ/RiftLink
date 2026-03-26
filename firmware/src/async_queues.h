@@ -92,8 +92,9 @@ extern QueueHandle_t displayQueue;
 
 #include "ptr_pool.h"
 
-inline constexpr size_t PACKET_POOL_SIZE = 16;
-inline constexpr size_t TX_REQUEST_POOL_SIZE = 48;
+inline constexpr size_t PACKET_POOL_SIZE = 32;
+/** Согласовано с TX_REQUEST_QUEUE_LEN: при burst BLE/ping + CAD-requeue иначе txreq_pool_empty, пока priority overflow (T-Beam) мал. */
+inline constexpr size_t TX_REQUEST_POOL_SIZE = 64;
 
 extern PtrPool<PacketQueueItem, PACKET_POOL_SIZE> packetPool;
 extern PtrPool<TxRequest, TX_REQUEST_POOL_SIZE> txRequestPool;

@@ -60,14 +60,19 @@ bool onBroadcastAckWitness(const uint8_t* from, uint32_t msgId, bool requireOnli
 // onDelivered вызывается для каждого доставленного msgId (для ble::notifyDelivered).
 void onAckBatchReceived(const uint8_t* from, const uint8_t* payload, size_t payloadLen, int rssi,
     void (*onDelivered)(const uint8_t* from, uint32_t msgId, int rssi));
+// Selective ACK v3: bitmap for batch messages from peer.
+void onSelectiveAckReceived(const uint8_t* from, uint16_t batchPktId, uint16_t ackBitmap, int rssi,
+    void (*onDelivered)(const uint8_t* from, uint32_t msgId, int rssi));
 
 // RIT: при получении POLL от получателя — ускорить отправку pending для него
 void onPollReceived(const uint8_t* from);
 
 // Packet Fusion: зарегистрировать batch для ACK tracking
-void registerBatchSent(const uint8_t* to, const uint32_t* msgIds, int count);
+void registerBatchSent(const uint8_t* to, const uint32_t* msgIds, int count, uint16_t batchPktId);
 // Packet Fusion: single message flush — добавить в pending
 bool registerPendingFromFusion(const uint8_t* to, uint32_t msgId, const uint8_t* pkt, size_t pktLen, uint8_t txSf);
+// Retransmit specific pending message by msgId if still in pending table.
+bool retransmitPendingByMsgId(const uint8_t* to, uint32_t msgId);
 
 // Callback при успешной постановке unicast в очередь (для evt "sent")
 void setOnUnicastSent(void (*cb)(const uint8_t* to, uint32_t msgId));

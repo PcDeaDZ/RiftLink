@@ -195,9 +195,9 @@ static QueueHandle_t s_txRequestQueue = nullptr;
 
 static constexpr size_t TX_REQUEST_QUEUE_LEN =
 #if defined(USE_EINK)
-    48;
+    64;
 #else
-    48;
+    64;
 #endif
 
 bool asyncInfraEnsure() {
@@ -300,6 +300,10 @@ static bool queueTxRequestInternal(const TxRequest& inReq, char* reasonBuf, size
   // Any per-packet SF hints are ignored to keep deterministic fixed-SF behavior.
   req.txSf = radio::getSpreadingFactor();
   if (req.txSf < 7 || req.txSf > 12) req.txSf = 7;
+  const bool fastLane = req.priority || req.klass == TxRequestClass::critical || req.klass == TxRequestClass::control;
+  uint8_t congestion = radio::getCongestionLevel();
+  uint8_t qWaiting = asyncTxQueueWaiting();
+  uint8_t reserveSlots = ACK_RESERVE_SLOTS + (congestion >= 2 ? 2 : 0) + (qWaiting >= 32 ? 2 : 0);
   if (req.enqueueMs == 0) req.enqueueMs = millis();
   if (!asyncIsRadioFsmV2Enabled()) {
     if (!radioCmdQueue) {
@@ -308,7 +312,7 @@ static bool queueTxRequestInternal(const TxRequest& inReq, char* reasonBuf, size
           (unsigned)req.priority, (unsigned)req.len);
       return false;
     }
-    if (!req.priority && uxQueueSpacesAvailable(radioCmdQueue) <= ACK_RESERVE_SLOTS) {
+    if (!fastLane && uxQueueSpacesAvailable(radioCmdQueue) <= reserveSlots) {
       if (send_overflow::push(req)) return true;
       queueSendReason(reasonBuf, reasonLen, "legacy_overflow_full");
       return false;
@@ -319,7 +323,7 @@ static bool queueTxRequestInternal(const TxRequest& inReq, char* reasonBuf, size
     memcpy(rcmd.u.tx.buf, req.buf, req.len);
     rcmd.u.tx.len = req.len;
     rcmd.u.tx.txSf = req.txSf;
-    BaseType_t ok = req.priority ? xQueueSendToFront(radioCmdQueue, &rcmd, 0)
+    BaseType_t ok = fastLane ? xQueueSendToFront(radioCmdQueue, &rcmd, 0)
                                  : xQueueSend(radioCmdQueue, &rcmd, 0);
     if (ok != pdTRUE) {
       if (send_overflow::push(req)) return true;
@@ -328,7 +332,7 @@ static bool queueTxRequestInternal(const TxRequest& inReq, char* reasonBuf, size
     }
     return true;
   }
-  if (!req.priority && uxQueueSpacesAvailable(s_txRequestQueue) <= ACK_RESERVE_SLOTS) {
+  if (!fastLane && uxQueueSpacesAvailable(s_txRequestQueue) <= reserveSlots) {
     if (send_overflow::push(req)) {
       RIFTLINK_DIAG("QUEUE", "event=TX_DEFER lane=overflow cause=ack_reserve sf=%u len=%u free=%u",
           (unsigned)req.txSf, (unsigned)req.len, (unsigned)uxQueueSpacesAvailable(s_txRequestQueue));
@@ -352,7 +356,7 @@ static bool queueTxRequestInternal(const TxRequest& inReq, char* reasonBuf, size
     return false;
   }
   *slot = req;
-  BaseType_t ok = req.priority ? xQueueSendToFront(s_txRequestQueue, &slot, 0)
+  BaseType_t ok = fastLane ? xQueueSendToFront(s_txRequestQueue, &slot, 0)
                                : xQueueSend(s_txRequestQueue, &slot, 0);
   if (ok != pdTRUE) {
     txRequestPool.free(slot);
@@ -1133,10 +1137,21 @@ static void radioSchedulerTask(void* arg) {
         uint32_t lastToaUs = 0;
         uint32_t burstToaUs = 0;
         bool pushedBack = false;
-        int drainLimit = 6;
+        uint8_t congestion = radio::getCongestionLevel();
+        int drainLimit = (congestion >= 3) ? 8 : 12;
+        int dataBudget = (congestion >= 3) ? 3 : (congestion >= 2 ? 5 : 8);
+        int dataDrained = 0;
         for (int drainIdx = 0; drainIdx < drainLimit; drainIdx++) {
           TxRequest item{};
           if (!send_overflow::getNextTxRequest(s_txRequestQueue, &item)) break;
+          bool fastLaneItem = item.priority || item.klass == TxRequestClass::critical || item.klass == TxRequestClass::control;
+          if (!fastLaneItem && dataDrained >= dataBudget) {
+            item.priority = true;
+            item.enqueueMs = millis();
+            (void)pushBackTxRequest(item);
+            pushedBack = true;
+            break;
+          }
           if (drainIdx > 0 && item.txSf >= 10) { drainLimit = drainIdx + 1; }
           if (drainIdx >= 2 && item.txSf >= 10) break;
 #if !defined(SF_FORCE_7)
@@ -1178,6 +1193,7 @@ static void radioSchedulerTask(void* arg) {
             RIFTLINK_DIAG("RADIO", "event=TX_FAIL_REQUEUE len=%u sf=%u", (unsigned)item.len, (unsigned)item.txSf);
           }
           didTx = true;
+          if (!fastLaneItem) dataDrained++;
           // TX/RX interleave: release mutex between packets, check for pending RX
           if (drainIdx + 1 < drainLimit) {
             radio::releaseMutex();
@@ -1397,16 +1413,27 @@ static void radioSchedulerTask(void* arg) {
       continue;
     }
     send_overflow::drainApplyCommandsFromRadioQueue();
-    // TX: до 6 пакетов за цикл при SF7/9 (pipelining), 2 при SF10/11, 1 при SF12
     bool didTx = false;
     uint32_t lastToaUs = 0;
     uint32_t burstToaUs = 0;
     bool pushedBack = false;
-    int drainLimit = 6;
+    uint8_t congestion = radio::getCongestionLevel();
+    uint8_t curSf = radio::getSpreadingFactor();
+    int drainLimit = (curSf >= 10) ? 3 : (congestion >= 3 ? 8 : 14);
+    int dataBudget = (congestion >= 3) ? 3 : (congestion >= 2 ? 6 : 10);
+    int dataDrained = 0;
     if (useFsmV2) fsmTransition(&fsmState, RadioFsmState::TXCommit, "tx_drain");
     for (int drainIdx = 0; drainIdx < drainLimit; drainIdx++) {
     TxRequest item{};
     if (!send_overflow::getNextTxRequest(s_txRequestQueue, &item)) break;
+    bool fastLaneItem = item.priority || item.klass == TxRequestClass::critical || item.klass == TxRequestClass::control;
+    if (!fastLaneItem && dataDrained >= dataBudget) {
+      item.priority = true;
+      item.enqueueMs = millis();
+      (void)pushBackTxRequest(item);
+      pushedBack = true;
+      break;
+    }
     if (drainIdx > 0 && item.txSf >= 10) { drainLimit = drainIdx + 1; }  // SF10+: только 1 доп. пакет
     if (drainIdx >= 2 && item.txSf >= 10) break;  // SF10+ после 2-го — стоп
 #if defined(SF_FORCE_7)
@@ -1420,7 +1447,10 @@ static void radioSchedulerTask(void* arg) {
         }
         didTx = true;
         if (item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_MSG) {
-          vTaskDelay(pdMS_TO_TICKS(60));
+          uint32_t msgGapMs = (lastToaUs > 0) ? ((lastToaUs / 1000 + 3) / 4) : 1;
+          if (msgGapMs < 1) msgGapMs = 1;
+          if (msgGapMs > 30) msgGapMs = 30;
+          vTaskDelay(pdMS_TO_TICKS(msgGapMs));
         }
 #else
         if (item.txSf >= 10 && highSfDrained >= 2) {
@@ -1458,9 +1488,13 @@ static void radioSchedulerTask(void* arg) {
             RIFTLINK_DIAG("RADIO", "event=TX_FAIL_REQUEUE len=%u sf=%u", (unsigned)item.len, (unsigned)item.txSf);
           }
           didTx = true;
+          if (!fastLaneItem) dataDrained++;
           vTaskDelay(pdMS_TO_TICKS(1));
           if (item.buf[0] == protocol::SYNC_BYTE && item.buf[2] == protocol::OP_MSG) {
-            vTaskDelay(pdMS_TO_TICKS(60));
+            uint32_t msgGapMs = (pktToaUs > 0) ? ((pktToaUs / 1000 + 3) / 4) : 1;
+            if (msgGapMs < 1) msgGapMs = 1;
+            if (msgGapMs > 30) msgGapMs = 30;
+            vTaskDelay(pdMS_TO_TICKS(msgGapMs));
           }
         }
 #endif

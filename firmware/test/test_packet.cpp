@@ -534,6 +534,35 @@ void test_opcode_group_msg_pktid_roundtrip() {
   TEST_ASSERT_EQUAL_UINT8_ARRAY(grpPl, pl, 40);
 }
 
+void test_opcode_ack_selective_roundtrip() {
+  uint8_t buf[128];
+  uint8_t pl[8] = {1, 0x34, 0x12, 0x0F, 0x00, 0xAA, 0xBB, 0xCC};
+  size_t len = protocol::buildPacket(buf, sizeof(buf),
+      s_from, s_to, 1, protocol::OP_ACK_SELECTIVE,
+      pl, sizeof(pl), true, false, false, 0, 0x1234);
+  TEST_ASSERT_GREATER_THAN(0, len);
+  protocol::PacketHeader hdr;
+  const uint8_t* out = nullptr;
+  size_t outLen = 0;
+  bool ok = protocol::parsePacket(buf, len, &hdr, &out, &outLen);
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL(protocol::OP_ACK_SELECTIVE, hdr.opcode);
+  TEST_ASSERT_EQUAL(sizeof(pl), outLen);
+}
+
+void test_opcode_frag_ctrl_roundtrip() {
+  uint8_t buf[128];
+  uint8_t pl[10] = {1, 1, 2, 3, 4, 8, 0xFF, 0, 0, 0};
+  size_t len = protocol::buildPacket(buf, sizeof(buf),
+      s_from, s_to, 1, protocol::OP_FRAG_CTRL,
+      pl, sizeof(pl), true, false, false, 0, 0x0102);
+  TEST_ASSERT_GREATER_THAN(0, len);
+  protocol::PacketHeader hdr;
+  bool ok = protocol::parsePacket(buf, len, &hdr, nullptr, nullptr);
+  TEST_ASSERT_TRUE(ok);
+  TEST_ASSERT_EQUAL(protocol::OP_FRAG_CTRL, hdr.opcode);
+}
+
 // --- buildPacket граничные ---
 void test_build_buffer_too_small() {
   uint8_t buf[5];
@@ -618,13 +647,16 @@ void test_parse_buffer_too_large_rejected() {
 void test_get_expected_payload_range_all() {
   size_t minP, maxP;
   const struct { uint8_t op; size_t minV; size_t maxV; } cases[] = {
-    {protocol::OP_HELLO, 0, 0},
+    {protocol::OP_HELLO, 2, 2},
     {protocol::OP_ACK, 4, 4},
     {protocol::OP_KEY_EXCHANGE, 32, 32},
     {protocol::OP_ROUTE_REQ, 21, 21},
     {protocol::OP_ECHO, 12, 12},
     {protocol::OP_POLL, 0, 0},
     {protocol::OP_NACK, 2, 2},
+    {protocol::OP_ACK_SELECTIVE, 6, 96},
+    {protocol::OP_FRAG_CTRL, 8, 96},
+    {protocol::OP_PARITY, 12, protocol::MAX_PAYLOAD},
     {protocol::OP_TELEMETRY, 28, 64},
     {protocol::OP_MSG, 29, protocol::MAX_PAYLOAD},
     {protocol::OP_GROUP_MSG, 32, protocol::MAX_PAYLOAD},
@@ -965,6 +997,8 @@ int main(int argc, char** argv) {
   RUN_TEST(test_opcode_msg_frag_min_payload);
   RUN_TEST(test_opcode_group_msg_min_payload);
   RUN_TEST(test_opcode_group_msg_pktid_roundtrip);
+  RUN_TEST(test_opcode_ack_selective_roundtrip);
+  RUN_TEST(test_opcode_frag_ctrl_roundtrip);
   RUN_TEST(test_build_buffer_too_small);
   RUN_TEST(test_build_null_payload_zero_len);
   RUN_TEST(test_build_all_flags);

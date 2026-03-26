@@ -31,6 +31,10 @@ constexpr uint8_t OP_XOR_RELAY = 0x11;  // Network Coding: XOR(A,B) broadcast, m
 constexpr uint8_t OP_SF_BEACON = 0x12;  // broadcast: payload 1B = mesh SF (7,9,10,12) — новый узел узнаёт, на каком SF искать
 constexpr uint8_t OP_ACK_BATCH = 0x13;  // unicast: count(1) + msgId(4)* — батч ACK для MSG_BATCH (pipelining)
 constexpr uint8_t OP_SOS = 0x14;        // broadcast emergency flood: msgId(4) + text (encrypted)
+// v3 reliability controls
+constexpr uint8_t OP_ACK_SELECTIVE = 0x15;     // unicast: selective ack bitmap (batch/frag)
+constexpr uint8_t OP_FRAG_CTRL = 0x16;         // unicast: fragment control (missing bitmap / resend hints)
+constexpr uint8_t OP_PARITY = 0x17;            // unicast: adaptive redundancy parity payload
 constexpr uint8_t OP_PONG = 0xFE;
 constexpr uint8_t OP_PING = 0xFF;
 
@@ -110,10 +114,8 @@ size_t getExpectedPacketLength(uint8_t opcode, size_t payloadLen, bool isBroadca
 
 /** Полный размер KEY_EXCHANGE в эфире (как в buildPacket): strict v2.2 unicast = HEADER_LEN_PKTID+32. */
 constexpr inline size_t keyExchangeTotalLen(bool hasPktId, bool isBroadcast) {
-  if (hasPktId) {
-    return isBroadcast ? (HEADER_LEN_BROADCAST_PKTID + 32) : (HEADER_LEN_PKTID + 32);
-  }
-  return isBroadcast ? (HEADER_LEN_BROADCAST + 32) : (SYNC_LEN + HEADER_LEN + 32);
+  return hasPktId ? (isBroadcast ? (HEADER_LEN_BROADCAST_PKTID + 32) : (HEADER_LEN_PKTID + 32))
+                  : (isBroadcast ? (HEADER_LEN_BROADCAST + 32) : (SYNC_LEN + HEADER_LEN + 32));
 }
 
 /** Min/max payload для opcode. true если opcode известен. */

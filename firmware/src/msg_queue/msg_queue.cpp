@@ -23,6 +23,7 @@
 #include "esp_now_slots/esp_now_slots.h"
 #include "x25519_keys/x25519_keys.h"
 #include "voice_frag/voice_frag.h"
+#include "ack_coalesce/ack_coalesce.h"
 #include <Arduino.h>
 #include <esp_random.h>
 #include <string.h>
@@ -46,9 +47,14 @@
 #define MSG_ENCRYPT_RETRY_COUNT 3
 #define MSG_ENCRYPT_RETRY_DELAY_MS 2
 
-// ACK timeout с учётом SF: SF7 быстрее, SF12 дольше (ToA, relay в mesh)
-static uint32_t getAckTimeoutMs(uint8_t txSf) {
+// ACK timeout с учётом SF и hop distance.
+// Direct neighbors (online, known RSSI) get aggressive timeout; multi-hop keeps original.
+static uint32_t getAckTimeoutMs(uint8_t txSf, const uint8_t* to = nullptr) {
   if (txSf < 7 || txSf > 12) txSf = 12;
+  bool direct = to && neighbors::isOnline(to) && neighbors::getRssiFor(to) > -128;
+  if (direct) {
+    return 500 + (uint32_t)(txSf - 6) * 200;  // SF7: 700ms, SF12: 1700ms
+  }
   return 2000 + (uint32_t)(txSf - 6) * 500;  // SF7: 2.5s, SF12: 5s
 }
 
@@ -62,7 +68,7 @@ struct PendingMsg {
   uint8_t txSf;   // SF при отправке — для timeout и retry
   bool inUse;
   bool triggerSend;  // RIT: отправить при следующем update (получили POLL от получателя)
-  int8_t lastAction;  // MAB: последнее действие (0..2) для reward
+  int8_t lastAction;  // MAB: последнее действие (0..NUM_ARMS-1) для reward
   bool critical;
   uint8_t triggerType;
   uint32_t triggerValueMs;
@@ -78,11 +84,15 @@ struct PendingBroadcast {
   bool inUse;
 };
 
+static constexpr uint8_t UNICAST_FLAG_PIGGY = 0x01;
+static constexpr uint8_t PIGGY_MAX_IDS = 4;
+
 struct PendingBatch {
   uint8_t to[protocol::NODE_ID_LEN];
-  uint32_t msgIds[4];
-  uint8_t acked[4];
+  uint32_t msgIds[8];
+  uint8_t acked[8];
   int count;
+  uint16_t batchPktId;
   bool inUse;
 };
 
@@ -98,6 +108,18 @@ static void (*s_onBroadcastSent)(uint32_t msgId) = nullptr;
 static void (*s_onBroadcastDelivery)(uint32_t msgId, int delivered, int total) = nullptr;
 static void (*s_onTimeCapsuleReleased)(const uint8_t* to, uint32_t msgId, uint8_t triggerType) = nullptr;
 static std::atomic<uint8_t> s_lastSendFailReason{msg_queue::SEND_FAIL_NONE};
+static std::atomic<uint32_t> s_metricPiggyEmbedded{0};
+static std::atomic<uint32_t> s_metricPiggyConsumed{0};
+static std::atomic<uint32_t> s_metricSelectiveAckRx{0};
+static constexpr uint8_t PARITY_AFTER_N = 3;
+static constexpr int PARITY_ACK_PERMILLE_THRESHOLD = 650;
+static constexpr int PARITY_RSSI_THRESHOLD = -103;
+struct ParityState {
+  uint8_t peer[protocol::NODE_ID_LEN];
+  uint8_t sinceLast;
+  bool inUse;
+};
+static ParityState s_parityState[8];
 struct AckReplayEntry {
   std::atomic<uint32_t> fromLo;
   std::atomic<uint32_t> fromHi;
@@ -142,6 +164,57 @@ static bool isAckReplayAndMark(const uint8_t* from, uint32_t msgId) {
   return false;
 }
 
+static ParityState* getParityState(const uint8_t* to) {
+  for (size_t i = 0; i < sizeof(s_parityState) / sizeof(s_parityState[0]); i++) {
+    if (s_parityState[i].inUse && memcmp(s_parityState[i].peer, to, protocol::NODE_ID_LEN) == 0) {
+      return &s_parityState[i];
+    }
+  }
+  for (size_t i = 0; i < sizeof(s_parityState) / sizeof(s_parityState[0]); i++) {
+    if (!s_parityState[i].inUse) {
+      s_parityState[i].inUse = true;
+      s_parityState[i].sinceLast = 0;
+      memcpy(s_parityState[i].peer, to, protocol::NODE_ID_LEN);
+      return &s_parityState[i];
+    }
+  }
+  return nullptr;
+}
+
+static void maybeSendParityPacket(const uint8_t* to, uint32_t msgId, const uint8_t* cipher, size_t cipherLen, uint8_t txSf) {
+  if (!to || !cipher || cipherLen == 0) return;
+  int ackRate = neighbors::getAckRatePermille(to);
+  int rssi = neighbors::getRssiFor(to);
+  bool poor = ((ackRate >= 0 && ackRate < PARITY_ACK_PERMILLE_THRESHOLD) || (rssi != -128 && rssi < PARITY_RSSI_THRESHOLD));
+  if (!poor) return;
+  ParityState* st = getParityState(to);
+  if (!st) return;
+  st->sinceLast++;
+  if (st->sinceLast < PARITY_AFTER_N) return;
+  st->sinceLast = 0;
+  uint8_t plain[32];
+  size_t off = 0;
+  plain[off++] = 0x01;  // parity subtype v1
+  memcpy(plain + off, &msgId, msg_queue::MSG_ID_LEN); off += msg_queue::MSG_ID_LEN;
+  uint8_t sampleLen = (uint8_t)((cipherLen < 16) ? cipherLen : 16);
+  plain[off++] = sampleLen;
+  uint8_t parity = 0;
+  for (uint8_t i = 0; i < sampleLen; i++) {
+    parity ^= cipher[i];
+    plain[off++] = cipher[i];
+  }
+  plain[off++] = parity;
+  uint8_t enc[64];
+  size_t encLen = sizeof(enc);
+  if (!crypto::encryptFor(to, plain, off, enc, &encLen)) return;
+  uint8_t pkt[protocol::PAYLOAD_OFFSET + protocol::MAX_PAYLOAD];
+  size_t pktLen = protocol::buildPacket(pkt, sizeof(pkt),
+      node::getId(), to, 31, protocol::OP_PARITY, enc, encLen, true, false, false, protocol::CHANNEL_DEFAULT, (uint16_t)(msgId & 0xFFFF));
+  if (pktLen > 0) {
+    (void)queueTxPacket(pkt, pktLen, txSf, true, TxRequestClass::control);
+  }
+}
+
 namespace msg_queue {
 
 static inline void setLastSendFail(SendFailReason reason) {
@@ -156,6 +229,7 @@ void init() {
   s_mutex = xSemaphoreCreateMutex();
   memset(s_pending, 0, sizeof(s_pending));
   memset(s_bcPending, 0, sizeof(s_bcPending));
+  memset(s_parityState, 0, sizeof(s_parityState));
   for (int i = 0; i < ACK_REPLAY_GUARD_SIZE; i++) {
     s_ackReplayGuard[i].fromLo.store(0, std::memory_order_relaxed);
     s_ackReplayGuard[i].fromHi.store(0, std::memory_order_relaxed);
@@ -217,6 +291,36 @@ static PendingMsg* findByMsgId(uint32_t msgId) {
 // Макс. plaintext для одного пакета (encrypted output <= MAX_PAYLOAD)
 constexpr size_t MAX_SINGLE_PLAIN = protocol::MAX_PAYLOAD - crypto::OVERHEAD;
 
+static bool buildUnicastPlainV3(const uint8_t* to, uint32_t msgId, const char* text,
+    uint8_t* out, size_t outMax, size_t* outLen) {
+  if (!to || !text || !out || !outLen) return false;
+  size_t textLen = strlen(text);
+  if (textLen == 0) return false;
+  uint8_t piggyCount = 0;
+  uint32_t piggyIds[PIGGY_MAX_IDS] = {0};
+  (void)ack_coalesce::consumeForPeer(to, piggyIds, PIGGY_MAX_IDS, &piggyCount);
+  if (piggyCount > 0) {
+    s_metricPiggyConsumed.fetch_add(piggyCount, std::memory_order_relaxed);
+    s_metricPiggyEmbedded.fetch_add(1, std::memory_order_relaxed);
+  }
+  uint8_t flags = (piggyCount > 0) ? UNICAST_FLAG_PIGGY : 0;
+  size_t need = MSG_ID_LEN + 1 + ((piggyCount > 0) ? (1 + piggyCount * MSG_ID_LEN) : 0) + textLen;
+  if (need > outMax) return false;
+  size_t off = 0;
+  memcpy(out + off, &msgId, MSG_ID_LEN); off += MSG_ID_LEN;
+  out[off++] = flags;
+  if (piggyCount > 0) {
+    out[off++] = piggyCount;
+    for (uint8_t i = 0; i < piggyCount; i++) {
+      memcpy(out + off, &piggyIds[i], MSG_ID_LEN);
+      off += MSG_ID_LEN;
+    }
+  }
+  memcpy(out + off, text, textLen); off += textLen;
+  *outLen = off;
+  return true;
+}
+
 bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
     bool critical, TriggerType triggerType, uint32_t triggerValueMs) {
   setLastSendFail(SEND_FAIL_NONE);
@@ -237,7 +341,7 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
   (void)ttlMinutes;
   // Длинные сообщения — фрагментация (без ACK для MVP)
   size_t maxSingle = MAX_SINGLE_PLAIN
-      - (isUnicast ? MSG_ID_LEN : 0)
+      - (isUnicast ? (MSG_ID_LEN + 1 + 1 + PIGGY_MAX_IDS * MSG_ID_LEN) : 0)
       - (isUnicast ? 0 : GROUP_ID_LEN + MSG_ID_LEN);  // broadcast: groupId + msgId
   if (textLen > maxSingle) {
     xSemaphoreGive(s_mutex);
@@ -250,9 +354,11 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
 
   if (isUnicast) {
     uint32_t msgId = ++s_msgIdCounter;
-    memcpy(plainBuf, &msgId, MSG_ID_LEN);
-    memcpy(plainBuf + MSG_ID_LEN, text, textLen);
-    plainLen = MSG_ID_LEN + textLen;
+    if (!buildUnicastPlainV3(to, msgId, text, plainBuf, sizeof(plainBuf), &plainLen)) {
+      xSemaphoreGive(s_mutex);
+      setLastSendFail(SEND_FAIL_BUILD_PACKET);
+      return false;
+    }
 
     uint8_t compBuf[protocol::MAX_PAYLOAD];
     size_t compLen = compress::compress(plainBuf, plainLen, compBuf, sizeof(compBuf));
@@ -351,6 +457,8 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
         critical ? TxRequestClass::critical : TxRequestClass::data);
     if (!ok) {
       RIFTLINK_LOG_ERR("[RiftLink] MSG radioCmdQueue full, to %02X%02X — retry via update\n", to[0], to[1]);
+    } else {
+      maybeSendParityPacket(to, msgId, encBuf, encLen, txSf);
     }
     neighbors::recordAckSent(to);
     if (s_onUnicastSent) s_onUnicastSent(to, msgId);
@@ -625,6 +733,38 @@ void onAckBatchReceived(const uint8_t* from, const uint8_t* payload, size_t payl
   }
 }
 
+void onSelectiveAckReceived(const uint8_t* from, uint16_t batchPktId, uint16_t ackBitmap, int rssi,
+    void (*onDelivered)(const uint8_t* from, uint32_t msgId, int rssi)) {
+  s_metricSelectiveAckRx.fetch_add(1, std::memory_order_relaxed);
+  if (!from) return;
+  if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) != pdTRUE) return;
+  for (int i = 0; i < 2; i++) {
+    PendingBatch* pb = &s_batchPending[i];
+    if (!pb->inUse) continue;
+    if (pb->batchPktId != batchPktId) continue;
+    if (memcmp(pb->to, from, protocol::NODE_ID_LEN) != 0) continue;
+    bool allDone = true;
+    for (int j = 0; j < pb->count; j++) {
+      bool bit = ((ackBitmap >> j) & 0x01) != 0;
+      if (bit && !pb->acked[j]) {
+        pb->acked[j] = 1;
+        if (onDelivered) onDelivered(from, pb->msgIds[j], rssi);
+      }
+      if (!pb->acked[j]) allDone = false;
+    }
+    if (allDone) {
+      pb->inUse = false;
+    } else {
+      for (int j = 0; j < pb->count; j++) {
+        if (pb->acked[j]) continue;
+        (void)retransmitPendingByMsgId(from, pb->msgIds[j]);
+      }
+    }
+    break;
+  }
+  xSemaphoreGive(s_mutex);
+}
+
 bool registerPendingFromFusion(const uint8_t* to, uint32_t msgId, const uint8_t* pkt, size_t pktLen, uint8_t txSf) {
   if (!s_inited || !to || !pkt || pktLen > sizeof(s_pending[0].pkt)) return false;
   PendingMsg* slot = findFreeSlot();
@@ -646,14 +786,26 @@ bool registerPendingFromFusion(const uint8_t* to, uint32_t msgId, const uint8_t*
   return true;
 }
 
-void registerBatchSent(const uint8_t* to, const uint32_t* msgIds, int count) {
-  if (!to || !msgIds || count < 1 || count > 4) return;
+bool retransmitPendingByMsgId(const uint8_t* to, uint32_t msgId) {
+  if (!to) return false;
+  PendingMsg* p = findByMsgId(msgId);
+  if (!p || !p->inUse) return false;
+  if (memcmp(p->to, to, protocol::NODE_ID_LEN) != 0) return false;
+  p->retries++;
+  p->lastSendTime = millis();
+  return queueTxPacket(p->pkt, p->pktLen, p->txSf, p->critical,
+      p->critical ? TxRequestClass::critical : TxRequestClass::data);
+}
+
+void registerBatchSent(const uint8_t* to, const uint32_t* msgIds, int count, uint16_t batchPktId) {
+  if (!to || !msgIds || count < 1 || count > 8) return;
   for (int i = 0; i < 2; i++) {
     if (!s_batchPending[i].inUse) {
       memcpy(s_batchPending[i].to, to, protocol::NODE_ID_LEN);
       for (int j = 0; j < count; j++) s_batchPending[i].msgIds[j] = msgIds[j];
       memset(s_batchPending[i].acked, 0, sizeof(s_batchPending[i].acked));
       s_batchPending[i].count = count;
+      s_batchPending[i].batchPktId = batchPktId;
       s_batchPending[i].inUse = true;
       return;
     }
@@ -676,6 +828,7 @@ void update() {
   if (!s_inited) return;
   if (!s_mutex || xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
   uint32_t now = millis();
+  static uint32_t s_lastMetricLogMs = 0;
 
   packet_fusion::flush();
 
@@ -709,7 +862,7 @@ void update() {
       continue;
     }
 
-    uint32_t ackTimeout = getAckTimeoutMs(p->txSf);
+    uint32_t ackTimeout = getAckTimeoutMs(p->txSf, p->to);
     if (p->triggerType == TRIGGER_TARGET_ONLINE && !neighbors::isOnline(p->to)) continue;
     if (p->triggerType == TRIGGER_DELIVER_AFTER && (int32_t)(now - p->triggerValueMs) < 0) continue;
     if (p->triggerType != TRIGGER_NONE && !p->triggerReleasedNotified) {
@@ -744,8 +897,20 @@ void update() {
     p->retries++;
     p->lastSendTime = now;
     neighbors::recordAckSent(p->to);
-    (void)queueTxPacket(p->pkt, p->pktLen, p->txSf, p->critical,
-        p->critical ? TxRequestClass::critical : TxRequestClass::data);
+    if (queueTxPacket(p->pkt, p->pktLen, p->txSf, p->critical,
+            p->critical ? TxRequestClass::critical : TxRequestClass::data)) {
+      // parity sample from ciphertext payload area (after header)
+      const uint8_t* cipher = p->pkt + protocol::PAYLOAD_OFFSET;
+      size_t cipherLen = (p->pktLen > protocol::PAYLOAD_OFFSET) ? (p->pktLen - protocol::PAYLOAD_OFFSET) : 0;
+      maybeSendParityPacket(p->to, p->msgId, cipher, cipherLen, p->txSf);
+    }
+  }
+  if ((now - s_lastMetricLogMs) >= 15000) {
+    s_lastMetricLogMs = now;
+    RIFTLINK_DIAG("V3", "event=V3_METRICS piggy_embedded=%lu piggy_consumed=%lu selective_ack_rx=%lu",
+        (unsigned long)s_metricPiggyEmbedded.load(std::memory_order_relaxed),
+        (unsigned long)s_metricPiggyConsumed.load(std::memory_order_relaxed),
+        (unsigned long)s_metricSelectiveAckRx.load(std::memory_order_relaxed));
   }
   xSemaphoreGive(s_mutex);
 }

@@ -11,8 +11,8 @@
 
 namespace packet_fusion {
 
-constexpr int MAX_BATCH = 4;
-constexpr uint32_t BATCH_WINDOW_MS = 100;  // ждём 100 ms для накопления
+constexpr int MAX_BATCH = 8;
+constexpr uint32_t BATCH_WINDOW_MS = 100;
 
 void init();
 
@@ -24,7 +24,7 @@ bool offer(const uint8_t* to, const uint8_t* plainBuf, size_t plainLen,
 void flush();
 
 /** Callback при отправке batch (для registerBatchSent в msg_queue) */
-void setOnBatchSent(void (*cb)(const uint8_t* to, const uint32_t* msgIds, int count));
+void setOnBatchSent(void (*cb)(const uint8_t* to, const uint32_t* msgIds, int count, uint16_t batchPktId));
 /** Callback при single flush (для registerPendingFromFusion) */
 void setOnSingleFlush(bool (*cb)(const uint8_t* to, uint32_t msgId, const uint8_t* pkt, size_t pktLen, uint8_t txSf));
 

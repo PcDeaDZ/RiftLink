@@ -16,8 +16,8 @@
 
 /** При burst HELLO/ACK/control пул TxRequest и основная очередь заполняются; fallback priority был 4 — массовый txreq_pool_empty. */
 #if defined(ARDUINO_LILYGO_T_BEAM)
-/** ESP32 (T-Beam): DRAM лимит ~320 KB — статические OverflowSlot × 32 съедают BSS; 12+12 достаточно для mesh. */
-#define PRIORITY_SLOTS 12
+/** ESP32 (T-Beam): при полной TX-очереди fallback сюда; 12 забивались под PING/HELLO burst → txreq_pool_empty. */
+#define PRIORITY_SLOTS 20
 #define NORMAL_SLOTS 12
 #else
 #define PRIORITY_SLOTS 16

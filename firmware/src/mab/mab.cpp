@@ -14,9 +14,9 @@ static uint32_t s_count[NUM_ARMS];
 static uint32_t s_totalPulls = 0;
 static constexpr float EPSILON = 0.2f;
 
-// Диапазоны задержки в ms: short 200–350, medium 400–600, long 700–1000
-static const uint32_t s_delayMin[NUM_ARMS] = {200, 400, 700};
-static const uint32_t s_delayMax[NUM_ARMS] = {350, 600, 1000};
+// Диапазоны задержки в ms: fast 50–150, short 200–350, medium 400–600, long 700–1000
+static const uint32_t s_delayMin[NUM_ARMS] = {50, 200, 400, 700};
+static const uint32_t s_delayMax[NUM_ARMS] = {150, 350, 600, 1000};
 
 void init() {
   memset(s_sum, 0, sizeof(s_sum));

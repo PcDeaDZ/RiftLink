@@ -13,7 +13,7 @@
 
 #define CACHE_SIZE 4
 #define OVERHEAR_SIZE 2
-#define BATCH_CACHE_SIZE 1
+#define BATCH_CACHE_SIZE 4
 #define NACK_GUARD_SIZE 8
 #define NACK_GUARD_MS 800
 
@@ -36,7 +36,7 @@ struct OverhearEntry {
 
 struct BatchEntry {
   uint8_t to[protocol::NODE_ID_LEN];
-  uint16_t pktIds[4];
+  uint16_t pktIds[8];
   int count;
   uint8_t pkt[PACKET_BUF_SIZE];
   uint16_t len;
@@ -193,7 +193,7 @@ bool retransmitOverheard(const uint8_t* nackFrom, const uint8_t* nackTo, uint16_
 }
 
 void addBatch(const uint8_t* to, const uint16_t* pktIds, int count, const uint8_t* pkt, size_t len) {
-  if (!s_inited || !to || !pktIds || count < 1 || count > 4 || !pkt || len > PACKET_BUF_SIZE) return;
+  if (!s_inited || !to || !pktIds || count < 1 || count > 8 || !pkt || len > PACKET_BUF_SIZE) return;
   int idx = 0;
   for (int i = 0; i < BATCH_CACHE_SIZE; i++) {
     if (!s_batchCache[i].inUse) { idx = i; break; }
