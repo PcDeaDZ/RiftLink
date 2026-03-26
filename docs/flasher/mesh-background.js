@@ -4,8 +4,9 @@
  */
 const DOT_OPACITY = 0.06;
 const LINE_OPACITY = 0.04;
-const PULSE_OPACITY = 0.12;
-const PULSE_RADIUS = 2.25;
+const PULSE_OPACITY = 0.26;
+const PULSE_RADIUS = 3.4;
+const PULSE_TIME_SCALE = 2.8;
 const BASE_SPACING = 48;
 const MAX_PULSES = 36;
 
@@ -93,16 +94,47 @@ function pickPulseEdges(edges, width, height) {
   );
 
   const pulses = [];
-  const step = Math.max(1, Math.floor(pool.length / (MAX_PULSES * 3)));
+  const step = Math.max(1, Math.floor(pool.length / (MAX_PULSES * 2)));
   for (let k = 0; k < pool.length && pulses.length < MAX_PULSES; k += step) {
     const e = pool[k];
     const seed = { x: e.a.x * 0.71 + e.b.x * 1.31, y: e.a.y * 1.91 + e.b.y * 0.47 };
-    if (stableNoise(seed) > 0.22) continue;
+    if (stableNoise(seed) > 0.45) continue;
     const h = stableNoise(seed);
-    const speed = 0.35 + h * 0.55;
+    const speed = 0.55 + h * 0.85;
     const phase = h * 7 + k * 0.17;
     pulses.push({ a: e.a, b: e.b, speed, phase, bright: pulses.length % 2 === 0 });
   }
+
+  /* Запас: жёсткий фильтр часто оставлял 0 импульсов — добираем из pool */
+  if (pulses.length < 12 && pool.length > 0) {
+    for (let k = 0; k < pool.length && pulses.length < MAX_PULSES; k += 1) {
+      const e = pool[k];
+      const seed = { x: e.a.x + k, y: e.a.y + k * 0.13 };
+      const h = stableNoise(seed);
+      pulses.push({
+        a: e.a,
+        b: e.b,
+        speed: 0.85 + h * 0.55,
+        phase: h * 9.2 + k * 0.31,
+        bright: pulses.length % 2 === 0,
+      });
+    }
+  }
+
+  if (pulses.length === 0 && edges.length > 0) {
+    for (let k = 0; k < edges.length && pulses.length < 24; k += 1) {
+      const e = edges[k];
+      const h = stableNoise({ x: e.a.x * 2 + k, y: e.b.y * 2 });
+      pulses.push({
+        a: e.a,
+        b: e.b,
+        speed: 1.1 + h * 0.6,
+        phase: h * 11 + k * 0.2,
+        bright: k % 2 === 0,
+      });
+    }
+  }
+
   return pulses;
 }
 
@@ -140,10 +172,11 @@ function drawStaticMesh(ctx, width, height, points, allPoints, edges) {
 }
 
 function drawPulses(ctx, t, pulses) {
-  const soft = `rgba(61, 139, 253, ${PULSE_OPACITY * 0.85})`;
-  const bright = `rgba(61, 139, 253, ${PULSE_OPACITY * 1.25})`;
+  const soft = `rgba(61, 139, 253, ${PULSE_OPACITY * 0.88})`;
+  const bright = `rgba(100, 180, 255, ${Math.min(0.95, PULSE_OPACITY * 1.35)})`;
+  const tt = t * PULSE_TIME_SCALE;
   for (const p of pulses) {
-    const u = (Math.sin(t * p.speed + p.phase) * 0.5 + 0.5) ** 1.1;
+    const u = (Math.sin(tt * p.speed + p.phase) * 0.5 + 0.5) ** 1.05;
     const x = p.a.x + (p.b.x - p.a.x) * u;
     const y = p.a.y + (p.b.y - p.a.y) * u;
     ctx.beginPath();

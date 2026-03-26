@@ -59,52 +59,52 @@
     </header>
 
     <main class="shell main-flow">
-      <section class="workflow panel panel--hero" aria-labelledby="titleText">
-        <p class="eyebrow" id="workflowEyebrow"></p>
-        <h1 id="titleText" class="workflow__title">Web Flash Tool</h1>
-        <p id="subtitleText" class="workflow__lead"></p>
-
-        <ol class="flash-steps" id="flashSteps" aria-label="">
-          <li class="flash-step">
-            <span class="flash-step-num" aria-hidden="true">1</span>
-            <span class="flash-step-text" id="step1Text"></span>
-          </li>
-          <li class="flash-step">
-            <span class="flash-step-num" aria-hidden="true">2</span>
-            <span class="flash-step-text" id="step2Text"></span>
-          </li>
-          <li class="flash-step">
-            <span class="flash-step-num" aria-hidden="true">3</span>
-            <span class="flash-step-text" id="step3Text"></span>
-          </li>
-        </ol>
-
-        <div class="env-badges" id="envBadges" aria-live="polite"></div>
-
-        <div class="controls">
-          <label id="deviceLabel" class="field-label" for="deviceSelect"></label>
-          <select id="deviceSelect" class="field-select">
-            <option value="heltec-v3"></option>
-            <option value="heltec-v4" selected></option>
-            <option value="heltec-v3-paper"></option>
-            <option value="lilygo-t-lora-pager"></option>
-            <option value="lilygo-t-beam"></option>
-          </select>
-        </div>
-
-        <div id="deviceMeta" class="device-meta"></div>
-        <p id="deviceHint" class="device-hint" hidden></p>
-
-        <div class="install-box">
-          <esp-web-install-button id="installButton"></esp-web-install-button>
-        </div>
-
-        <div class="info manifest-line" id="manifestInfo"></div>
-        <p class="minor-note" id="eraseNote"></p>
-      </section>
-
       <div class="layout-split">
         <div class="col-main">
+          <section class="workflow panel panel--hero" aria-labelledby="titleText">
+            <p class="eyebrow" id="workflowEyebrow"></p>
+            <h1 id="titleText" class="workflow__title">Web Flash Tool</h1>
+            <p id="subtitleText" class="workflow__lead"></p>
+
+            <ol class="flash-steps" id="flashSteps" aria-label="">
+              <li class="flash-step">
+                <span class="flash-step-num" aria-hidden="true">1</span>
+                <span class="flash-step-text" id="step1Text"></span>
+              </li>
+              <li class="flash-step">
+                <span class="flash-step-num" aria-hidden="true">2</span>
+                <span class="flash-step-text" id="step2Text"></span>
+              </li>
+              <li class="flash-step">
+                <span class="flash-step-num" aria-hidden="true">3</span>
+                <span class="flash-step-text" id="step3Text"></span>
+              </li>
+            </ol>
+
+            <div class="env-badges" id="envBadges" aria-live="polite"></div>
+
+            <div class="controls">
+              <label id="deviceLabel" class="field-label" for="deviceSelect"></label>
+              <select id="deviceSelect" class="field-select">
+                <option value="heltec-v3"></option>
+                <option value="heltec-v4" selected></option>
+                <option value="heltec-v3-paper"></option>
+                <option value="lilygo-t-lora-pager"></option>
+                <option value="lilygo-t-beam"></option>
+              </select>
+            </div>
+
+            <div id="deviceMeta" class="device-meta"></div>
+            <p id="deviceHint" class="device-hint" hidden></p>
+
+            <div class="install-box">
+              <esp-web-install-button id="installButton"></esp-web-install-button>
+            </div>
+
+            <div class="info manifest-line" id="manifestInfo"></div>
+            <p class="minor-note" id="eraseNote"></p>
+          </section>
+
           <section class="panel about-box">
             <h2 id="aboutTitle" class="section-heading"></h2>
             <p id="aboutLead" class="about-lead"></p>
@@ -140,7 +140,7 @@
           </section>
         </div>
 
-        <aside class="col-side">
+        <aside class="col-side col-side--sticky">
           <section class="panel release-box">
             <h2 id="latestReleaseTitle" class="section-heading"></h2>
             <div class="release-kpis" id="releaseKpis" role="group" aria-label="">

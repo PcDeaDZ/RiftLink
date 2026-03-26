@@ -240,7 +240,8 @@ body {
 }
 
 .workflow {
-  max-width: 720px;
+  width: 100%;
+  min-width: 0;
 }
 
 .workflow__title {
@@ -492,6 +493,17 @@ esp-web-install-button::part(button):hover {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-width: 0;
+}
+
+@media (min-width: 901px) {
+  .col-side--sticky {
+    position: sticky;
+    top: calc(64px + 12px);
+    align-self: start;
+    max-height: calc(100vh - 88px);
+    overflow-y: auto;
+  }
 }
 
 .section-heading {
