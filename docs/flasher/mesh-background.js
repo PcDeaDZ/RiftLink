@@ -171,21 +171,26 @@ function drawStaticMesh(ctx, width, height, points, allPoints, edges) {
   }
 }
 
-/** Если по рёбрам мало точек — добавляем синтетические (всегда видимая анимация) */
-function ensureSyntheticPulses(pulses, width, height) {
-  if (pulses.length >= 8) return;
+/**
+ * Добираем импульсы только по уже нарисованным рёбрам графа — без «диагоналей в пустоте».
+ */
+function ensureSyntheticPulses(pulses, edges, height) {
+  if (pulses.length >= 8 || edges.length === 0) return;
   const n = 12 - pulses.length;
+  const step = Math.max(1, Math.floor(edges.length / Math.max(n * 3, 8)));
   for (let i = 0; i < n; i += 1) {
-    const x1 = (width * (0.08 + i * 0.07)) % Math.max(width * 0.85, 100);
-    const y1 = height * (0.12 + (i % 5) * 0.16);
-    const x2 = x1 + 80 + (i % 3) * 40;
-    const y2 = y1 + 60 + (i % 2) * 30;
+    const k = (i * step * 7 + Math.floor(edges.length * 0.21)) % edges.length;
+    const e = edges[k];
+    const yMid = (e.a.y + e.b.y) * 0.5;
+    if (yMid < -8 || yMid > height + 8) continue;
+    const seed = { x: e.a.x * 0.71 + e.b.x * 1.31, y: e.a.y * 1.91 + e.b.y * 0.47 };
+    const h = stableNoise(seed);
     pulses.push({
-      a: { x: x1, y: y1 },
-      b: { x: Math.min(width - 4, x2), y: Math.min(height - 4, y2) },
-      speed: 1.2 + (i % 4) * 0.35,
-      phase: i * 0.9,
-      bright: i % 2 === 0,
+      a: e.a,
+      b: e.b,
+      speed: 0.55 + h * 0.85,
+      phase: h * 7 + i * 0.17,
+      bright: pulses.length % 2 === 0,
     });
   }
 }
@@ -244,7 +249,7 @@ function initMeshBackground(canvas) {
     drawStaticMesh(offCtx, w, h, points, allPoints, edges);
 
     pulses = pickPulseEdges(edges, w, h);
-    ensureSyntheticPulses(pulses, w, h);
+    ensureSyntheticPulses(pulses, edges, h);
   }
 
   function drawPulsesWithMotion(ctx, t, pulseList) {

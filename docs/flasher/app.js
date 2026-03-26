@@ -86,9 +86,12 @@ const I18N = {
     aboutFeature2Title: "Безопасность",
     aboutFeature2Text:
       "Криптография и групповые механики с разделением ролей, маршрутов и состояний доставки.",
-    aboutFeature3Title: "Клиенты",
+    aboutFeature3Title: "BLE и Wi‑Fi",
     aboutFeature3Text:
-      "Android-приложение, web-флешер и инструменты диагностики/восстановления для устройства.",
+      "Управление с телефона: BLE (GATT), настройка узла без сотовой сети; Wi‑Fi для OTA и сценариев сопряжения.",
+    aboutFeature4Title: "Клиенты",
+    aboutFeature4Text:
+      "Android-приложение, этот веб-флешер и сценарии восстановления и диагностики.",
     linkGithub: "GitHub репозиторий",
     linkReleases: "Скачать релизы",
     linkDocs: "Документация",
@@ -167,9 +170,12 @@ const I18N = {
     aboutFeature2Title: "Security",
     aboutFeature2Text:
       "Cryptography and group mechanics with role separation, routes, and delivery state tracking.",
-    aboutFeature3Title: "Clients",
+    aboutFeature3Title: "BLE & Wi‑Fi",
     aboutFeature3Text:
-      "Android app, web flasher, and recovery/diagnostic tools for the device.",
+      "Phone-side control: BLE GATT, node setup without cellular; Wi‑Fi for OTA and pairing flows.",
+    aboutFeature4Title: "Clients",
+    aboutFeature4Text:
+      "Android app, this web flasher, plus recovery and diagnostic workflows.",
     linkGithub: "GitHub repository",
     linkReleases: "Download releases",
     linkDocs: "Documentation",
@@ -234,6 +240,8 @@ const aboutFeature2TitleEl = document.getElementById("aboutFeature2Title");
 const aboutFeature2TextEl = document.getElementById("aboutFeature2Text");
 const aboutFeature3TitleEl = document.getElementById("aboutFeature3Title");
 const aboutFeature3TextEl = document.getElementById("aboutFeature3Text");
+const aboutFeature4TitleEl = document.getElementById("aboutFeature4Title");
+const aboutFeature4TextEl = document.getElementById("aboutFeature4Text");
 const navGithubEl = document.getElementById("navGithub");
 const navReleasesEl = document.getElementById("navReleases");
 const navDocsEl = document.getElementById("navDocs");
@@ -569,6 +577,8 @@ function renderLanguage() {
   if (aboutFeature2TextEl) aboutFeature2TextEl.textContent = t("aboutFeature2Text");
   if (aboutFeature3TitleEl) aboutFeature3TitleEl.textContent = t("aboutFeature3Title");
   if (aboutFeature3TextEl) aboutFeature3TextEl.textContent = t("aboutFeature3Text");
+  if (aboutFeature4TitleEl) aboutFeature4TitleEl.textContent = t("aboutFeature4Title");
+  if (aboutFeature4TextEl) aboutFeature4TextEl.textContent = t("aboutFeature4Text");
   if (navGithubEl) navGithubEl.textContent = t("linkGithub");
   if (navReleasesEl) navReleasesEl.textContent = t("linkReleases");
   if (navDocsEl) navDocsEl.textContent = t("linkDocs");
