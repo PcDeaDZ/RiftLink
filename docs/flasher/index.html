@@ -8,6 +8,12 @@
       name="description"
       content="Веб-прошивка устройств RiftLink через ESP Web Tools"
     />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="./styles.css" />
     <script
       type="module"
@@ -43,6 +49,23 @@
 
         <p id="subtitleText" class="subtitle"></p>
 
+        <ol class="flash-steps" id="flashSteps" aria-label="">
+          <li class="flash-step">
+            <span class="flash-step-num">1</span>
+            <span class="flash-step-text" id="step1Text"></span>
+          </li>
+          <li class="flash-step">
+            <span class="flash-step-num">2</span>
+            <span class="flash-step-text" id="step2Text"></span>
+          </li>
+          <li class="flash-step">
+            <span class="flash-step-num">3</span>
+            <span class="flash-step-text" id="step3Text"></span>
+          </li>
+        </ol>
+
+        <div class="env-badges" id="envBadges" aria-live="polite"></div>
+
         <div class="controls">
           <label id="deviceLabel" for="deviceSelect"></label>
           <select id="deviceSelect">
@@ -54,6 +77,9 @@
           </select>
         </div>
 
+        <div id="deviceMeta" class="device-meta"></div>
+        <p id="deviceHint" class="device-hint" hidden></p>
+
         <div class="install-box">
           <esp-web-install-button id="installButton"></esp-web-install-button>
         </div>
@@ -64,7 +90,7 @@
         <div class="content-grid">
           <div class="col-stack">
             <section class="about-box">
-              <h2 id="aboutTitle"></h2>
+              <h2 id="aboutTitle" class="section-heading"></h2>
               <p id="aboutLead" class="about-lead"></p>
               <div class="about-grid">
                 <article class="about-item">
@@ -88,13 +114,13 @@
             </section>
 
             <section class="roadmap-box">
-              <h2 id="roadmapTitle"></h2>
+              <h2 id="roadmapTitle" class="section-heading"></h2>
               <p id="roadmapLead" class="roadmap-lead"></p>
               <ul id="roadmapList" class="roadmap-list"></ul>
             </section>
 
             <div class="tips">
-              <h2 id="tipsTitle"></h2>
+              <h2 id="tipsTitle" class="section-heading"></h2>
               <ul>
                 <li id="tip1"></li>
                 <li id="tip2"></li>
@@ -105,10 +131,21 @@
 
           <div class="col-stack">
             <section class="release-box">
-              <h2 id="latestReleaseTitle"></h2>
-              <p class="release-line"><span id="releaseTagLabel"></span> <strong id="releaseTag">...</strong></p>
-              <p class="release-line"><span id="firmwareLabel"></span> <strong id="firmwareVersion">...</strong></p>
-              <p class="release-line"><span id="appLabel"></span> <strong id="appVersion">...</strong></p>
+              <h2 id="latestReleaseTitle" class="section-heading"></h2>
+              <div class="release-kpis" id="releaseKpis" role="group" aria-label="">
+                <div class="release-kpi">
+                  <span class="release-kpi-label" id="releaseTagLabel"></span>
+                  <strong class="release-kpi-value" id="releaseTag">...</strong>
+                </div>
+                <div class="release-kpi">
+                  <span class="release-kpi-label" id="firmwareLabel"></span>
+                  <strong class="release-kpi-value" id="firmwareVersion">...</strong>
+                </div>
+                <div class="release-kpi">
+                  <span class="release-kpi-label" id="appLabel"></span>
+                  <strong class="release-kpi-value" id="appVersion">...</strong>
+                </div>
+              </div>
               <a
                 id="apkDownloadLink"
                 class="apk-button"
@@ -120,12 +157,12 @@
             </section>
 
             <section class="notes-box">
-              <h2 id="whatsNewTitle"></h2>
+              <h2 id="whatsNewTitle" class="section-heading"></h2>
               <ul id="whatsNewList" class="notes-list"></ul>
             </section>
 
             <section class="faq-box">
-              <h2 id="faqTitle"></h2>
+              <h2 id="faqTitle" class="section-heading"></h2>
               <details>
                 <summary id="faqQ1"></summary>
                 <p id="faqA1"></p>

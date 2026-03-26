@@ -21,11 +21,49 @@ const STATIC_MANIFESTS = {
   "lilygo-t-beam": "./manifests/lilygo-t-beam.json",
 };
 
+/** Короткие метки платы / радио / экрана для выбранного устройства. */
+const DEVICE_CHIPS = {
+  "heltec-v3": ["ESP32-S3", "SX1262", "OLED"],
+  "heltec-v4": ["ESP32-S3", "SX1262", "OLED"],
+  "heltec-v3-paper": ["ESP32-S3", "SX1262", "E-Ink"],
+  "lilygo-t-lora-pager": ["ESP32-S3", "SX1262", "ST7796"],
+  "lilygo-t-beam": ["ESP32", "SX1262", "OLED"],
+};
+
+/** Подсказка под селектором (только для части плат). */
+const DEVICE_HINTS = {
+  ru: {
+    "heltec-v3-paper":
+      "E-Ink: при переходе с OLED-прошивки согласуйте Erase, чтобы избежать артефактов состояния.",
+    "lilygo-t-lora-pager":
+      "Пейджер: энкодер переключает вкладки; убедитесь, что кабель передаёт данные.",
+    "lilygo-t-beam":
+      "T-Beam V1.1/V1.2: при сомнениях проверьте разводку платы в документации LilyGO.",
+  },
+  en: {
+    "heltec-v3-paper":
+      "E-Ink: when moving from OLED firmware, Erase is recommended to avoid stale state.",
+    "lilygo-t-lora-pager":
+      "Pager: the encoder switches tabs; use a data-capable USB cable.",
+    "lilygo-t-beam":
+      "T-Beam V1.1/V1.2: verify your board revision in LilyGO docs if unsure.",
+  },
+};
+
 const I18N = {
   ru: {
     title: "Web Flash Tool",
     subtitle:
       "Прошивка устройств через браузер с выбором модели и автоматической загрузкой правильного manifest.",
+    flashStepsAria: "Шаги прошивки",
+    releaseKpisAria: "Версии последнего релиза",
+    step1: "Выберите модель устройства",
+    step2: "Подключите USB и разрешите доступ в браузере",
+    step3: "Нажмите Install и дождитесь завершения",
+    envSecureOk: "Безопасный контекст (HTTPS / localhost)",
+    envSecureWarn: "Нужен HTTPS или localhost — иначе Web Serial недоступен",
+    envSerialOk: "Web Serial доступен в этом браузере",
+    envSerialWarn: "Нужен Chrome, Edge или Opera (Web Serial)",
     deviceLabel: "Выберите устройство",
     eraseNote:
       "Примечание: окно подтверждения Erase device показывает сам ESP Web Tools, оно может быть на английском.",
@@ -85,12 +123,22 @@ const I18N = {
       "heltec-v4": "Heltec WiFi LoRa 32 V4 (OLED)",
       "heltec-v3-paper": "Heltec Wireless Paper (V3 Paper, E-Ink)",
       "lilygo-t-lora-pager": "LilyGO T-Lora Pager (SX1262, ST7796)",
+      "lilygo-t-beam": "LilyGO T-Beam V1.1/V1.2 (ESP32, SX1262, OLED)",
     },
   },
   en: {
     title: "Web Flash Tool",
     subtitle:
       "Flash RiftLink devices from browser with model selection and automatic manifest loading.",
+    flashStepsAria: "Flashing steps",
+    releaseKpisAria: "Latest release versions",
+    step1: "Pick your hardware model",
+    step2: "Connect USB and allow browser access",
+    step3: "Click Install and wait until finished",
+    envSecureOk: "Secure context (HTTPS / localhost)",
+    envSecureWarn: "Use HTTPS or localhost — Web Serial requires a secure context",
+    envSerialOk: "Web Serial is available in this browser",
+    envSerialWarn: "Use Chrome, Edge, or Opera (Web Serial)",
     deviceLabel: "Select device",
     eraseNote:
       "Note: the Erase device confirmation dialog is rendered by ESP Web Tools and may stay in English.",
@@ -204,6 +252,14 @@ const appVersionEl = document.getElementById("appVersion");
 const apkDownloadLinkEl = document.getElementById("apkDownloadLink");
 const langRuBtn = document.getElementById("langRu");
 const langEnBtn = document.getElementById("langEn");
+const flashStepsEl = document.getElementById("flashSteps");
+const step1TextEl = document.getElementById("step1Text");
+const step2TextEl = document.getElementById("step2Text");
+const step3TextEl = document.getElementById("step3Text");
+const envBadgesEl = document.getElementById("envBadges");
+const deviceMetaEl = document.getElementById("deviceMeta");
+const deviceHintEl = document.getElementById("deviceHint");
+const releaseKpisEl = document.getElementById("releaseKpis");
 
 const runtimeManifestUrls = { ...STATIC_MANIFESTS };
 let currentLang = "ru";
@@ -228,6 +284,67 @@ function t(key) {
 
 function tWithVersion(templateKey, version) {
   return t(templateKey).replace("{version}", version);
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/"/g, "&quot;");
+}
+
+function renderEnvBadges() {
+  if (!envBadgesEl) return;
+  const secureOk =
+    typeof window !== "undefined" &&
+    (window.isSecureContext === true ||
+      (typeof location !== "undefined" &&
+        (location.protocol === "https:" ||
+          location.hostname === "localhost" ||
+          location.hostname === "127.0.0.1")));
+  const serialOk =
+    typeof navigator !== "undefined" && typeof navigator.serial !== "undefined";
+
+  envBadgesEl.innerHTML = "";
+  const mk = (ok, text) => {
+    const span = document.createElement("span");
+    span.className = `env-badge ${ok ? "ok" : "warn"}`;
+    span.textContent = text;
+    envBadgesEl.appendChild(span);
+  };
+  mk(secureOk, secureOk ? t("envSecureOk") : t("envSecureWarn"));
+  mk(serialOk, serialOk ? t("envSerialOk") : t("envSerialWarn"));
+}
+
+function renderDeviceMeta(deviceKey) {
+  if (!deviceMetaEl) return;
+  deviceMetaEl.innerHTML = "";
+  const chips = DEVICE_CHIPS[deviceKey] ?? [];
+  for (const c of chips) {
+    const span = document.createElement("span");
+    span.className = "device-chip";
+    span.textContent = c;
+    deviceMetaEl.appendChild(span);
+  }
+
+  if (deviceHintEl) {
+    const hintMap = DEVICE_HINTS[currentLang] ?? DEVICE_HINTS.ru;
+    const hint = hintMap[deviceKey];
+    if (hint) {
+      deviceHintEl.textContent = hint;
+      deviceHintEl.hidden = false;
+    } else {
+      deviceHintEl.textContent = "";
+      deviceHintEl.hidden = true;
+    }
+  }
+}
+
+function setManifestLine(deviceKey, manifest) {
+  if (!infoEl) return;
+  const label = I18N[currentLang].deviceNames[deviceKey] ?? deviceKey;
+  const prefix = `${t("selected")}: ${label}. ${t("manifestLabel")}: `;
+  infoEl.innerHTML = `${escapeHtml(prefix)}<code class="manifest-code">${escapeHtml(manifest)}</code>`;
 }
 
 function renderDeviceOptions() {
@@ -453,6 +570,12 @@ function renderLanguage() {
   if (footerLinkTelegramEl) footerLinkTelegramEl.textContent = t("footerTelegram");
   if (langRuBtn) langRuBtn.classList.toggle("active", currentLang === "ru");
   if (langEnBtn) langEnBtn.classList.toggle("active", currentLang === "en");
+  if (flashStepsEl) flashStepsEl.setAttribute("aria-label", t("flashStepsAria"));
+  if (step1TextEl) step1TextEl.textContent = t("step1");
+  if (step2TextEl) step2TextEl.textContent = t("step2");
+  if (step3TextEl) step3TextEl.textContent = t("step3");
+  if (releaseKpisEl) releaseKpisEl.setAttribute("aria-label", t("releaseKpisAria"));
+  renderEnvBadges();
   renderDeviceOptions();
   renderReleaseState();
   renderRoadmap();
@@ -579,8 +702,8 @@ function setDevice(deviceKey) {
   const manifest = runtimeManifestUrls[deviceKey] ?? STATIC_MANIFESTS[deviceKey];
   if (!manifest || !installEl) return;
   installEl.setAttribute("manifest", manifest);
-  const label = I18N[currentLang].deviceNames[deviceKey] ?? deviceKey;
-  infoEl.textContent = `${t("selected")}: ${label}. ${t("manifestLabel")}: ${manifest}`;
+  renderDeviceMeta(deviceKey);
+  setManifestLine(deviceKey, manifest);
 }
 
 selectEl.addEventListener("change", (event) => {
