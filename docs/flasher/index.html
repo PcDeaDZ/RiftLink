@@ -104,7 +104,7 @@
             <p class="minor-note" id="eraseNote"></p>
           </section>
 
-          <section class="panel about-box">
+          <section class="panel info-dense" aria-labelledby="aboutTitle">
             <h2 id="aboutTitle" class="section-heading"></h2>
             <p id="aboutLead" class="about-lead"></p>
             <div class="about-grid">
@@ -121,81 +121,87 @@
                 <p id="aboutFeature3Text"></p>
               </article>
             </div>
-          </section>
-
-          <section class="panel roadmap-box">
-            <h2 id="roadmapTitle" class="section-heading"></h2>
-            <p id="roadmapLead" class="roadmap-lead"></p>
-            <ul id="roadmapList" class="roadmap-list"></ul>
-          </section>
-
-          <section class="panel tips">
-            <h2 id="tipsTitle" class="section-heading"></h2>
-            <ul class="tips-list">
-              <li id="tip1"></li>
-              <li id="tip2"></li>
-              <li id="tip3"></li>
-            </ul>
+            <div class="info-dense-split">
+              <div class="info-dense-col">
+                <h3 id="roadmapTitle" class="subsection-heading"></h3>
+                <p id="roadmapLead" class="subsection-lead"></p>
+                <ul id="roadmapList" class="roadmap-list roadmap-list--dense"></ul>
+              </div>
+              <div class="info-dense-col">
+                <h3 id="tipsTitle" class="subsection-heading"></h3>
+                <ul class="tips-list tips-list--dense">
+                  <li id="tip1"></li>
+                  <li id="tip2"></li>
+                  <li id="tip3"></li>
+                </ul>
+              </div>
+            </div>
           </section>
         </div>
 
         <aside class="col-side col-side--sticky">
-          <section class="panel release-box">
-            <h2 id="latestReleaseTitle" class="section-heading"></h2>
-            <div class="release-kpis" id="releaseKpis" role="group" aria-label="">
-              <div class="release-kpi">
-                <span class="release-kpi-label" id="releaseTagLabel"></span>
-                <strong class="release-kpi-value" id="releaseTag">...</strong>
+          <section class="panel panel-stack">
+            <div class="stack-block">
+              <h2 id="latestReleaseTitle" class="section-heading"></h2>
+              <div class="release-kpis" id="releaseKpis" role="group" aria-label="">
+                <div class="release-kpi">
+                  <span class="release-kpi-label" id="releaseTagLabel"></span>
+                  <strong class="release-kpi-value" id="releaseTag">...</strong>
+                </div>
+                <div class="release-kpi">
+                  <span class="release-kpi-label" id="firmwareLabel"></span>
+                  <strong class="release-kpi-value" id="firmwareVersion">...</strong>
+                </div>
+                <div class="release-kpi">
+                  <span class="release-kpi-label" id="appLabel"></span>
+                  <strong class="release-kpi-value" id="appVersion">...</strong>
+                </div>
               </div>
-              <div class="release-kpi">
-                <span class="release-kpi-label" id="firmwareLabel"></span>
-                <strong class="release-kpi-value" id="firmwareVersion">...</strong>
-              </div>
-              <div class="release-kpi">
-                <span class="release-kpi-label" id="appLabel"></span>
-                <strong class="release-kpi-value" id="appVersion">...</strong>
+              <a
+                id="apkDownloadLink"
+                class="apk-button"
+                href="#"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-disabled="true"
+              ></a>
+            </div>
+
+            <div class="stack-divider" role="presentation"></div>
+
+            <div class="stack-block">
+              <h2 id="whatsNewTitle" class="section-heading"></h2>
+              <ul id="whatsNewList" class="notes-list notes-list--dense"></ul>
+            </div>
+
+            <div class="stack-divider" role="presentation"></div>
+
+            <div class="stack-block stack-block--faq">
+              <h2 id="faqTitle" class="section-heading"></h2>
+              <details>
+                <summary id="faqQ1"></summary>
+                <p id="faqA1"></p>
+              </details>
+              <details>
+                <summary id="faqQ2"></summary>
+                <p id="faqA2"></p>
+              </details>
+              <details>
+                <summary id="faqQ3"></summary>
+                <p id="faqA3"></p>
+              </details>
+            </div>
+
+            <div class="stack-links">
+              <p id="footerTitle" class="footer-title"></p>
+              <div class="footer-links footer-links--inline">
+                <a id="footerLinkIssues" class="footer-link" href="https://github.com/PcDeaDZ/RiftLink/issues" target="_blank" rel="noopener noreferrer"></a>
+                <a id="footerLinkReleases" class="footer-link" href="https://github.com/PcDeaDZ/RiftLink/releases" target="_blank" rel="noopener noreferrer"></a>
+                <a id="footerLinkRepo" class="footer-link" href="https://github.com/PcDeaDZ/RiftLink" target="_blank" rel="noopener noreferrer"></a>
+                <a id="footerLinkTelegram" class="footer-link" href="https://t.me/+aScoNiTHdMM2MWMy" target="_blank" rel="noopener noreferrer"></a>
               </div>
             </div>
-            <a
-              id="apkDownloadLink"
-              class="apk-button"
-              href="#"
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-disabled="true"
-            ></a>
           </section>
-
-          <section class="panel notes-box">
-            <h2 id="whatsNewTitle" class="section-heading"></h2>
-            <ul id="whatsNewList" class="notes-list"></ul>
-          </section>
-
-          <section class="panel faq-box">
-            <h2 id="faqTitle" class="section-heading"></h2>
-            <details>
-              <summary id="faqQ1"></summary>
-              <p id="faqA1"></p>
-            </details>
-            <details>
-              <summary id="faqQ2"></summary>
-              <p id="faqA2"></p>
-            </details>
-            <details>
-              <summary id="faqQ3"></summary>
-              <p id="faqA3"></p>
-            </details>
-          </section>
-
-          <footer class="footer-box">
-            <p id="footerTitle" class="footer-title"></p>
-            <div class="footer-links">
-              <a id="footerLinkIssues" class="footer-link" href="https://github.com/PcDeaDZ/RiftLink/issues" target="_blank" rel="noopener noreferrer"></a>
-              <a id="footerLinkReleases" class="footer-link" href="https://github.com/PcDeaDZ/RiftLink/releases" target="_blank" rel="noopener noreferrer"></a>
-              <a id="footerLinkRepo" class="footer-link" href="https://github.com/PcDeaDZ/RiftLink" target="_blank" rel="noopener noreferrer"></a>
-              <a id="footerLinkTelegram" class="footer-link" href="https://t.me/+aScoNiTHdMM2MWMy" target="_blank" rel="noopener noreferrer"></a>
-            </div>
-          </footer>
         </aside>
       </div>
     </main>
