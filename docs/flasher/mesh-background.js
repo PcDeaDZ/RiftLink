@@ -1,14 +1,14 @@
 /**
  * Абстрактный mesh-фон в духе app/lib/widgets/mesh_background.dart (MeshBackgroundPainter).
- * Статическая сетка кэшируется; импульсы — упрощённые «путешествия» по рёбрам.
+ * Статическая сетка кэшируется; импульсы идут по цепочке рёбер (pickNextHop), как во Flutter.
  */
 const DOT_OPACITY = 0.06;
 const LINE_OPACITY = 0.04;
 const PULSE_OPACITY = 0.26;
 const PULSE_RADIUS = 3.4;
-const PULSE_TIME_SCALE = 2.8;
 const BASE_SPACING = 48;
-const MAX_PULSES = 36;
+/** Как во Flutter: не больше импульсов за кадр */
+const MAX_DRAWN_PULSES = 48;
 
 function stableNoise(p) {
   const v = Math.sin(p.x * 12.9898 + p.y * 78.233) * 43758.5453;
@@ -67,75 +67,106 @@ function buildEdges(points, maxDist) {
       const dy = points[i].y - points[j].y;
       const dist = Math.hypot(dx, dy);
       if (dist < maxDist) {
-        edges.push({ a: points[i], b: points[j], i, j });
+        const pi = points[i];
+        const pj = points[j];
+        const a = pi.y < pj.y || (pi.y === pj.y && pi.x <= pj.x) ? pi : pj;
+        const b = pi.y < pj.y || (pi.y === pj.y && pi.x <= pj.x) ? pj : pi;
+        edges.push({ a, b, i, j });
       }
     }
   }
   return edges;
 }
 
-function pickPulseEdges(edges, width, height) {
-  const animEdges = edges.filter((e) => {
-    const yMid = (e.a.y + e.b.y) * 0.5;
-    const density = densityForY(yMid, height);
-    const boostedDensity = yMid > height * 0.76 ? Math.max(density, 0.82) : density;
-    const edgeSeed = { x: e.a.x + e.b.x, y: e.a.y + e.b.y };
-    return stableNoise(edgeSeed) <= boostedDensity;
-  });
+/** Те же фильтры, что у animEdges во Flutter (animZoneFraction = 1). */
+function buildAnimEdges(edges, width, height) {
+  const animLimitY = height;
+  return edges
+    .filter((e) => e.a.y < animLimitY && e.b.y < animLimitY)
+    .filter(
+      (e) =>
+        e.a.x >= -8 &&
+        e.a.x <= width + 8 &&
+        e.b.x >= -8 &&
+        e.b.x <= width + 8 &&
+        e.a.y >= -8 &&
+        e.a.y <= height + 8 &&
+        e.b.y >= -8 &&
+        e.b.y <= height + 8,
+    )
+    .filter((e) => {
+      const yMid = (e.a.y + e.b.y) * 0.5;
+      const density = densityForY(yMid, height);
+      const boostedDensity = yMid > height * 0.76 ? Math.max(density, 0.82) : density;
+      const edgeSeed = { x: e.a.x + e.b.x, y: e.a.y + e.b.y };
+      return stableNoise(edgeSeed) <= boostedDensity;
+    });
+}
 
-  const pool = animEdges.filter(
-    (e) =>
-      e.a.x >= -8 &&
-      e.a.x <= width + 8 &&
-      e.b.x >= -8 &&
-      e.b.x <= width + 8 &&
-      e.a.y >= -8 &&
-      e.b.y <= height + 8,
-  );
+function pointKey(p) {
+  return `${p.x.toFixed(2)}:${p.y.toFixed(2)}`;
+}
 
-  const pulses = [];
-  const step = Math.max(1, Math.floor(pool.length / (MAX_PULSES * 2)));
-  for (let k = 0; k < pool.length && pulses.length < MAX_PULSES; k += step) {
-    const e = pool[k];
-    const seed = { x: e.a.x * 0.71 + e.b.x * 1.31, y: e.a.y * 1.91 + e.b.y * 0.47 };
-    if (stableNoise(seed) > 0.45) continue;
+function buildNeighborMap(animEdges) {
+  const byPoint = {};
+  for (const e of animEdges) {
+    const ka = pointKey(e.a);
+    const kb = pointKey(e.b);
+    if (!byPoint[ka]) byPoint[ka] = [];
+    if (!byPoint[kb]) byPoint[kb] = [];
+    byPoint[ka].push(e.b);
+    byPoint[kb].push(e.a);
+  }
+  return byPoint;
+}
+
+function pickNextHop(prev, cur, selector, preferDown, byPoint) {
+  const prevKey = pointKey(prev);
+  const all = (byPoint[pointKey(cur)] || []).filter((n) => pointKey(n) !== prevKey);
+  if (all.length === 0) return prev;
+  const directed = preferDown
+    ? all.filter((n) => n.y >= cur.y + 0.5)
+    : all.filter((n) => n.y <= cur.y - 0.5);
+  const pool = directed.length > 0 ? directed : all;
+  if (preferDown && pool.length > 1) {
+    pool.sort((a, b) => b.y - a.y);
+    const topCount = Math.max(1, Math.ceil(pool.length * 0.85));
+    const top = pool.slice(0, topCount);
+    const idx = Math.min(Math.floor(selector * top.length), top.length - 1);
+    return top[idx];
+  }
+  const idx = Math.min(Math.floor(selector * pool.length), pool.length - 1);
+  return pool[idx];
+}
+
+/** Конфиги импульсов: то же разрежение и двойные полосы, что во Flutter. */
+function buildPulseConfigs(animEdges) {
+  const configs = [];
+  for (let ei = 0; ei < animEdges.length; ei += 1) {
+    const edge = animEdges[ei];
+    const seed = {
+      x: edge.a.x * 0.71 + edge.b.x * 1.31,
+      y: edge.a.y * 1.91 + edge.b.y * 0.47,
+    };
     const h = stableNoise(seed);
-    const speed = 0.55 + h * 0.85;
-    const phase = h * 7 + k * 0.17;
-    pulses.push({ a: e.a, b: e.b, speed, phase, bright: pulses.length % 2 === 0 });
-  }
+    if (h > 0.22) continue;
 
-  /* Запас: жёсткий фильтр часто оставлял 0 импульсов — добираем из pool */
-  if (pulses.length < 12 && pool.length > 0) {
-    for (let k = 0; k < pool.length && pulses.length < MAX_PULSES; k += 1) {
-      const e = pool[k];
-      const seed = { x: e.a.x + k, y: e.a.y + k * 0.13 };
-      const h = stableNoise(seed);
-      pulses.push({
-        a: e.a,
-        b: e.b,
-        speed: 0.85 + h * 0.55,
-        phase: h * 9.2 + k * 0.31,
-        bright: pulses.length % 2 === 0,
+    const laneCount = h < 0.1 ? 2 : 1;
+    for (let lane = 0; lane < laneCount; lane += 1) {
+      const laneSeed = { x: seed.x + lane * 13.7, y: seed.y + lane * 9.1 };
+      const lh = stableNoise(laneSeed);
+      configs.push({
+        edge: { a: edge.a, b: edge.b },
+        seed,
+        h,
+        lane,
+        lh,
+        bright: lane % 2 === 0,
       });
+      if (configs.length >= MAX_DRAWN_PULSES) return configs;
     }
   }
-
-  if (pulses.length === 0 && edges.length > 0) {
-    for (let k = 0; k < edges.length && pulses.length < 24; k += 1) {
-      const e = edges[k];
-      const h = stableNoise({ x: e.a.x * 2 + k, y: e.b.y * 2 });
-      pulses.push({
-        a: e.a,
-        b: e.b,
-        speed: 1.1 + h * 0.6,
-        phase: h * 11 + k * 0.2,
-        bright: k % 2 === 0,
-      });
-    }
-  }
-
-  return pulses;
+  return configs;
 }
 
 function drawStaticMesh(ctx, width, height, points, allPoints, edges) {
@@ -171,43 +202,20 @@ function drawStaticMesh(ctx, width, height, points, allPoints, edges) {
   }
 }
 
-/**
- * Добираем импульсы только по уже нарисованным рёбрам графа — без «диагоналей в пустоте».
- */
-function ensureSyntheticPulses(pulses, edges, height) {
-  if (pulses.length >= 8 || edges.length === 0) return;
-  const n = 12 - pulses.length;
-  const step = Math.max(1, Math.floor(edges.length / Math.max(n * 3, 8)));
-  for (let i = 0; i < n; i += 1) {
-    const k = (i * step * 7 + Math.floor(edges.length * 0.21)) % edges.length;
-    const e = edges[k];
-    const yMid = (e.a.y + e.b.y) * 0.5;
-    if (yMid < -8 || yMid > height + 8) continue;
-    const seed = { x: e.a.x * 0.71 + e.b.x * 1.31, y: e.a.y * 1.91 + e.b.y * 0.47 };
-    const h = stableNoise(seed);
-    pulses.push({
-      a: e.a,
-      b: e.b,
-      speed: 0.55 + h * 0.85,
-      phase: h * 7 + i * 0.17,
-      bright: pulses.length % 2 === 0,
-    });
-  }
-}
-
 function initMeshBackground(canvas) {
   if (!canvas || !(canvas instanceof HTMLCanvasElement)) return () => {};
 
   /** Декоративный фон: при reduce — только слабее/медленнее, не «выключатель» */
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   const motionScale = reducedMotion ? 0.55 : 1;
-  const timeScale = reducedMotion ? 1.4 : PULSE_TIME_SCALE;
 
   const ctxMain = canvas.getContext("2d", { alpha: true });
   if (!ctxMain) return () => {};
 
   let offscreen = null;
   let pulses = [];
+  /** Смежность по вершинам для pickNextHop (как byPoint во Flutter) */
+  let pulseByPoint = null;
   let raf = 0;
   let w = 0;
   let h = 0;
@@ -248,21 +256,113 @@ function initMeshBackground(canvas) {
     offCtx.clearRect(0, 0, w, h);
     drawStaticMesh(offCtx, w, h, points, allPoints, edges);
 
-    pulses = pickPulseEdges(edges, w, h);
-    ensureSyntheticPulses(pulses, edges, h);
+    const animEdges = buildAnimEdges(edges, w, h);
+    pulseByPoint = animEdges.length > 0 ? buildNeighborMap(animEdges) : null;
+    pulses = buildPulseConfigs(animEdges);
   }
 
-  function drawPulsesWithMotion(ctx, t, pulseList) {
+  function selectorFor(seed, lane, turn, salt) {
+    return stableNoise({
+      x: seed.x * 0.17 + lane * 11.0 + turn * 0.73 + salt * 7.0,
+      y: seed.y * 0.23 + lane * 13.0 + turn * 1.11 + salt * 5.0,
+    });
+  }
+
+  /**
+   * Цепочка сегментов A→B→…→H и обратно, как в MeshBackgroundPainter (14 шагов на цикл).
+   */
+  function drawPulsesWithMotion(ctx, timeSec, pulseList, byPoint, height) {
+    if (!byPoint || pulseList.length === 0) return;
     const soft = `rgba(61, 139, 253, ${PULSE_OPACITY * 0.88 * motionScale})`;
     const bright = `rgba(120, 200, 255, ${Math.min(0.95, PULSE_OPACITY * 1.35 * motionScale)})`;
-    const tt = t * timeScale;
-    for (const p of pulseList) {
-      const u = (Math.sin(tt * p.speed + p.phase) * 0.5 + 0.5) ** 1.05;
-      const x = p.a.x + (p.b.x - p.a.x) * u;
-      const y = p.a.y + (p.b.y - p.a.y) * u;
+    for (const cfg of pulseList) {
+      const { edge, seed, h, lane, lh, bright: isBright } = cfg;
+      const speed = 0.018 + lh * 0.05;
+      const phase = h * 7.0 + lh * 13.0 + lane * 0.61;
+      /* Как во Flutter: v = timeSec * speed + phase; замедление только при reduce motion */
+      const v = timeSec * speed * motionScale + phase;
+      const turn = Math.floor(v);
+      const cycle = (v - turn) * 14.0;
+      const seg = Math.floor(cycle);
+      const u = cycle - seg;
+
+      const a = edge.a;
+      const b = edge.b;
+      const c = pickNextHop(a, b, selectorFor(seed, lane, turn, 1), true, byPoint);
+      const d = pickNextHop(b, c, selectorFor(seed, lane, turn, 2), true, byPoint);
+      const e = pickNextHop(c, d, selectorFor(seed, lane, turn, 3), true, byPoint);
+      const f = pickNextHop(d, e, selectorFor(seed, lane, turn, 4), true, byPoint);
+      const g = pickNextHop(e, f, selectorFor(seed, lane, turn, 5), true, byPoint);
+      const h2 = pickNextHop(f, g, selectorFor(seed, lane, turn, 6), true, byPoint);
+
+      let from;
+      let to;
+      switch (seg) {
+        case 0:
+          from = a;
+          to = b;
+          break;
+        case 1:
+          from = b;
+          to = c;
+          break;
+        case 2:
+          from = c;
+          to = d;
+          break;
+        case 3:
+          from = d;
+          to = e;
+          break;
+        case 4:
+          from = e;
+          to = f;
+          break;
+        case 5:
+          from = f;
+          to = g;
+          break;
+        case 6:
+          from = g;
+          to = h2;
+          break;
+        case 7:
+          from = h2;
+          to = g;
+          break;
+        case 8:
+          from = g;
+          to = f;
+          break;
+        case 9:
+          from = f;
+          to = e;
+          break;
+        case 10:
+          from = e;
+          to = d;
+          break;
+        case 11:
+          from = d;
+          to = c;
+          break;
+        case 12:
+          from = c;
+          to = b;
+          break;
+        default:
+          from = b;
+          to = a;
+          break;
+      }
+
+      const xRaw = from.x + (to.x - from.x) * u;
+      const yRaw = from.y + (to.y - from.y) * u;
+      const y = Math.max(-8, Math.min(height + 8, yRaw));
+      const radius = PULSE_RADIUS * (0.9 + lh * 0.45) * (0.85 + 0.15 * motionScale);
       ctx.beginPath();
-      ctx.arc(x, y, PULSE_RADIUS * (p.bright ? 1.1 : 0.95) * (0.85 + 0.15 * motionScale), 0, Math.PI * 2);
-      ctx.fillStyle = p.bright ? bright : soft;
+      ctx.arc(xRaw, y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = isBright ? bright : soft;
       ctx.fill();
     }
   }
@@ -276,9 +376,9 @@ function initMeshBackground(canvas) {
     ctxMain.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctxMain.clearRect(0, 0, w, h);
     ctxMain.drawImage(offscreen, 0, 0);
-    if (pulses.length > 0) {
-      const t = timeMs * 0.001;
-      drawPulsesWithMotion(ctxMain, t, pulses);
+    if (pulses.length > 0 && pulseByPoint) {
+      const timeSec = Date.now() / 1000;
+      drawPulsesWithMotion(ctxMain, timeSec, pulses, pulseByPoint, h);
     }
     if (running && !document.hidden) {
       raf = requestAnimationFrame(frame);

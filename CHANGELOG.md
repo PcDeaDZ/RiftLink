@@ -20,7 +20,7 @@
 - Пересборка PlatformIO: **heltec_v3**, **heltec_v3_paper**, **heltec_v4**, **lilygo_t_lora_pager** — merged `*_full.bin` скопированы в **`docs/flasher/firmware/`**; **faketec_v5** — сборка OK (артефакт в `firmware/out/faketec_v5/`, не в веб-флешере).
 - **LilyGO T-Beam** (`lilygo_t_beam`): в текущей конфигурации линковка **не проходит** (overflow сегмента `.dram0.bss` / DRAM) — файл **`docs/flasher/firmware/lilygo_t_beam_full.bin`** в репозитории **не заменялся** на новую сборку до отдельной оптимизации RAM; манифест обновлён по **версии** 1.5.25 для единообразия веб-флешера.
 - **`protocol::keyExchangeTotalLen`**: выражение в одном `return` для совместимости **constexpr** на toolchain FakeTech (nRF52), иначе ошибка компиляции.
-- **`docs/flasher/embedded-release.json`**, **`release-github.json`**: тег **v1.5.25**, заметки RU/EN для блока «Что нового» на странице флешера; URL APK под GitHub Release (после публикации артефакта **`RiftLink-1.5.25-arm64-v8a.apk`**).
+- **`docs/flasher/embedded-release.json`**, **`release-github.json`**: тег **v1.5.25**, заметки RU/EN для блока «Что нового» на странице флешера; **`apkDownloadUrl`** на артефакт **`RiftLink-1.5.25-arm64-v8a.apk`** в GitHub Release **v1.5.25**.
 - Сборка Android APK: **`flutter build apk`** (release).
 
 ### Документация
