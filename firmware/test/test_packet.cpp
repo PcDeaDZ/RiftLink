@@ -8,9 +8,19 @@
 #include <unity.h>
 #include "protocol/packet.h"
 
+// test_ui.cpp — логика UI без железа (единый main ниже)
+void test_sync_list_window_aligns_to_selection(void);
+void test_sync_list_window_single_row(void);
+void test_rssi_to_bars(void);
+void test_msg_scroll_advance_wraps(void);
+void test_msg_scroll_advance_two_lines(void);
+void test_msg_scroll_overflow_hint(void);
+
 static uint8_t s_from[8] = {0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x08};
 static uint8_t s_to[8] = {0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x08, 0x19};
 static uint8_t s_relay[8] = {0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x08, 0x19, 0x2A};
+/** v2.3: OP_HELLO обязан нести 2-байтовый sender tag. */
+static const uint8_t kHelloTag[2] = {0x01, 0x02};
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -18,10 +28,9 @@ void tearDown(void) {}
 // --- Базовые roundtrip ---
 void test_build_parse_broadcast_roundtrip() {
   uint8_t buf[256];
-  // OP_HELLO: payload must be 0 bytes
   size_t len = protocol::buildPacket(buf, sizeof(buf),
       s_from, protocol::BROADCAST_ID, 5, protocol::OP_HELLO,
-      nullptr, 0, false, false, false, 0, 0);
+      kHelloTag, sizeof(kHelloTag), false, false, false, 0, 0);
   TEST_ASSERT_GREATER_THAN(0, len);
 
   protocol::PacketHeader hdr;
@@ -32,7 +41,8 @@ void test_build_parse_broadcast_roundtrip() {
   TEST_ASSERT_EQUAL(protocol::OP_HELLO, hdr.opcode);
   TEST_ASSERT_EQUAL(5, hdr.ttl);
   TEST_ASSERT_EQUAL(0, hdr.channel);
-  TEST_ASSERT_EQUAL(0, plLen);
+  TEST_ASSERT_EQUAL(2, plLen);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(kHelloTag, pl, plLen);
   TEST_ASSERT_EQUAL_UINT8_ARRAY(s_from, hdr.from, 8);
   TEST_ASSERT_EQUAL_UINT8_ARRAY(protocol::BROADCAST_ID, hdr.to, 8);
 }
@@ -87,14 +97,15 @@ void test_corrupt_garbage_before_packet() {
   uint8_t valid[64];
   size_t vlen = protocol::buildPacket(valid, sizeof(valid),
       s_from, protocol::BROADCAST_ID, 3, protocol::OP_HELLO,
-      nullptr, 0, false, false, false, 0, 0);
+      kHelloTag, sizeof(kHelloTag), false, false, false, 0, 0);
   uint8_t buf[80];
   memset(buf, 0xAA, 5);  // 5 байт мусора
   memcpy(buf + 5, valid, vlen);
   protocol::PacketHeader hdr;
   const uint8_t* pl = nullptr;
   size_t plLen = 0;
-  bool ok = protocol::parsePacket(buf, 5 + vlen, &hdr, &pl, &plLen);
+  // strict-only: сканирования sync нет — парсим срез, где первый байт = SYNC
+  bool ok = protocol::parsePacket(buf + 5, vlen, &hdr, &pl, &plLen);
   TEST_ASSERT_TRUE(ok);
   TEST_ASSERT_EQUAL(protocol::OP_HELLO, hdr.opcode);
 }
@@ -109,8 +120,9 @@ void test_corrupt_shifted_sync_sx1262() {
     memset(buf, 0xAA, shift);
     memcpy(buf + shift, valid, vlen);
     protocol::PacketHeader hdr;
-    bool ok = protocol::parsePacket(buf, shift + (int)vlen, &hdr, nullptr, nullptr);
-    TEST_ASSERT_TRUE_MESSAGE(ok, "findPacketStart should find sync after shift");
+    // strict-only: парсим кадр с начала SYNC (срез после префикса)
+    bool ok = protocol::parsePacket(buf + shift, vlen, &hdr, nullptr, nullptr);
+    TEST_ASSERT_TRUE_MESSAGE(ok, "slice from first SYNC byte");
   }
 }
 
@@ -123,7 +135,7 @@ void test_shifted_parse_all_core_opcodes_with_offset() {
     bool encrypted;
     uint16_t pktId;
   } cases[] = {
-    {protocol::OP_HELLO, protocol::BROADCAST_ID, {0}, 0, false, 0},
+    {protocol::OP_HELLO, protocol::BROADCAST_ID, {0xAB, 0xCD}, 2, false, 0},
     {protocol::OP_KEY_EXCHANGE, s_to, {0}, 32, false, 7},
     {protocol::OP_NACK, s_to, {0x34, 0x12}, 2, false, 0},
     {protocol::OP_ACK, s_to, {0x11, 0x22, 0x33, 0x44}, 4, false, 0},
@@ -151,9 +163,9 @@ void test_shifted_parse_all_core_opcodes_with_offset() {
       const uint8_t* pl = nullptr;
       size_t plLen = 0;
       protocol::ParseResult res;
-      bool ok = protocol::parsePacketEx(buf, shift + pktLen, &hdr, &pl, &plLen, &res);
+      bool ok = protocol::parsePacketEx(buf + shift, pktLen, &hdr, &pl, &plLen, &res);
       TEST_ASSERT_TRUE(ok);
-      TEST_ASSERT_EQUAL_UINT32(shift, (uint32_t)res.startOffset);
+      TEST_ASSERT_EQUAL_UINT32(0, (uint32_t)res.startOffset);
       TEST_ASSERT_EQUAL(cases[i].opcode, hdr.opcode);
       TEST_ASSERT_EQUAL(cases[i].payloadLen, plLen);
     }
@@ -167,16 +179,15 @@ void test_shifted_parse_status_payload_range_for_bad_ack_len() {
       s_from, s_to, 1, protocol::OP_ACK, ackPl, 4, false, false, false, 0, 0);
   TEST_ASSERT_GREATER_THAN(0, pktLen);
   uint8_t buf[80];
-  memset(buf, 0xCC, 2);
-  memcpy(buf + 2, pkt, pktLen - 1);  // намеренно обрезаем 1 байт
+  memcpy(buf, pkt, pktLen - 1);  // намеренно обрезаем 1 байт; SYNC в начале буфера
 
   protocol::PacketHeader hdr;
   protocol::ParseResult res;
-  bool ok = protocol::parsePacketEx(buf, 2 + pktLen - 1, &hdr, nullptr, nullptr, &res);
+  bool ok = protocol::parsePacketEx(buf, pktLen - 1, &hdr, nullptr, nullptr, &res);
   TEST_ASSERT_FALSE(ok);
-  TEST_ASSERT_EQUAL(protocol::ParseStatus::payload_range, res.status);
+  TEST_ASSERT_EQUAL(protocol::ParseStatus::len_mismatch, res.status);
   TEST_ASSERT_EQUAL(protocol::OP_ACK, res.opcode);
-  TEST_ASSERT_EQUAL_UINT32(2, (uint32_t)res.startOffset);
+  TEST_ASSERT_EQUAL_UINT32(0, (uint32_t)res.startOffset);
 }
 
 void test_parse_status_invalid_ids() {
@@ -254,7 +265,7 @@ void test_relay_broadcast_hello() {
   uint8_t buf[64];
   size_t len = protocol::buildPacket(buf, sizeof(buf),
       s_from, protocol::BROADCAST_ID, 10, protocol::OP_HELLO,
-      nullptr, 0, false, false, false, 0, 0);
+      kHelloTag, sizeof(kHelloTag), false, false, false, 0, 0);
   protocol::PacketHeader hdr;
   bool ok = protocol::parsePacket(buf, len, &hdr, nullptr, nullptr);
   TEST_ASSERT_TRUE(ok);
@@ -356,8 +367,8 @@ void test_edge_max_payload() {
 void test_edge_get_expected_payload_range() {
   size_t minP, maxP;
   TEST_ASSERT_TRUE(protocol::getExpectedPayloadRange(protocol::OP_HELLO, &minP, &maxP));
-  TEST_ASSERT_EQUAL(0, minP);
-  TEST_ASSERT_EQUAL(0, maxP);
+  TEST_ASSERT_EQUAL(2, minP);
+  TEST_ASSERT_EQUAL(2, maxP);
   TEST_ASSERT_TRUE(protocol::getExpectedPayloadRange(protocol::OP_MSG, &minP, &maxP));
   TEST_ASSERT_EQUAL(29, minP);
   TEST_ASSERT_EQUAL(protocol::MAX_PAYLOAD, maxP);
@@ -368,7 +379,7 @@ void test_edge_multiple_packets_parse_first_only() {
   uint8_t pkt1[64], pkt2[64];
   size_t len1 = protocol::buildPacket(pkt1, sizeof(pkt1),
       s_from, protocol::BROADCAST_ID, 1, protocol::OP_HELLO,
-      nullptr, 0, false, false, false, 0, 0);
+      kHelloTag, sizeof(kHelloTag), false, false, false, 0, 0);
   size_t len2 = protocol::buildPacket(pkt2, sizeof(pkt2),
       s_to, protocol::BROADCAST_ID, 2, protocol::OP_PONG,
       nullptr, 0, false, false, false, 0, 0);
@@ -576,7 +587,7 @@ void test_build_null_payload_zero_len() {
   uint8_t buf[64];
   size_t len = protocol::buildPacket(buf, sizeof(buf),
       s_from, protocol::BROADCAST_ID, 0, protocol::OP_HELLO,
-      nullptr, 0, false, false, false, 0, 0);
+      kHelloTag, sizeof(kHelloTag), false, false, false, 0, 0);
   TEST_ASSERT_GREATER_THAN(0, len);
 }
 
@@ -602,7 +613,7 @@ void test_build_channel_values() {
   for (uint8_t ch = 0; ch <= 2; ch++) {
     size_t len = protocol::buildPacket(buf, sizeof(buf),
         s_from, protocol::BROADCAST_ID, 0, protocol::OP_HELLO,
-        nullptr, 0, false, false, false, ch, 0);
+        kHelloTag, sizeof(kHelloTag), false, false, false, ch, 0);
     TEST_ASSERT_GREATER_THAN(0, len);
     protocol::PacketHeader hdr;
     bool ok = protocol::parsePacket(buf, len, &hdr, nullptr, nullptr);
@@ -615,7 +626,7 @@ void test_build_ttl_values() {
   uint8_t buf[64];
   size_t len = protocol::buildPacket(buf, sizeof(buf),
       s_from, protocol::BROADCAST_ID, 255, protocol::OP_HELLO,
-      nullptr, 0, false, false, false, 0, 0);
+      kHelloTag, sizeof(kHelloTag), false, false, false, 0, 0);
   protocol::PacketHeader hdr;
   bool ok = protocol::parsePacket(buf, len, &hdr, nullptr, nullptr);
   TEST_ASSERT_TRUE(ok);
@@ -634,7 +645,7 @@ void test_parse_buffer_too_large_rejected() {
   uint8_t buf[512];
   size_t len = protocol::buildPacket(buf, sizeof(buf),
       s_from, protocol::BROADCAST_ID, 0, protocol::OP_HELLO,
-      nullptr, 0, false, false, false, 0, 0);
+      kHelloTag, sizeof(kHelloTag), false, false, false, 0, 0);
   protocol::PacketHeader hdr;
   uint8_t big[512];
   memset(big, 0x5A, sizeof(big));
@@ -648,7 +659,7 @@ void test_get_expected_payload_range_all() {
   size_t minP, maxP;
   const struct { uint8_t op; size_t minV; size_t maxV; } cases[] = {
     {protocol::OP_HELLO, 2, 2},
-    {protocol::OP_ACK, 4, 4},
+    {protocol::OP_ACK, 4, 96},
     {protocol::OP_KEY_EXCHANGE, 32, 32},
     {protocol::OP_ROUTE_REQ, 21, 21},
     {protocol::OP_ECHO, 12, 12},
@@ -673,8 +684,10 @@ void test_get_expected_payload_range_all() {
 void test_get_expected_packet_length() {
   size_t v = protocol::getExpectedPacketLength(protocol::OP_HELLO, 0, true);
   TEST_ASSERT_EQUAL(0, v);
+  v = protocol::getExpectedPacketLength(protocol::OP_HELLO, 2, true);
+  TEST_ASSERT_EQUAL(protocol::HEADER_LEN_BROADCAST + 2, v);
   v = protocol::getExpectedPacketLength(protocol::OP_ACK, 4, true);
-  TEST_ASSERT_EQUAL(protocol::SYNC_LEN + 12 + 4, v);
+  TEST_ASSERT_EQUAL(0, v);  // ACK: переменная/зашифрованная длина — фиксированная оценка не задаётся
   v = protocol::getExpectedPacketLength(protocol::OP_NACK, 2, false);
   TEST_ASSERT_EQUAL(protocol::SYNC_LEN + protocol::HEADER_LEN + 2, v);
 }
@@ -840,11 +853,11 @@ void test_scenario_unicast_ack() {
 }
 
 void test_scenario_exact_buffer_size() {
-  size_t need = protocol::SYNC_LEN + 12 + 0;
+  size_t need = protocol::HEADER_LEN_BROADCAST + 2;
   uint8_t buf[32];
   size_t len = protocol::buildPacket(buf, need,
       s_from, protocol::BROADCAST_ID, 0, protocol::OP_HELLO,
-      nullptr, 0, false, false, false, 0, 0);
+      kHelloTag, sizeof(kHelloTag), false, false, false, 0, 0);
   TEST_ASSERT_EQUAL(need, len);
   protocol::PacketHeader hdr;
   bool ok = protocol::parsePacket(buf, len, &hdr, nullptr, nullptr);
@@ -870,7 +883,7 @@ void test_scenario_garbage_between_packets() {
   uint8_t pkt1[64], pkt2[64];
   size_t len1 = protocol::buildPacket(pkt1, sizeof(pkt1),
       s_from, protocol::BROADCAST_ID, 1, protocol::OP_HELLO,
-      nullptr, 0, false, false, false, 0, 0);
+      kHelloTag, sizeof(kHelloTag), false, false, false, 0, 0);
   size_t len2 = protocol::buildPacket(pkt2, sizeof(pkt2),
       s_to, protocol::BROADCAST_ID, 2, protocol::OP_PONG,
       nullptr, 0, false, false, false, 0, 0);
@@ -1027,5 +1040,11 @@ int main(int argc, char** argv) {
   RUN_TEST(test_scenario_read_unicast_to_sender);
   RUN_TEST(test_parse_len_mismatch_on_truncated_key_exchange_pktid);
   RUN_TEST(test_parse_accepts_trailing_radio_garbage);
+  RUN_TEST(test_sync_list_window_aligns_to_selection);
+  RUN_TEST(test_sync_list_window_single_row);
+  RUN_TEST(test_rssi_to_bars);
+  RUN_TEST(test_msg_scroll_advance_wraps);
+  RUN_TEST(test_msg_scroll_advance_two_lines);
+  RUN_TEST(test_msg_scroll_overflow_hint);
   return UNITY_END();
 }

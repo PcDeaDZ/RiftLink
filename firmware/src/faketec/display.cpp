@@ -4,6 +4,7 @@
 
 #include "display.h"
 #include "board.h"
+#include "log.h"
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -22,18 +23,27 @@ static bool probeI2C(uint8_t addr) {
 namespace display {
 
 bool init() {
+#if defined(RIFTLINK_SKIP_DISPLAY)
+  s_present = false;
+  RIFTLINK_DIAG("DISPLAY", "event=OLED skip=1 reason=RIFTLINK_SKIP_DISPLAY");
+  return true;
+#endif
+  Wire.setPins(OLED_SDA, OLED_SCL);
   Wire.begin();
   Wire.setClock(100000);
+#if defined(WIRE_HAS_TIMEOUT)
+  Wire.setTimeout(40);
+#endif
 
   if (!probeI2C(OLED_ADDR)) {
-    Serial.println("[RiftLink] No OLED display");
+    RIFTLINK_DIAG("DISPLAY", "event=OLED_PROBE ok=0 addr=0x%02X", (unsigned)OLED_ADDR);
     s_present = false;
     return true;
   }
 
   oled = new Adafruit_SSD1306(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire);
   if (!oled->begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    Serial.println("[RiftLink] OLED init failed");
+    RIFTLINK_DIAG("DISPLAY", "event=OLED_BEGIN ok=0 addr=0x%02X", (unsigned)OLED_ADDR);
     oled = nullptr;
     s_present = false;
     return true;
@@ -44,7 +54,8 @@ bool init() {
   oled->setTextColor(SSD1306_WHITE);
   oled->display();
   s_present = true;
-  Serial.println("[RiftLink] OLED OK");
+  RIFTLINK_DIAG("DISPLAY", "event=OLED_BEGIN ok=1 addr=0x%02X w=%d h=%d",
+      (unsigned)OLED_ADDR, SCREEN_WIDTH, SCREEN_HEIGHT);
   return true;
 }
 

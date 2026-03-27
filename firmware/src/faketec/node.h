@@ -13,6 +13,7 @@ const uint8_t* getId();
 void getIdCopy(uint8_t* out);
 bool isForMe(const uint8_t* to);
 bool isBroadcast(const uint8_t* to);
+bool isInvalidNodeId(const uint8_t* id);
 void setNickname(const char* nick);
 const char* getNickname();
 

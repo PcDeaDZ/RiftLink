@@ -13,6 +13,9 @@ void displayText(int x, int y, const char* text);
 void displayShow();
 void displaySetTextSize(uint8_t s);
 
+/** Цепочка загрузки при первом старте: doneCount заполненных шагов из totalSteps, строка статуса. */
+void displayShowInitProgress(int doneCount, int totalSteps, const char* statusLine);
+
 /** Красивый бут-скрин: RiftLink + иконка связи */
 void displayShowBootScreen();
 /** Выбор языка при первом буте. Блокирует до выбора. Возвращает true если выбран. */
@@ -20,15 +23,16 @@ bool displayShowLanguagePicker();
 /** Выбор страны/региона при первом буте. Вызывать после region::init() и radio::init(). */
 bool displayShowRegionPicker();
 
-/** Меню: 0=Main, 1=Msg, 2=Peers, [GPS], [WiFi], Sys(last). Вызывать после init. */
+/** Меню: 0=Home, 1=Main, 2=Msg, 3=Peers, [GPS], Net, Sys(last). Вызывать после init. */
 void displayShowScreen(int screen);
-/** Смена вкладки с принудительным full refresh (против ghosting на e-ink). */
+/** Смена экрана с принудительным full refresh (против ghosting на e-ink). */
 void displayShowScreenForceFull(int screen);
-/** Текущая вкладка (для опроса кнопки в loopTask) */
+/** Текущий экран (для опроса кнопки в loopTask) */
 int displayGetCurrentScreen();
-/** Следующая вкладка при переключении (учитывает gps::isPresent — скрывает GPS если нет модуля) */
-int displayGetNextScreen(int current);
-/** Обработка long press на вкладке (picker, selftest, gps toggle) */
+/** Короткое нажатие: на главном — следующий пункт меню; иначе — на главный экран. Возвращает индекс экрана (обычно 0). */
+/** Короткое нажатие: возвращает индекс экрана после обработки (для queueDisplayRedraw в main). */
+int displayHandleShortPress();
+/** Обработка long press на экране (picker, selftest, gps toggle) */
 void displayOnLongPress(int screen);
 /** Установить последнее сообщение — обновит экран если Msg активен. */
 void displaySetLastMsg(const char* fromHex, const char* text);
@@ -51,3 +55,12 @@ bool displayIsMenuActive();
 void displaySetButtonPolledExternally(bool on);
 /** Показать предупреждение на экране на duration_ms (блокирующий). */
 void displayShowWarning(const char* line1, const char* line2, uint32_t durationMs);
+/** Результаты selftest в том же стиле, что подменю (chrome + заголовок). */
+void displayShowSelftestSummary(bool radioOk, bool antennaOk, uint16_t batteryMv, uint32_t heapFree);
+
+/** Таб-режим: первое короткое при скрытой полоске вкладок только показывает её (true = событие поглощено). */
+bool displayTryRevealTabBarRowOnly();
+/** Сброс таймера скрытия полоски вкладок (кнопка, энкодер). */
+void displayNotifyTabChromeActivity();
+/** Применить переворот экрана из NVS (после init и смены в настройках). Реализация в бэкенде дисплея. */
+void displayApplyRotationFromPrefs();

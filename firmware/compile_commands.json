@@ -1,0 +1,8 @@
+[
+    {
+        "command": "C:\\msys64\\ucrt64\\bin\\g++.exe -o .pio\\build\\native\\src\\protocol\\packet.o -c -DPLATFORMIO=60119 -Iinclude -Isrc src\\protocol\\packet.cpp",
+        "directory": "C:\\Users\\HYPERPC\\source\\repos\\dual_boot\\firmware",
+        "file": "src\\protocol\\packet.cpp",
+        "output": ".pio\\build\\native\\src\\protocol\\packet.o"
+    }
+]

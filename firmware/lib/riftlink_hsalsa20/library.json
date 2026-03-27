@@ -1,0 +1,17 @@
+{
+  "name": "riftlink_hsalsa20",
+  "version": "1.0.0",
+  "description": "crypto_core_hsalsa20 (libsodium ref2) for RiftLink crypto_box_beforenm parity on nRF",
+  "license": "ISC",
+  "build": {
+    "includeDir": "include/sodium",
+    "srcDir": "src",
+    "flags": [
+      "-DCONFIGURED=1",
+      "-DNATIVE_LITTLE_ENDIAN",
+      "-DSODIUM_STATIC",
+      "-Wno-unused-function",
+      "-Wno-unknown-pragmas"
+    ]
+  }
+}

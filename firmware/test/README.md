@@ -1,8 +1,12 @@
 # Тесты прошивки
 
-## Native-тесты (protocol/packet)
+## Native-тесты
 
-54 теста: roundtrip, битые пакеты, relay, opcodes, граничные случаи, сценарии.
+**protocol/packet** — roundtrip, битые пакеты, relay, opcodes, граничные случаи, сценарии (ожидания синхронизированы с `packet.cpp`: v2.3 HELLO с 2-байтовым tag, strict-only парсер без сканирования sync).
+
+**ui** (`test_ui.cpp`, один `main` в `test_packet.cpp`) — прокрутка списка (`ui_scroll`), RSSI→полоски (`ui_topbar`), прокрутка текста сообщения (`ui_msg_scroll`).
+
+Сборка native-тестов линкует `src/protocol/packet.cpp` (`test_build_src = yes` в `[env:native]`); без этого линковка пустая, а два `main` / два `setUp` в `test/*.cpp` дают ошибку линкера.
 
 | Категория | Тесты |
 |-----------|-------|

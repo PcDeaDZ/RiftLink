@@ -399,4 +399,13 @@ bool isCompressed(const PacketHeader& hdr) {
   return (hdr.version_flags & FLAG_COMPRESSED) != 0;
 }
 
+size_t ttlFieldOffsetBytes(const PacketHeader& hdr) {
+  const bool hasPktId = (hdr.version_flags & VERSION_MASK) == VERSION_V2_PKTID;
+  const bool isBc = (hdr.version_flags & FLAG_BROADCAST) != 0;
+  if (isBc) {
+    return hasPktId ? 13u : 11u;
+  }
+  return hasPktId ? 21u : 19u;
+}
+
 }  // namespace protocol

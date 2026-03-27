@@ -3,6 +3,7 @@
  */
 
 #include "region.h"
+#include "duty_cycle.h"
 #include "storage.h"
 #include <Arduino.h>
 #include <string.h>
@@ -64,6 +65,7 @@ bool setRegion(const char* code) {
       s_current = PRESETS[i];
       s_isSet = true;
       storage::setStr(STORAGE_KEY_REGION, s_current.code);
+      duty_cycle::reset();
       return true;
     }
   }
@@ -86,6 +88,11 @@ int getChannelCount() {
 }
 
 int getChannel() { return s_euChannel; }
+
+float getChannelMHz(int idx) {
+  if (idx < 0 || idx >= EU_N_CHANNELS) return 0.f;
+  return EU_CHANNELS[idx];
+}
 
 bool setChannel(int ch) {
   if (!s_current.hasChannels || ch < 0 || ch >= EU_N_CHANNELS) return false;

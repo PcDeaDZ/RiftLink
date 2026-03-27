@@ -47,26 +47,12 @@ void run(Result* out) {
   r.heapFree = ESP.getFreeHeap();
   r.displayOk = true;
 
-  // 3. Show all results
-  displayClear();
-  displayText(0, 0, "SELF TEST");
-  char buf[32];
-  snprintf(buf, sizeof(buf), "Radio: %s", r.radioOk ? "OK" : "FAIL");
-  displayText(0, 12, buf);
-  snprintf(buf, sizeof(buf), "Antenna: %s", r.antennaOk ? "OK" : "WARN");
-  displayText(0, 24, buf);
-  snprintf(buf, sizeof(buf), "Bat: %umV", (unsigned)r.batteryMv);
-  displayText(0, 36, buf);
-  snprintf(buf, sizeof(buf), "Heap: %uK", (unsigned)(r.heapFree / 1024));
-  displayText(0, 48, buf);
-  displayShow();
+  // 3. Show all results (стиль как у подменю)
+  displayShowSelftestSummary(r.radioOk, r.antennaOk, r.batteryMv, r.heapFree);
 
   Serial.printf("[RiftLink] Selftest: radio=%s ant=%s bat=%umV heap=%u\n",
       r.radioOk ? "OK" : "FAIL", r.antennaOk ? "OK" : "WARN",
       (unsigned)r.batteryMv, (unsigned)r.heapFree);
-
-  // Hold results on screen for 5 seconds
-  for (int i = 0; i < 50; i++) { delay(100); yield(); }
 
   if (out) *out = r;
 }

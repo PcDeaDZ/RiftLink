@@ -164,11 +164,12 @@ static uint32_t computeTxAsymSkewMs(const uint8_t* buf, size_t len, TxAsymMeta* 
 
 // OLED: после Wi-Fi + очередей (64/48) в internal heap не хватает места под стек 32K+8K+4K — xTaskCreate(packet) даёт FAIL.
 // Watermark на V4 при 32K был ~31K «свободно» (фактически байты/запас) — 16K достаточно для handlePacket.
+// packetTask во внутренней RAM (не SPIRAM — см. комментарий у createPacketTask*): 32K на OLED отнимает heap у NimBLE/BLE.
 #if defined(USE_EINK)
 #define PACKET_TASK_STACK 32768
 #else
-// Align OLED with a wide safety margin for deep packet/notify/log call chains.
-#define PACKET_TASK_STACK 32768
+// OLED: 24K — баланс глубины handlePacket и heap под BLE (NimBLE).
+#define PACKET_TASK_STACK (24 * 1024)
 #endif
 #define DISPLAY_TASK_STACK 8192   // 12KB — create FAIL (heap), 8KB — минимум для создания
 #define PACKET_TASK_PRIO 2
@@ -585,7 +586,8 @@ void queueDisplayLastMsg(const char* fromHex, const char* text) {
 void queueDisplayRedraw(uint8_t screen, bool priority) {
   (void)asyncInfraEnsure();
   if (!displayQueue) {
-    displayShowScreen(screen);
+    (void)screen;
+    displayShowScreen(displayGetCurrentScreen());
     return;
   }
   DisplayQueueItem item = {};
@@ -600,7 +602,8 @@ void queueDisplayRedraw(uint8_t screen, bool priority) {
       s_lastFallbackLog = now;
       Serial.println("[RiftLink] displayQueue full, fallback draw");
     }
-    displayShowScreen(screen);  // fallback при переполнении очереди
+    (void)screen;
+    displayShowScreen(displayGetCurrentScreen());
   }
 }
 
@@ -668,7 +671,8 @@ static void packetTask(void* arg) {
 }
 
 #define RX_ALIVE_LOG_INTERVAL_MS 120000  // 2 мин — диагностика
-#define RADIO_SCHEDULER_STACK 4096
+/** RX FSM + interBuf при TX interleave; 4K на S3 давали тесный запас при глубоких цепочках. */
+#define RADIO_SCHEDULER_STACK 8192
 #define RADIO_SCHEDULER_PRIO 4
 
 static TaskHandle_t s_packetTaskHandle = nullptr;
@@ -815,6 +819,22 @@ static uint32_t simpleRxFingerprint(const uint8_t* buf, int len, int /*rssi*/) {
 /** Доставка RX из планировщика в packetTask или прямой handlePacket (общая логика normal + powersave RX). */
 static void deliverRxToPacketQueue(uint8_t* rxBuf, int n, int rssi, uint8_t sf) {
   if (n <= 0) return;
+  // KEY с pktId: кадр 56 B (header 24 + pubkey 32). Любой короче с From=наш ID — самослушание/обрезок
+  // (16 B — только начало; 46 B — типичный «хвост» до парсера: len_mismatch expected=56, не ответ 4FA4).
+  const size_t keyFullLen = protocol::keyExchangeTotalLen(true, false);
+  if (n >= 13 && (size_t)n < keyFullLen && rxBuf[0] == protocol::SYNC_BYTE &&
+      (rxBuf[1] & 0xF0u) == protocol::VERSION_V2_PKTID && rxBuf[2] == protocol::OP_KEY_EXCHANGE) {
+    if (memcmp(rxBuf + 5, node::getId(), protocol::NODE_ID_LEN) == 0) {
+      static uint32_t s_lastSelfKeyFragLogMs = 0;
+      uint32_t now = millis();
+      if (now - s_lastSelfKeyFragLogMs >= 5000u) {
+        s_lastSelfKeyFragLogMs = now;
+        RIFTLINK_DIAG("RADIO", "event=RX_DROP_SHORT cause=self_key_fragment len=%u rssi=%d sf=%u",
+            (unsigned)n, rssi, (unsigned)sf);
+      }
+      return;
+    }
+  }
   uint8_t op = (n > 2 && rxBuf[0] == protocol::SYNC_BYTE) ? rxBuf[2] : 0xFF;
   RIFTLINK_DIAG("BLE_CHAIN", "stage=fw_rx_queue action=enqueue len=%u rssi=%d sf=%u op=0x%02X",
       (unsigned)n, rssi, (unsigned)sf, (unsigned)op);
@@ -1610,12 +1630,11 @@ static void displayTask(void* arg) {
           displaySetLastMsg(item.fromHex, item.text);
           break;
         case CMD_REDRAW_SCREEN: {
-          uint8_t lastScreen = item.screen;
           while (xQueuePeek(displayQueue, &item, 0) == pdTRUE && item.cmd == CMD_REDRAW_SCREEN) {
             xQueueReceive(displayQueue, &item, 0);
-            lastScreen = item.screen;
           }
-          displayShowScreen(lastScreen);
+          /* Индекс в элементе очереди может устареть (смена список/вкладки long до обработки REDRAW). */
+          displayShowScreen(displayGetCurrentScreen());
           break;
         }
         case CMD_REQUEST_INFO_REDRAW:
@@ -1623,6 +1642,7 @@ static void displayTask(void* arg) {
           break;
         case CMD_LONG_PRESS:
           displayOnLongPress(item.screen);
+          displayNotifyTabChromeActivity();
           break;
         case CMD_WAKE:
           displayWake();
@@ -1648,47 +1668,16 @@ static void displayTask(void* arg) {
 
 #if !defined(USE_EINK)
 /**
- * OLED: packetTask — самый большой стек; при PSRAM сначала стек в SPIRAM (не ест contiguous internal),
- * иначе после BLE/Wi‑Fi часто largest < 16K и xTaskCreate падает.
- * Нужен CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY в sdkconfig (у Heltec V4 с PSRAM обычно включён).
+ * Стек packetTask только во внутренней RAM: handlePacket → crypto/NVS при отключении кэша flash
+ * несовместимы со стеком в SPIRAM (ESP-IDF: assert esp_task_stack_is_sane_cache_disabled).
  */
 static BaseType_t createPacketTaskOled() {
-#if defined(RIFTLINK_HAVE_TASK_CREATE_WITH_CAPS)
-  const size_t psramTot = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
-  if (psramTot > 0) {
-    BaseType_t ok = xTaskCreateWithCaps(packetTask, "packet", PACKET_TASK_STACK, nullptr,
-        (UBaseType_t)PACKET_TASK_PRIO_EINK, &s_packetTaskHandle,
-        (UBaseType_t)MALLOC_CAP_SPIRAM);
-    if (ok == pdPASS) {
-      Serial.printf("[RiftLink] packetTask: стек в SPIRAM (internal largest=%u)\n",
-          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-      return ok;
-    }
-    Serial.printf("[RiftLink] packetTask: SPIRAM stack не удался — fallback internal (largest=%u)\n",
-        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-  }
-#endif
   return xTaskCreate(packetTask, "packet", PACKET_TASK_STACK, nullptr, PACKET_TASK_PRIO_EINK, &s_packetTaskHandle);
 }
 #endif
 
 #if defined(USE_EINK)
-/** Paper: стек packetTask в SPIRAM, чтобы не съедать ~32K internal (как на OLED). Иначе после wifi::init free падает. */
 static BaseType_t createPacketTaskPaper() {
-#if defined(RIFTLINK_HAVE_TASK_CREATE_WITH_CAPS)
-  const size_t psramTot = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
-  if (psramTot > 0) {
-    BaseType_t ok = xTaskCreateWithCaps(packetTask, "packet", PACKET_TASK_STACK, nullptr,
-        (UBaseType_t)PACKET_TASK_PRIO_EINK, &s_packetTaskHandle, (UBaseType_t)MALLOC_CAP_SPIRAM);
-    if (ok == pdPASS) {
-      Serial.printf("[RiftLink] packetTask (Paper): стек в SPIRAM, internal largest=%u\n",
-          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-      return ok;
-    }
-    Serial.printf("[RiftLink] packetTask (Paper): SPIRAM stack не удался — fallback internal (largest=%u)\n",
-        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-  }
-#endif
   return xTaskCreatePinnedToCore(packetTask, "packet", PACKET_TASK_STACK, nullptr, PACKET_TASK_PRIO_EINK,
       &s_packetTaskHandle, 1);
 }

@@ -63,6 +63,9 @@ bool isConnected();
  */
 void processCommand(const uint8_t* data, size_t len);
 
+/** Имя в списке Bluetooth (как в scan response advertising, RL-…). */
+void getAdvertisingName(char* out, size_t outLen);
+
 /** 6-значный PIN для passkey pairing (отображается на экране). */
 uint32_t getPasskey();
 /** Перегенерировать PIN и сохранить в NVS. */

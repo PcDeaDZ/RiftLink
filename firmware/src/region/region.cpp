@@ -60,6 +60,7 @@ namespace region {
 void init() {
   if (s_inited) return;
 
+  esp_err_t euChNvs = ESP_ERR_NVS_NOT_FOUND;
   nvs_handle_t h;
   if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
     char buf[8] = {0};
@@ -74,12 +75,19 @@ void init() {
       }
     }
     int8_t ch = 0;
-    if (nvs_get_i8(h, NVS_KEY_EU_CHANNEL, &ch) == ESP_OK && ch >= 0 && ch < EU_N_CHANNELS) {
+    euChNvs = nvs_get_i8(h, NVS_KEY_EU_CHANNEL, &ch);
+    if (euChNvs == ESP_OK && ch >= 0 && ch < EU_N_CHANNELS) {
       s_euChannel = ch;
     }
     nvs_close(h);
   }
   s_inited = true;
+  // Пресет EU в таблице хранит 868.1 как «базу», но для EU/UK реальная частота — EU_CHANNELS[eu_ch] из NVS.
+  if (s_current.hasChannels) {
+    Serial.printf("[RiftLink] Region init: %s LoRa ch index=%d (%.1f MHz), NVS eu_ch=%s\n",
+        s_current.code, s_euChannel, getFreqForPreset(s_current),
+        euChNvs == ESP_OK ? "loaded" : "absent (default 0 until setChannel)");
+  }
 }
 
 bool isSet() {
@@ -129,6 +137,11 @@ int getChannelCount() {
 
 int getChannel() {
   return s_current.hasChannels ? s_euChannel : 0;
+}
+
+float getChannelMHz(int idx) {
+  if (idx < 0 || idx >= EU_N_CHANNELS) return 0.f;
+  return EU_CHANNELS[idx];
 }
 
 bool setChannel(int ch) {

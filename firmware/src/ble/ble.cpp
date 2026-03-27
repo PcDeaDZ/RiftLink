@@ -4,6 +4,7 @@
  */
 
 #include "ble.h"
+#include <cstdio>
 #include <string.h>
 #include <string_view>
 #include <new>
@@ -3380,6 +3381,14 @@ void update() {
 }
 
 bool isConnected() { return s_connected; }
+
+void getAdvertisingName(char* out, size_t outLen) {
+  if (!out || outLen == 0) return;
+  out[0] = '\0';
+  const uint8_t* id = node::getId();
+  snprintf(out, outLen, "RL-%02X%02X%02X%02X%02X%02X%02X%02X",
+      id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7]);
+}
 
 uint32_t getPasskey() { return s_passkey; }
 

@@ -125,4 +125,7 @@ bool isEncrypted(const PacketHeader& hdr);
 bool isAckReq(const PacketHeader& hdr);
 bool isCompressed(const PacketHeader& hdr);
 
+/** Смещение байта TTL от начала кадра (buf[0] = SYNC). Совпадает с main.cpp (ESP) при ретрансляции. */
+size_t ttlFieldOffsetBytes(const PacketHeader& hdr);
+
 }  // namespace protocol

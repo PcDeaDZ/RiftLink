@@ -4,7 +4,9 @@
 
 #include "node.h"
 #include "storage.h"
+#include "log.h"
 #include <Arduino.h>
+#include <stdio.h>
 #include <string.h>
 
 static uint8_t s_nodeId[protocol::NODE_ID_LEN];
@@ -26,6 +28,11 @@ void init() {
     } else {
       storage::getStr(STORAGE_KEY_NICKNAME, s_nickname, sizeof(s_nickname));
       s_inited = true;
+      char idHex[17] = {0};
+      for (size_t i = 0; i < protocol::NODE_ID_LEN; i++) {
+        sprintf(idHex + i * 2, "%02X", s_nodeId[i]);
+      }
+      RIFTLINK_DIAG("NODE", "event=NODE_ID id=%s new=0 source=storage", idHex);
       return;
     }
   }
@@ -35,10 +42,11 @@ void init() {
   for (size_t i = 0; i < protocol::NODE_ID_LEN; i++) {
     s_nodeId[i] = (uint8_t)(random(256));
   }
-  Serial.print("[RiftLink] Node ID: ");
-  Serial.print(s_nodeId[0], HEX);
-  Serial.print(s_nodeId[1], HEX);
-  Serial.println("... (new)");
+  char idHex[17] = {0};
+  for (size_t i = 0; i < protocol::NODE_ID_LEN; i++) {
+    sprintf(idHex + i * 2, "%02X", s_nodeId[i]);
+  }
+  RIFTLINK_DIAG("NODE", "event=NODE_ID id=%s new=1 source=random", idHex);
 
   storage::setBlob(STORAGE_KEY_NODEID, s_nodeId, protocol::NODE_ID_LEN);
   s_inited = true;
@@ -61,6 +69,17 @@ bool isBroadcast(const uint8_t* to) {
     if (to[i] != 0xFF) return false;
   }
   return true;
+}
+
+bool isInvalidNodeId(const uint8_t* id) {
+  if (!id) return true;
+  if (id[0] == 0xFF && id[1] == 0xFF) return true;
+  if (id[0] == 0x00 && id[1] == 0x00) return true;
+  if (id[0] == 0x03 && id[1] == 0x00) return true;
+  if (id[0] == 0x06 && id[1] == 0x00) return true;
+  if (id[0] == 0x1F && id[1] == 0x03) return true;
+  if (id[0] == 0x1F && id[1] == 0x06) return true;
+  return false;
 }
 
 void setNickname(const char* nick) {

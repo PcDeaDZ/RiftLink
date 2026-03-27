@@ -34,6 +34,9 @@ int getChannel();
 /** Установить канал (0–2). Только для EU/UK. Возвращает true при успехе */
 bool setChannel(int ch);
 
+/** Частота несущей для канала idx (0..getChannelCount()-1) при EU/UK; иначе 0 */
+float getChannelMHz(int idx);
+
 /** Channel Hopping: при congestion переключить на следующий канал (EU 868.1→868.3→868.5). Rate-limited. */
 void switchChannelOnCongestion();
 

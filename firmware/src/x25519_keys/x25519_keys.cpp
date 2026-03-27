@@ -64,6 +64,13 @@ static SemaphoreHandle_t s_mutex = nullptr;
 #define KEY_RESP_SLOT_STEP_MS 70
 #define KEY_RESP_SLOT_JITTER_SPAN_MS 18
 #define KEY_STALE_SECOND_CHANCE_MS 160  // второй шанс после hello_stale_refresh (anti-loss, low-noise)
+
+/** hello / hello_fwd / retry — первичный обмен без ключа; retry идёт с forceSend=false (main.cpp). */
+static bool isHandshakeKeyOfferReason(const char* reason) {
+  if (!reason) return false;
+  return strcmp(reason, "hello") == 0 || strcmp(reason, "hello_fwd") == 0 || strcmp(reason, "retry") == 0;
+}
+
 struct ThrottleEntry {
   std::atomic<uint32_t> idLo;
   std::atomic<uint32_t> idHi;
@@ -436,22 +443,28 @@ void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, c
   // Для force-ответа на свежий KEY_EXCHANGE debounce отключаем, иначе второй узел может не получить наш ключ.
   uint32_t now = millis();
   if (forceSend && !hadKeyBefore) {
-    uint32_t lastSend = 0;
-    if (throttleLastSendFor(peerId, &lastSend) && (now - lastSend < KEY_FORCE_MIN_GAP_MS)) {
-      xSemaphoreGive(s_mutex);
-      RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=force_min_gap peer=%02X%02X delta_ms=%lu min_gap_ms=%lu reason=%s",
-          peerId[0], peerId[1], (unsigned long)(now - lastSend),
-          (unsigned long)KEY_FORCE_MIN_GAP_MS, safeReason(reason));
-      return;
+    const bool isKeyRxResponse = reason && strcmp(reason, "key_rx") == 0;
+    if (!isKeyRxResponse) {
+      uint32_t lastSend = 0;
+      if (throttleLastSendFor(peerId, &lastSend) && (now - lastSend < KEY_FORCE_MIN_GAP_MS)) {
+        xSemaphoreGive(s_mutex);
+        RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=force_min_gap peer=%02X%02X delta_ms=%lu min_gap_ms=%lu reason=%s",
+            peerId[0], peerId[1], (unsigned long)(now - lastSend),
+            (unsigned long)KEY_FORCE_MIN_GAP_MS, safeReason(reason));
+        return;
+      }
     }
   }
   if (!bypassDebounce) {
-    uint32_t lastSend = 0;
-    if (throttleLastSendFor(peerId, &lastSend) && (now - lastSend < KEY_DEBOUNCE_MS)) {
-      xSemaphoreGive(s_mutex);
-      RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=debounce peer=%02X%02X delta_ms=%lu reason=%s",
-          peerId[0], peerId[1], (unsigned long)(now - lastSend), safeReason(reason));
-      return;
+    /* Не глушить ответ на HELLO из‑за недавнего retry/key_tx (типично <1500 ms). */
+    if (!isHandshakeKeyOfferReason(reason)) {
+      uint32_t lastSend = 0;
+      if (throttleLastSendFor(peerId, &lastSend) && (now - lastSend < KEY_DEBOUNCE_MS)) {
+        xSemaphoreGive(s_mutex);
+        RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=debounce peer=%02X%02X delta_ms=%lu reason=%s",
+            peerId[0], peerId[1], (unsigned long)(now - lastSend), safeReason(reason));
+        return;
+      }
     }
   } else {
     RIFTLINK_DIAG("KEY", "event=KEY_TX_FORCE_RESPONSE peer=%02X%02X reason=%s",
@@ -461,26 +474,29 @@ void sendKeyExchange(const uint8_t* peerId, bool forceSend, bool hadKeyBefore, c
   if (forceSend && !hadKeyBefore) {
     // Первый ответ — без длинного троттла, пир ждёт наш ключ
   } else {
-    // Recovery paths when key existed but channel side may be asymmetric/stale:
-    // - key_rx_dup: peer lost pairwise state while pubkey stayed same
-    // - decrypt_fail*: decrypt failed even though hasKeyFor() may still be true
-    // Use medium throttle to heal asymmetry faster without enabling KEY storm.
-    bool isDupRecovery = forceSend && hadKeyBefore && reason && strcmp(reason, "key_rx_dup") == 0;
-    bool isDecryptRecovery = forceSend && hadKeyBefore && reason &&
-                             strncmp(reason, "decrypt_fail", strlen("decrypt_fail")) == 0;
-    bool isHelloStaleRecovery = forceSend && hadKeyBefore && reason &&
-                                strcmp(reason, "hello_stale_refresh") == 0;
-    uint32_t throttleMs = isDupRecovery ? KEY_DUP_RECOVERY_THROTTLE_MS
-                                        : ((isDecryptRecovery || isHelloStaleRecovery) ? KEY_EXCHANGE_THROTTLE_MS
-                                                             : (hadKeyBefore ? KEY_RESPONSE_THROTTLE_MS
-                                                                             : KEY_EXCHANGE_THROTTLE_MS));
-    uint32_t lastSend = 0;
-    if (throttleLastSendFor(peerId, &lastSend) && (now - lastSend < throttleMs)) {
-      xSemaphoreGive(s_mutex);
-      RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=throttle peer=%02X%02X delta_ms=%lu throttle_ms=%lu reason=%s",
-          peerId[0], peerId[1], (unsigned long)(now - lastSend),
-          (unsigned long)throttleMs, safeReason(reason));
-      return;  // троттл — ключ уже был, не дрочить
+    /* hello / hello_fwd / retry: не резать 8 с (retry вызывается с forceSend=false). */
+    if (!isHandshakeKeyOfferReason(reason)) {
+      // Recovery paths when key existed but channel side may be asymmetric/stale:
+      // - key_rx_dup: peer lost pairwise state while pubkey stayed same
+      // - decrypt_fail*: decrypt failed even though hasKeyFor() may still be true
+      // Use medium throttle to heal asymmetry faster without enabling KEY storm.
+      bool isDupRecovery = forceSend && hadKeyBefore && reason && strcmp(reason, "key_rx_dup") == 0;
+      bool isDecryptRecovery = forceSend && hadKeyBefore && reason &&
+                               strncmp(reason, "decrypt_fail", strlen("decrypt_fail")) == 0;
+      bool isHelloStaleRecovery = forceSend && hadKeyBefore && reason &&
+                                  strcmp(reason, "hello_stale_refresh") == 0;
+      uint32_t throttleMs = isDupRecovery ? KEY_DUP_RECOVERY_THROTTLE_MS
+                                          : ((isDecryptRecovery || isHelloStaleRecovery) ? KEY_EXCHANGE_THROTTLE_MS
+                                                               : (hadKeyBefore ? KEY_RESPONSE_THROTTLE_MS
+                                                                               : KEY_EXCHANGE_THROTTLE_MS));
+      uint32_t lastSend = 0;
+      if (throttleLastSendFor(peerId, &lastSend) && (now - lastSend < throttleMs)) {
+        xSemaphoreGive(s_mutex);
+        RIFTLINK_DIAG("KEY", "event=KEY_TX_SKIP cause=throttle peer=%02X%02X delta_ms=%lu throttle_ms=%lu reason=%s",
+            peerId[0], peerId[1], (unsigned long)(now - lastSend),
+            (unsigned long)throttleMs, safeReason(reason));
+        return;  // троттл — ключ уже был, не дрочить
+      }
     }
   }
 

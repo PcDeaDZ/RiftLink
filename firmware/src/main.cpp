@@ -51,6 +51,9 @@ SET_LOOP_TASK_STACK_SIZE(32768);
 #include "x25519_keys/x25519_keys.h"
 #include "wifi/wifi.h"
 #include "locale/locale.h"
+#include "ui/ui_nav_mode.h"
+#include "ui/ui_display_prefs.h"
+#include "ui/ui_tab_bar_idle.h"
 #include "voice_frag/voice_frag.h"
 #include "voice_buffers/voice_buffers.h"
 #include "gps/gps.h"
@@ -574,7 +577,8 @@ static void pollButtonAndQueue() {
     if (displayGetCurrentScreen() == s_pendingScreen) {
       s_pendingScreen = 0xFF;
     } else if ((now - s_pendingScreenTime) >= PENDING_REDRAW_RETRY_MS) {
-      queueDisplayRedraw(s_pendingScreen, true);
+      queueDisplayRedraw((uint8_t)displayGetCurrentScreen(), true);
+      s_pendingScreen = (uint8_t)displayGetCurrentScreen();
       s_pendingScreenTime = now;
     }
   }
@@ -610,11 +614,18 @@ static void pollButtonAndQueue() {
     } else if (hold >= LONG_PRESS_MS) {
       s_pendingScreen = 0xFF;  // long press — не смена вкладки
       queueDisplayLongPress((uint8_t)cur);
+      displayNotifyTabChromeActivity();
     } else {
-      uint8_t next = (uint8_t)displayGetNextScreen(cur);
-      queueDisplayRedraw(next, true);  // priority — смена вкладки кнопкой в начало очереди
-      s_pendingScreen = next;
-      s_pendingScreenTime = now;
+      if (displayTryRevealTabBarRowOnly()) {
+        queueDisplayRedraw((uint8_t)displayGetCurrentScreen(), true);
+        s_pendingScreen = 0xFF;
+      } else {
+        uint8_t next = (uint8_t)displayHandleShortPress();
+        queueDisplayRedraw(next, true);  // priority — смена вкладки кнопкой в начало очереди
+        s_pendingScreen = next;
+        s_pendingScreenTime = now;
+      }
+      displayNotifyTabChromeActivity();
     }
     queueDisplayLedBlink();
   }
@@ -1083,11 +1094,13 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 
   // Relay: unicast не для нас, или GROUP_MSG (broadcast) с TTL>0
   // HELLO — всегда broadcast, не ретранслируем (защита от парсинга с перепутанным to)
+  // KEY_EXCHANGE — только прямой unicast, не ретранслируем (паритет с faketec/main.cpp)
   // ROUTE_REQ/REPLY обрабатываются модулем routing
   // Broadcast relay только при 2+ соседях — иначе ping-pong между двумя устройствами, HELLO не проходят
   bool needRelay = (hdr.ttl > 0) && (hdr.opcode != protocol::OP_ROUTE_REQ) &&
       (hdr.opcode != protocol::OP_ROUTE_REPLY) && (hdr.opcode != protocol::OP_HELLO) &&
-      (hdr.opcode != protocol::OP_SF_BEACON) && (hdr.opcode != protocol::OP_NACK) && (
+      (hdr.opcode != protocol::OP_SF_BEACON) && (hdr.opcode != protocol::OP_NACK) &&
+      (hdr.opcode != protocol::OP_KEY_EXCHANGE) && (
       (!node::isForMe(hdr.to) && !node::isBroadcast(hdr.to)) ||
       ((hdr.opcode == protocol::OP_GROUP_MSG || hdr.opcode == protocol::OP_VOICE_MSG || hdr.opcode == protocol::OP_SOS) &&
        neighbors::getCount() >= 2));
@@ -1245,15 +1258,15 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         }
         bool keyMismatch = x25519_keys::isPeerPubKeyMismatch(hdr.from, payload);
         if (keyMismatch) {
-          RIFTLINK_DIAG("KEY", "event=KEY_STORE_FAIL cause=pubkey_mismatch peer=%02X%02X pktId=%u",
+          /* Пир сменил ключевую пару (перепрошивка, сброс NVS/FS) при том же node id — не блокировать
+           * пару V3↔FakeTech: пересчитать shared secret через onKeyExchange ниже. */
+          RIFTLINK_DIAG("KEY", "event=KEY_ROTATE peer=%02X%02X pktId=%u (pubkey changed, accepting)",
               hdr.from[0], hdr.from[1], (unsigned)hdr.pktId);
-          RIFTLINK_LOG_ERR("[RiftLink] KEY_EXCHANGE mismatch for %02X%02X — possible key substitution\n",
+          RIFTLINK_LOG_EVENT("[RiftLink] KEY_EXCHANGE: peer pubkey changed, re-key for %02X%02X\n",
               hdr.from[0], hdr.from[1]);
-          ble::notifyError("invite_peer_key_mismatch", "Peer public key mismatch");
-          break;
         }
         bool hadKey = x25519_keys::hasKeyFor(hdr.from);
-        if (hadKey) {
+        if (hadKey && !keyMismatch) {
           RIFTLINK_DIAG("KEY", "event=KEY_RX_DUP from=%02X%02X pktId=%u action=reply_with_throttle",
               hdr.from[0], hdr.from[1], (unsigned)hdr.pktId);
           extendHandshakeQuiet("key_rx_dup");
@@ -2044,6 +2057,9 @@ void setup() {
   // boot_radio=1 и есть STA-креды (см. radio_mode::bootShouldTryWifi). Явный выбор BLE в приложении
   // пишет boot_radio=0, SSID при этом может оставаться сохранённым.
   locale::init();
+  ui_nav_mode::init();
+  ui_display_prefs::init();
+  ui_tab_bar_idle::init();
   displayInit();
   Serial.printf("[RiftLink] Heap after displayInit: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   displayShowBootScreen();
@@ -2059,36 +2075,44 @@ static void runBootStateMachine() {
     return;
   }
   s_bootPhase = BOOT_PHASE_DONE;
-  if (!locale::isSet()) {
+  while (!locale::isSet()) {
     displayShowLanguagePicker();
   }
   displayClear();
-  displaySetTextSize(1);
-  displayText(0, 0, locale::getForDisplay("init"));
-  displayShow();
+  displayShowInitProgress(0, 4, locale::getForDisplay("init_step_identity"));
+  Serial.println("[RiftLink] boot: node::init");
   node::init();
+  Serial.println("[RiftLink] boot: region::init");
   region::init();
+  Serial.println("[RiftLink] boot: crypto::init");
   crypto::init();
+  Serial.println("[RiftLink] boot: voice_buffers_init");
   voice_buffers_init();
+  Serial.println("[RiftLink] boot: x25519_keys::init");
   x25519_keys::init();
+  displayShowInitProgress(1, 4, locale::getForDisplay("init_step_radio"));
+  Serial.println("[RiftLink] boot: radio::init (SX1262 / SPI — при зависании смотрите сюда)");
   if (!radio::init()) {
     RIFTLINK_LOG_ERR("[RiftLink] Radio init FAILED\n");
-    displayText(0, 10, locale::getForDisplay("radio_fail"));
-    displayShow();
+    displayShowInitProgress(2, 4, locale::getForDisplay("radio_fail"));
   } else {
-    displayText(0, 10, locale::getForDisplay("radio_ok"));
-    displayShow();
+    displayShowInitProgress(2, 4, locale::getForDisplay("radio_ok"));
   }
   Serial.printf("[RiftLink] Heap after radio::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  Serial.println("[RiftLink] boot: selftest::quickAntennaCheck");
   if (!selftest::quickAntennaCheck()) {
     displayShowWarning(locale::getForDisplay("antenna_warn"), locale::getForDisplay("antenna_check"), 3000);
   }
-  if (!region::isSet()) {
+  displayShowInitProgress(2, 4, locale::getForDisplay("init_step_region"));
+  while (!region::isSet()) {
     displayShowRegionPicker();
   }
+  displayShowInitProgress(3, 4, locale::getForDisplay("init_step_ble"));
+  Serial.println("[RiftLink] boot: ble::init");
   if (!ble::init()) {
     RIFTLINK_LOG_ERR("[RiftLink] BLE init FAILED — устройство не будет видно в скане\n");
   }
+  displayShowInitProgress(4, 4, locale::getForDisplay("init_step_done"));
   Serial.printf("[RiftLink] Heap after ble::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   memoryDiagLog("ble");
   ble::setOnSend(sendMsg);

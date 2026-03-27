@@ -1,4 +1,5 @@
 # PlatformIO / firmware
+firmware/.cache/
 firmware/.pio/
 firmware/.pioenvs/
 firmware/.piocore/

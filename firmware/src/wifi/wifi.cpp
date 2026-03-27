@@ -254,6 +254,17 @@ bool isConnected() {
   return s_available && WiFi.status() == WL_CONNECTED;
 }
 
+bool isStaConnecting() {
+  if (!s_available) return false;
+  if (WiFi.status() == WL_CONNECTED) return false;
+  if (!hasCredentials()) return false;
+  const wifi_mode_t mode = WiFi.getMode();
+  if (mode != WIFI_STA && mode != WIFI_AP_STA) return false;
+  const wl_status_t st = WiFi.status();
+  if (st == WL_CONNECT_FAILED || st == WL_NO_SSID_AVAIL) return false;
+  return true;
+}
+
 void getStatus(char* ssidOut, size_t ssidLen, char* ipOut, size_t ipLen) {
   if (ssidOut && ssidLen > 0) ssidOut[0] = '\0';
   if (ipOut && ipLen > 0) ipOut[0] = '\0';

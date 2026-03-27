@@ -24,6 +24,8 @@ bool getSavedSsid(char* out, size_t outLen);
 bool connect();
 void disconnect();
 bool isConnected();
+/** STA подключается (есть креды, STA поднят, ещё не WL_CONNECTED и не окончательная ошибка). */
+bool isStaConnecting();
 void getStatus(char* ssid, size_t ssidLen, char* ip, size_t ipLen);
 bool hasCredentials();
 
