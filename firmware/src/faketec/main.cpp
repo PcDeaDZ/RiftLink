@@ -57,6 +57,13 @@ static uint32_t s_lastKeyRetry = 0;
 static int s_keyRetryRoundRobin = 0;
 static uint32_t s_keyRetryCooldownUntil = 0;
 static uint32_t s_lastDiagSnapshotMs = 0;
+/** Интервалы KEY retry — те же, что в ESP `main.cpp`. */
+static constexpr uint32_t KEY_RETRY_BASE_MS = 45000;
+static constexpr uint32_t KEY_RETRY_JITTER_MS = 15000;
+static constexpr uint32_t KEY_RETRY_EXTRA_JITTER_MS = 3000;
+static constexpr uint32_t KEY_RETRY_SMALL_MESH_BASE_MS = 12000;
+static constexpr uint32_t KEY_RETRY_SMALL_MESH_JITTER_MS = 4000;
+static constexpr uint32_t KEY_RETRY_SMALL_MESH_EXTRA_JITTER_MS = 1500;
 #if defined(RIFTLINK_BOARD_HELTEC_T114)
 static bool s_t114BtnPrev = false;
 #endif
@@ -280,12 +287,6 @@ void loop() {
   mesh_hello_nrf_loop();
 
   // Паритет с ESP: периодический retry KEY_EXCHANGE (см. main.cpp KEY_RETRY_*).
-  #define KEY_RETRY_BASE_MS 45000
-  #define KEY_RETRY_JITTER_MS 15000
-  #define KEY_RETRY_EXTRA_JITTER_MS 3000
-  #define KEY_RETRY_SMALL_MESH_BASE_MS 12000
-  #define KEY_RETRY_SMALL_MESH_JITTER_MS 4000
-  #define KEY_RETRY_SMALL_MESH_EXTRA_JITTER_MS 1500
   if (millis() >= s_lastKeyRetry && millis() >= s_keyRetryCooldownUntil) {
     int n = neighbors::getCount();
     const bool smallMesh = (n <= 2);
@@ -400,6 +401,9 @@ void loop() {
       } else {
         Serial.println("[RiftLink] ping <hex16>");
       }
+    } else if (cmd == "region") {
+      Serial.printf("[RiftLink] Region: %s (%.1f MHz) channel=%d\n", region::getCode(), (double)region::getFreq(),
+          region::getChannel());
     } else if (cmd.startsWith("region ")) {
       String r = cmd.substring(7);
       r.trim();
@@ -449,6 +453,12 @@ void loop() {
       }
     } else if (cmd == "memdiag") {
       memoryDiagLog("serial");
+    } else if (cmd == "bat" || cmd == "battery") {
+      uint16_t mv = telemetry::readBatteryMv();
+      int pct = telemetry::batteryPercent();
+      Serial.printf("[RiftLink] Battery: %umV", (unsigned)mv);
+      if (pct >= 0) Serial.printf(" ~%d%%", pct);
+      Serial.printf(" charging=%s\n", telemetry::isCharging() ? "yes" : "no");
     } else if (cmd == "node" || cmd == "id") {
       const uint8_t* nid = node::getId();
       char hex[protocol::NODE_ID_LEN * 2 + 1];
@@ -471,7 +481,9 @@ void loop() {
         if (!neighbors::getId(i, id)) continue;
         neighbors::getIdHex(i, hex);
         const bool hasKey = x25519_keys::hasKeyFor(id);
-        Serial.printf("  %d: %s rssi=%d key=%s\n", i, hex, neighbors::getRssi(i), hasKey ? "yes" : "no");
+        const int batMv = neighbors::getBatteryMv(id);
+        Serial.printf("  %d: %s rssi=%d key=%s bat_mv=%d\n", i, hex, neighbors::getRssi(i), hasKey ? "yes" : "no",
+            batMv);
       }
     } else if (cmd == "gps") {
       int rx = 0, tx = 0, en = 0;
@@ -525,7 +537,7 @@ void loop() {
       Serial.println("[RiftLink] powersave: на nRF52840 не реализовано (см. docs/API.md, evt:error powersave_unsupported)");
     } else if (cmd == "help" || cmd == "?") {
       Serial.println(
-          "[RiftLink] Serial: send|ping|node|region|channel|nickname|route|lang|memdiag|neighbors|gps|selftest|sf|"
+          "[RiftLink] Serial: send|ping|node|region|channel|nickname|route|lang|memdiag|bat|neighbors|gps|selftest|sf|"
           "modemscan|powersave|espnow|version|uptime|help");
     }
   }
