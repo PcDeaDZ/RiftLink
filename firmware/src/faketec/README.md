@@ -94,7 +94,7 @@ pio run -t upload -e faketec_v5
 
 - **LoRa mesh:** HELLO, MSG, ACK, relay (в т.ч. XOR / deferred relay), маршрутизация и очереди исходящих как на V3 (без Wi‑Fi)
 - **Дисплей:** автоопределение I2C OLED (SSD1306 @ 0x3C)
-- **Команды:** BLE GATT (UUID как в `docs/API.md`) и USB Serial — JSON, до 512 байт на запись. В USB Serial для отладки — те же сценарии, что и в перечне **§4 `docs/API.md`** (включая **`node`**, **`espnow`**, **`powersave`**, **`version`**, **`uptime`**, расширенный **`sf`**). Двухузловой ручной чеклист: [`docs/NRF52_PARITY_CHECKLIST.md`](../../../docs/NRF52_PARITY_CHECKLIST.md).
+- **Команды:** BLE GATT (UUID как в `docs/API.md`) и USB Serial — JSON, до 512 байт на запись. В USB Serial для отладки — те же сценарии, что и в перечне **§4 `docs/API.md`**, в т.ч. паритет с **BLE JSON** по смыслу: `info`, `modem`/`modemCustom`, `sf N`, `traceroute`, `read`, `loraScan`, `signalTest`. Двухузловой ручной чеклист: [`docs/NRF52_PARITY_CHECKLIST.md`](../../../docs/NRF52_PARITY_CHECKLIST.md).
 - **Совместимость:** тот же протокол, что и Heltec — узлы в одной сети
 
 ## Совместимость с Heltec V3 (приём / «вижу только в одну сторону»)

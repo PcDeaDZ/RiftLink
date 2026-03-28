@@ -74,6 +74,50 @@ static void nrf_system_reset_now() {
   }
 }
 
+static int parse_modem_preset_arg(const String& arg) {
+  String t = arg;
+  t.trim();
+  t.toLowerCase();
+  if (t.length() == 0) return -1;
+  if (t.length() == 1 && t[0] >= '0' && t[0] <= '3') return t[0] - '0';
+  if (t == "speed" || t == "spaid") return 0;
+  if (t == "normal") return 1;
+  if (t == "range") return 2;
+  if (t == "maxrange" || t == "max_range") return 3;
+  return -1;
+}
+
+static uint16_t s_serialDiagPktId = 1;
+
+/** Паритет с BLE `signalTest`: PING всем соседям (до 8). */
+static void nrf_serial_signal_test() {
+  int n = neighbors::getCount();
+  if (n == 0) {
+    Serial.println("[RiftLink] signalTest: no neighbors");
+    return;
+  }
+  int sent = 0;
+  const int nMax = (n > 8) ? 8 : n;
+  for (int i = 0; i < nMax; i++) {
+    uint8_t peerId[protocol::NODE_ID_LEN];
+    if (!neighbors::getId(i, peerId)) continue;
+    uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN_PKTID + 64];
+    uint16_t pktId = ++s_serialDiagPktId;
+    size_t plen = protocol::buildPacket(pkt, sizeof(pkt), node::getId(), peerId, 31, protocol::OP_PING, nullptr, 0, false,
+        false, false, protocol::CHANNEL_DEFAULT, pktId);
+    if (plen > 0) {
+      uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(peerId));
+      char reasonBuf[40];
+      uint32_t delayMs = 140u + (uint32_t)(i * 220u) + (uint32_t)(random(90));
+      if (!queueTxPacket(pkt, plen, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
+        queueDeferredSend(pkt, plen, txSf, delayMs, true);
+      }
+      sent++;
+    }
+  }
+  Serial.printf("[RiftLink] signalTest: queued %d ping(s) (neighbors=%d)\n", sent, n);
+}
+
 /** Несколько экранов статуса на ST7789/OLED (кнопка T114 или Serial `status`/`dash`). */
 static uint8_t s_statusDashPage = 0;
 
@@ -507,8 +551,50 @@ void loop() {
       uint8_t target[protocol::NODE_ID_LEN];
       if (parseNodeIdHex16(hex16, target)) {
         routing::requestRoute(target);
+        Serial.println("[RiftLink] route: request sent");
       } else {
         Serial.println("[RiftLink] route <hex16>");
+      }
+    } else if (cmd.startsWith("traceroute ")) {
+      String hex16 = cmd.substring(11);
+      hex16.trim();
+      uint8_t target[protocol::NODE_ID_LEN];
+      if (parseNodeIdHex16(hex16, target)) {
+        routing::requestRoute(target);
+        Serial.println("[RiftLink] traceroute: request sent (same as route)");
+      } else {
+        Serial.println("[RiftLink] traceroute <hex16>");
+      }
+    } else if (cmd.startsWith("read ")) {
+      String rest = cmd.substring(5);
+      rest.trim();
+      int sp = rest.indexOf(' ');
+      if (sp < 0) {
+        Serial.println("[RiftLink] read <hex16> <msgId>");
+      } else {
+        String hex16 = rest.substring(0, sp);
+        uint32_t msgId = (uint32_t)rest.substring(sp + 1).toInt();
+        hex16.trim();
+        uint8_t to[protocol::NODE_ID_LEN];
+        if (!parseNodeIdHex16(hex16, to) || msgId == 0) {
+          Serial.println("[RiftLink] read <hex16> <msgId>");
+        } else {
+          uint8_t payload[4];
+          memcpy(payload, &msgId, 4);
+          uint8_t pkt[protocol::PAYLOAD_OFFSET + 4];
+          size_t pktLen =
+              protocol::buildPacket(pkt, sizeof(pkt), node::getId(), to, 31, protocol::OP_READ, payload, 4, false, false);
+          if (pktLen > 0) {
+            uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(to));
+            char reasonBuf[40];
+            if (!queueTxPacket(pkt, pktLen, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
+              queueDeferredSend(pkt, pktLen, txSf, 60 + (uint32_t)(random(40)), true);
+            }
+            Serial.printf("[RiftLink] READ sent msgId=%lu\n", (unsigned long)msgId);
+          } else {
+            Serial.println("[RiftLink] READ build failed");
+          }
+        }
       }
     } else if (cmd.startsWith("lang ")) {
       String l = cmd.substring(5);
@@ -538,6 +624,21 @@ void loop() {
       char nick[20];
       node::getNickname(nick, sizeof(nick));
       Serial.printf("[RiftLink] node_id=%s nickname=%s\n", hex, nick);
+    } else if (cmd == "info") {
+      const uint8_t* nid = node::getId();
+      char idfull[protocol::NODE_ID_LEN * 2 + 1];
+      for (int i = 0; i < (int)protocol::NODE_ID_LEN; i++) {
+        snprintf(idfull + i * 2, 3, "%02X", nid[i]);
+      }
+      char nick[20];
+      node::getNickname(nick, sizeof(nick));
+      Serial.printf("[RiftLink] info id=%s nick=%s\n", idfull, nick);
+      Serial.printf("[RiftLink]   region=%s %.2fMHz ch=%d tx=%ddBm\n", region::getCode(), (double)region::getFreq(),
+          region::getChannel(), region::getPower());
+      Serial.printf("[RiftLink]   modem=%s SF%u bw=%.0f cr=%u\n", radio::modemPresetName(radio::getModemPreset()),
+          (unsigned)radio::getSpreadingFactor(), (double)radio::getBandwidth(), (unsigned)radio::getCodingRate());
+      Serial.printf("[RiftLink]   ble=%s neighbors=%d\n", ble::isConnected() ? "connected" : "advertising",
+          neighbors::getCount());
     } else if (cmd.startsWith("espnow ")) {
       Serial.println("[RiftLink] ESP-NOW не на nRF52840 (см. docs/API.md, Wi‑Fi не используется)");
     } else if (cmd == "espnow") {
@@ -605,6 +706,52 @@ void loop() {
       selftest::ScanResult sr[16];
       int n = selftest::modemScan(sr, 16);
       Serial.printf("[RiftLink] modemScan: found %d\n", n);
+    } else if (cmd.startsWith("modemCustom ")) {
+      int sf = -1, cr = -1;
+      float bw = -1.0f;
+      int nscan = sscanf(cmd.c_str() + 12, "%d %f %d", &sf, &bw, &cr);
+      if (nscan == 3 && sf >= 7 && sf <= 12 && bw > 0 && cr >= 5 && cr <= 8) {
+        if (radio::requestCustomModem((uint8_t)sf, bw, (uint8_t)cr)) {
+          Serial.printf("[RiftLink] modemCustom: SF%u BW%.1f CR%u\n", (unsigned)sf, (double)bw, (unsigned)cr);
+        } else {
+          Serial.println("[RiftLink] modemCustom: radio busy");
+        }
+      } else {
+        Serial.println("[RiftLink] modemCustom <sf 7-12> <bw_kHz> <cr 5-8>");
+      }
+    } else if (cmd == "modem" || cmd.startsWith("modem ")) {
+      if (cmd.length() <= 5) {
+        Serial.printf("[RiftLink] modem: %s SF%u bw=%.0f cr=%u\n", radio::modemPresetName(radio::getModemPreset()),
+            (unsigned)radio::getSpreadingFactor(), (double)radio::getBandwidth(), (unsigned)radio::getCodingRate());
+      } else {
+        int p = parse_modem_preset_arg(cmd.substring(6));
+        if (p >= 0 && p < 4) {
+          if (radio::requestModemPreset((radio::ModemPreset)p)) {
+            Serial.printf("[RiftLink] modem preset %d OK\n", p);
+          } else {
+            Serial.println("[RiftLink] modem: radio busy");
+          }
+        } else {
+          Serial.println("[RiftLink] modem [0..3|speed|normal|range|maxrange]");
+        }
+      }
+    } else if (cmd.startsWith("sf ")) {
+      int sf = cmd.substring(3).toInt();
+      if (sf >= 7 && sf <= 12) {
+        if (radio::requestSpreadingFactor((uint8_t)sf)) {
+          Serial.printf("[RiftLink] SF=%u OK\n", (unsigned)sf);
+        } else {
+          Serial.println("[RiftLink] sf: radio busy");
+        }
+      } else {
+        Serial.println("[RiftLink] sf <7..12>");
+      }
+    } else if (cmd == "loraScan") {
+      selftest::ScanResult sr[8];
+      int n = selftest::modemScanQuick(sr, 8);
+      Serial.printf("[RiftLink] loraScan: found %d (BLE parity)\n", n);
+    } else if (cmd == "signalTest") {
+      nrf_serial_signal_test();
     } else if (cmd == "powersave") {
       Serial.printf("[RiftLink] Power save: не на nRF52840 (BLE %s)\n", ble::isConnected() ? "connected" : "disconnected");
     } else if (cmd == "powersave on" || cmd == "powersave off") {
@@ -627,8 +774,9 @@ void loop() {
       nrf_system_reset_now();
     } else if (cmd == "help" || cmd == "?") {
       Serial.println(
-          "[RiftLink] Serial: send|ping|node|region|channel|nickname|route|lang|memdiag|bat|neighbors|gps|selftest|sf|"
-          "modemscan|powersave|espnow|wifi|ota|ws|status|dash|reboot|version|uptime|help");
+          "[RiftLink] Serial: send|ping|info|node|region|channel|nickname|route|traceroute|read|lang|memdiag|bat|"
+          "neighbors|gps|selftest|sf|sf N|modem|modemCustom|modemscan|loraScan|signalTest|powersave|espnow|wifi|ota|ws|"
+          "status|dash|reboot|version|uptime|help");
     }
   }
 

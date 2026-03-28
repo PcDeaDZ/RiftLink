@@ -18,6 +18,7 @@
 | 4 | Broadcast (если используете) | `evt` на телефоне согласовано с ESP |
 | 5 | Serial `node` / `region` / `sf` / `bat` / `modemscan quick` / `neighbors` на nRF | ID, регион/канал, модем, локальная батарея, соседи с **bat_mv** |
 | 5b | `espnow` / `powersave` в Serial | Ответы-заглушки (нет Wi‑Fi / нет powersave как на ESP) |
+| 5c | Serial `info` / `modem` / `sf 9` / `signalTest` / `read` | Соответствуют BLE-командам по смыслу (см. `docs/API.md` §4) |
 | 5a | Фоновый **KEY retry** (как на ESP) | В логе `KEY_RETRY_TARGET` при соседе без ключа; сессия устанавливается без ручного `ping` |
 | 6 | T114: экран, кнопка — **переключение страниц дашборда** (0/1/2), Serial `status`/`dash`; LED при старте | Соответствует плате |
 | 7 | Телеметрия / `evt:telemetry` | На T114 — разумное напряжение батареи при питании от аккумулятора |
