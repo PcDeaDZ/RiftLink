@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace display_nrf {
@@ -24,5 +25,14 @@ void show_status_screen(const char* line1, const char* line2, const char* line3,
 
 /** Вызывать из loop: отложенная перерисовка last msg. */
 void poll();
+
+/** Список меню: [scroll..scroll+visible) строк, selected — индекс в полном списке. */
+void show_menu_list(const char* title, const char* const* labels, int count, int selected, int scroll);
+
+/** Многострочный экран (body с \\n). */
+void show_fullscreen_text(const char* title, const char* body);
+
+/** Последнее сообщение для экрана «Сообщения». */
+void get_last_msg_peek(char* fromBuf, size_t fromLen, char* textBuf, size_t textLen);
 
 }  // namespace display_nrf

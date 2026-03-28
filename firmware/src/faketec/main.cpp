@@ -18,6 +18,7 @@
 #include "groups/groups.h"
 #include "handle_packet_nrf.h"
 #include "display_nrf.h"
+#include "menu_nrf.h"
 #include "kv.h"
 #include "mab/mab.h"
 #include "msg_queue/msg_queue.h"
@@ -122,42 +123,6 @@ static void nrf_serial_signal_test() {
   Serial.printf("[RiftLink] signalTest: queued %d ping(s) (neighbors=%d)\n", sent, n);
 }
 
-/** Несколько экранов статуса на ST7789/OLED (кнопка T114 или Serial `status`/`dash`). */
-static uint8_t s_statusDashPage = 0;
-
-static void nrf_refresh_status_dashboard(uint8_t page) {
-  if (!display_nrf::is_ready()) return;
-  if (page > 2) page = 0;
-  char l1[32], l2[32], l3[40], l4[40];
-  const uint8_t* nid = node::getId();
-  char idshort[12];
-  snprintf(idshort, sizeof(idshort), "%02X%02X%02X%02X", nid[0], nid[1], nid[2], nid[3]);
-  if (page == 0) {
-    snprintf(l1, sizeof(l1), "RiftLink %s", RIFTLINK_VERSION);
-    snprintf(l2, sizeof(l2), "ID %s..", idshort);
-    snprintf(l3, sizeof(l3), "%s %.2f ch%d", region::getCode(), (double)region::getFreq(), region::getChannel());
-    snprintf(l4, sizeof(l4), "SF%u n=%d %s", (unsigned)radio::getSpreadingFactor(), neighbors::getCount(),
-        radio::modemPresetName(radio::getModemPreset()));
-  } else if (page == 1) {
-    snprintf(l1, sizeof(l1), "Mesh / BLE");
-    snprintf(l2, sizeof(l2), "n=%d", neighbors::getCount());
-    snprintf(l3, sizeof(l3), "%s", ble::isConnected() ? "BLE connected" : "BLE advertising");
-    if (neighbors::getCount() <= 0) {
-      snprintf(l4, sizeof(l4), "minRSSI --");
-    } else {
-      int mr = neighbors::getMinRssi();
-      snprintf(l4, sizeof(l4), "minRSSI %d", mr < 0 ? mr : -120);
-    }
-  } else {
-    uint16_t mv = telemetry::readBatteryMv();
-    snprintf(l1, sizeof(l1), "Power / time");
-    snprintf(l2, sizeof(l2), "Bat %umV", (unsigned)mv);
-    snprintf(l3, sizeof(l3), "heap %u kB", (unsigned)nrf_heap_kb());
-    snprintf(l4, sizeof(l4), "up %lus", (unsigned long)(millis() / 1000UL));
-  }
-  display_nrf::show_status_screen(l1, l2, l3, l4);
-}
-
 static uint8_t s_rxBuf[PACKET_BUF_SIZE];
 static constexpr uint32_t TELEM_INTERVAL_MS = 60000;
 static uint32_t s_lastTelemetryMs = 0;
@@ -176,10 +141,6 @@ static constexpr uint32_t KEY_RETRY_EXTRA_JITTER_MS = 3000;
 static constexpr uint32_t KEY_RETRY_SMALL_MESH_BASE_MS = 12000;
 static constexpr uint32_t KEY_RETRY_SMALL_MESH_JITTER_MS = 4000;
 static constexpr uint32_t KEY_RETRY_SMALL_MESH_EXTRA_JITTER_MS = 1500;
-#if defined(RIFTLINK_BOARD_HELTEC_T114)
-static bool s_t114BtnPrev = false;
-#endif
-
 /** USB CDC на nRF часто не принимает данные, пока хост не открыл COM — ранний println «теряется». Дублируем на Serial1 (TX=GPIO6 в variant). */
 #if !defined(RIFTLINK_NO_UART1_LOG)
 static void uart1_begin() {
@@ -363,6 +324,7 @@ void setup() {
     log_line("[RiftLink] OLED init failed (проверьте I2C и env)");
   } else {
     display_nrf::show_boot("RiftLink", "nRF52840");
+    menu_nrf_init();
   }
 #endif
 
@@ -388,7 +350,7 @@ void loop() {
     }
   }
 
-  display_nrf::poll();
+  if (!menu_nrf_owns_display()) display_nrf::poll();
 
   mesh_hello_nrf_loop();
 
@@ -614,6 +576,7 @@ void loop() {
       int lang = (l == "ru") ? LANG_RU : LANG_EN;
       if (l == "en" || l == "ru") {
         locale::setLang(lang);
+        menu_nrf_redraw_after_locale();
         Serial.printf("[RiftLink] Language: %s\n", l.c_str());
       } else {
         Serial.println("[RiftLink] lang en|ru");
@@ -773,13 +736,14 @@ void loop() {
       int pg = 0;
       if (cmd.startsWith("status ")) pg = cmd.substring(7).toInt();
       if (pg < 0 || pg > 2) pg = 0;
-      s_statusDashPage = (uint8_t)pg;
-      nrf_refresh_status_dashboard(s_statusDashPage);
-      Serial.printf("[RiftLink] status page %u (0=RF 1=mesh 2=bat)\n", (unsigned)s_statusDashPage);
+      menu_nrf_goto_dashboard((uint8_t)pg);
+      Serial.printf("[RiftLink] status page %u (0=RF 1=mesh 2=bat)\n", (unsigned)menu_nrf_dashboard_page());
     } else if (cmd == "dash") {
-      s_statusDashPage = 0;
-      nrf_refresh_status_dashboard(0);
+      menu_nrf_goto_dashboard(0);
       Serial.println("[RiftLink] status page 0");
+    } else if (cmd == "menu" || cmd == "mm") {
+      menu_nrf_open_menu();
+      Serial.println("[RiftLink] menu open");
     } else if (cmd == "reboot" || cmd == "rst") {
       Serial.println("[RiftLink] reboot...");
       nrf_system_reset_now();
@@ -787,20 +751,12 @@ void loop() {
       Serial.println(
           "[RiftLink] Serial: send|ping|info|node|region|channel|nickname|route|traceroute|read|lang|memdiag|bat|"
           "neighbors|gps|selftest|sf|sf N|modem|modemCustom|modemscan|loraScan|signalTest|powersave|espnow|wifi|ota|ws|"
-          "status|dash|reboot|version|uptime|help");
+          "status|dash|menu|reboot|version|uptime|help");
     }
   }
 
 #if defined(RIFTLINK_BOARD_HELTEC_T114)
-  {
-    bool pressed = digitalRead(T114_BUTTON_PIN) == LOW;
-    if (pressed && !s_t114BtnPrev) {
-      Serial.println("[RiftLink] T114 button: next screen");
-      s_statusDashPage = (uint8_t)((s_statusDashPage + 1) % 3);
-      nrf_refresh_status_dashboard(s_statusDashPage);
-    }
-    s_t114BtnPrev = pressed;
-  }
+  menu_nrf_poll_t114_button(digitalRead(T114_BUTTON_PIN) == LOW, millis());
 #endif
 
   /* Паритет с ESP main loop: BLE и очереди после эфира/Serial — отложенные notify из handlePacket снимаются здесь. */

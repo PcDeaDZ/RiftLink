@@ -10,6 +10,7 @@
 #include "groups/groups.h"
 #include "kv.h"
 #include "locale/locale.h"
+#include "menu_nrf.h"
 #include "log.h"
 #include "msg_queue/msg_queue.h"
 #include "neighbors/neighbors.h"
@@ -1788,8 +1789,13 @@ static void handleJsonCommand(const char* json, size_t len) {
   if (strcmp(cmd, "lang") == 0) {
     const char* lang = doc["lang"];
     if (lang) {
-      if (strcmp(lang, "ru") == 0) (void)locale::setLang(LANG_RU);
-      else if (strcmp(lang, "en") == 0) (void)locale::setLang(LANG_EN);
+      if (strcmp(lang, "ru") == 0) {
+        (void)locale::setLang(LANG_RU);
+        menu_nrf_redraw_after_locale();
+      } else if (strcmp(lang, "en") == 0) {
+        (void)locale::setLang(LANG_EN);
+        menu_nrf_redraw_after_locale();
+      }
     }
     /* Как ble.cpp: только смена локали, без emit info. */
     return;

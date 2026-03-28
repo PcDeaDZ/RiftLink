@@ -4,6 +4,7 @@
 
 #include "display_nrf.h"
 #include "board_pins.h"
+#include "locale/locale.h"
 
 #include <Arduino.h>
 #include <cstring>
@@ -75,11 +76,11 @@ void show_selftest_summary(bool radioOk, bool antennaOk, uint16_t batteryMv, uin
   g_tft.startWrite();
   g_tft.fillScreen(ST77XX_BLACK);
   g_tft.setCursor(0, 0);
-  g_tft.println(F("Selftest"));
-  g_tft.printf("Radio %s\n", radioOk ? "OK" : "FAIL");
-  g_tft.printf("Ant %s\n", antennaOk ? "OK" : "WARN");
-  g_tft.printf("Bat %umV\n", (unsigned)batteryMv);
-  g_tft.printf("Heap %u\n", (unsigned)heapFree);
+  g_tft.println(locale::getForDisplay("menu_selftest"));
+  g_tft.printf("%s\n", radioOk ? locale::getForDisplay("radio_ok") : locale::getForDisplay("radio_fail"));
+  g_tft.printf("%s\n", antennaOk ? locale::getForDisplay("selftest_ant_ok") : locale::getForDisplay("selftest_ant_warn"));
+  g_tft.printf("%s %umV\n", locale::getForDisplay("battery"), (unsigned)batteryMv);
+  g_tft.printf("%s %u\n", locale::getForDisplay("selftest_heap"), (unsigned)heapFree);
   g_tft.endWrite();
 }
 
@@ -127,11 +128,88 @@ void poll() {
   g_tft.startWrite();
   g_tft.fillScreen(ST77XX_BLACK);
   g_tft.setCursor(0, 0);
-  g_tft.println(F("Last msg"));
+  g_tft.println(locale::getForDisplay("last_msg_title"));
   if (g_line_from[0]) g_tft.println(g_line_from);
   if (g_line_text[0]) g_tft.println(g_line_text);
   g_tft.endWrite();
   g_last_dirty = false;
+}
+
+static constexpr int kMenuRowT114 = 12;
+static constexpr int kMenuTitleH = 14;
+
+void show_menu_list(const char* title, const char* const* labels, int count, int selected, int scroll) {
+  if (!g_ok || !labels || count < 1) return;
+  if (scroll < 0) scroll = 0;
+  if (scroll > count - 1) scroll = count - 1;
+  const int maxRows = (240 - kMenuTitleH) / kMenuRowT114;
+  if (scroll > selected) scroll = selected;
+  if (scroll < selected - maxRows + 1) scroll = selected - maxRows + 1;
+  if (scroll < 0) scroll = 0;
+
+  g_tft.setTextWrap(false);
+  g_tft.startWrite();
+  g_tft.fillScreen(ST77XX_BLACK);
+  g_tft.setTextSize(1);
+  g_tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  g_tft.setCursor(0, 2);
+  if (title) g_tft.print(title);
+  g_tft.drawFastHLine(0, kMenuTitleH - 1, 135, ST77XX_WHITE);
+
+  int y = kMenuTitleH;
+  for (int row = 0; row < maxRows; row++) {
+    int idx = scroll + row;
+    if (idx >= count) break;
+    const bool sel = (idx == selected);
+    if (sel) {
+      g_tft.fillRect(0, y, 135, kMenuRowT114, ST77XX_WHITE);
+      g_tft.setTextColor(ST77XX_BLACK, ST77XX_WHITE);
+    } else {
+      g_tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+    }
+    g_tft.setCursor(2, y + 2);
+    if (labels[idx]) g_tft.print(labels[idx]);
+    y += kMenuRowT114;
+  }
+  g_tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  g_tft.endWrite();
+}
+
+void show_fullscreen_text(const char* title, const char* body) {
+  if (!g_ok) return;
+  g_tft.startWrite();
+  g_tft.fillScreen(ST77XX_BLACK);
+  g_tft.setTextSize(1);
+  g_tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  g_tft.setCursor(0, 2);
+  if (title) g_tft.println(title);
+  g_tft.drawFastHLine(0, 12, 135, ST77XX_WHITE);
+  int y = 16;
+  if (body && body[0]) {
+    const char* p = body;
+    char line[28];
+    while (*p && y < 228) {
+      size_t n = 0;
+      while (*p && *p != '\n' && n < sizeof(line) - 1) line[n++] = *p++;
+      line[n] = 0;
+      if (*p == '\n') p++;
+      g_tft.setCursor(0, y);
+      g_tft.print(line);
+      y += 10;
+    }
+  }
+  g_tft.endWrite();
+}
+
+void get_last_msg_peek(char* fromBuf, size_t fromLen, char* textBuf, size_t textLen) {
+  if (fromBuf && fromLen) {
+    strncpy(fromBuf, g_line_from, fromLen - 1);
+    fromBuf[fromLen - 1] = 0;
+  }
+  if (textBuf && textLen) {
+    strncpy(textBuf, g_line_text, textLen - 1);
+    textBuf[textLen - 1] = 0;
+  }
 }
 
 }  // namespace display_nrf
@@ -199,11 +277,11 @@ void show_selftest_summary(bool radioOk, bool antennaOk, uint16_t batteryMv, uin
   if (!g_ok) return;
   g_disp.clearDisplay();
   g_disp.setCursor(0, 0);
-  g_disp.println(F("Selftest"));
-  g_disp.printf("Radio %s\n", radioOk ? "OK" : "FAIL");
-  g_disp.printf("Ant   %s\n", antennaOk ? "OK" : "WARN");
-  g_disp.printf("Bat %umV\n", (unsigned)batteryMv);
-  g_disp.printf("Heap %u\n", (unsigned)heapFree);
+  g_disp.println(locale::getForDisplay("menu_selftest"));
+  g_disp.printf("%s\n", radioOk ? locale::getForDisplay("radio_ok") : locale::getForDisplay("radio_fail"));
+  g_disp.printf("%s\n", antennaOk ? locale::getForDisplay("selftest_ant_ok") : locale::getForDisplay("selftest_ant_warn"));
+  g_disp.printf("%s %umV\n", locale::getForDisplay("battery"), (unsigned)batteryMv);
+  g_disp.printf("%s %u\n", locale::getForDisplay("selftest_heap"), (unsigned)heapFree);
   g_disp.display();
 }
 
@@ -243,7 +321,7 @@ void poll() {
 
   g_disp.clearDisplay();
   g_disp.setCursor(0, 0);
-  g_disp.println(F("Last msg"));
+  g_disp.println(locale::getForDisplay("last_msg_title"));
   if (g_line_from[0]) {
     g_disp.println(g_line_from);
   }
@@ -252,6 +330,71 @@ void poll() {
   }
   g_disp.display();
   g_last_dirty = false;
+}
+
+static constexpr int kMenuRowOled = 9;
+
+void show_menu_list(const char* title, const char* const* labels, int count, int selected, int scroll) {
+  if (!g_ok || !labels || count < 1) return;
+  if (scroll < 0) scroll = 0;
+  const int maxRows = (kScreenH - 10) / kMenuRowOled;
+  if (scroll > selected) scroll = selected;
+  if (scroll < selected - maxRows + 1) scroll = selected - maxRows + 1;
+  if (scroll < 0) scroll = 0;
+
+  g_disp.clearDisplay();
+  g_disp.setTextSize(1);
+  g_disp.setTextColor(SSD1306_WHITE);
+  g_disp.setCursor(0, 0);
+  if (title) g_disp.println(title);
+  int y = 10;
+  for (int row = 0; row < maxRows; row++) {
+    int idx = scroll + row;
+    if (idx >= count) break;
+    const bool sel = (idx == selected);
+    if (sel) g_disp.fillRect(0, y, kScreenW, kMenuRowOled, SSD1306_WHITE);
+    g_disp.setTextColor(sel ? SSD1306_BLACK : SSD1306_WHITE);
+    g_disp.setCursor(1, y + 1);
+    if (labels[idx]) g_disp.print(labels[idx]);
+    y += kMenuRowOled;
+  }
+  g_disp.setTextColor(SSD1306_WHITE);
+  g_disp.display();
+}
+
+void show_fullscreen_text(const char* title, const char* body) {
+  if (!g_ok) return;
+  g_disp.clearDisplay();
+  g_disp.setTextSize(1);
+  g_disp.setTextColor(SSD1306_WHITE);
+  g_disp.setCursor(0, 0);
+  if (title) g_disp.println(title);
+  int y = 10;
+  if (body && body[0]) {
+    const char* p = body;
+    char line[22];
+    while (*p && y < 56) {
+      size_t n = 0;
+      while (*p && *p != '\n' && n < sizeof(line) - 1) line[n++] = *p++;
+      line[n] = 0;
+      if (*p == '\n') p++;
+      g_disp.setCursor(0, y);
+      g_disp.print(line);
+      y += 8;
+    }
+  }
+  g_disp.display();
+}
+
+void get_last_msg_peek(char* fromBuf, size_t fromLen, char* textBuf, size_t textLen) {
+  if (fromBuf && fromLen) {
+    strncpy(fromBuf, g_line_from, fromLen - 1);
+    fromBuf[fromLen - 1] = 0;
+  }
+  if (textBuf && textLen) {
+    strncpy(textBuf, g_line_text, textLen - 1);
+    textBuf[textLen - 1] = 0;
+  }
 }
 
 }  // namespace display_nrf
