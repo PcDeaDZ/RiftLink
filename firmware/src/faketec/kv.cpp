@@ -1,7 +1,10 @@
 /**
  * KV на Internal LittleFS (Adafruit nRF52).
+ * Как Meshtastic FSCommon (ARCH_NRF52): InternalFS.begin(); при битой LFS — format() и повторный begin().
+ * На nRF FILE_O_WRITE к весуществующему файлу часто дописывает — перед setBlob удаляем ключ.
  */
 #include "kv.h"
+#include <Arduino.h>
 #include <Adafruit_LittleFS.h>
 #include <InternalFileSystem.h>
 #include <stdio.h>
@@ -15,9 +18,36 @@ namespace riftlink_kv {
 
 bool begin() {
   if (s_ok) return true;
-  if (!InternalFS.begin()) return false;
+
+  if (InternalFS.begin()) {
+    s_ok = true;
+    return true;
+  }
+
+  Serial.println("[RiftLink] InternalFS mount failed, format()...");
+  Serial.flush();
+  InternalFS.end();
+
+  if (!InternalFS.format()) {
+    Serial.println("[RiftLink] InternalFS format failed");
+    Serial.flush();
+    return false;
+  }
+
+  if (!InternalFS.begin()) {
+    Serial.println("[RiftLink] InternalFS begin after format failed");
+    Serial.flush();
+    return false;
+  }
+
+  Serial.println("[RiftLink] InternalFS ok after format");
+  Serial.flush();
   s_ok = true;
   return true;
+}
+
+bool is_ready() {
+  return s_ok;
 }
 
 static void pathFor(char* out, size_t outLen, const char* key) {
@@ -40,6 +70,9 @@ bool setBlob(const char* key, const uint8_t* buf, size_t len) {
   if (!s_ok || !key) return false;
   char path[48];
   pathFor(path, sizeof(path), key);
+  if (InternalFS.exists(path)) {
+    (void)InternalFS.remove(path);
+  }
   File f = InternalFS.open(path, Adafruit_LittleFS_Namespace::FILE_O_WRITE);
   if (!f) return false;
   size_t w = f.write(buf, len);

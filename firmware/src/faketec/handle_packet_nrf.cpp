@@ -3,7 +3,6 @@
  */
 
 #include <Arduino.h>
-#include <atomic>
 #include <cstdio>
 #include <cstring>
 
@@ -33,23 +32,11 @@
 #include "voice_buffers/voice_buffers.h"
 #include "voice_frag/voice_frag.h"
 #include "x25519_keys/x25519_keys.h"
+#include "mesh_hello_nrf.h"
 
-#define HANDSHAKE_TRAFFIC_QUIET_MS 3000
 #define HELLO_STALE_KEY_REFRESH_MS 10000
 
-static uint32_t s_handshakeQuietUntilMs = 0;
-static inline void extendHandshakeQuiet(const char* cause, uint32_t durMs = HANDSHAKE_TRAFFIC_QUIET_MS) {
-  uint32_t now = millis();
-  uint32_t until = now + durMs;
-  if ((int32_t)(until - s_handshakeQuietUntilMs) > 0) {
-    s_handshakeQuietUntilMs = until;
-  }
-  RIFTLINK_DIAG("HELLO", "event=HANDSHAKE_QUIET cause=%s quiet_ms=%lu",
-      cause ? cause : "-", (unsigned long)(s_handshakeQuietUntilMs - now));
-}
-
 static uint8_t s_fragOutBuf[frag::MAX_MSG_PLAIN];
-static std::atomic<bool> s_pendingDiscoveryHello{false};
 
 #include "handle_packet_nrf_helpers.inc"
 #include "handle_packet_nrf_body.inc"

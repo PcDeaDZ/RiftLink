@@ -1,9 +1,36 @@
 /**
- * Реализация memory_diag — internal DRAM, сравнение с общим free heap, PSRAM, задачи, CPU MHz.
+ * Реализация memory_diag — ESP: internal DRAM / PSRAM; nRF52840: куча SoftDevice + число задач FreeRTOS.
  */
 
 #include "memory_diag.h"
 #include <Arduino.h>
+
+#if defined(RIFTLINK_NRF52)
+
+#include <FreeRTOS.h>
+#include <task.h>
+
+#if __has_include(<nrf_sdh.h>)
+#include <nrf_sdh.h>
+#define RIFTLINK_HAS_NRF_SDH 1
+#else
+#define RIFTLINK_HAS_NRF_SDH 0
+#endif
+
+void memoryDiagLog(const char* tag) {
+  const char* t = tag ? tag : "?";
+#if RIFTLINK_HAS_NRF_SDH
+  uint32_t freeSd = nrf_sdh_get_free_heap_size();
+#else
+  uint32_t freeSd = 0;
+#endif
+  UBaseType_t nTasks = uxTaskGetNumberOfTasks();
+  Serial.printf("[RiftLink] MemDiag[%s] softdevice_heap_free=%u tasks=%u\n", t, (unsigned)freeSd,
+      (unsigned)nTasks);
+}
+
+#else
+
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -38,3 +65,5 @@ void memoryDiagLog(const char* tag) {
         (unsigned)psramUsed, (unsigned)psramTot);
   }
 }
+
+#endif

@@ -8,6 +8,7 @@
 #include "radio/radio.h"
 #include "protocol/packet.h"
 #include "display_nrf.h"
+#include "memory_diag/memory_diag.h"
 #include <Arduino.h>
 #include <string.h>
 
@@ -25,7 +26,9 @@ bool asyncHasPacketTask(void) {
   return false;
 }
 
-void asyncMemoryDiagLogStacks() {}
+void asyncMemoryDiagLogStacks() {
+  memoryDiagLog("async_stub");
+}
 
 bool queueSend(const uint8_t* buf, size_t len, uint8_t txSf, bool priority, char* reasonBuf, size_t reasonLen) {
   return queueTxPacket(buf, len, txSf, priority, TxRequestClass::data, reasonBuf, reasonLen);
@@ -109,11 +112,21 @@ void queueDisplayLongPress(uint8_t) {}
 void queueDisplayWake() {}
 void queueDisplayLedBlink() {}
 
-uint8_t asyncTxQueueFree() {
-  return 255;
+static uint8_t deferred_used_count() {
+  uint8_t n = 0;
+  for (int i = 0; i < kDeferredSlots; i++) {
+    if (s_deferred[i].used) n++;
+  }
+  return n;
 }
+
+uint8_t asyncTxQueueFree() {
+  uint8_t u = deferred_used_count();
+  return (u >= (uint8_t)kDeferredSlots) ? 0 : (uint8_t)(kDeferredSlots - u);
+}
+
 uint8_t asyncTxQueueWaiting() {
-  return 0;
+  return deferred_used_count();
 }
 
 bool asyncIsRadioFsmV2Enabled() {

@@ -152,7 +152,8 @@ void init() {
   if (s_inited) return;
 
 #ifdef RIFTLINK_NRF52
-  if (riftlink_kv::begin()) {
+  // KV уже поднят в main; не вызывать begin() повторно (избегаем лишнего кода и путаницы с порядком init).
+  if (riftlink_kv::is_ready()) {
     uint8_t buf[8];
     size_t len = sizeof(buf);
     if (riftlink_kv::getBlob(NVS_KEY_LANG, buf, &len) && len > 0 && len < sizeof(buf)) {

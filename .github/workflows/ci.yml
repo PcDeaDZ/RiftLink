@@ -22,3 +22,36 @@ jobs:
 
       - name: Run tests
         run: cd app && flutter test
+
+  firmware-nrf52:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build nRF52840 (faketec_v5, heltec_t114)
+        run: cd firmware && pio run -e faketec_v5 -e heltec_t114
+
+  firmware-native-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host toolchain for native Unity tests
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Native protocol tests (Unity)
+        run: cd firmware && pio test -e native

@@ -6,9 +6,68 @@
 #include "crypto/crypto.h"
 #include "x25519_keys/x25519_keys.h"
 #include "kv.h"
+#include <Arduino.h>
+#include <nrf_error.h>
+#include <nrf_soc.h>
 #include <sodium.h>
 #include <string.h>
 #include "port/rtos_include.h"
+
+/*
+ * esphome/libsodium по умолчанию использует randombytes_sysrandom → open("/dev/urandom").
+ * На bare-metal nRF52 этого нет — read() может висеть бесконечно; sodium_init() тогда
+ * останавливается на randombytes_stir(). Регистрируем выдачу байт через SoftDevice.
+ */
+extern "C" {
+
+static const char* riftlink_rng_name(void) { return "nrf_sd_rand"; }
+
+static void riftlink_rng_buf(void* const buf, const size_t size) {
+  auto* p = static_cast<uint8_t*>(buf);
+  size_t left = size;
+  while (left > 0U) {
+    /* S140: за один вызов — не больше 16 байт (см. документацию sd_rand_application_vector_get). */
+    uint8_t chunk = (left > 16U) ? 16U : static_cast<uint8_t>(left);
+    uint32_t err;
+    do {
+      err = sd_rand_application_vector_get(p, chunk);
+      if (err == NRF_ERROR_SOC_RAND_NOT_ENOUGH_VALUES) {
+        yield();
+      }
+    } while (err == NRF_ERROR_SOC_RAND_NOT_ENOUGH_VALUES);
+    if (err != NRF_SUCCESS) {
+      for (uint8_t i = 0; i < chunk; i++) {
+        p[i] = static_cast<uint8_t>(micros() >> ((i & 7U) * 4U));
+      }
+    }
+    p += chunk;
+    left -= chunk;
+  }
+}
+
+static uint32_t riftlink_rng_random(void) {
+  uint32_t v;
+  riftlink_rng_buf(&v, sizeof v);
+  return v;
+}
+
+static void riftlink_rng_stir(void) {}
+
+static int riftlink_rng_close(void) { return 0; }
+
+static void riftlink_install_libsodium_randombytes_nrf52(void) {
+  static const randombytes_implementation impl = {
+      riftlink_rng_name,
+      riftlink_rng_random,
+      riftlink_rng_stir,
+      nullptr,
+      riftlink_rng_buf,
+      riftlink_rng_close,
+  };
+  (void)randombytes_set_implementation(&impl);
+}
+
+}  // extern "C"
 
 #define NVS_NAMESPACE "riftlink"
 #define MUTEX_TIMEOUT_MS 50
@@ -25,17 +84,50 @@ static SemaphoreHandle_t s_mutex = nullptr;
 namespace crypto {
 
 bool init() {
-  if (sodium_init() < 0) return false;
-  s_mutex = xSemaphoreCreateMutex();
-  if (!s_mutex) return false;
+  if (s_inited) return true;
 
-  {
-    size_t len = KEY_LEN;
-    if (riftlink_kv::getBlob(NVS_KEY_CHANNEL, s_key, &len) && len == KEY_LEN) {
-      (void)riftlink_kv::getU32("nonce_ctr", &s_nonceCounter);
-      s_inited = true;
-      return true;
-    }
+  // Чтение KV до sodium_init: при подвисании LittleFS будет видно до libsodium; ChaCha IETF ключ = 32 байта.
+  Serial.println("[RiftLink] crypto: KV read chkey/nonce (before sodium)");
+  Serial.flush();
+  if (!riftlink_kv::is_ready()) {
+    Serial.println("[RiftLink] crypto: KV not ready");
+    Serial.flush();
+    return false;
+  }
+  size_t len = KEY_LEN;
+  const bool hasKey = riftlink_kv::getBlob(NVS_KEY_CHANNEL, s_key, &len) && len == KEY_LEN;
+  uint32_t nonceFromKv = 0;
+  if (hasKey) {
+    (void)riftlink_kv::getU32("nonce_ctr", &nonceFromKv);
+  }
+  Serial.printf("[RiftLink] crypto: KV done has_chkey=%d\n", hasKey ? 1 : 0);
+  Serial.flush();
+
+  Serial.println("[RiftLink] crypto: randombytes -> SoftDevice (sd_rand), not /dev/urandom");
+  Serial.flush();
+  riftlink_install_libsodium_randombytes_nrf52();
+
+  Serial.println("[RiftLink] crypto: sodium_init...");
+  Serial.flush();
+  if (sodium_init() < 0) {
+    Serial.println("[RiftLink] crypto: sodium_init FAILED");
+    Serial.flush();
+    return false;
+  }
+  Serial.println("[RiftLink] crypto: sodium_init ok");
+  Serial.flush();
+
+  s_mutex = xSemaphoreCreateMutex();
+  if (!s_mutex) {
+    Serial.println("[RiftLink] crypto: mutex create failed");
+    Serial.flush();
+    return false;
+  }
+
+  if (hasKey) {
+    s_nonceCounter = nonceFromKv;
+    s_inited = true;
+    return true;
   }
 
   // Дефолтный ключ канала (при первом запуске). Смена через BLE: channelKey, invite/acceptInvite.
@@ -48,6 +140,8 @@ bool init() {
   memcpy(s_key, DEFAULT_KEY, KEY_LEN);
   s_nonceCounter = 0;
 
+  Serial.println("[RiftLink] crypto: writing default chkey to KV");
+  Serial.flush();
   (void)riftlink_kv::setBlob(NVS_KEY_CHANNEL, s_key, KEY_LEN);
   (void)riftlink_kv::setU32("nonce_ctr", s_nonceCounter);
   s_inited = true;

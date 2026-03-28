@@ -19,6 +19,22 @@
 #define OLED_I2C_ADDR 0x3C
 #define PIN_I2C_SDA 26
 #define PIN_I2C_SCL 27
+/** Встроенный ST7789 135×240 (SPI1, не общий с LoRa SPI). Сверено с Meshtastic variants/nrf52840/heltec_mesh_node_t114/variant.h (ST7789_*). */
+#define TFT_SPI_CS 11
+#define TFT_SPI_DC 12
+#define TFT_SPI_RST 2
+#define TFT_SPI_SCK 40
+#define TFT_SPI_MOSI 41
+/** MISO для SPI1 не используется чтением TFT — задан незадействованный GPIO (как «заглушка» для setPins). */
+#define TFT_SPI_MISO 39
+/** Подсветка: VTFT_LEDA в upstream Meshtastic, не путать с закомментированным ST7789_BL (32+6). */
+#define TFT_BL 15
+/** Включение подсветки (Meshtastic: TFT_BACKLIGHT_ON LOW). */
+#define TFT_BL_ON LOW
+/** Батарея: AIN2 на P0.04, делитель включается ADC_CTRL P0.06 HIGH — см. telemetry_nrf.cpp и Meshtastic BATTERY_PIN / ADC_CTRL. */
+#define T114_BATT_ADC_PIN 4
+#define T114_ADC_CTRL_PIN 6
+#define T114_ADC_CTRL_ON HIGH
 #else
 // FakeTech V5 / ProMicro DIY + HT-RA62
 #define LORA_NSS 45

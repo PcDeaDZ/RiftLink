@@ -244,7 +244,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
       if (neighbors::isOnline(hdr.from) && !node::isInvalidNodeId(hdr.to)) {
         uint16_t pktId = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
         if (pkt_cache::retransmitOverheard(hdr.from, hdr.to, pktId)) {
-          extendHandshakeQuiet("nack_retransmit_overheard");
+          mesh_hello_extend_quiet("nack_retransmit_overheard");
           RIFTLINK_LOG_EVENT("[RiftLink] Overhear retransmit pktId=%u\n", (unsigned)pktId);
         }
       } else {
@@ -309,13 +309,13 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         if (hadKey && !keyMismatch) {
           RIFTLINK_DIAG("KEY", "event=KEY_RX_DUP from=%02X%02X pktId=%u action=reply_with_throttle",
               hdr.from[0], hdr.from[1], (unsigned)hdr.pktId);
-          extendHandshakeQuiet("key_rx_dup");
+          mesh_hello_extend_quiet("key_rx_dup");
           // Peer may have lost pairwise state while keeping the same pubkey.
           // Reply with throttled KEY_EXCHANGE to heal asymmetry without KEY storm.
           x25519_keys::sendKeyExchange(hdr.from, true, true, "key_rx_dup");
           break;
         }
-        extendHandshakeQuiet("key_rx_parsed");
+        mesh_hello_extend_quiet("key_rx_parsed");
         RIFTLINK_DIAG("KEY", "event=KEY_RX_PARSED_OK from=%02X%02X payload=%u pktId=%u hadKey=%u",
             hdr.from[0], hdr.from[1], (unsigned)payloadLen, (unsigned)hdr.pktId, (unsigned)hadKey);
         RIFTLINK_LOG_EVENT("[RiftLink] KEY_EXCHANGE rx parsed payload=%u from %02X%02X (→ onKeyExchange)\n",
@@ -410,7 +410,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
           if (nBefore == 0) {
             // Не вызывать sendHello() здесь (packetTask) — только очередь TX из loop
             // и долго держит s_radioMutex — radioScheduler в это время ждёт mutex → «мертвый» mesh, loop залипает.
-            s_pendingDiscoveryHello.store(true, std::memory_order_release);
+            mesh_hello_request_discovery();
           }
           ble::requestNeighborsNotify();
           queueDisplayRequestInfoRedraw();  // Paper: обновить вкладку Info при новом соседе
@@ -864,7 +864,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         }
         uint16_t pktId = (uint16_t)payload[0] | ((uint16_t)payload[1] << 8);
         if (pkt_cache::retransmitOnNack(hdr.from, pktId)) {
-          extendHandshakeQuiet("nack_retransmit");
+          mesh_hello_extend_quiet("nack_retransmit");
           region::switchChannelOnCongestion();  // Channel Hopping при NACK
           RIFTLINK_LOG_EVENT("[RiftLink] NACK retransmit pktId=%u to %02X%02X\n",
               (unsigned)pktId, hdr.from[0], hdr.from[1]);

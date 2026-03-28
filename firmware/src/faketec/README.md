@@ -2,11 +2,11 @@
 
 Прошивка RiftLink для платы **FakeTech V5 Rev B** (NiceNano nRF52840 + HT-RA62/RA-01SH LoRa).
 
-> **Минимальная ветка (актуально для сборки):** `pio run -e faketec_v5` и `-e heltec_t114` проходят. LoRa — `radio_nrf.cpp` (SX1262, TCXO, DIO2 RF switch, KV для модема), точка входа — `faketec/main.cpp`. BLE — NUS в `ble_nrf.cpp` (Bluefruit); очередь исходящих mesh — общий `msg_queue/msg_queue.cpp` + `packet_fusion` + `mab` (BLS-N/ESP-NOW отключены флагами `-DRIFTLINK_DISABLE_BLS_N` / `DISABLE_ESP_NOW`), TX через `async_stubs_nrf.cpp` → `radio::sendDirectInternal`; колбэки BLE — `main.cpp` (`ble::setOnSend`, `notifySent` / `undelivered`). **OLED I2C:** `display_nrf` + Adafruit SSD1306/GFX в `lib_deps`; пины `Wire.setPins` из `board_pins.h`; в `variants/faketec_nrf52840/variant.h` задано `WIRE_INTERFACES_COUNT=1` (без второго TWIM, иначе ядро требует `PIN_WIRE1_*`). Встроенный **ST7789** на T114 — отдельно. Ключи X25519: `crypto_box_keypair` заменён на `randombytes_buf` + `crypto_scalarmult_base` + HSalsa (урезанный esphome/libsodium без `crypto_box`). Прошивка с ПК: см. `docs/flasher/NRF52.md`; из корня репозитория: `.\build.ps1 -Faketec` / `-HeltecT114`.
+> **Минимальная ветка (актуально для сборки):** `pio run -e faketec_v5` и `-e heltec_t114` проходят. LoRa — `radio_nrf.cpp` (SX1262, TCXO, DIO2 RF switch, KV для модема), точка входа — `faketec/main.cpp`. BLE — NUS в `ble_nrf.cpp` (Bluefruit); очередь исходящих mesh — общий `msg_queue/msg_queue.cpp` + `packet_fusion` + `mab` (BLS-N/ESP-NOW отключены флагами `-DRIFTLINK_DISABLE_BLS_N` / `DISABLE_ESP_NOW`), TX через `async_stubs_nrf.cpp` → `radio::sendDirectInternal`; колбэки BLE — `main.cpp` (`ble::setOnSend`, `notifySent` / `undelivered`). **Mesh HELLO/POLL** и тихое окно после handshake — `mesh_hello_nrf.cpp` / `mesh_hello_nrf.h`, вызов из `loop` в `faketec/main.cpp`. **OLED I2C:** `display_nrf` + Adafruit SSD1306/GFX в `lib_deps`; пины `Wire.setPins` из `board_pins.h`; в `variants/faketec_nrf52840/variant.h` задано `WIRE_INTERFACES_COUNT=1` (без второго TWIM, иначе ядро требует `PIN_WIRE1_*`). **Heltec T114:** встроенный **ST7789** (SPI1) в `display_nrf.cpp` при `RIFTLINK_BOARD_HELTEC_T114`, пины TFT/подсветка — `board_pins.h` (сверено с upstream Meshtastic `heltec_mesh_node_t114`). Ключи X25519: `crypto_box_keypair` заменён на `randombytes_buf` + `crypto_scalarmult_base` + HSalsa (урезанный esphome/libsodium без `crypto_box`). Прошивка с ПК: см. `docs/flasher/NRF52.md`; из корня репозитория: `.\build.ps1 -Faketec` / `-HeltecT114`.
 
 ### Что ещё не сделано (кратко)
 
-- **UI / меню** — нет полноценного меню как на ESP; минимальный I2C OLED — `display_nrf` (см. ниже). ST7789 на T114 — не реализовано.
+- **UI / меню как на Heltec V3** — нет `ui/display.cpp`, вкладок, кнопки и long press; на nRF только минимальная отрисовка: I2C OLED (FakeTech) или текст на ST7789 (T114). Полный порт UI — отдельный эпик (см. раздел «Дисплей и меню»).
 - **BLE OTA** (`bleOtaStart` / chunk / …) — не реализовано; обновление: DFU (NiceNano) или `nrfutil` (см. `docs/flasher/NRF52.md`). В BLE приходит `evt:error` с кодом `ble_ota_unsupported`.
 - **Голос по BLE** (`cmd: voice` → mesh `OP_VOICE_MSG`, `evt: voice` с эфира) — реализовано в `ble_nrf.cpp` (паритет с ESP).
 - **Wi‑Fi, ESP‑NOW** (`wifi`, `espnowChannel`, `espnowAdaptive`) — не применимо; явные ошибки в BLE. Команда **`ota`** (AP для OTA как в §2.3 API) — `ota_unsupported`; обновление только DFU/USB.
@@ -14,19 +14,19 @@
 
 ### Архитектура (паритет с Heltec V3, без Wi‑Fi)
 
-- **Поток:** один **`loop()`** в `faketec/main.cpp`: `ble::update`, `msg_queue`/`routing`/`offline_queue`, **`flushDeferredSends()`** (`async_stubs_nrf.cpp`: `queueTxPacket` → `radio::sendDirectInternal`, отложенный TX, `ack_coalesce::flush`). Приём LoRa — **`radio::receive`** под mutex (`radio_nrf.cpp`), разбор — **`handlePacket`** (`handle_packet_nrf.cpp` + `handle_packet_nrf_body.inc`), паритет с ESP по relay/XOR/очередям.
-- **Хранилище:** InternalFS через **`kv.cpp`** (`riftlink_kv::` — блобы в `/rl_*`). **Группы V2** и **offline_queue** — общие `groups/groups.cpp` и `offline_queue/offline_queue.cpp` с веткой **`RIFTLINK_NRF52`** (KV вместо NVS).
+- **Поток:** один **`loop()`** в `faketec/main.cpp`: `ble::update`, `msg_queue`/`routing`/`offline_queue`, **`flushDeferredSends()`** (`async_stubs_nrf.cpp`: `queueTxPacket` → `radio::sendDirectInternal`, отложенный TX, `ack_coalesce::flush`), затем **`mesh_hello_nrf_loop()`** (HELLO/POLL, тихое окно handshake). Приём LoRa — **`radio::receive`** под mutex (`radio_nrf.cpp`), разбор — **`handlePacket`** (`handle_packet_nrf.cpp` + `handle_packet_nrf_body.inc`), паритет с ESP по relay/XOR/очередям.
+- **Хранилище:** InternalFS через **`kv.cpp`** (`riftlink_kv::` — блобы в `/rl_*`). При ошибке монтирования LittleFS вызывается **`InternalFS.format()`** и повторный `begin()` (как в Meshtastic `FSBegin` для nRF52). При полной порче раздела — factory erase UF2 (см. `docs/flasher/NRF52.md`). Перед записью ключа файл удаляется, чтобы не копить append на nRF. **Группы V2** и **offline_queue** — общие `groups/groups.cpp` и `offline_queue/offline_queue.cpp` с веткой **`RIFTLINK_NRF52`** (KV вместо NVS).
 - **Сборка `nrf52_base` (`platformio.ini`):** подключаются те же модули, что и на ESP для mesh: `msg_queue`, `packet_fusion`, `mab`, `frag`, `routing`, `ack_coalesce`, `groups`, `offline_queue`, `beacon_sync`, `clock_drift`, `voice_frag`, `voice_buffers`, плюс порты в `faketec/*` (`gps_nrf.cpp` вместо `gps/gps.cpp`). Файла **`nrf_mesh_stubs.cpp`** больше нет — заглушки выведены.
 - **GPS:** **`gps_nrf.cpp`** — без модуля GNSS; время/координаты для гео и epoch — через **`setPhoneSync`** (BLE), пины/флаг питания в KV.
 - **Голос:** общий **`voice_frag`/`voice_buffers`** (на nRF память через `malloc` вместо `heap_caps`).
 
 ## Дисплей и меню
 
-**I2C OLED SSD1306:** `faketec/display_nrf.*` + `Adafruit SSD1306` / `GFX` в `nrf52_base` (`lib_deps`). Пины — `board_pins.h` (`PIN_I2C_SDA`/`SCL`). Бут-строка и самотест на экране; последнее сообщение mesh — через `queueDisplayLastMsg` → `display_nrf::poll()` в `loop`. Полноценное меню как на ESP (`ui/display.cpp`) не подключено.
+**I2C OLED SSD1306:** `faketec/display_nrf.*` + `Adafruit SSD1306` / `GFX` в `nrf52_base` (`lib_deps`). Пины — `board_pins.h` (`PIN_I2C_SDA`/`SCL`). Бут-строка и самотест на экране; последнее сообщение mesh — через `queueDisplayLastMsg` → `display_nrf::poll()` в `loop`.
 
-**ST7789** (встроенный TFT на T114 и т.п.) — отдельный драйвер/SPI, сюда не входит.
+**ST7789 (Heltec Mesh Node T114):** при сборке **`heltec_t114`** (`RIFTLINK_BOARD_HELTEC_T114`) используется ветка в `display_nrf.cpp`: Adafruit ST7789 на **SPI1**, пины CS/DC/RST/SCK/MOSI и подсветка — в `board_pins.h` (ориентир — upstream Meshtastic `variants/nrf52840/heltec_mesh_node_t114`). Отрисовка упрощённая (текст, без полного UI ESP).
 
-**План расширения:** при необходимости — вкладки/кнопка как на Heltec; не тянуть TinyUSB/SdFat без нужды.
+**План расширения (отдельный эпик):** полноценное меню/`queueDisplayRedraw` как на V3, вкладки, кнопка — не в `nrf52_base` `build_src_filter`; при необходимости — урезанное меню или только доработка текстового слоя на ST7789. Не тянуть TinyUSB/SdFat без нужды.
 
 Общие модули рефакторинга UI (`firmware/src/ui/ui_scroll.h`, `ui_menu_exec.*`, `ui_layout_profile.h`, `ui_icons.h` и т.д.) подключаются только в ESP-сборках (`heltec_*`, `lilygo_*`); env **faketec_v5** собирает `faketec/` + `protocol/` и не тянет эти файлы.
 
@@ -63,7 +63,16 @@ pio run -t upload -e faketec_v5
 .\build.ps1 -Faketec -Flash -Port COM5
 ```
 
-## Распиновка (board.h)
+## Распиновка (board.h) и выбор `pio -e`
+
+| Плата | `pio run -e …` | Примечание |
+|-------|----------------|------------|
+| FakeTech V5 / NiceNano / Pro Micro DIY (как ниже) | **`faketec_v5`** | Таблица пинов — эта секция |
+| Heltec Mesh Node **T114** | **`heltec_t114`** | Другие I2C/SPI в `board_pins.h` (OLED: 26/27); не прошивать `faketec_v5` на T114 и наоборот |
+
+Плата `heltec_mesh_t114.json` в репозитории использует **тот же** вариант `faketec_nrf52840`, что и FakeTech; различие только **макрос** `RIFTLINK_BOARD_HELTEC_T114` и строки в `board_pins.h`.
+
+### FakeTech / Pro Micro (env `faketec_v5`)
 
 Соответствует **Meshtastic** `nrf52_promicro_diy_tcxo` (fakeTec PCB = DIY ProMicro). Логические пины 0..47 = GPIO nRF.
 
@@ -85,7 +94,7 @@ pio run -t upload -e faketec_v5
 
 - **LoRa mesh:** HELLO, MSG, ACK, relay (в т.ч. XOR / deferred relay), маршрутизация и очереди исходящих как на V3 (без Wi‑Fi)
 - **Дисплей:** автоопределение I2C OLED (SSD1306 @ 0x3C)
-- **Команды:** BLE GATT (UUID как в `docs/API.md`) и USB Serial — JSON, до 512 байт на запись
+- **Команды:** BLE GATT (UUID как в `docs/API.md`) и USB Serial — JSON, до 512 байт на запись. В USB Serial для отладки также поддерживаются строки **`send`**, **`ping`**, **`region`**, **`channel`**, **`nickname`**, **`route`**, **`lang`**, **`memdiag`** (как на ESP `main.cpp` по смыслу, без перерисовки дисплея на nRF).
 - **Совместимость:** тот же протокол, что и Heltec — узлы в одной сети
 
 ## Совместимость с Heltec V3 (приём / «вижу только в одну сторону»)
@@ -166,5 +175,5 @@ pio run -t upload -e faketec_v5
 - **Шифрование:** ChaCha20-Poly1305 (libsodium), X25519 (`x25519_keys`). **Groups V2:** `ble.cpp` + `groups_storage`, Ed25519-подпись инвайта (`ed25519_sign/`, `group_owner_sign`); сценарии invite / accept / grant / revoke / rekey / snapshot — см. `ble.cpp` и паритет с `src/ble/ble.h`.
 - **Wi‑Fi:** на nRF52840 **нет** модуля Wi‑Fi (в отличие от Heltec ESP32). Только **BLE** (телефон) и **LoRa** (mesh). В JSON для приложения: `radioMode: "ble"`, `wifiConnected: false`.
 - **OTA:** только USB DFU (`firmware.zip`), не Wi‑Fi AP как на ESP.
-- **Голос:** общий **`voice_frag` / `voice_buffers`** (приём/сборка фрагментов, шифрование). **Location / GPS:** **`gps_nrf.cpp`** — без GNSS; координаты и epoch с телефона (**`gps::setPhoneSync`** по BLE). Входящие `OP_LOCATION` с mesh → `evt:location` (relay). Периодический **`OP_TELEMETRY`** (broadcast, как на ESP) — **`telemetry_nrf.cpp`**, интервал в **`main.cpp`** (`TELEM_INTERVAL_MS`).
+- **Голос:** общий **`voice_frag` / `voice_buffers`** (приём/сборка фрагментов, шифрование). **Location / GPS:** **`gps_nrf.cpp`** — без GNSS; координаты и epoch с телефона (**`gps::setPhoneSync`** по BLE). Входящие `OP_LOCATION` с mesh → `evt:location` (relay). Периодический **`OP_TELEMETRY`** (broadcast, как на ESP) — **`telemetry_nrf.cpp`**, интервал в **`main.cpp`** (`TELEM_INTERVAL_MS`). На **T114** напряжение батареи в телеметрии берётся с АЦП (делитель как в Meshtastic: `T114_BATT_ADC_PIN` / `T114_ADC_CTRL_PIN` в `board_pins.h`); на **FakeTech** без схемы делителя в прошивке поле батареи может оставаться 0.
 - **Board:** `faketec_v5` + variant `faketec_nrf52840` (48 GPIO, см. `platformio.ini`)

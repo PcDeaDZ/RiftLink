@@ -430,6 +430,8 @@ Groups V2 работает по `groupUid` и signed grants. Команды `gro
 
 Обновление прошивки с ПК: см. `docs/flasher/NRF52.md` (DFU / `nrfutil`).
 
+**Телеметрия эфира (`OP_TELEMETRY`) на nRF:** на **FakeTech** без делителя батареи в прошивке поле напряжения может быть **0**. На **Heltec T114** (`heltec_t114`) используется АЦП по схеме Meshtastic (см. `board_pins.h`, `telemetry_nrf.cpp`). Поле **heapKb** заполняется из свободной кучи SoftDevice (`nrf_sdh_get_free_heap_size`) при отсутствии рабочего `xPortGetFreeHeapSize`; если оба источника дают 0, в payload будет **0** кБ.
+
 ### 3.17 groupRekeyProgress — прогресс rekey по участникам
 
 ```json
@@ -526,6 +528,8 @@ channel 2
 ```
 
 Выбор канала LoRaWAN для EU/UK: 0 = 868.1 MHz, 1 = 868.3 MHz, 2 = 868.5 MHz.
+
+**Прошивки nRF52840 (USB Serial):** те же команды `send`, `ping`, `region`, `channel`, `nickname`, `route`, `lang` поддерживаются в `faketec/main.cpp` (без перерисовки экрана). Дополнительно: `memdiag` — одна строка диагностики кучи SoftDevice и числа задач FreeRTOS (`memory_diag`).
 
 ### 4.6 NVS: настройки экрана (прошивка)
 

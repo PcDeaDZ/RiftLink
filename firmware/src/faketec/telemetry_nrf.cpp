@@ -1,5 +1,8 @@
 /**
- * Телеметрия nRF52840: OP_TELEMETRY broadcast (батарея 0 без ADC; heap — FreeRTOS при наличии).
+ * Телеметрия nRF52840: OP_TELEMETRY broadcast.
+ * - Батарея: FakeTech — без делителя readBatteryMv() = 0. Heltec T114 — AIN2 + ADC_CTRL (board_pins.h, Meshtastic variant).
+ * - Heap: при отсутствии сильного xPortGetFreeHeapSize — nrf_sdh_get_free_heap_size() (куча под SoftDevice).
+ * Документация: docs/API.md (nRF52840).
  */
 
 #include "telemetry/telemetry.h"
@@ -10,21 +13,65 @@
 #include "node/node.h"
 #include "protocol/packet.h"
 
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+#include "board_pins.h"
+#endif
+
 #include <Arduino.h>
 #include <stddef.h>
 #include <string.h>
 
-// heap_3 на Adafruit nRF52 часто не экспортирует xPortGetFreeHeapSize; слабый stub даёт 0 до появления сильного символа.
-extern "C" __attribute__((weak)) size_t xPortGetFreeHeapSize(void) {
+#if __has_include(<nrf_sdh.h>)
+#include <nrf_sdh.h>
+#define RIFTLINK_HAS_NRF_SDH 1
+#else
+#define RIFTLINK_HAS_NRF_SDH 0
+#endif
+
+static size_t nrfHeapFreeBytes() {
+#if RIFTLINK_HAS_NRF_SDH
+  return nrf_sdh_get_free_heap_size();
+#else
   return 0U;
+#endif
+}
+
+extern "C" __attribute__((weak)) size_t xPortGetFreeHeapSize(void) {
+  return nrfHeapFreeBytes();
 }
 
 namespace telemetry {
 
-void init() {}
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+static constexpr float kT114BattMult = 4.916f;
+static bool s_t114AdcReady = false;
+
+static void t114AdcEnsure() {
+  if (s_t114AdcReady) return;
+  pinMode(T114_ADC_CTRL_PIN, OUTPUT);
+  digitalWrite(T114_ADC_CTRL_PIN, T114_ADC_CTRL_ON);
+  analogReadResolution(12);
+  s_t114AdcReady = true;
+}
+#endif
+
+void init() {
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  t114AdcEnsure();
+#endif
+}
 
 uint16_t readBatteryMv() {
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  t114AdcEnsure();
+  int raw = analogRead(T114_BATT_ADC_PIN);
+  if (raw <= 0) return 0;
+  const float vAin = (static_cast<float>(raw) * 3.0f) / 4096.0f;
+  const float vBat = vAin * kT114BattMult;
+  return static_cast<uint16_t>(vBat * 1000.0f + 0.5f);
+#else
   return 0;
+#endif
 }
 
 bool isCharging() {
@@ -32,12 +79,21 @@ bool isCharging() {
 }
 
 int batteryPercent() {
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  uint16_t mv = readBatteryMv();
+  if (mv < 3100) return -1;
+  if (mv >= 4200) return 100;
+  return static_cast<int>((mv - 3100) * 100 / (4200 - 3100));
+#else
   return -1;
+#endif
 }
 
 void send() {
   uint16_t batMv = readBatteryMv();
-  uint16_t heapKb = (uint16_t)(xPortGetFreeHeapSize() / 1024U);
+  size_t heapFree = xPortGetFreeHeapSize();
+  if (heapFree == 0) heapFree = nrfHeapFreeBytes();
+  uint16_t heapKb = static_cast<uint16_t>(heapFree / 1024U);
 
   uint8_t plain[TELEM_PAYLOAD_LEN];
   memcpy(plain, &batMv, 2);

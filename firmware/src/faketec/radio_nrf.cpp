@@ -192,6 +192,8 @@ namespace radio {
 
 bool init() {
   s_radioChipReady = false;
+  /* Один variant.h на FakeTech и Heltec T114: дефолтный SPI — пины V5. T114 — другая шина LoRa (board_pins.h). */
+  SPI.setPins(LORA_MISO, LORA_SCK, LORA_MOSI);
   SPI.begin();
 
 #if LORA_RXEN != 255

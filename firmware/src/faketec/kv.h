@@ -6,6 +6,8 @@
 namespace riftlink_kv {
 
 bool begin();
+/** true после успешного begin() (InternalFS смонтирован). */
+bool is_ready();
 bool getBlob(const char* key, uint8_t* buf, size_t* len);
 bool setBlob(const char* key, const uint8_t* buf, size_t len);
 bool getU32(const char* key, uint32_t* out);

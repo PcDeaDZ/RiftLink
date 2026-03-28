@@ -97,7 +97,12 @@ static bool s_groupOwnerSignReady = false;
 
 static bool loadOrGenerateGroupOwnerSigningKey() {
   if (s_groupOwnerSignReady) return true;
+  // После crypto::init() sodium уже поднят; иначе первый sodium_init здесь может зависать до SoftDevice.
+  Serial.println("[RiftLink] BLE: signing key: sodium_init (fast if already done)");
+  Serial.flush();
   if (sodium_init() < 0) return false;
+  Serial.println("[RiftLink] BLE: signing key: KV gpk/gsk...");
+  Serial.flush();
   size_t pkLen = sizeof(s_groupOwnerSignPk);
   size_t skLen = sizeof(s_groupOwnerSignSk);
   const bool hasPk =
@@ -105,6 +110,8 @@ static bool loadOrGenerateGroupOwnerSigningKey() {
   const bool hasSk =
       riftlink_kv::getBlob(KV_GSK, s_groupOwnerSignSk, &skLen) && skLen == sizeof(s_groupOwnerSignSk);
   if (!hasPk || !hasSk) {
+    Serial.println("[RiftLink] BLE: signing key: crypto_sign_keypair...");
+    Serial.flush();
     if (crypto_sign_keypair(s_groupOwnerSignPk, s_groupOwnerSignSk) != 0) return false;
     (void)riftlink_kv::setBlob(KV_GPK, s_groupOwnerSignPk, sizeof(s_groupOwnerSignPk));
     (void)riftlink_kv::setBlob(KV_GSK, s_groupOwnerSignSk, sizeof(s_groupOwnerSignSk));
@@ -1729,14 +1736,31 @@ bool init() {
   if (s_inited) return true;
 
   loadOrCreatePasskey();
-  (void)loadOrGenerateGroupOwnerSigningKey();
 
   Bluefruit.autoConnLed(true);
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
+  // Сначала SoftDevice (Bluefruit.begin): иначе первый sodium_init() в loadOrGenerateGroupOwnerSigningKey()
+  // до поднятия SD на части nRF52840 блокируется навсегда.
   if (!Bluefruit.begin(1)) {
     RIFTLINK_LOG_ERR("[RiftLink] Bluefruit.begin failed\n");
     return false;
   }
+  Serial.println("[RiftLink] BLE: SoftDevice/Bluefruit.begin ok");
+  Serial.flush();
+
+  // Ключи mesh (ChaCha) + sodium: до loadOrGenerateGroupOwnerSigningKey(), иначе libsodium в signing зависает.
+  if (!crypto::init()) {
+    Serial.println("[RiftLink] BLE: crypto::init failed");
+    Serial.flush();
+    return false;
+  }
+  Serial.println("[RiftLink] BLE: crypto::init ok");
+  Serial.flush();
+
+  (void)loadOrGenerateGroupOwnerSigningKey();
+  Serial.println("[RiftLink] BLE: group signing key ok");
+  Serial.flush();
+
   Bluefruit.setTxPower(4);
   Bluefruit.Periph.setConnectCallback(connect_callback);
   Bluefruit.Periph.setDisconnectCallback(disconnect_callback);

@@ -2,6 +2,21 @@
 
 Веб-инструмент в `docs/flasher/` (ESP Web Tools) **не подходит** для nRF52840: он рассчитан на ESP32. Для плат на Nordic используйте **PlatformIO**, **nrfutil** или **UF2/DFU**.
 
+## Какая плата → какой env (`-e`)
+
+Оба окружения используют один Arduino-вариант [`firmware/variants/faketec_nrf52840`](../../firmware/variants/faketec_nrf52840); отличие только в **макросах** и таблице пинов [`firmware/src/faketec/board_pins.h`](../../firmware/src/faketec/board_pins.h). Прошивка **не того** env даёт неверные **I2C (OLED)** и **SPI (LoRa)** — типично «чёрный экран», «тишина» на эфире.
+
+| Физическое устройство | PlatformIO | I2C OLED (логические GPIO) |
+|------------------------|------------|----------------------------|
+| FakeTech V5 / NiceNano / nRF52 Pro Micro DIY (как в README FakeTech) | `faketec_v5` | SDA **36**, SCL **11** |
+| Heltec Mesh Node **T114** | `heltec_t114` | SDA **26**, SCL **27** |
+
+Подробнее по SPI LoRa и совместимости с Meshtastic — [`firmware/src/faketec/README.md`](../../firmware/src/faketec/README.md).
+
+### Serial (USB CDC) пустой
+
+После прошивки выберите **COM-порт устройства в режиме приложения** (иногда он отличается от порта bootloader). На TinyUSB CDC **первые строки часто теряются**, пока хост не открыл виртуальный COM: в `faketec/main.cpp` перед первым логом ждётся до **15 с** готовности `Serial`, строки дублируются на **аппаратный UART `Serial1`** (в варианте `faketec_nrf52840`: **TX = GPIO 6**, 115200 8N1) — при «пустом» USB подключите внешний USB–UART к TX. Отключить UART1: `-D RIFTLINK_NO_UART1_LOG`. Если порт верный, а строк нет — проверьте драйвер CDC и bootloader (см. ниже).
+
 ## Сборка
 
 Из корня репозитория:

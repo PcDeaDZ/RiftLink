@@ -1,6 +1,5 @@
 /**
- * Диагностика internal heap, сводки по RAM-пулам, задачам и частоте CPU.
- * Фаза 0: метрики для анализа фрагментации и OOM (BLE/Wi‑Fi/async).
+ * Диагностика heap: на ESP — internal/PSRAM и CPU; на nRF52840 — свободная куча SoftDevice и число задач FreeRTOS.
  */
 
 #pragma once

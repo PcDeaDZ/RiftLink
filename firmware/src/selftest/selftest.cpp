@@ -18,6 +18,7 @@
 #include <cstdio>
 
 #if defined(RIFTLINK_NRF52)
+#include "region/region.h"
 extern "C" size_t xPortGetFreeHeapSize(void);
 #endif
 
@@ -54,14 +55,48 @@ void run(Result* out) {
   Result r = {false, false, false, 0, 0};
 
 #if defined(RIFTLINK_NRF52)
+  Serial.println("[RiftLink] Selftest.run: start (nRF)");
+  Serial.flush();
+
+  if (!display_nrf::is_ready()) {
+    Serial.println("[RiftLink] Selftest: OLED not ready, display_nrf::init()...");
+    Serial.flush();
+    const bool dispInited = display_nrf::init();
+    Serial.printf("[RiftLink] Selftest: display_nrf::init -> %s\n", dispInited ? "OK" : "FAIL");
+    Serial.flush();
+  } else {
+    Serial.println("[RiftLink] Selftest: OLED already ready");
+    Serial.flush();
+  }
+
+  Serial.printf("[RiftLink] Selftest: radio::isReady=%d\n", radio::isReady() ? 1 : 0);
+  if (radio::isReady()) {
+    Serial.printf("[RiftLink] Selftest: LoRa freq_MHz=%.3f dBm=%d preset=%s SF%u BW%.0f CR4/%u\n",
+        (double)region::getFreq(), region::getPower(), radio::modemPresetName(radio::getModemPreset()),
+        (unsigned)radio::getSpreadingFactor(), (double)radio::getBandwidth(), (unsigned)radio::getCodingRate());
+  }
+  Serial.flush();
+
+  const uint8_t* nid = node::getId();
+  Serial.printf("[RiftLink] Selftest: node_id=%02X%02X%02X%02X%02X%02X%02X%02X heap_free=%u (before ping)\n", nid[0], nid[1],
+      nid[2], nid[3], nid[4], nid[5], nid[6], nid[7], (unsigned)xPortGetFreeHeapSize());
+  Serial.println("[RiftLink] Selftest: TX PING broadcast (skip CAD)...");
+  Serial.flush();
+
   r.radioOk = txPingBroadcastSkipCad();
   r.antennaOk = r.radioOk;
+  Serial.printf("[RiftLink] Selftest: ping_tx -> %s\n", r.radioOk ? "OK" : "FAIL");
+  Serial.flush();
+
   r.batteryMv = telemetry::readBatteryMv();
   r.heapFree = (uint32_t)xPortGetFreeHeapSize();
   r.displayOk = display_nrf::is_ready();
   if (r.displayOk) display_nrf::show_selftest_summary(r.radioOk, r.antennaOk, r.batteryMv, r.heapFree);
-  Serial.printf("[RiftLink] Selftest: radio=%s ant=%s bat=%umV heap=%u disp=%s\n", r.radioOk ? "OK" : "FAIL",
+
+  Serial.printf("[RiftLink] Selftest: summary radio=%s ant=%s bat=%umV heap=%u disp=%s\n", r.radioOk ? "OK" : "FAIL",
       r.antennaOk ? "OK" : "WARN", (unsigned)r.batteryMv, (unsigned)r.heapFree, r.displayOk ? "OK" : "no");
+  Serial.printf("[RiftLink] Selftest.run: done (battery ADC — если 0, датчик может быть не подключён на плате)\n");
+  Serial.flush();
 #else
   duty_cycle::reset();
   uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
