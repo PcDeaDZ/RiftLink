@@ -40,6 +40,7 @@
 #include "voice_buffers/voice_buffers.h"
 #include "voice_frag/voice_frag.h"
 #include "x25519_keys/x25519_keys.h"
+#include "version.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -501,8 +502,13 @@ void loop() {
       selftest::Result r;
       selftest::run(&r);
     } else if (cmd == "sf" || cmd == "radio") {
-      Serial.printf("[RiftLink] SF=%u, %.1f MHz, neighbors=%d\n", (unsigned)radio::getSpreadingFactor(),
-          (double)region::getFreq(), neighbors::getCount());
+      Serial.printf("[RiftLink] SF=%u, %.1f MHz, bw=%.1f kHz, cr=%u, neighbors=%d\n",
+          (unsigned)radio::getSpreadingFactor(), (double)region::getFreq(), (double)radio::getBandwidth(),
+          (unsigned)radio::getCodingRate(), neighbors::getCount());
+    } else if (cmd == "version" || cmd == "ver") {
+      Serial.printf("[RiftLink] RiftLink %s nRF52840 build " __DATE__ " " __TIME__ "\n", RIFTLINK_VERSION);
+    } else if (cmd == "uptime") {
+      Serial.printf("[RiftLink] uptime_s=%lu\n", (unsigned long)(millis() / 1000UL));
     } else if (cmd == "modemscan" || cmd == "modemscan quick") {
       selftest::ScanResult sr[8];
       int n = selftest::modemScanQuick(sr, 8);
@@ -520,7 +526,7 @@ void loop() {
     } else if (cmd == "help" || cmd == "?") {
       Serial.println(
           "[RiftLink] Serial: send|ping|node|region|channel|nickname|route|lang|memdiag|neighbors|gps|selftest|sf|"
-          "modemscan|powersave|espnow|help");
+          "modemscan|powersave|espnow|version|uptime|help");
     }
   }
 
@@ -529,6 +535,9 @@ void loop() {
     bool pressed = digitalRead(T114_BUTTON_PIN) == LOW;
     if (pressed && !s_t114BtnPrev) {
       Serial.println("[RiftLink] T114 button");
+      if (display_nrf::is_ready()) {
+        display_nrf::queue_last_msg("T114", "Button");
+      }
     }
     s_t114BtnPrev = pressed;
   }
