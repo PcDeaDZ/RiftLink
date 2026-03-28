@@ -6,8 +6,13 @@
 #include "node/node.h"
 #include <string.h>
 
+#if defined(ARDUINO_LILYGO_T_BEAM)
+#define XOR_CACHE_SIZE 2
+#define PENDING_XOR_SIZE 2
+#else
 #define XOR_CACHE_SIZE 4
 #define PENDING_XOR_SIZE 2
+#endif
 
 // Meta в payload OP_XOR_RELAY: pktIdA(2) + pktIdB(2) + fromA(8) + toA(8) + fromB(8) + toB(8) = 36
 #define XOR_META_LEN 36

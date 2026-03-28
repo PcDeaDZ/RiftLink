@@ -10,7 +10,6 @@
 | `heltec_v3/` | Heltec WiFi LoRa 32 V3 (OLED) |
 | `heltec_v3_paper/` | Heltec Wireless Paper (E-Ink, автоопределение BN/B73) |
 | `heltec_v4/` | Heltec WiFi LoRa 32 V4 |
-| — | FakeTech V5 Rev B: `pio run -e faketec_v5` → `.pio/build/faketec_v5/firmware.hex` |
 
 **Сборка всех трёх:** `pio run -e heltec_v3 -e heltec_v4 -e heltec_v3_paper`
 

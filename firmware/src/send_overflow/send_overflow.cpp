@@ -16,9 +16,9 @@
 
 /** При burst HELLO/ACK/control пул TxRequest и основная очередь заполняются; fallback priority был 4 — массовый txreq_pool_empty. */
 #if defined(ARDUINO_LILYGO_T_BEAM)
-/** ESP32 (T-Beam): при полной TX-очереди fallback сюда; 12 забивались под PING/HELLO burst → txreq_pool_empty. */
-#define PRIORITY_SLOTS 20
-#define NORMAL_SLOTS 12
+/** ESP32: static OverflowSlot (TxRequest) в .bss — уменьшено для линковки; при burst смотри txRequestPool/очереди. */
+#define PRIORITY_SLOTS 12
+#define NORMAL_SLOTS 8
 #else
 #define PRIORITY_SLOTS 16
 #define NORMAL_SLOTS 16

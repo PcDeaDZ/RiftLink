@@ -5,6 +5,7 @@
 export LANG="${LANG:-en_US.UTF-8}"
 export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 # Использование: ./build.sh  или  ./build.sh --setup  или  ./build.sh --flash --v4
+# Прошивка: ./build.sh --tbeam  |  ./build.sh --all (все env: V3, Paper, V4, T-Beam 4MB)
 # Пути: .env.local (FLUTTER_ROOT, ANDROID_SDK_ROOT)
 #
 # Отладка Android (ADB):
@@ -68,6 +69,8 @@ while [[ $# -gt 0 ]]; do
         --v3)        ENV="heltec_v3"; shift ;;
         --v3paper)   ENV="heltec_v3_paper"; shift ;;
         --v4)        ENV="heltec_v4"; shift ;;
+        --tbeam)     ENV="lilygo_t_beam_4mb"; shift ;;
+        --tbeam-4m)  ENV="lilygo_t_beam_4mb"; shift ;;
         *)           shift ;;
     esac
 done
@@ -233,6 +236,7 @@ do_setup() {
     echo ""
     echo -e "\033[32mГотово!\033[0m"
     echo "  Сборка: ./build.sh --v4"
+    echo "  T-Beam: ./build.sh --tbeam"
     echo "  Прошивка: ./build.sh --v4 --flash"
     echo "  APK: ./build.sh --app --install"
     echo "  ADB: ./build.sh --adb-help"
@@ -272,7 +276,8 @@ get_serial_ports() {
         }
         /Hardware ID:.*BTHENUM/ { skip=1; next }
         /Hardware ID:.*303A|VID_303A|ESP32|JTAG/ || /Description:.*JTAG|USB Serial|debug/ { hint="V4 (native USB)"; next }
-        /Hardware ID:.*CP210|10C4:EA60|Silicon/ || /Description:.*CP210|Silicon/ { hint="Paper (CP210x)"; next }
+        /Hardware ID:.*CP210|10C4:EA60|Silicon/ || /Description:.*CP210|Silicon/ { hint="T-Beam / Paper (CP210x)"; next }
+        /Hardware ID:.*239A|VID_239A|Adafruit/ || /Description:.*Adafruit/ { hint="USB (Adafruit CDC)"; next }
         END { if (port && !skip) print port "|" hint }
     ' | sort -u
 }
@@ -396,10 +401,12 @@ build_firmware() {
     (cd "$FIRMWARE_DIR" && pio run -e "$env_name")
     local ret=$?
     if [[ $ret -eq 0 ]]; then
-        local src="$FIRMWARE_DIR/.pio/build/$env_name/firmware.bin"
+        local out_dir="$FIRMWARE_DIR/out/$env_name"
+        local build_dir="$FIRMWARE_DIR/.pio/build/$env_name"
+        mkdir -p "$out_dir"
+        local src="$build_dir/firmware.bin"
         if [[ -f "$src" ]]; then
-            mkdir -p "$FIRMWARE_DIR/out/$env_name"
-            cp "$src" "$FIRMWARE_DIR/out/$env_name/firmware.bin"
+            cp "$src" "$out_dir/firmware.bin"
             echo -e "\033[32m[out] $env_name/firmware.bin\033[0m"
         fi
     fi
@@ -416,7 +423,6 @@ flash_firmware() {
             echo -e "\033[36m[RiftLink] Очистка flash + прошивка $env_name на $port...\033[0m"
             (cd "$FIRMWARE_DIR" && pio run -e "$env_name" -t upload_erase --upload-port "$port")
         else
-            # FakeTech: одна сборка, затем erase и upload
             echo -e "\033[36m[RiftLink] Очистка flash + прошивка $env_name на $port...\033[0m"
             (cd "$FIRMWARE_DIR" && pio run -e "$env_name" -t erase -t upload --upload-port "$port")
         fi
@@ -525,9 +531,9 @@ if [[ $APP_ONLY -eq 1 && $INSTALL_APK -eq 1 ]]; then
     exit $?
 fi
 if [[ $ALL -eq 1 ]]; then
-    ALL_ENVS=("heltec_v3" "heltec_v3_paper" "heltec_v4")
+    ALL_ENVS=("heltec_v3" "heltec_v3_paper" "heltec_v4" "lilygo_t_beam_4mb")
     for e in "${ALL_ENVS[@]}"; do
-        build_firmware "$e"
+        build_firmware "$e" || exit $?
     done
     exit 0
 fi
@@ -542,9 +548,10 @@ fi
 if [[ $FLASH -eq 1 || -n "$ENV" ]]; then
     [[ -z "$ENV" ]] && ENV="heltec_v3"
     [[ $OTA -eq 1 ]] && case $ENV in
-        heltec_v4)      ENV="heltec_v4_ota" ;;
-        heltec_v3_paper) ENV="heltec_v3_paper_ota" ;;
-        *)              ENV="heltec_v3_ota" ;;
+        heltec_v4)           ENV="heltec_v4_ota" ;;
+        heltec_v3_paper)     ENV="heltec_v3_paper_ota" ;;
+        lilygo_t_beam_4mb)   ENV="lilygo_t_beam_4mb_ota" ;;
+        *)                   ENV="heltec_v3_ota" ;;
     esac
     if [[ $FLASH -eq 1 ]]; then
         if [[ -z "$PORT" ]]; then
@@ -565,7 +572,9 @@ if [[ $FLASH -eq 1 || -n "$ENV" ]]; then
                 [[ $idx -ge 0 && $idx -lt ${#ports[@]} ]] && PORT="${ports[$idx]%%|*}"
             fi
         fi
-        [[ -n "$PORT" ]] && flash_firmware "$ENV" "$PORT" "$ERASE"
+        if [[ -n "$PORT" ]]; then
+            flash_firmware "$ENV" "$PORT" "$ERASE"
+        fi
     else
         build_firmware "$ENV"
     fi
@@ -574,7 +583,12 @@ if [[ $FLASH -eq 1 || -n "$ENV" ]]; then
 fi
 
 # Интерактивное меню
-ENV_MAP=("heltec_v3:V3 (OLED)" "heltec_v3_paper:V3 Paper (e-ink)" "heltec_v4:V4 (OLED)")
+ENV_MAP=(
+    "heltec_v3:V3 (OLED)"
+    "heltec_v3_paper:V3 Paper (e-ink)"
+    "heltec_v4:V4 (OLED)"
+    "lilygo_t_beam_4mb:LilyGO T-Beam V1.1/V1.2 (OLED, 4MB flash)"
+)
 
 while true; do
     show_menu
@@ -613,12 +627,14 @@ while true; do
                 else
                     echo ""
                     echo "  2. Порт:"
-                    prefer_paper=0; prefer_v4=0
+                    prefer_paper=0; prefer_v4=0; prefer_tbeam=0
                     [[ "$env_name" == *paper* ]] && prefer_paper=1
                     [[ "$env_name" == *v4* ]] && prefer_v4=1
+                    [[ "$env_name" == *lilygo_t_beam* ]] && prefer_tbeam=1
                     for i in "${!ports[@]}"; do
                         p="${ports[$i]}"; pt="${p%%|*}"; ht="${p#*|}"
                         mark=""
+                        [[ $prefer_tbeam -eq 1 && "$ht" == *T-Beam* ]] && mark=" <- рекомендуется"
                         [[ $prefer_paper -eq 1 && "$ht" == *Paper* ]] && mark=" <- рекомендуется"
                         [[ $prefer_v4 -eq 1 && "$ht" == *V4* ]] && mark=" <- рекомендуется"
                         echo "     $((i+1)). $pt - $ht$mark"
@@ -655,12 +671,14 @@ while true; do
                 else
                     echo ""
                     echo "  2. Порт:"
-                    prefer_paper=0; prefer_v4=0
+                    prefer_paper=0; prefer_v4=0; prefer_tbeam=0
                     [[ "$env_name" == *paper* ]] && prefer_paper=1
                     [[ "$env_name" == *v4* ]] && prefer_v4=1
+                    [[ "$env_name" == *lilygo_t_beam* ]] && prefer_tbeam=1
                     for i in "${!ports[@]}"; do
                         p="${ports[$i]}"; pt="${p%%|*}"; ht="${p#*|}"
                         mark=""
+                        [[ $prefer_tbeam -eq 1 && "$ht" == *T-Beam* ]] && mark=" <- рекомендуется"
                         [[ $prefer_paper -eq 1 && "$ht" == *Paper* ]] && mark=" <- рекомендуется"
                         [[ $prefer_v4 -eq 1 && "$ht" == *V4* ]] && mark=" <- рекомендуется"
                         echo "     $((i+1)). $pt - $ht$mark"

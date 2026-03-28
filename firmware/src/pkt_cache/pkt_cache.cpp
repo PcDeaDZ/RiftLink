@@ -11,10 +11,17 @@
 #include "log.h"
 #include <string.h>
 
+#if defined(ARDUINO_LILYGO_T_BEAM)
+#define CACHE_SIZE 2
+#define OVERHEAR_SIZE 1
+#define BATCH_CACHE_SIZE 2
+#define NACK_GUARD_SIZE 6
+#else
 #define CACHE_SIZE 4
 #define OVERHEAR_SIZE 2
 #define BATCH_CACHE_SIZE 4
 #define NACK_GUARD_SIZE 8
+#endif
 #define NACK_GUARD_MS 800
 
 struct CachedPkt {

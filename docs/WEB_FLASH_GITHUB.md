@@ -21,7 +21,7 @@
 
 ## Сборка образов локально
 
-После `pio run -e <env>` merged-файлы появляются в `firmware/out/<env>/`. Скопируйте `*_full.bin` в `docs/flasher/firmware/` с именами из манифестов (`heltec_v3_full.bin`, `heltec_v4_full.bin`, `heltec_v3_paper_full.bin`, `lilygo_t_lora_pager_full.bin`, `lilygo_t_beam_full.bin`). Скрипт: [`docs/flasher/scripts/update-manifests.ps1`](flasher/scripts/update-manifests.ps1) — обновление поля `version` в JSON манифестах (параметр `-Version`, например `1.5.25`).
+После `pio run -e <env>` merged-файлы появляются в `firmware/out/<env>/`. Скопируйте `*_full.bin` в `docs/flasher/firmware/` с именами из манифестов (`heltec_v3_full.bin`, `heltec_v4_full.bin`, `heltec_v3_paper_full.bin`, `lilygo_t_lora_pager_full.bin`, `lilygo_t_beam_4mb_full.bin`). Скрипт: [`docs/flasher/scripts/update-manifests.ps1`](flasher/scripts/update-manifests.ps1) — обновление поля `version` в JSON манифестах (параметр `-Version`, например `1.5.25`).
 
 **Текущая версия артефактов** должна совпадать с [`embedded-release.json`](flasher/embedded-release.json) (`firmwareVersion`, `appVersion`) и с [`firmware/src/version.h`](../firmware/src/version.h).
 

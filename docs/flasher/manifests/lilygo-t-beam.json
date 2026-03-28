@@ -7,7 +7,7 @@
       "chipFamily": "ESP32",
       "parts": [
         {
-          "path": "../firmware/lilygo_t_beam_full.bin",
+          "path": "../firmware/lilygo_t_beam_4mb_full.bin",
           "offset": 0
         }
       ]

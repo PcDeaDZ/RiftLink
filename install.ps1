@@ -1,4 +1,4 @@
-﻿# RiftLink — установка «в один клик»: git clone + build.ps1 -Setup
+# RiftLink — установка «в один клик»: git clone + build.ps1 -Setup
 # Использование: irm https://raw.githubusercontent.com/PcDeaDZ/RiftLink/master/install.ps1 | iex
 # Или: Invoke-Expression (Invoke-WebRequest -Uri "https://raw.../install.ps1" -UseBasicParsing).Content
 #
@@ -65,7 +65,4 @@ Write-Host "========================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Прошивки:" -ForegroundColor Gray
 Write-Host "    Heltec V3/V4:  .\build.ps1 -V4 -Flash" -ForegroundColor Gray
-Write-Host "    FakeTech V5:   .\build.ps1 -FakeTech        # сборка" -ForegroundColor Gray
-Write-Host "                  .\build.ps1 -FakeTech -Flash  # сборка + прошивка" -ForegroundColor Gray
-Write-Host "                  Для erase (-Erase): winget install NordicSemiconductor.JLink + J-Link probe по SWD" -ForegroundColor Gray
 Write-Host ""

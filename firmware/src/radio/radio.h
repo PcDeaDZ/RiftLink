@@ -1,5 +1,5 @@
 /**
- * Radio Layer — LoRa (SX1262)
+ * Radio Layer — LoRa (SX1262; на T-Beam с RFM9x — SX1276, авто или RIFTLINK_T_BEAM_LORA_SX127X)
  */
 
 #pragma once
@@ -29,6 +29,8 @@ const ModemConfig& modemPresetConfig(ModemPreset p);
 const char* modemPresetName(ModemPreset p);
 
 bool init();
+/** false если begin() не прошёл — не дергать TX/RX (объект RadioLib может существовать без чипа). */
+bool isReady();
 void setAsyncMode(bool on);
 /** TX только через очередь → `radioSchedulerTask` (без синхронного SPI из loop/packetTask).
  * txSf 7–12 — SF пакета; 0 — mesh SF. reasonBuf — причина отказа (HELLO drop и т.п.). */
@@ -36,8 +38,10 @@ bool send(const uint8_t* data, size_t len, uint8_t txSf = 0, bool priority = fal
     char* reasonBuf = nullptr, size_t reasonLen = 0);
 /** Устаревшее имя: то же, что `send(..., priority=true)` — только очередь, без прямого TX. */
 bool sendDirect(const uint8_t* data, size_t len, char* reasonBuf = nullptr, size_t reasonLen = 0);
-/** Только из `radioSchedulerTask` под `takeMutex` — не вызывать из прикладного кода. */
-bool sendDirectInternal(const uint8_t* data, size_t len, char* reasonBuf = nullptr, size_t reasonLen = 0);
+/** Только из `radioSchedulerTask` под `takeMutex` — не вызывать из прикладного кода.
+ *  skipCad: для раннего selftest — без CSMA/CAD (иначе на EU 868 часто ложный «нет антенны» при шумном эфире). */
+bool sendDirectInternal(const uint8_t* data, size_t len, char* reasonBuf = nullptr, size_t reasonLen = 0,
+    bool skipCad = false);
 /** Только: планировщик радио, E-Ink SPI (Paper). CAD — внутри `sendDirectInternal`. */
 bool takeMutex(TickType_t timeout);
 void releaseMutex();

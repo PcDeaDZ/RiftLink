@@ -107,7 +107,15 @@ static void loadFromNvs() {
     return;
   }
   size_t len = sizeof(s_nvsBuf);
-  if (nvs_get_blob(h, NVS_KEY_OFFLINE, s_nvsBuf, &len) != ESP_OK) {
+  esp_err_t blobErr = nvs_get_blob(h, NVS_KEY_OFFLINE, s_nvsBuf, &len);
+  if (blobErr == ESP_ERR_NVS_INVALID_LENGTH) {
+    // Старый образ с большим OFFLINE_MAX_MSGS — несовместимый blob, иначе load молча пустой
+    nvs_erase_key(h, NVS_KEY_OFFLINE);
+    nvs_commit(h);
+    nvs_close(h);
+    return;
+  }
+  if (blobErr != ESP_OK) {
     nvs_close(h);
     return;
   }

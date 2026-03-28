@@ -52,7 +52,7 @@
 | **Heltec V4** | OLED 128×64, 16MB flash | `heltec_v4` |
 | **Heltec V3 Paper** | E-Ink 2.13" | `heltec_v3_paper` |
 | **LilyGO T-Lora Pager** | ST7796 TFT | `lilygo_t_lora_pager` |
-| **LilyGO T-Beam** V1.1/V1.2 | OLED SSD1306, GPS | `lilygo_t_beam` |
+| **LilyGO T-Beam** V1.1/V1.2 | OLED SSD1306, GPS | `lilygo_t_beam_4mb` |
 
 Текущий релиз прошивки и приложения: **1.5.25** (см. [`firmware/src/version.h`](firmware/src/version.h), [`app/pubspec.yaml`](app/pubspec.yaml), [`CHANGELOG.md`](CHANGELOG.md)). Android APK: [релиз v1.5.25 на GitHub](https://github.com/PcDeaDZ/RiftLink/releases/tag/v1.5.25). Веб-прошивка из браузера: [`docs/flasher/`](docs/flasher/) → [`WEB_FLASH_GITHUB.md`](docs/WEB_FLASH_GITHUB.md).
 

@@ -9,7 +9,12 @@
 #include <cstddef>
 #include "protocol/packet.h"
 
+#if defined(ARDUINO_LILYGO_T_BEAM)
+/** ESP32: s_msgs + s_nvsBuf — крупный вклад в .dram0.bss; 8 слотов сохраняют совместимость NVS blob по размеру ключа. */
+#define OFFLINE_MAX_MSGS  8
+#else
 #define OFFLINE_MAX_MSGS  16
+#endif
 #define OFFLINE_MAX_LEN   280
 
 namespace offline_queue {

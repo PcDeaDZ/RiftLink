@@ -1,5 +1,5 @@
 /**
- * RiftLink — единый лог для захвата Serial (Heltec V3/V4/Paper, FakeTech nRF52).
+ * RiftLink — единый лог для захвата Serial (Heltec V3/V4/Paper и др.).
  * Формат: [DIAG][SCOPE] t=<ms> ... — удобно grep/filters как на «большой» прошивке.
  * RIFTLINK_LOG_* — короткие printf; на nRF52 Serial.printf есть в Print (Adafruit core).
  *

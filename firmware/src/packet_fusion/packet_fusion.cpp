@@ -27,7 +27,11 @@ struct FusionEntry {
   bool inUse;
 };
 
+#if defined(ARDUINO_LILYGO_T_BEAM)
+#define FUSION_SLOTS 2
+#else
 #define FUSION_SLOTS 4
+#endif
 static FusionEntry s_fusion[FUSION_SLOTS];
 static bool s_inited = false;
 static void (*s_onBatchSent)(const uint8_t* to, const uint32_t* msgIds, int count, uint16_t batchPktId) = nullptr;

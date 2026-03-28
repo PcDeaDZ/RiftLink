@@ -329,6 +329,15 @@ int batteryPercent() {
   if (mv >= 4200) return 100;
   if (mv <= 3000) return 0;
   return (int)((mv - 3000) / 12);
+#elif defined(ARDUINO_LILYGO_T_BEAM)
+  if (!s_inited) return -1;
+  int soc = lilygoTbeamReadBatteryPercent();
+  if (soc >= 0 && soc <= 100) return soc;
+  uint16_t mv = readBatteryMv();
+  if (mv < 2500) return -1;
+  if (mv >= 4200) return 100;
+  if (mv <= 3000) return 0;
+  return (int)((mv - 3000) / 12);
 #else
   uint16_t mv = readBatteryMv();
   if (mv < 2500) return -1;

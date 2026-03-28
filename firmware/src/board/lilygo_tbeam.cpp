@@ -39,27 +39,18 @@ static bool pmuReadReg(uint8_t reg, uint8_t* out) {
   return true;
 }
 
-static bool pmuReadReg16(uint8_t regH, uint8_t regL, uint16_t* out) {
-  uint8_t h = 0, l = 0;
-  if (!pmuReadReg(regH, &h)) return false;
-  if (!pmuReadReg(regL, &l)) return false;
-  *out = ((uint16_t)h << 8) | l;
-  return true;
-}
-
-// AXP2101 register map (partial)
-static constexpr uint8_t REG_PMU_STATUS1       = 0x00;
-static constexpr uint8_t REG_PMU_STATUS2       = 0x01;
-static constexpr uint8_t REG_CHIP_ID           = 0x03;
-static constexpr uint8_t REG_VBUS_IPSOUT       = 0x30;
-static constexpr uint8_t REG_BAT_CHARGING_CTRL = 0x62;
-static constexpr uint8_t REG_ALDO2_VOLTAGE     = 0x93;  // LoRa power
-static constexpr uint8_t REG_ALDO3_VOLTAGE     = 0x94;  // GPS power
-static constexpr uint8_t REG_LDO_ONOFF_CTRL0   = 0x90;  // ALDO1-4 enable bits
-static constexpr uint8_t REG_ADC_ENABLE        = 0x30;
-static constexpr uint8_t REG_VBAT_H            = 0x78;  // Battery voltage high byte
-static constexpr uint8_t REG_VBAT_L            = 0x79;  // Battery voltage low byte
-static constexpr uint8_t REG_BAT_PERCENT       = 0xA4;  // Battery SOC (state of charge)
+// AXP2101 register map — сверено с XPowersLib REG/AXP2101Constants.h
+static constexpr uint8_t REG_PMU_STATUS1         = 0x00;
+static constexpr uint8_t REG_PMU_STATUS2         = 0x01;
+static constexpr uint8_t REG_CHIP_ID             = 0x03;
+static constexpr uint8_t REG_ADC_CHANNEL_CTRL    = 0x30;  // bit0 = измерение Vbat
+static constexpr uint8_t REG_ADC_DATA_BAT_H      = 0x34;
+static constexpr uint8_t REG_ADC_DATA_BAT_L      = 0x35;
+static constexpr uint8_t REG_BAT_DET_CTRL        = 0x68;  // bit0 = detect battery
+static constexpr uint8_t REG_BAT_PERCENT_DATA    = 0xA4;
+static constexpr uint8_t REG_ALDO2_VOLTAGE       = 0x93;  // LoRa power
+static constexpr uint8_t REG_ALDO3_VOLTAGE       = 0x94;  // GPS power
+static constexpr uint8_t REG_LDO_ONOFF_CTRL0     = 0x90;  // ALDO1-4 enable bits
 
 static void setAldo(uint8_t aldoReg, uint8_t voltageSetting, uint8_t enableBit, bool on) {
   if (!s_pmuOk) return;
@@ -87,6 +78,22 @@ void lilygoTbeamEarlyInit() {
   Serial.printf("[RiftLink] AXP2101: chip ID 0x%02X\n", chipId);
   s_pmuOk = true;
 
+  // Без этого readRegisterH5L8(Vbat) даёт мусор / 0 — как enableBattVoltageMeasure в XPowersLib
+  {
+    uint8_t adc = 0;
+    if (pmuReadReg(REG_ADC_CHANNEL_CTRL, &adc)) {
+      adc |= 1u << 0;
+      (void)pmuWriteReg(REG_ADC_CHANNEL_CTRL, adc);
+    }
+  }
+  {
+    uint8_t det = 0;
+    if (pmuReadReg(REG_BAT_DET_CTRL, &det)) {
+      det |= 1u << 0;
+      (void)pmuWriteReg(REG_BAT_DET_CTRL, det);
+    }
+  }
+
   lilygoTbeamSetLoraPower(true);
   lilygoTbeamSetGpspower(false);
   lilygoTbeamSetOledPower(true);
@@ -110,20 +117,36 @@ void lilygoTbeamSetOledPower(bool on) {
 
 uint16_t lilygoTbeamReadBatteryMv() {
   if (!s_pmuOk) return 0;
+  uint8_t st1 = 0;
+  if (!pmuReadReg(REG_PMU_STATUS1, &st1)) return 0;
+  if ((st1 & (1u << 3)) == 0) return 0;  // батарея не подключена (XPowers isBatteryConnect)
+
   uint8_t h = 0, l = 0;
-  if (!pmuReadReg(REG_VBAT_H, &h)) return 0;
-  if (!pmuReadReg(REG_VBAT_L, &l)) return 0;
-  // AXP2101: VBAT[13:0], шаг 1 mV
-  uint16_t raw = ((uint16_t)(h & 0x3F) << 8) | l;
-  return raw;
+  if (!pmuReadReg(REG_ADC_DATA_BAT_H, &h)) return 0;
+  if (!pmuReadReg(REG_ADC_DATA_BAT_L, &l)) return 0;
+  // XPowers readRegisterH5L8 — напряжение батареи в мВ
+  uint16_t mv = (uint16_t)(((uint16_t)(h & 0x1Fu) << 8) | l);
+  return mv;
+}
+
+int lilygoTbeamReadBatteryPercent() {
+  if (!s_pmuOk) return -1;
+  uint8_t st1 = 0;
+  if (!pmuReadReg(REG_PMU_STATUS1, &st1)) return -1;
+  if ((st1 & (1u << 3)) == 0) return -1;
+
+  uint8_t p = 0;
+  if (!pmuReadReg(REG_BAT_PERCENT_DATA, &p)) return -1;
+  if (p > 100u) return -1;
+  return (int)p;
 }
 
 bool lilygoTbeamIsCharging() {
   if (!s_pmuOk) return false;
-  uint8_t st = 0;
-  if (!pmuReadReg(REG_PMU_STATUS1, &st)) return false;
-  // Bit 5 in STATUS1: charging active
-  return (st & 0x20) != 0;
+  uint8_t st2 = 0;
+  if (!pmuReadReg(REG_PMU_STATUS2, &st2)) return false;
+  // XPowers AXP2101::isCharging(): (STATUS2 >> 5) == 0x01
+  return (st2 >> 5) == 0x01;
 }
 
 #else
@@ -133,6 +156,7 @@ void lilygoTbeamSetLoraPower(bool) {}
 void lilygoTbeamSetGpspower(bool) {}
 void lilygoTbeamSetOledPower(bool) {}
 uint16_t lilygoTbeamReadBatteryMv() { return 0; }
+int lilygoTbeamReadBatteryPercent() { return -1; }
 bool lilygoTbeamIsCharging() { return false; }
 
 #endif

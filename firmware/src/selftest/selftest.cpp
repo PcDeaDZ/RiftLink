@@ -17,6 +17,10 @@
 namespace selftest {
 
 bool quickAntennaCheck() {
+  if (!radio::isReady()) {
+    Serial.println("[RiftLink] LoRa TX ping skipped: radio init failed (не SPI дисплея — отдельная шина I2C)");
+    return false;
+  }
   duty_cycle::reset();
   uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
   size_t len = protocol::buildPacket(pkt, sizeof(pkt),
@@ -25,9 +29,10 @@ bool quickAntennaCheck() {
   // При загрузке async-очередь ещё не создана — radio::send() вернёт false.
   // Используем прямой SPI TX под мьютексом (radioSchedulerTask не запущен, конкуренции нет).
   if (!radio::takeMutex(pdMS_TO_TICKS(500))) return false;
-  bool ok = radio::sendDirectInternal(pkt, len);
+  // skipCad=true: иначе на EU 868 при занятом эфире CAD даёт FAIL — это не «нет антенны».
+  bool ok = radio::sendDirectInternal(pkt, len, nullptr, 0, true);
   radio::releaseMutex();
-  Serial.printf("[RiftLink] Antenna check: %s\n", ok ? "OK" : "FAIL");
+  Serial.printf("[RiftLink] LoRa TX ping (selftest, no CAD): %s\n", ok ? "OK" : "FAIL");
   return ok;
 }
 

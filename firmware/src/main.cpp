@@ -12,9 +12,18 @@
 
 // Fallback: loopTask stack — build_flags -DARDUINO_LOOP_STACK_SIZE может не применяться к framework
 #if defined(ESP_LOOP_TASK_STACK_SIZE)
+#if defined(ARDUINO_LILYGO_T_BEAM)
+// ESP32 (T-Beam): держать в синхроне с platformio.ini lilygo_t_beam_4mb ARDUINO_LOOP_STACK_SIZE (fallback, если флаг не подхватился)
+ESP_LOOP_TASK_STACK_SIZE(16384);
+#else
 ESP_LOOP_TASK_STACK_SIZE(32768);
+#endif
 #elif defined(SET_LOOP_TASK_STACK_SIZE)
+#if defined(ARDUINO_LILYGO_T_BEAM)
+SET_LOOP_TASK_STACK_SIZE(16384);
+#else
 SET_LOOP_TASK_STACK_SIZE(32768);
+#endif
 #endif
 #include <nvs_flash.h>
 #include <esp_err.h>
@@ -1094,7 +1103,7 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
 
   // Relay: unicast не для нас, или GROUP_MSG (broadcast) с TTL>0
   // HELLO — всегда broadcast, не ретранслируем (защита от парсинга с перепутанным to)
-  // KEY_EXCHANGE — только прямой unicast, не ретранслируем (паритет с faketec/main.cpp)
+  // KEY_EXCHANGE — только прямой unicast, не ретранслируем
   // ROUTE_REQ/REPLY обрабатываются модулем routing
   // Broadcast relay только при 2+ соседях — иначе ping-pong между двумя устройствами, HELLO не проходят
   bool needRelay = (hdr.ttl > 0) && (hdr.opcode != protocol::OP_ROUTE_REQ) &&
@@ -1258,8 +1267,8 @@ void handlePacket(const uint8_t* buf, size_t len, int rssi, uint8_t sf) {
         }
         bool keyMismatch = x25519_keys::isPeerPubKeyMismatch(hdr.from, payload);
         if (keyMismatch) {
-          /* Пир сменил ключевую пару (перепрошивка, сброс NVS/FS) при том же node id — не блокировать
-           * пару V3↔FakeTech: пересчитать shared secret через onKeyExchange ниже. */
+          /* Пир сменил ключевую пару (перепрошивка, сброс NVS/FS) при том же node id — не блокировать;
+           * пересчитать shared secret через onKeyExchange ниже. */
           RIFTLINK_DIAG("KEY", "event=KEY_ROTATE peer=%02X%02X pktId=%u (pubkey changed, accepting)",
               hdr.from[0], hdr.from[1], (unsigned)hdr.pktId);
           RIFTLINK_LOG_EVENT("[RiftLink] KEY_EXCHANGE: peer pubkey changed, re-key for %02X%02X\n",
@@ -2099,9 +2108,13 @@ static void runBootStateMachine() {
     displayShowInitProgress(2, 4, locale::getForDisplay("radio_ok"));
   }
   Serial.printf("[RiftLink] Heap after radio::init: %u\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
-  Serial.println("[RiftLink] boot: selftest::quickAntennaCheck");
-  if (!selftest::quickAntennaCheck()) {
-    displayShowWarning(locale::getForDisplay("antenna_warn"), locale::getForDisplay("antenna_check"), 3000);
+  if (radio::isReady()) {
+    Serial.println("[RiftLink] boot: selftest::quickAntennaCheck");
+    if (!selftest::quickAntennaCheck()) {
+      displayShowWarning(locale::getForDisplay("antenna_warn"), locale::getForDisplay("antenna_check"), 3000);
+    }
+  } else {
+    Serial.println("[RiftLink] Skip LoRa ping selftest: radio init failed (не путать с I2C OLED)");
   }
   displayShowInitProgress(2, 4, locale::getForDisplay("init_step_region"));
   while (!region::isSet()) {

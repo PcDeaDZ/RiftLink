@@ -1,5 +1,6 @@
-﻿# RiftLink — ультимативный менеджер (setup + build + flash + APK)
+# RiftLink — ультимативный менеджер (setup + build + flash + APK)
 # Использование: .\build.ps1  или  .\build.ps1 -Setup  или  .\build.ps1 -Flash -V4
+# Прошивка: .\build.ps1 -TBeam  |  .\build.ps1 -All (V3, Paper, V4, T-Beam 4MB)
 # Пути: .env.local (FLUTTER_ROOT, ANDROID_SDK_ROOT)
 # После правок этого файла: .\scripts\fix_encoding.ps1 (UTF-8 BOM, CRLF — см. README.md)
 #
@@ -15,8 +16,9 @@ param(
     [switch]$Flash,
     [switch]$Monitor,
     [switch]$Ota,
-    [switch]$All,      # Сборка для всех env (V3, Paper, V4)
-    [switch]$FakeTech, # Сборка/прошивка FakeTech V5 (nRF52)
+    [switch]$All,      # Сборка для всех env (V3, Paper, V4, T-Beam)
+    [switch]$TBeam,    # Сборка/прошивка LilyGO T-Beam V1.1/V1.2 OLED 4MB — lilygo_t_beam_4mb
+    [switch]$TBeam4Mb, # То же, что -TBeam (совместимость)
     [switch]$Erase,    # Очистка flash перед прошивкой
     [switch]$V3,
     [switch]$V3Paper,
@@ -191,7 +193,7 @@ $EnvMap = @{
     "1" = @{ env = "heltec_v3";      name = "V3 (OLED)" }
     "2" = @{ env = "heltec_v3_paper"; name = "V3 Paper (e-ink)" }
     "3" = @{ env = "heltec_v4";       name = "V4 (OLED)" }
-    "4" = @{ env = "faketec_v5";     name = "FakeTech V5 (nRF52)" }
+    "4" = @{ env = "lilygo_t_beam_4mb"; name = "LilyGO T-Beam V1.1/V1.2 (OLED, 4MB flash)" }
 }
 
 function Get-SerialPorts {
@@ -221,9 +223,9 @@ function Get-SerialPorts {
                 if ($hwid -match "303A|VID_303A|ESP32|JTAG" -or $desc -match "JTAG|USB Serial|debug") {
                     $hint = "V4 (native USB)"
                 } elseif ($hwid -match "CP210|10C4:EA60|Silicon Labs" -or $desc -match "CP210|Silicon Labs") {
-                    $hint = "Paper (CP210x)"
+                    $hint = "T-Beam / Paper (CP210x)"
                 } elseif ($hwid -match "239A|VID_239A|Adafruit" -or $desc -match "Adafruit|последовательн") {
-                    $hint = "FakeTech (nRF52)"
+                    $hint = "USB (Adafruit CDC)"
                 }
                 $ports += [PSCustomObject]@{ Port = $port; Desc = $desc; HwId = $hwid; Hint = $hint }
             }
@@ -390,17 +392,10 @@ function Invoke-BuildFirmware {
             $outDir = Join-Path $FirmwareDir "out\$EnvName"
             New-Item -ItemType Directory -Force -Path $outDir | Out-Null
             $buildDir = Join-Path $FirmwareDir ".pio\build\$EnvName"
-            if ($EnvName -eq "faketec_v5") {
-                $hex = Join-Path $buildDir "firmware.hex"
-                $zip = Join-Path $buildDir "firmware.zip"
-                if (Test-Path $hex) { Copy-Item $hex (Join-Path $outDir "firmware.hex") -Force; Write-Host "[out] $EnvName/firmware.hex" -ForegroundColor Green }
-                if (Test-Path $zip) { Copy-Item $zip (Join-Path $outDir "firmware.zip") -Force; Write-Host "[out] $EnvName/firmware.zip" -ForegroundColor Green }
-            } else {
-                $src = Join-Path $buildDir "firmware.bin"
-                if (Test-Path $src) {
-                    Copy-Item $src (Join-Path $outDir "firmware.bin") -Force
-                    Write-Host "[out] $EnvName/firmware.bin" -ForegroundColor Green
-                }
+            $src = Join-Path $buildDir "firmware.bin"
+            if (Test-Path $src) {
+                Copy-Item $src (Join-Path $outDir "firmware.bin") -Force
+                Write-Host "[out] $EnvName/firmware.bin" -ForegroundColor Green
             }
         }
         return $ok
@@ -417,10 +412,6 @@ function Invoke-FlashFirmware {
             # upload_erase: одна сборка + erase + upload (Heltec V3/V4/Paper)
             Write-Host "[RiftLink] Очистка flash + прошивка $EnvName на $UploadPort..." -ForegroundColor Cyan
             pio run -e $EnvName -t upload_erase --upload-port $UploadPort
-        } elseif ($Erase -and $EnvName -match "faketec") {
-            # FakeTech: одна сборка, затем erase и upload
-            Write-Host "[RiftLink] Очистка flash + прошивка $EnvName на $UploadPort..." -ForegroundColor Cyan
-            pio run -e $EnvName -t erase -t upload --upload-port $UploadPort
         } else {
             Write-Host "[RiftLink] Прошивка $EnvName на $UploadPort..." -ForegroundColor Cyan
             pio run -e $EnvName -t upload --upload-port $UploadPort
@@ -578,16 +569,17 @@ if ($Monitor -and -not $Flash -and -not $App -and -not $InstallApk -and -not $Al
     }
     exit $LASTEXITCODE
 }
-if ($Flash -or $App -or $InstallApk -or $All -or $FakeTech -or $BuildEnv -ne "") {
+if ($Flash -or $App -or $InstallApk -or $All -or $TBeam -or $TBeam4Mb -or $BuildEnv -ne "") {
     $envChoice = $BuildEnv
-    if ($FakeTech) { $envChoice = "faketec_v5" }
+    if ($TBeam4Mb -or $TBeam) { $envChoice = "lilygo_t_beam_4mb" }
     elseif ($V4) { $envChoice = "heltec_v4" }
     elseif ($V3Paper) { $envChoice = "heltec_v3_paper" }
     elseif ($V3 -or $envChoice -eq "") { $envChoice = "heltec_v3" }
-    if ($Ota -and $envChoice -ne "faketec_v5") {
+    if ($Ota) {
         $envChoice = switch ($envChoice) {
             "heltec_v4" { "heltec_v4_ota" }
             "heltec_v3_paper" { "heltec_v3_paper_ota" }
+            "lilygo_t_beam_4mb" { "lilygo_t_beam_4mb_ota" }
             default { "heltec_v3_ota" }
         }
     }
@@ -605,7 +597,7 @@ if ($Flash -or $App -or $InstallApk -or $All -or $FakeTech -or $BuildEnv -ne "")
     }
     Set-Location $FirmwareDir
     if ($All) {
-        $allEnvs = @("heltec_v3", "heltec_v3_paper", "heltec_v4", "faketec_v5")
+        $allEnvs = @("heltec_v3", "heltec_v3_paper", "heltec_v4", "lilygo_t_beam_4mb")
         foreach ($e in $allEnvs) {
             Invoke-BuildFirmware -EnvName $e
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -622,13 +614,13 @@ if ($Flash -or $App -or $InstallApk -or $All -or $FakeTech -or $BuildEnv -ne "")
             }
             $preferPaper = $envChoice -match "paper"
             $preferV4 = $envChoice -match "v4"
-            $preferFakeTech = $envChoice -match "faketec"
+            $preferTBeam = $envChoice -match "lilygo_t_beam"
             if ($ports.Count -eq 1) {
                 $uploadPort = $ports[0].Port
             } else {
                 $sorted = @($ports | ForEach-Object {
                     $s = 0
-                    if ($preferFakeTech -and $_.Hint -match "FakeTech") { $s = 10 }
+                    if ($preferTBeam -and $_.Hint -match "T-Beam") { $s = 10 }
                     elseif ($preferPaper -and $_.Hint -match "Paper") { $s = 10 }
                     elseif ($preferV4 -and $_.Hint -match "V4") { $s = 10 }
                     $comNum = [int]($_.Port -replace 'COM', '')
@@ -639,7 +631,7 @@ if ($Flash -or $App -or $InstallApk -or $All -or $FakeTech -or $BuildEnv -ne "")
                 for ($i = 0; $i -lt $n; $i++) {
                     $p = $sorted[$i]
                     $m = ""
-                    if ($preferFakeTech -and $p.Hint -match "FakeTech") { $m = " <- FakeTech" }
+                    if ($preferTBeam -and $p.Hint -match "T-Beam") { $m = " <- T-Beam" }
                     elseif ($preferPaper -and $p.Hint -match "Paper") { $m = " <- Paper" }
                     elseif ($preferV4 -and $p.Hint -match "V4") { $m = " <- V4" }
                     Write-Host "  $($i+1). $($p.Port) - $($p.Hint)$m"
@@ -650,9 +642,6 @@ if ($Flash -or $App -or $InstallApk -or $All -or $FakeTech -or $BuildEnv -ne "")
             }
         }
         if ($uploadPort) {
-            if ($envChoice -eq "faketec_v5") {
-                Write-Host "[FakeTech] Двойной клик RST на NiceNano для DFU, затем прошивка..." -ForegroundColor Yellow
-            }
             Invoke-FlashFirmware -EnvName $envChoice -UploadPort $uploadPort -Erase:$Erase
         }
     }
@@ -697,12 +686,12 @@ while ($true) {
             }
             Write-Host ""
             Write-Host "  2. Порт:"
-            $preferFakeTech = $envName -match "faketec"
+            $preferTBeam = $envName -match "lilygo_t_beam"
             $preferPaper = $envName -match "paper"
             $preferV4 = $envName -match "v4"
             $sorted = @($ports | ForEach-Object {
                 $score = 0
-                if ($preferFakeTech -and $_.Hint -match "FakeTech") { $score = 10 }
+                if ($preferTBeam -and $_.Hint -match "T-Beam") { $score = 10 }
                 elseif ($preferPaper -and $_.Hint -match "Paper") { $score = 10 }
                 elseif ($preferV4 -and $_.Hint -match "V4") { $score = 10 }
                 $comNum = [int]($_.Port -replace 'COM', '')
@@ -711,7 +700,7 @@ while ($true) {
             for ($i = 0; $i -lt $sorted.Count; $i++) {
                 $p = $sorted[$i]
                 $mark = ""
-                if ($preferFakeTech -and $p.Hint -match "FakeTech") { $mark = " <- рекомендуется" }
+                if ($preferTBeam -and $p.Hint -match "T-Beam") { $mark = " <- рекомендуется" }
                 elseif ($preferPaper -and $p.Hint -match "Paper") { $mark = " <- рекомендуется" }
                 elseif ($preferV4 -and $p.Hint -match "V4") { $mark = " <- рекомендуется" }
                 Write-Host "     $($i+1). $($p.Port) - $($p.Hint)$mark"
@@ -725,9 +714,6 @@ while ($true) {
             $doErase = $yn -match '^[yY]'
             Write-Host ""
             if ($port) {
-                if ($envName -eq "faketec_v5") {
-                    Write-Host "  [FakeTech] Двойной клик RST на NiceNano для DFU." -ForegroundColor Yellow
-                }
                 Invoke-FlashFirmware -EnvName $envName -UploadPort $port -Erase:$doErase
             }
         } }
@@ -749,12 +735,12 @@ while ($true) {
             }
             Write-Host ""
             Write-Host "  2. Порт:"
-            $preferFakeTech = $envName -match "faketec"
+            $preferTBeam = $envName -match "lilygo_t_beam"
             $preferPaper = $envName -match "paper"
             $preferV4 = $envName -match "v4"
             $sorted = @($ports | ForEach-Object {
                 $score = 0
-                if ($preferFakeTech -and $_.Hint -match "FakeTech") { $score = 10 }
+                if ($preferTBeam -and $_.Hint -match "T-Beam") { $score = 10 }
                 elseif ($preferPaper -and $_.Hint -match "Paper") { $score = 10 }
                 elseif ($preferV4 -and $_.Hint -match "V4") { $score = 10 }
                 $comNum = [int]($_.Port -replace 'COM', '')
@@ -763,7 +749,7 @@ while ($true) {
             for ($i = 0; $i -lt $sorted.Count; $i++) {
                 $p = $sorted[$i]
                 $mark = ""
-                if ($preferFakeTech -and $p.Hint -match "FakeTech") { $mark = " <- рекомендуется" }
+                if ($preferTBeam -and $p.Hint -match "T-Beam") { $mark = " <- рекомендуется" }
                 elseif ($preferPaper -and $p.Hint -match "Paper") { $mark = " <- рекомендуется" }
                 elseif ($preferV4 -and $p.Hint -match "V4") { $mark = " <- рекомендуется" }
                 Write-Host "     $($i+1). $($p.Port) - $($p.Hint)$mark"
@@ -777,9 +763,6 @@ while ($true) {
             $doErase = $yn -match '^[yY]'
             Write-Host ""
             if ($port) {
-                if ($envName -eq "faketec_v5") {
-                    Write-Host "  [FakeTech] Двойной клик RST на NiceNano для DFU." -ForegroundColor Yellow
-                }
                 Invoke-FlashFirmware -EnvName $envName -UploadPort $port -Erase:$doErase
             }
         } }

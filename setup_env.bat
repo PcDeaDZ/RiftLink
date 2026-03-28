@@ -10,7 +10,7 @@ echo.
 cd /d "%~dp0"
 
 :: --- 1. Python ---
-echo [1/8] Проверка Python...
+echo [1/7] Проверка Python...
 where python >nul 2>nul
 if %errorlevel% neq 0 (
     where py >nul 2>nul
@@ -37,7 +37,7 @@ if %errorlevel% neq 0 (
 echo.
 
 :: --- 2. pip + зависимости ---
-echo [2/8] Установка pip-пакетов (pyserial, pytest, platformio)...
+echo [2/7] Установка pip-пакетов (pyserial, pytest, platformio)...
 %PY_CMD% -m pip install --upgrade pip -q
 %PY_CMD% -m pip install -r requirements-dev.txt -q
 if %errorlevel% neq 0 (
@@ -49,7 +49,7 @@ echo      OK: pyserial, pytest, platformio
 echo.
 
 :: --- 3. PlatformIO ---
-echo [3/8] Проверка PlatformIO...
+echo [3/7] Проверка PlatformIO...
 where pio >nul 2>nul
 if %errorlevel% neq 0 (
     %PY_CMD% -m platformio --version >nul 2>nul
@@ -67,7 +67,7 @@ if %errorlevel% neq 0 (
 echo.
 
 :: --- 4. Java (нужен до Flutter/Android) ---
-echo [4/8] Проверка Java...
+echo [4/7] Проверка Java...
 set "JAVA_OK=0"
 where java >nul 2>nul
 if %errorlevel% equ 0 (
@@ -86,7 +86,7 @@ if %JAVA_OK% equ 0 (
 echo.
 
 :: --- 5. Flutter ---
-echo [5/8] Проверка Flutter...
+echo [5/7] Проверка Flutter...
 set "FLUTTER_OK=0"
 set "FLUTTER_BIN="
 where flutter >nul 2>nul
@@ -140,7 +140,7 @@ if %FLUTTER_OK% equ 1 (
 echo.
 
 :: --- 6. Android SDK ---
-echo [6/8] Проверка Android SDK...
+echo [6/7] Проверка Android SDK...
 set "ANDROID_SDK_ROOT="
 if defined ANDROID_HOME set "ANDROID_SDK_ROOT=%ANDROID_HOME%"
 if not defined ANDROID_SDK_ROOT set "ANDROID_SDK_ROOT=%LOCALAPPDATA%\Android\Sdk"
@@ -187,32 +187,8 @@ if %ANDROID_OK% equ 0 (
 )
 echo.
 
-:: --- 7. J-Link (для FakeTech V5 — erase nRF52) ---
-echo [7/8] Проверка J-Link (FakeTech erase)...
-set "JLINK_OK=0"
-if exist "C:\Program Files\SEGGER\JLink\JLinkARM.dll" set "JLINK_OK=1"
-if exist "C:\Program Files (x86)\SEGGER\JLink\JLinkARM.dll" set "JLINK_OK=1"
-where nrfjprog >nul 2>nul
-if !errorlevel! equ 0 set "JLINK_OK=1"
-if %JLINK_OK% equ 0 (
-    echo      J-Link не найден. Для erase FakeTech V5 установите:
-    echo      winget install NordicSemiconductor.JLink
-    echo      Или: https://www.segger.com/downloads/jlink/
-    echo      Для erase также нужен J-Link probe, подключённый по SWD к NiceNano.
-    set /p JLINK_INSTALL="      Установить J-Link через winget? (y/n): "
-    if /i "!JLINK_INSTALL!"=="y" (
-        winget install NordicSemiconductor.JLink --accept-package-agreements --accept-source-agreements
-        if !errorlevel! equ 0 (
-            echo      J-Link установлен. Перезапустите терминал для обновления PATH.
-        )
-    )
-) else (
-    echo      OK: J-Link найден
-)
-echo.
-
-:: --- 8. Итог ---
-echo [8/8] Проверка окружения...
+:: --- 7. Итог ---
+echo [7/7] Проверка окружения...
 echo.
 
 echo ========================================

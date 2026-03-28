@@ -14,7 +14,12 @@
 #include <esp_random.h>
 #include <string.h>
 
-#define FRAG_REASSEMBLE_MAX  2       // макс. собираемых сообщений одновременно
+#if defined(ARDUINO_LILYGO_T_BEAM)
+/** ESP32 (T-Beam): два слота × 4 KiB в .dram0.bss — линковка не проходит; один слот достаточен для типичного MSG_FRAG. */
+#define FRAG_REASSEMBLE_MAX 1
+#else
+#define FRAG_REASSEMBLE_MAX 2  // макс. собираемых сообщений одновременно
+#endif
 #define FRAG_TIMEOUT_MS      60000  // таймаут неполного сообщения
 /** Раньше malloc(4096) на слот — теперь фиксированный пул в BSS. */
 #define FRAG_SLOT_BUF 4096
