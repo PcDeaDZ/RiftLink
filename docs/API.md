@@ -392,6 +392,17 @@ Groups V2 работает по `groupUid` и signed grants. Команды `gro
 {"evt":"error","code":"invite_peer_key_mismatch","msg":"Peer public key mismatch"}
 ```
 
+Общие коды валидации команд/JSON (Heltec ESP и nRF52840, паритет BLE-слоя):
+
+| `code` | Когда |
+|--------|--------|
+| `missing_cmdId` | Команда с tracked-ответом в приложении пришла без поля `cmdId` |
+| `json_overflow` | Входной JSON не поместился в буфер парсера (ArduinoJson) |
+| `payload_too_long` | Строка JSON превышает лимит записи BLE (512 байт на значение характеристики) |
+| `unknown_cmd` | Неизвестная `cmd`; имя команды передаётся в `msg` (укорочено, если очень длинное) |
+| `send_to_bad` | Поле `to` в `cmd:send` не 16 hex-символов узла |
+| `lora_scan_serialize` | Результат `loraScan` не уместился в лимит BLE JSON |
+
 Для invite-потока используются коды:
 - `invite_token_bad_length`
 - `invite_token_bad_format`
@@ -408,7 +419,6 @@ Groups V2 работает по `groupUid` и signed grants. Команды `gro
 
 | Команда или условие | `code` |
 |---------------------|--------|
-| `voice` | `voice_unsupported` |
 | `shutdown`, `poweroff` | `poweroff_unsupported` |
 | `powersave` | `powersave_unsupported` |
 | любая команда с префиксом `bleOta` | `ble_ota_unsupported` |
@@ -460,6 +470,8 @@ Groups V2 работает по `groupUid` и signed grants. Команды `gro
 Формат payload invite в V3.1 (signed): `v3.1|groupUid|channelId32|groupTag|canonicalName|keyVersion|groupKeyB64|role|expiresAt|ownerSignPubKeyB64|signatureB64`.  
 `signatureB64` — Ed25519 detached подпись по строке без последнего поля `signatureB64`.  
 `groupInviteCreate` в V3.1 разрешен только owner (fail-closed reject для admin/member).
+
+По **BLE** длинная строка одного события может передаваться **несколькими фрагментами** до завершающего перевода строки (NDJSON); приложение склеивает приёмный буфер (так же на ESP и на nRF52840, если сериализованный JSON длиннее 512 байт).
 
 ---
 

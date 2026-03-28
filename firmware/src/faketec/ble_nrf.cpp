@@ -10,6 +10,7 @@
 #include "kv.h"
 #include "locale/locale.h"
 #include "log.h"
+#include "msg_queue/msg_queue.h"
 #include "neighbors/neighbors.h"
 #include "node/node.h"
 #include "protocol/packet.h"
@@ -19,6 +20,8 @@
 #include "selftest/selftest.h"
 #include "telemetry/telemetry.h"
 #include "version.h"
+#include "voice_buffers/voice_buffers.h"
+#include "voice_frag/voice_frag.h"
 #include "x25519_keys/x25519_keys.h"
 
 #include <Arduino.h>
@@ -61,6 +64,7 @@ static volatile uint8_t s_outCount = 0;
 
 static char s_rxLine[kRxLineMax];
 static size_t s_rxLen = 0;
+static uint32_t s_lastRxLineTooLongNotifyMs = 0;
 
 static bool s_inited = false;
 static bool s_connected = false;
@@ -70,6 +74,18 @@ static uint8_t s_inviteToken[8];
 static uint32_t s_inviteExpiryMs = 0;
 static bool s_inviteTokenValid = false;
 static uint32_t s_emitInviteCmdId = 0;
+/** Как ble.cpp: общий seq для evt:node → neighbors → routes → groups. */
+static uint32_t s_bleSyncSeq = 0;
+static uint32_t s_emitRoutesCmdId = 0;
+static uint32_t s_emitGroupsCmdId = 0;
+/** Как ble.cpp: текущий cmdId при разборе JSON в handleJsonCommand (evt:error, groupInvite, …). */
+static uint32_t s_activeCmdId = 0;
+
+class ActiveCmdScope {
+ public:
+  explicit ActiveCmdScope(uint32_t cmdId) { s_activeCmdId = cmdId; }
+  ~ActiveCmdScope() { s_activeCmdId = 0; }
+};
 
 static constexpr const char* KV_PIN = "ble_pin";
 static constexpr const char* KV_GPK = "gpk1";
@@ -151,6 +167,136 @@ static int parseModemPresetValue(JsonDocument& doc) {
 
 static uint16_t s_diagPktIdCounter = 1;
 
+/** Паритет с ble.cpp: голос BLE → mesh (OP_VOICE_MSG). */
+static constexpr size_t BLE_VOICE_CHUNK_RAW_MAX = 300;
+static constexpr size_t BLE_VOICE_CHUNK_B64_BUF = 400;
+static size_t s_voiceBufLen = 0;
+static int s_voiceChunkTotal = -1;
+static uint8_t s_voiceTo[protocol::NODE_ID_LEN];
+static bool s_voiceBleLocked = false;
+
+/** Как ble.cpp: при отсутствии PONG — повторные OP_PING (диагностика). */
+static constexpr uint8_t kPingRetryMaxExtra = 2;
+struct PingRetryState {
+  bool active = false;
+  uint8_t to[protocol::NODE_ID_LEN]{};
+  uint8_t txSf = 12;
+  uint32_t deadlineMs = 0;
+  uint8_t retriesLeft = 0;
+};
+static PingRetryState s_pingRetry;
+
+static uint32_t pingAckWaitMs(uint8_t neighborSfHint) {
+  uint8_t modemSf = radio::getSpreadingFactor();
+  if (modemSf < 7 || modemSf > 12) modemSf = 12;
+  uint8_t hint = neighborSfHint;
+  if (hint < 7 || hint > 12) hint = modemSf;
+  const uint8_t sf = modemSf > hint ? modemSf : hint;
+  return 2000 + (uint32_t)(sf - 6) * 500;
+}
+
+static void pingRetryTick() {
+  if (!s_pingRetry.active) return;
+  const uint32_t now = millis();
+  if ((int32_t)(now - s_pingRetry.deadlineMs) < 0) return;
+  if (s_pingRetry.retriesLeft == 0) {
+    s_pingRetry.active = false;
+    return;
+  }
+  uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN_PKTID];
+  uint16_t pktId = ++s_diagPktIdCounter;
+  size_t len = protocol::buildPacket(pkt, sizeof(pkt), node::getId(), s_pingRetry.to, 31, protocol::OP_PING, nullptr, 0,
+      false, false, false, protocol::CHANNEL_DEFAULT, pktId);
+  if (len == 0) {
+    s_pingRetry.deadlineMs = now + 400;
+    return;
+  }
+  char reasonBuf[40];
+  if (!queueTxPacket(pkt, len, s_pingRetry.txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
+    queueDeferredSend(pkt, len, s_pingRetry.txSf, 60 + (uint32_t)(random(40)), true);
+    RIFTLINK_DIAG("PING", "event=PING_RETRY_DEFER to=%02X%02X pktId=%u left=%u cause=%s",
+        s_pingRetry.to[0], s_pingRetry.to[1], (unsigned)pktId, (unsigned)s_pingRetry.retriesLeft,
+        reasonBuf[0] ? reasonBuf : "?");
+  } else {
+    RIFTLINK_DIAG("PING", "event=PING_RETRY_QUEUED to=%02X%02X pktId=%u left=%u sf=%u",
+        s_pingRetry.to[0], s_pingRetry.to[1], (unsigned)pktId, (unsigned)s_pingRetry.retriesLeft,
+        (unsigned)s_pingRetry.txSf);
+  }
+  s_pingRetry.retriesLeft--;
+  if (s_pingRetry.retriesLeft == 0) {
+    s_pingRetry.active = false;
+  } else {
+    s_pingRetry.deadlineMs = now + pingAckWaitMs(s_pingRetry.txSf);
+  }
+}
+
+struct PendingPingCmdId {
+  bool used = false;
+  uint8_t to[protocol::NODE_ID_LEN] = {0};
+  uint32_t cmdId = 0;
+  uint32_t expiresAtMs = 0;
+};
+static PendingPingCmdId s_pendingPingCmdIds[8];
+
+static void rememberPingCmdId(const uint8_t to[protocol::NODE_ID_LEN], uint32_t cmdId) {
+  if (!to || cmdId == 0 || memcmp(to, protocol::BROADCAST_ID, protocol::NODE_ID_LEN) == 0) return;
+  const uint32_t now = millis();
+  int freeIdx = -1;
+  int replaceIdx = 0;
+  uint32_t oldest = 0xFFFFFFFFUL;
+  for (int i = 0; i < (int)(sizeof(s_pendingPingCmdIds) / sizeof(s_pendingPingCmdIds[0])); i++) {
+    auto& e = s_pendingPingCmdIds[i];
+    if (e.used && (int32_t)(now - e.expiresAtMs) >= 0) e.used = false;
+    if (e.used && memcmp(e.to, to, protocol::NODE_ID_LEN) == 0) {
+      e.cmdId = cmdId;
+      e.expiresAtMs = now + 30000UL;
+      return;
+    }
+    if (!e.used && freeIdx < 0) freeIdx = i;
+    if (e.expiresAtMs < oldest) {
+      oldest = e.expiresAtMs;
+      replaceIdx = i;
+    }
+  }
+  const int idx = (freeIdx >= 0) ? freeIdx : replaceIdx;
+  auto& dst = s_pendingPingCmdIds[idx];
+  dst.used = true;
+  memcpy(dst.to, to, protocol::NODE_ID_LEN);
+  dst.cmdId = cmdId;
+  dst.expiresAtMs = now + 30000UL;
+}
+
+static uint32_t peekPingCmdIdForFrom(const uint8_t from[protocol::NODE_ID_LEN]) {
+  if (!from) return 0;
+  const uint32_t now = millis();
+  for (int i = 0; i < (int)(sizeof(s_pendingPingCmdIds) / sizeof(s_pendingPingCmdIds[0])); i++) {
+    auto& e = s_pendingPingCmdIds[i];
+    if (!e.used) continue;
+    if ((int32_t)(now - e.expiresAtMs) >= 0) continue;
+    if (memcmp(e.to, from, protocol::NODE_ID_LEN) == 0) return e.cmdId;
+  }
+  return 0;
+}
+
+static uint32_t takePingCmdIdForFrom(const uint8_t from[protocol::NODE_ID_LEN]) {
+  if (!from) return 0;
+  const uint32_t now = millis();
+  for (int i = 0; i < (int)(sizeof(s_pendingPingCmdIds) / sizeof(s_pendingPingCmdIds[0])); i++) {
+    auto& e = s_pendingPingCmdIds[i];
+    if (!e.used) continue;
+    if ((int32_t)(now - e.expiresAtMs) >= 0) {
+      e.used = false;
+      continue;
+    }
+    if (memcmp(e.to, from, protocol::NODE_ID_LEN) == 0) {
+      const uint32_t id = e.cmdId;
+      e.used = false;
+      return id;
+    }
+  }
+  return 0;
+}
+
 static void emitInfoDoc(uint32_t cmdId) {
   JsonDocument doc;
   doc["evt"] = "info";
@@ -168,6 +314,153 @@ static void emitInfoDoc(uint32_t cmdId) {
   doc["lang"] = (locale::getLang() == LANG_RU) ? "ru" : "en";
   if (cmdId != 0) doc["cmdId"] = cmdId;
   emitJsonDoc(doc);
+}
+
+static void bleWaveDelayMs(uint32_t ms) {
+  delay(ms);
+  yield();
+}
+
+static const char* groupRoleToStr(groups::GroupRole role);
+
+/** Первый кадр волны info: как evt:node на ESP (паспорт + seq/cmdId). */
+static void emitNodeSnapshotForWave(uint32_t seq, uint32_t cmdId) {
+  JsonDocument doc;
+  doc["evt"] = "node";
+  doc["seq"] = seq;
+  if (cmdId != 0) doc["cmdId"] = cmdId;
+  doc["platform"] = "nrf52840";
+  doc["version"] = RIFTLINK_VERSION;
+  char idHex[17] = {0};
+  const uint8_t* id = node::getId();
+  for (int i = 0; i < 8; i++) snprintf(idHex + i * 2, 3, "%02X", id[i]);
+  doc["nodeId"] = idHex;
+  doc["id"] = idHex;
+  doc["sf"] = radio::getSpreadingFactor();
+  doc["bw"] = radio::getBandwidth();
+  doc["cr"] = radio::getCodingRate();
+  doc["modemPreset"] = (int)radio::getModemPreset();
+  doc["blePin"] = s_passkey;
+  doc["neighbors"] = neighbors::getCount();
+  doc["lang"] = (locale::getLang() == LANG_RU) ? "ru" : "en";
+  doc["radioMode"] = "ble";
+  doc["wifiConnected"] = false;
+  const uint32_t heap = xPortGetFreeHeapSize();
+  if (heap > 0) doc["heapFree"] = heap;
+  emitJsonDoc(doc);
+}
+
+static void notifyNeighborsWithSeq(uint32_t seq, uint32_t cmdId) {
+  JsonDocument doc;
+  doc["evt"] = "neighbors";
+  doc["seq"] = seq;
+  if (cmdId != 0) doc["cmdId"] = cmdId;
+  JsonArray arr = doc["neighbors"].to<JsonArray>();
+  JsonArray rssiArr = doc["rssi"].to<JsonArray>();
+  JsonArray keyArr = doc["hasKey"].to<JsonArray>();
+  int n = neighbors::getCount();
+  char hex[17];
+  uint8_t peerId[protocol::NODE_ID_LEN];
+  for (int i = 0; i < n; i++) {
+    neighbors::getIdHex(i, hex);
+    arr.add(hex);
+    const int r = neighbors::getRssi(i);
+    rssiArr.add(r != 0 ? r : 0);
+    if (neighbors::getId(i, peerId)) keyArr.add(x25519_keys::hasKeyFor(peerId));
+    else keyArr.add(false);
+  }
+  emitJsonDoc(doc);
+}
+
+static void notifyRoutesWithSeq(uint32_t seq, uint32_t cmdId) {
+  JsonDocument doc;
+  doc["evt"] = "routes";
+  doc["seq"] = seq;
+  if (cmdId != 0) doc["cmdId"] = cmdId;
+  JsonArray arr = doc["routes"].to<JsonArray>();
+  const int nAll = routing::getRouteCount();
+  uint8_t dest[8], nextHop[8];
+  uint8_t hops;
+  int8_t rssi;
+  int trustScore;
+  char d[17], nh[17];
+  for (int i = 0; i < nAll; i++) {
+    if (!routing::getRouteAt(i, dest, nextHop, &hops, &rssi, &trustScore)) continue;
+    JsonObject ro = arr.add<JsonObject>();
+    for (int j = 0; j < 8; j++) {
+      snprintf(d + j * 2, 3, "%02X", dest[j]);
+      snprintf(nh + j * 2, 3, "%02X", nextHop[j]);
+    }
+    d[16] = nh[16] = '\0';
+    ro["dest"] = d;
+    ro["nextHop"] = nh;
+    ro["hops"] = hops;
+    ro["rssi"] = (int)rssi;
+    ro["modemPreset"] = (int)radio::getModemPreset();
+    ro["sf"] = radio::getSpreadingFactor();
+    ro["bw"] = radio::getBandwidth();
+    ro["cr"] = radio::getCodingRate();
+    ro["trustScore"] = trustScore;
+    if (measureJson(doc) >= kTxJsonMax - 4) {
+      arr.remove(arr.size() - 1);
+      doc["routesTruncated"] = true;
+      break;
+    }
+  }
+  emitJsonDoc(doc);
+}
+
+static void notifyGroupsWithSeq(uint32_t seq, uint32_t cmdId) {
+  JsonDocument doc;
+  doc["evt"] = "groups";
+  doc["seq"] = seq;
+  if (cmdId != 0) doc["cmdId"] = cmdId;
+  JsonArray arr = doc["groups"].to<JsonArray>();
+  const int nv2 = groups::getV2Count();
+  char uid[groups::GROUP_UID_MAX_LEN + 1];
+  char tag[groups::GROUP_TAG_MAX_LEN + 1];
+  char canonicalName[groups::GROUP_CANONICAL_NAME_MAX_LEN + 1];
+  for (int i = 0; i < nv2; i++) {
+    uint32_t channelId32 = 0;
+    uint16_t keyVersion = 0;
+    groups::GroupRole role = groups::GroupRole::None;
+    uint32_t revEpoch = 0;
+    bool ackApplied = false;
+    if (!groups::getV2At(i, uid, sizeof(uid), &channelId32, tag, sizeof(tag), canonicalName, sizeof(canonicalName),
+            &keyVersion, &role, &revEpoch, &ackApplied))
+      continue;
+    JsonObject gv2 = arr.add<JsonObject>();
+    gv2["groupUid"] = uid;
+    gv2["groupTag"] = tag;
+    gv2["canonicalName"] = canonicalName;
+    gv2["channelId32"] = channelId32;
+    gv2["keyVersion"] = keyVersion;
+    gv2["myRole"] = groupRoleToStr(role);
+    gv2["revocationEpoch"] = revEpoch;
+    gv2["ackApplied"] = ackApplied;
+    if (measureJson(doc) >= kTxJsonMax) {
+      arr.remove(arr.size() - 1);
+      if (arr.size() == 0) {
+        ble::notifyError("groups_payload_too_large", "groups payload exceeds BLE notify buffer");
+        return;
+      }
+      doc["groupsTruncated"] = true;
+      break;
+    }
+  }
+  emitJsonDoc(doc);
+}
+
+/** Волна как notifyInfo() на ESP: node → neighbors → routes → groups. */
+static void emitInfoWave(uint32_t cmdId) {
+  const uint32_t seq = ++s_bleSyncSeq;
+  emitNodeSnapshotForWave(seq, cmdId);
+  bleWaveDelayMs(6);
+  notifyNeighborsWithSeq(seq, cmdId);
+  bleWaveDelayMs(6);
+  notifyRoutesWithSeq(seq, cmdId);
+  bleWaveDelayMs(4);
+  notifyGroupsWithSeq(seq, cmdId);
 }
 
 static const char* groupRoleToStr(groups::GroupRole role) {
@@ -219,6 +512,24 @@ static void flushOutQueue() {
   }
 }
 
+/** Как ESP `notifyJsonToApp`: длинный NDJSON — несколько `write` подряд, `\n` только после последнего байта. */
+static bool writeJsonNdjsonChunked(const char* payload, size_t len) {
+  if (!payload || len == 0) return false;
+  if (!s_connected || Bluefruit.connected() == 0) return false;
+  if (!bleuart.notifyEnabled()) return false;
+  constexpr size_t kChunk = 512;
+  size_t off = 0;
+  while (off < len) {
+    const size_t remain = len - off;
+    const size_t n = remain > kChunk ? kChunk : remain;
+    bleuart.write((const uint8_t*)(payload + off), n);
+    off += n;
+    if (off < len) yield();
+  }
+  bleuart.write('\n');
+  return true;
+}
+
 static void emitJsonDoc(JsonDocument& doc) {
   char buf[kTxJsonMax];
   size_t n = serializeJson(doc, buf, sizeof(buf));
@@ -245,6 +556,10 @@ static void emitLoraScanDoc(uint32_t cmdId, int n, const selftest::ScanResult* r
     o["rssi"] = res[i].rssi;
   }
   if (cmdId != 0) doc["cmdId"] = cmdId;
+  if (measureJson(doc) >= kTxJsonMax) {
+    ble::notifyError("lora_scan_serialize", "loraScan JSON exceeds BLE limit");
+    return;
+  }
   emitJsonDoc(doc);
 }
 
@@ -281,6 +596,42 @@ static uint32_t parseJsonChannelId32(JsonVariant v) {
   const double d = v.as<double>();
   if (d < 2.0 || d > 4294967295.0) return 0;
   return static_cast<uint32_t>(static_cast<uint64_t>(d + 0.5));
+}
+
+/// cmdId из JSON: как ble.cpp — большие целые могут лежать в double; `doc["cmdId"]|0` даёт 0.
+static uint32_t parseCmdIdFromDoc(JsonDocument& doc) {
+  JsonVariant v = doc["cmdId"];
+  if (v.isNull()) return 0;
+  if (v.is<const char*>()) {
+    const char* s = v.as<const char*>();
+    if (!s || !s[0]) return 0;
+    char* end = nullptr;
+    unsigned long ul = strtoul(s, &end, 10);
+    if (end == s) return 0;
+    if (ul > 4294967295UL) return 0;
+    return static_cast<uint32_t>(ul);
+  }
+  const double d = v.as<double>();
+  if (d < 1.0 || d > 4294967295.0) return 0;
+  return static_cast<uint32_t>(static_cast<uint64_t>(d + 0.5));
+}
+
+/** Команды без tracked-ответа в приложении — допускают отсутствие cmdId (как ble.cpp). */
+static bool bleJsonCmdAllowsMissingCmdId(const char* cmd) {
+  if (!cmd) return false;
+  if (strcmp(cmd, "send") == 0) return true;
+  if (strcmp(cmd, "sos") == 0) return true;
+  if (strcmp(cmd, "location") == 0) return true;
+  if (strcmp(cmd, "radioMode") == 0) return true;
+  if (strcmp(cmd, "lang") == 0) return true;
+  if (strcmp(cmd, "wifi") == 0) return true;
+  if (strcmp(cmd, "read") == 0) return true;
+  if (strcmp(cmd, "voice") == 0) return true;
+  if (strcmp(cmd, "signalTest") == 0) return true;
+  if (strcmp(cmd, "loraScan") == 0) return true;
+  if (strcmp(cmd, "shutdown") == 0 || strcmp(cmd, "poweroff") == 0) return true;
+  if (strncmp(cmd, "bleOta", 6) == 0) return true;
+  return false;
 }
 
 static bool b64EncodeBytes(const uint8_t* data, size_t len, char* out, size_t outCap) {
@@ -548,14 +899,22 @@ static bool handleGroupV2Commands(JsonDocument& doc, const char* cmd, uint32_t c
     ev["channelId32"] = channelId32;
     ev["canonicalName"] = cname;
     if (cmdId != 0) ev["cmdId"] = cmdId;
-    char out[kTxJsonMax];
+    char out[2048];
     size_t outLen = serializeJson(ev, out, sizeof(out));
     if (outLen == 0 || outLen >= sizeof(out)) {
       notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Invite JSON serialize failed", cmdId);
       return true;
     }
-    out[outLen] = '\0';
-    (void)enqueueJsonLine(out);
+    if (outLen < kTxJsonMax) {
+      out[outLen] = '\0';
+      (void)enqueueJsonLine(out);
+    } else {
+      flushOutQueue();
+      if (!writeJsonNdjsonChunked(out, outLen)) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Invite TX failed", cmdId);
+        return true;
+      }
+    }
     return true;
   }
   if (strcmp(cmd, "groupInviteAccept") == 0) {
@@ -820,15 +1179,25 @@ static void handleJsonCommand(const char* json, size_t len) {
     RIFTLINK_DIAG("BLE", "event=RX_PARSE_FAIL err=%s", err.c_str());
     return;
   }
+  if (doc.overflowed()) {
+    ble::notifyError("json_overflow", "ArduinoJson document overflow");
+    return;
+  }
 
   const char* cmd = doc["cmd"] | "";
   if (!cmd[0]) return;
-  const uint32_t cmdId = doc["cmdId"] | 0U;
+  const uint32_t cmdId = parseCmdIdFromDoc(doc);
+  if (!bleJsonCmdAllowsMissingCmdId(cmd) && cmdId == 0) {
+    ble::notifyError("missing_cmdId", "cmdId required");
+    return;
+  }
+
+  const ActiveCmdScope activeCmdScope(cmdId);
 
   if (handleGroupV2Commands(doc, cmd, cmdId)) return;
 
   if (strcmp(cmd, "info") == 0) {
-    emitInfoDoc(cmdId);
+    emitInfoWave(cmdId);
     return;
   }
   if (strcmp(cmd, "neighbors") == 0) {
@@ -837,12 +1206,32 @@ static void handleJsonCommand(const char* json, size_t len) {
   }
   if (strcmp(cmd, "send") == 0) {
     const char* text = doc["text"] | "";
+    if (!text[0]) return;
+    const char* lane = doc["lane"] | "normal";
+    const char* trigger = doc["trigger"] | "";
+    bool critical = (strcmp(lane, "critical") == 0);
+    uint8_t triggerType = 0;
+    uint32_t triggerValueMs = 0;
+    if (strcmp(trigger, "target_online") == 0) {
+      triggerType = 1;
+    } else if (strcmp(trigger, "deliver_after_time") == 0) {
+      triggerType = 2;
+      triggerValueMs = (uint32_t)(doc["triggerAtMs"] | 0);
+      if (triggerValueMs == 0) triggerValueMs = (uint32_t)(doc["triggerValueMs"] | 0);
+    }
+    uint32_t groupId = doc["group"] | 0U;
+    if (groupId > 0) {
+      if (!msg_queue::enqueueGroup(groupId, text)) {
+        ble::notifyError("group_send", "Сообщение слишком длинное или ошибка шифрования");
+      }
+      return;
+    }
+    if (!s_onSend) return;
     const char* toHex = doc["to"] | "";
-    if (!text[0] || !s_onSend) return;
     uint8_t toId[protocol::NODE_ID_LEN];
     if (toHex[0]) {
       if (strlen(toHex) != protocol::NODE_ID_LEN * 2) {
-        ble::notifyError("send_bad_to", "to must be 16 hex chars");
+        ble::notifyError("send_to_bad", "to must be full 16 hex node id");
         return;
       }
       for (size_t i = 0; i < protocol::NODE_ID_LEN; i++) {
@@ -850,7 +1239,7 @@ static void handleJsonCommand(const char* json, size_t len) {
         char* end = nullptr;
         unsigned long v = strtoul(hx, &end, 16);
         if (end != hx + 2) {
-          ble::notifyError("send_bad_to", "invalid hex in to");
+          ble::notifyError("send_to_bad", "to must be full 16 hex node id");
           return;
         }
         toId[i] = (uint8_t)v;
@@ -859,16 +1248,16 @@ static void handleJsonCommand(const char* json, size_t len) {
       memcpy(toId, protocol::BROADCAST_ID, protocol::NODE_ID_LEN);
     }
     uint8_t ttl = (uint8_t)(doc["ttl"] | 0);
-    const char* lane = doc["lane"] | "normal";
-    bool critical = doc["critical"] | false;
-    if (strcmp(lane, "critical") == 0) critical = true;
-    const char* trigger = doc["trigger"] | "";
-    uint32_t trigVal = doc["triggerValueMs"] | 0U;
-    uint8_t trigType = (uint8_t)(doc["triggerType"] | 0);
-    if (strcmp(trigger, "target_online") == 0) trigType = 1;
-    else if (strcmp(trigger, "deliver_after_time") == 0) trigType = 2;
-    bool isSos = doc["sos"] | false;
-    s_onSend(toId, text, ttl, critical, trigType, trigVal, isSos);
+    s_onSend(toId, text, ttl, critical, triggerType, triggerValueMs, false);
+    if (triggerType != 0) {
+      JsonDocument qdoc;
+      qdoc["evt"] = "timeCapsuleQueued";
+      const char* toStr = doc["to"];
+      if (toStr && toStr[0]) qdoc["to"] = toStr;
+      qdoc["trigger"] = trigger;
+      if (triggerValueMs > 0) qdoc["triggerAtMs"] = triggerValueMs;
+      emitJsonDoc(qdoc);
+    }
     return;
   }
 
@@ -960,7 +1349,7 @@ static void handleJsonCommand(const char* json, size_t len) {
   }
 
   if (strcmp(cmd, "routes") == 0 || strcmp(cmd, "mesh") == 0) {
-    (void)cmdId;
+    s_emitRoutesCmdId = cmdId;
     ble::notifyRoutes();
     return;
   }
@@ -976,12 +1365,12 @@ static void handleJsonCommand(const char* json, size_t len) {
       return;
     }
     routing::requestRoute(target);
+    s_emitRoutesCmdId = cmdId;
     ble::notifyRoutes();
-    (void)cmdId;
     return;
   }
   if (strcmp(cmd, "groups") == 0) {
-    (void)cmdId;
+    s_emitGroupsCmdId = cmdId;
     ble::notifyGroups();
     return;
   }
@@ -1049,7 +1438,7 @@ static void handleJsonCommand(const char* json, size_t len) {
 
   if (strcmp(cmd, "regeneratePin") == 0) {
     ble::regeneratePasskey();
-    emitInfoDoc(cmdId);
+    emitInfoWave(cmdId);
     return;
   }
 
@@ -1106,6 +1495,7 @@ static void handleJsonCommand(const char* json, size_t len) {
       size_t plen = protocol::buildPacket(pkt, sizeof(pkt), node::getId(), peerId, 31, protocol::OP_PING, nullptr, 0,
           false, false, false, protocol::CHANNEL_DEFAULT, pktId);
       if (plen > 0) {
+        if (cmdId != 0) rememberPingCmdId(peerId, cmdId);
         uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(peerId));
         char reasonBuf[40];
         uint32_t delayMs = 140u + (uint32_t)(i * 220u) + (uint32_t)(random(90));
@@ -1133,11 +1523,22 @@ static void handleJsonCommand(const char* json, size_t len) {
     size_t plen = protocol::buildPacket(pkt, sizeof(pkt), node::getId(), to, 31, protocol::OP_PING, nullptr, 0, false,
         false, false, protocol::CHANNEL_DEFAULT, pktId);
     if (plen > 0) {
+      if (cmdId != 0) rememberPingCmdId(to, cmdId);
       uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(to));
       char reasonBuf[40];
       if (!queueTxPacket(pkt, plen, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
         queueDeferredSend(pkt, plen, txSf, 60 + (uint32_t)(random(40)), true);
+        RIFTLINK_DIAG("PING", "event=PING_TX_DEFER to=%02X%02X pktId=%u cause=%s",
+            to[0], to[1], (unsigned)pktId, reasonBuf[0] ? reasonBuf : "?");
+      } else {
+        RIFTLINK_DIAG("PING", "event=PING_TX_QUEUED to=%02X%02X pktId=%u sf=%u",
+            to[0], to[1], (unsigned)pktId, (unsigned)txSf);
       }
+      s_pingRetry.active = true;
+      memcpy(s_pingRetry.to, to, protocol::NODE_ID_LEN);
+      s_pingRetry.txSf = txSf;
+      s_pingRetry.retriesLeft = kPingRetryMaxExtra;
+      s_pingRetry.deadlineMs = millis() + pingAckWaitMs(txSf);
     }
     (void)cmdId;
     return;
@@ -1168,7 +1569,72 @@ static void handleJsonCommand(const char* json, size_t len) {
   }
 
   if (strcmp(cmd, "voice") == 0) {
-    ble::notifyError("voice_unsupported", "Голос по BLE на nRF в этой сборке не поддерживается");
+    const char* toStr = doc["to"];
+    const char* dataStr = doc["data"];
+    int chunk = doc["chunk"] | -1;
+    int total = doc["total"] | -1;
+    if (!toStr || !toStr[0] || !dataStr || chunk < 0 || total <= 0) {
+      RIFTLINK_DIAG("BLE", "event=VOICE_RX_DROP reason=missing_fields");
+      return;
+    }
+    if (strlen(dataStr) > BLE_VOICE_CHUNK_B64_BUF) {
+      RIFTLINK_DIAG("BLE", "event=VOICE_RX_DROP reason=b64_too_long");
+      return;
+    }
+    if (!parseFullNodeIdHex(toStr, s_voiceTo)) {
+      ble::notifyError("voice_to_bad", "to must be full 16 hex node id");
+      return;
+    }
+    if (chunk == 0) {
+      if (!voice_buffers_init()) {
+        ble::notifyError("voice_init", "voice_buffers_init failed");
+        return;
+      }
+      if (!voice_buffers_acquire()) {
+        ble::notifyError("voice_oom", "voice buffer alloc failed");
+        return;
+      }
+      s_voiceBleLocked = true;
+      s_voiceBufLen = 0;
+      s_voiceChunkTotal = total;
+    }
+    if (s_voiceChunkTotal != total) {
+      if (s_voiceBleLocked) {
+        voice_buffers_release();
+        s_voiceBleLocked = false;
+      }
+      s_voiceBufLen = 0;
+      s_voiceChunkTotal = -1;
+      return;
+    }
+    uint8_t* plain = voice_buffers_plain();
+    const size_t plainCap = voice_buffers_plain_cap();
+    size_t maxDec = plainCap - s_voiceBufLen;
+    size_t binLen = 0;
+    if (sodium_base642bin(plain + s_voiceBufLen, maxDec, dataStr, strlen(dataStr), nullptr, &binLen, nullptr,
+            sodium_base64_VARIANT_ORIGINAL) != 0) {
+      RIFTLINK_DIAG("BLE", "event=VOICE_RX_B64_ERR");
+    } else {
+      s_voiceBufLen += binLen;
+    }
+    if (chunk == total - 1) {
+      if (s_voiceBufLen > 0 && s_voiceBufLen <= voice_frag::MAX_VOICE_PLAIN) {
+        uint32_t voiceMsgId = 0;
+        bool hasKey = x25519_keys::hasKeyFor(s_voiceTo);
+        bool ok = voice_frag::send(s_voiceTo, plain, s_voiceBufLen, &voiceMsgId);
+        if (ok && voiceMsgId != 0) ble::notifySent(s_voiceTo, voiceMsgId);
+        if (!ok) {
+          ble::notifyError("voice_send_fail", hasKey ? "voice_frag::send failed (queue full or too large?)"
+                                                     : "no pairwise key for peer — key exchange not completed");
+        }
+      }
+      s_voiceBufLen = 0;
+      s_voiceChunkTotal = -1;
+      if (s_voiceBleLocked) {
+        voice_buffers_release();
+        s_voiceBleLocked = false;
+      }
+    }
     return;
   }
   if (strcmp(cmd, "shutdown") == 0 || strcmp(cmd, "poweroff") == 0) {
@@ -1191,10 +1657,10 @@ static void handleJsonCommand(const char* json, size_t len) {
   if (strcmp(cmd, "radioMode") == 0) {
     const char* mode = doc["mode"];
     if (mode && strcmp(mode, "ble") == 0) {
-      emitInfoDoc(cmdId);
-    } else {
-      ble::notifyError("radioMode", "nRF: только BLE, Wi‑Fi недоступен");
+      /* Как ble.cpp: switchTo(BLE) без лишнего evt:info. */
+      return;
     }
+    ble::notifyError("radioMode", "nRF: только BLE, Wi‑Fi недоступен");
     return;
   }
   if (strcmp(cmd, "wifi") == 0) {
@@ -1211,7 +1677,7 @@ static void handleJsonCommand(const char* json, size_t len) {
       if (strcmp(lang, "ru") == 0) (void)locale::setLang(LANG_RU);
       else if (strcmp(lang, "en") == 0) (void)locale::setLang(LANG_EN);
     }
-    emitInfoDoc(cmdId);
+    /* Как ble.cpp: только смена локали, без emit info. */
     return;
   }
 
@@ -1222,7 +1688,9 @@ static void handleJsonCommand(const char* json, size_t len) {
     return;
   }
 
-  ble::notifyError("unknown_cmd", cmd);
+  char unknownBuf[80];
+  snprintf(unknownBuf, sizeof(unknownBuf), "%.79s", cmd ? cmd : "");
+  ble::notifyError("unknown_cmd", unknownBuf);
 }
 
 static void onBleUartRx(uint16_t) {
@@ -1304,10 +1772,16 @@ void update() {
     } else {
       s_rxLen = 0;
       RIFTLINK_DIAG("BLE", "event=RX_DROP reason=line_too_long");
+      const uint32_t now = millis();
+      if ((uint32_t)(now - s_lastRxLineTooLongNotifyMs) >= 2000) {
+        s_lastRxLineTooLongNotifyMs = now;
+        ble::notifyError("payload_too_long", "JSON exceeds 512 bytes");
+      }
     }
   }
 
   s_connected = (Bluefruit.connected() > 0);
+  pingRetryTick();
   flushOutQueue();
 }
 
@@ -1322,9 +1796,6 @@ void setOnLocation(void (*cb)(float lat, float lon, int16_t alt, uint16_t radius
 
 void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes,
     const char* lane, const char* type, uint32_t groupId, const char* groupUid) {
-  (void)ttlMinutes;
-  (void)groupId;
-  (void)groupUid;
   if (!from || !text) return;
   JsonDocument doc;
   doc["evt"] = "msg";
@@ -1334,8 +1805,11 @@ void notifyMsg(const uint8_t* from, const char* text, uint32_t msgId, int rssi, 
   doc["text"] = text;
   if (msgId != 0) doc["msgId"] = msgId;
   if (rssi != 0) doc["rssi"] = rssi;
+  if (ttlMinutes != 0) doc["ttl"] = ttlMinutes;
   if (lane && lane[0]) doc["lane"] = lane;
   if (type && type[0]) doc["type"] = type;
+  if (groupId > 0) doc["group"] = groupId;
+  if (groupUid && groupUid[0]) doc["groupUid"] = groupUid;
   emitJsonDoc(doc);
 }
 
@@ -1438,21 +1912,38 @@ void notifyTelemetry(const uint8_t* from, uint16_t batteryMv, uint16_t heapKb, i
 
 void notifyRelayProof(const uint8_t* relayedBy, const uint8_t* from, const uint8_t* to, uint16_t pktId,
     uint8_t opcode) {
-  (void)relayedBy;
-  (void)from;
-  (void)to;
-  (void)pktId;
-  (void)opcode;
+  if (!relayedBy || !from || !to) return;
+  JsonDocument doc;
+  doc["evt"] = "relayProof";
+  char byHex[17];
+  char fromHex[17];
+  char toHex[17];
+  nodeIdToHexBuf(relayedBy, byHex);
+  nodeIdToHexBuf(from, fromHex);
+  nodeIdToHexBuf(to, toHex);
+  doc["relayedBy"] = byHex;
+  doc["from"] = fromHex;
+  doc["to"] = toHex;
+  doc["pktId"] = pktId;
+  doc["opcode"] = opcode;
+  emitJsonDoc(doc);
 }
 
 void notifyTimeCapsuleReleased(const uint8_t* to, uint32_t msgId, uint8_t triggerType) {
-  (void)to;
-  (void)msgId;
-  (void)triggerType;
+  if (!to) return;
+  JsonDocument doc;
+  doc["evt"] = "timeCapsuleReleased";
+  char toHex[17];
+  nodeIdToHexBuf(to, toHex);
+  doc["to"] = toHex;
+  doc["msgId"] = msgId;
+  if (triggerType == 1) doc["trigger"] = "target_online";
+  else if (triggerType == 2) doc["trigger"] = "deliver_after_time";
+  emitJsonDoc(doc);
 }
 
 void notifyInfo() {
-  emitInfoDoc(0);
+  emitInfoWave(0);
 }
 
 void notifyInvite() {
@@ -1488,22 +1979,8 @@ void notifyInvite() {
 }
 
 void notifyNeighbors() {
-  JsonDocument doc;
-  doc["evt"] = "neighbors";
-  JsonArray arr = doc["neighbors"].to<JsonArray>();
-  JsonArray rssiArr = doc["rssi"].to<JsonArray>();
-  JsonArray keyArr = doc["hasKey"].to<JsonArray>();
-  int n = neighbors::getCount();
-  char hex[17];
-  uint8_t peerId[protocol::NODE_ID_LEN];
-  for (int i = 0; i < n; i++) {
-    neighbors::getIdHex(i, hex);
-    arr.add(hex);
-    rssiArr.add(neighbors::getRssi(i));
-    if (neighbors::getId(i, peerId)) keyArr.add(x25519_keys::hasKeyFor(peerId));
-    else keyArr.add(false);
-  }
-  emitJsonDoc(doc);
+  const uint32_t seq = ++s_bleSyncSeq;
+  notifyNeighborsWithSeq(seq, 0);
 }
 
 void requestNeighborsNotify() {
@@ -1511,87 +1988,36 @@ void requestNeighborsNotify() {
 }
 
 void notifyRoutes() {
-  JsonDocument doc;
-  doc["evt"] = "routes";
-  doc["modemPreset"] = (int)radio::getModemPreset();
-  doc["sf"] = radio::getSpreadingFactor();
-  doc["bw"] = radio::getBandwidth();
-  doc["cr"] = radio::getCodingRate();
-  JsonArray arr = doc["routes"].to<JsonArray>();
-  const int nAll = routing::getRouteCount();
-  uint8_t dest[8], nextHop[8];
-  uint8_t hops;
-  int8_t rssi;
-  int trustScore;
-  char d[17], nh[17];
-  int added = 0;
-  constexpr int kMaxRoutesInLine = 4;
-  for (int i = 0; i < nAll && added < kMaxRoutesInLine; i++) {
-    if (!routing::getRouteAt(i, dest, nextHop, &hops, &rssi, &trustScore)) continue;
-    JsonObject ro = arr.add<JsonObject>();
-    for (int j = 0; j < 8; j++) {
-      snprintf(d + j * 2, 3, "%02X", dest[j]);
-      snprintf(nh + j * 2, 3, "%02X", nextHop[j]);
-    }
-    d[16] = nh[16] = '\0';
-    ro["dest"] = d;
-    ro["nextHop"] = nh;
-    ro["hops"] = hops;
-    ro["rssi"] = (int)rssi;
-    ro["trustScore"] = trustScore;
-    added++;
-  }
-  if (nAll > kMaxRoutesInLine) doc["routesTruncated"] = true;
-  emitJsonDoc(doc);
+  const uint32_t cmdId = s_emitRoutesCmdId;
+  s_emitRoutesCmdId = 0;
+  const uint32_t seq = ++s_bleSyncSeq;
+  notifyRoutesWithSeq(seq, cmdId);
 }
 
 void notifyGroups() {
-  JsonDocument doc;
-  doc["evt"] = "groups";
-  JsonArray arr = doc["groups"].to<JsonArray>();
-  const int nv2 = groups::getV2Count();
-  // Один элемент — верхняя оценка JSON с макс. длинами полей укладывается в лимит TX (RIFTLINK_BLE_JSON_LINE_MAX).
-  constexpr int kMaxGroupsInLine = 1;
-  char uid[groups::GROUP_UID_MAX_LEN + 1];
-  char tag[groups::GROUP_TAG_MAX_LEN + 1];
-  char canonicalName[groups::GROUP_CANONICAL_NAME_MAX_LEN + 1];
-  for (int i = 0; i < nv2 && i < kMaxGroupsInLine; i++) {
-    uint32_t channelId32 = 0;
-    uint16_t keyVersion = 0;
-    groups::GroupRole role = groups::GroupRole::None;
-    uint32_t revEpoch = 0;
-    bool ackApplied = false;
-    if (!groups::getV2At(i, uid, sizeof(uid), &channelId32, tag, sizeof(tag), canonicalName, sizeof(canonicalName),
-            &keyVersion, &role, &revEpoch, &ackApplied))
-      continue;
-    JsonObject gv2 = arr.add<JsonObject>();
-    gv2["groupUid"] = uid;
-    gv2["groupTag"] = tag;
-    gv2["canonicalName"] = canonicalName;
-    gv2["channelId32"] = channelId32;
-    gv2["keyVersion"] = keyVersion;
-    gv2["myRole"] = groupRoleToStr(role);
-    gv2["revocationEpoch"] = revEpoch;
-    gv2["ackApplied"] = ackApplied;
-  }
-  if (nv2 > kMaxGroupsInLine) doc["groupsTruncated"] = true;
-  emitJsonDoc(doc);
+  const uint32_t cmdId = s_emitGroupsCmdId;
+  s_emitGroupsCmdId = 0;
+  const uint32_t seq = ++s_bleSyncSeq;
+  notifyGroupsWithSeq(seq, cmdId);
 }
 
 void notifyWifi(bool connected, const char* ssid, const char* ip) {
-  (void)connected;
-  (void)ssid;
-  (void)ip;
+  JsonDocument doc;
+  doc["evt"] = "wifi";
+  doc["connected"] = connected;
+  if (ssid) doc["ssid"] = ssid;
+  if (ip) doc["ip"] = ip;
+  emitJsonDoc(doc);
 }
 
 void notifyRegion(const char* code, float freq, int power, int channel, uint32_t cmdId) {
   JsonDocument doc;
   doc["evt"] = "region";
-  if (code) doc["code"] = code;
+  if (cmdId != 0) doc["cmdId"] = cmdId;
+  if (code) doc["region"] = code;
   doc["freq"] = freq;
   doc["power"] = power;
-  doc["channel"] = channel;
-  if (cmdId != 0) doc["cmdId"] = cmdId;
+  if (channel >= 0) doc["channel"] = channel;
   emitJsonDoc(doc);
 }
 
@@ -1616,11 +2042,24 @@ void notifyPong(const uint8_t* from, int rssi, uint16_t pingPktId) {
   doc["from"] = fromHex;
   if (rssi != 0) doc["rssi"] = rssi;
   if (pingPktId != 0) doc["pingPktId"] = pingPktId;
-  emitJsonDoc(doc);
+  const uint32_t appCmdId = peekPingCmdIdForFrom(from);
+  if (appCmdId != 0) doc["cmdId"] = appCmdId;
+  char buf[kTxJsonMax];
+  size_t n = serializeJson(doc, buf, sizeof(buf));
+  if (n == 0 || n >= sizeof(buf)) {
+    RIFTLINK_DIAG("BLE", "event=PONG_JSON_SERIAL_FAIL n=%u cap=%u", (unsigned)n, (unsigned)sizeof(buf));
+    return;
+  }
+  buf[n] = '\0';
+  if (!enqueueJsonLine(buf)) return;
+  (void)takePingCmdIdForFrom(from);
 }
 
 void clearPingRetryForPeer(const uint8_t* from) {
-  (void)from;
+  if (!from || !s_pingRetry.active) return;
+  if (memcmp(s_pingRetry.to, from, protocol::NODE_ID_LEN) != 0) return;
+  s_pingRetry.active = false;
+  RIFTLINK_DIAG("PING", "event=PING_RETRY_CLEAR reason=pong from=%02X%02X", from[0], from[1]);
 }
 
 void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t heapFree, uint32_t cmdId) {
@@ -1635,10 +2074,28 @@ void notifySelftest(bool radioOk, bool displayOk, uint16_t batteryMv, uint32_t h
 }
 
 void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen, uint32_t msgId) {
-  (void)from;
-  (void)data;
-  (void)dataLen;
-  (void)msgId;
+  if (!from || !data || dataLen == 0) return;
+  if (!s_connected || Bluefruit.connected() == 0) return;
+  const size_t totalChunks = (dataLen + BLE_VOICE_CHUNK_RAW_MAX - 1) / BLE_VOICE_CHUNK_RAW_MAX;
+  char fromHex[17];
+  nodeIdToHexBuf(from, fromHex);
+  for (size_t i = 0; i < totalChunks; i++) {
+    size_t off = i * BLE_VOICE_CHUNK_RAW_MAX;
+    size_t chunkLen = dataLen - off;
+    if (chunkLen > BLE_VOICE_CHUNK_RAW_MAX) chunkLen = BLE_VOICE_CHUNK_RAW_MAX;
+    char b64[BLE_VOICE_CHUNK_B64_BUF + 8];
+    if (sodium_base64_encoded_len(chunkLen, sodium_base64_VARIANT_ORIGINAL) > sizeof(b64)) break;
+    sodium_bin2base64(b64, sizeof(b64), data + off, chunkLen, sodium_base64_VARIANT_ORIGINAL);
+    JsonDocument doc;
+    doc["evt"] = "voice";
+    doc["from"] = fromHex;
+    doc["chunk"] = (int)i;
+    doc["total"] = (int)totalChunks;
+    doc["data"] = b64;
+    if (msgId != 0) doc["msgId"] = msgId;
+    emitJsonDoc(doc);
+    if (i + 1 < totalChunks) delay(4);
+  }
 }
 
 void notifyError(const char* code, const char* msg) {
@@ -1646,6 +2103,7 @@ void notifyError(const char* code, const char* msg) {
   doc["evt"] = "error";
   doc["code"] = code ? code : "error";
   doc["msg"] = msg ? msg : "";
+  if (s_activeCmdId != 0) doc["cmdId"] = s_activeCmdId;
   emitJsonDoc(doc);
 }
 
@@ -1655,8 +2113,11 @@ bool isConnected() {
 
 void processCommand(const uint8_t* data, size_t len) {
   if (!data || len == 0) return;
-  if (len >= 512) return;
-  char tmp[512];
+  if (len >= kRxLineMax) {
+    ble::notifyError("payload_too_long", "JSON exceeds 512 bytes");
+    return;
+  }
+  char tmp[kRxLineMax];
   memcpy(tmp, data, len);
   tmp[len] = '\0';
   handleJsonCommand(tmp, len);

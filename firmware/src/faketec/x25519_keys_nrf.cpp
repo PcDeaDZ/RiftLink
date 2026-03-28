@@ -82,7 +82,7 @@ static std::atomic<uint32_t> s_throttleSeq{0};  // even=stable, odd=writer
 /** Слот троттла по хэшу peerId — не round-robin: иначе 4 чужие TX затирают lastSend и дебаунс HELLO+KEY ломается */
 static int throttleSlotForPeer(const uint8_t* peerId) {
   uint32_t h = 2166136261u;
-  for (int i = 0; i < protocol::NODE_ID_LEN; i++) {
+  for (size_t i = 0; i < protocol::NODE_ID_LEN; i++) {
     h ^= peerId[i];
     h *= 16777619u;
   }

@@ -9,6 +9,8 @@
 #include "node/node.h"
 #ifndef RIFTLINK_NRF52
 #include "ui/display.h"
+#else
+#include "faketec/display_nrf.h"
 #endif
 #include "telemetry/telemetry.h"
 #include "duty_cycle/duty_cycle.h"
@@ -56,9 +58,10 @@ void run(Result* out) {
   r.antennaOk = r.radioOk;
   r.batteryMv = telemetry::readBatteryMv();
   r.heapFree = (uint32_t)xPortGetFreeHeapSize();
-  r.displayOk = false;
-  Serial.printf("[RiftLink] Selftest: radio=%s ant=%s bat=%umV heap=%u\n", r.radioOk ? "OK" : "FAIL",
-      r.antennaOk ? "OK" : "WARN", (unsigned)r.batteryMv, (unsigned)r.heapFree);
+  r.displayOk = display_nrf::is_ready();
+  if (r.displayOk) display_nrf::show_selftest_summary(r.radioOk, r.antennaOk, r.batteryMv, r.heapFree);
+  Serial.printf("[RiftLink] Selftest: radio=%s ant=%s bat=%umV heap=%u disp=%s\n", r.radioOk ? "OK" : "FAIL",
+      r.antennaOk ? "OK" : "WARN", (unsigned)r.batteryMv, (unsigned)r.heapFree, r.displayOk ? "OK" : "no");
 #else
   duty_cycle::reset();
   uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];

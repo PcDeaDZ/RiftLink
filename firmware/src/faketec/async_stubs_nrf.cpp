@@ -7,6 +7,7 @@
 #include "async_queues.h"
 #include "radio/radio.h"
 #include "protocol/packet.h"
+#include "display_nrf.h"
 #include <Arduino.h>
 #include <string.h>
 
@@ -99,7 +100,9 @@ void flushDeferredSends() {
   }
 }
 
-void queueDisplayLastMsg(const char*, const char*) {}
+void queueDisplayLastMsg(const char* fromHex, const char* text) {
+  display_nrf::queue_last_msg(fromHex, text);
+}
 void queueDisplayRedraw(uint8_t, bool) {}
 void queueDisplayRequestInfoRedraw() {}
 void queueDisplayLongPress(uint8_t) {}

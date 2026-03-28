@@ -25,7 +25,8 @@ extern "C" {
 #define LED_BLUE PIN_LED1
 #define LED_STATE_ON 1
 
-#define WIRE_INTERFACES_COUNT 2
+/** Одна шина TWIM: OLED задаём через Wire.setPins (board_pins.h). Wire1 не объявлять — иначе нужны PIN_WIRE1_* в ядре. */
+#define WIRE_INTERFACES_COUNT 1
 #define PIN_WIRE_SDA (36)
 #define PIN_WIRE_SCL (11)
 

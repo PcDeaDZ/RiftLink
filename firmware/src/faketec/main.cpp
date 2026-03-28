@@ -17,6 +17,7 @@
 #include "gps/gps.h"
 #include "groups/groups.h"
 #include "handle_packet_nrf.h"
+#include "display_nrf.h"
 #include "kv.h"
 #include "mab/mab.h"
 #include "msg_queue/msg_queue.h"
@@ -166,6 +167,7 @@ void setup() {
 }
 
 void loop() {
+  display_nrf::poll();
   ble::update();
   msg_queue::update();
   routing::update();

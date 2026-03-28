@@ -114,6 +114,16 @@ class _OtaFlowState extends State<_OtaFlow> {
 
   void _onEvent(RiftLinkEvent evt) {
     if (!mounted) return;
+    if (evt is RiftLinkErrorEvent) {
+      if (_state == _OtaState.starting && evt.code == 'ble_ota_unsupported') {
+        _startTimeout?.cancel();
+        setState(() {
+          _state = _OtaState.error;
+          _errorMsg = evt.msg.isNotEmpty ? evt.msg : evt.code;
+        });
+        return;
+      }
+    }
     if (evt is RiftLinkBleOtaReadyEvent) {
       _startTimeout?.cancel();
       setState(() {

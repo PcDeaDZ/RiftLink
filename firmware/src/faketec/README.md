@@ -2,13 +2,13 @@
 
 Прошивка RiftLink для платы **FakeTech V5 Rev B** (NiceNano nRF52840 + HT-RA62/RA-01SH LoRa).
 
-> **Минимальная ветка (актуально для сборки):** `pio run -e faketec_v5` и `-e heltec_t114` проходят. LoRa — `radio_nrf.cpp` (SX1262, TCXO, DIO2 RF switch, KV для модема), точка входа — `faketec/main.cpp`. BLE — NUS в `ble_nrf.cpp` (Bluefruit); очередь исходящих mesh — общий `msg_queue/msg_queue.cpp` + `packet_fusion` + `mab` (BLS-N/ESP-NOW отключены флагами `-DRIFTLINK_DISABLE_BLS_N` / `DISABLE_ESP_NOW`), TX через `async_stubs_nrf.cpp` → `radio::sendDirectInternal`; колбэки BLE — `main.cpp` (`ble::setOnSend`, `notifySent` / `undelivered`). Дисплей (I2C OLED / ST7789) пока не в `lib_deps` nRF: цепочка Adafruit SSD1306→Wire→TinyUSB тянет лишние зависимости; подключим отдельно с корректным variant/TinyUSB. Ключи X25519: `crypto_box_keypair` заменён на `randombytes_buf` + `crypto_scalarmult_base` + HSalsa (урезанный esphome/libsodium без `crypto_box`). Прошивка с ПК: см. `docs/flasher/NRF52.md`; из корня репозитория: `.\build.ps1 -Faketec` / `-HeltecT114`.
+> **Минимальная ветка (актуально для сборки):** `pio run -e faketec_v5` и `-e heltec_t114` проходят. LoRa — `radio_nrf.cpp` (SX1262, TCXO, DIO2 RF switch, KV для модема), точка входа — `faketec/main.cpp`. BLE — NUS в `ble_nrf.cpp` (Bluefruit); очередь исходящих mesh — общий `msg_queue/msg_queue.cpp` + `packet_fusion` + `mab` (BLS-N/ESP-NOW отключены флагами `-DRIFTLINK_DISABLE_BLS_N` / `DISABLE_ESP_NOW`), TX через `async_stubs_nrf.cpp` → `radio::sendDirectInternal`; колбэки BLE — `main.cpp` (`ble::setOnSend`, `notifySent` / `undelivered`). **OLED I2C:** `display_nrf` + Adafruit SSD1306/GFX в `lib_deps`; пины `Wire.setPins` из `board_pins.h`; в `variants/faketec_nrf52840/variant.h` задано `WIRE_INTERFACES_COUNT=1` (без второго TWIM, иначе ядро требует `PIN_WIRE1_*`). Встроенный **ST7789** на T114 — отдельно. Ключи X25519: `crypto_box_keypair` заменён на `randombytes_buf` + `crypto_scalarmult_base` + HSalsa (урезанный esphome/libsodium без `crypto_box`). Прошивка с ПК: см. `docs/flasher/NRF52.md`; из корня репозитория: `.\build.ps1 -Faketec` / `-HeltecT114`.
 
 ### Что ещё не сделано (кратко)
 
-- **UI / дисплей** — нет полноценного меню как на ESP; план подключения OLED/ST7789 — в разделе «Дисплей и меню» ниже.
+- **UI / меню** — нет полноценного меню как на ESP; минимальный I2C OLED — `display_nrf` (см. ниже). ST7789 на T114 — не реализовано.
 - **BLE OTA** (`bleOtaStart` / chunk / …) — не реализовано; обновление: DFU (NiceNano) или `nrfutil` (см. `docs/flasher/NRF52.md`). В BLE приходит `evt:error` с кодом `ble_ota_unsupported`.
-- **Голос по BLE** (`cmd: voice`) — не поддерживается; код `voice_unsupported`. Сетевой голос mesh при необходимости — отдельный объём.
+- **Голос по BLE** (`cmd: voice` → mesh `OP_VOICE_MSG`, `evt: voice` с эфира) — реализовано в `ble_nrf.cpp` (паритет с ESP).
 - **Wi‑Fi, ESP‑NOW** (`wifi`, `espnowChannel`, `espnowAdaptive`) — не применимо; явные ошибки в BLE. Команда **`ota`** (AP для OTA как в §2.3 API) — `ota_unsupported`; обновление только DFU/USB.
 - **Poweroff / powersave по BLE** — не реализованы; коды `poweroff_unsupported`, `powersave_unsupported`.
 
@@ -22,9 +22,11 @@
 
 ## Дисплей и меню
 
-OLED через `faketec/display.*` — минимальный слой (`clear`/`print`/`show`), **без** полноценного меню как на ESP (`ui/display.cpp`: HOME, разделы, popup). Паритет UX с Heltec — отдельный объём работ.
+**I2C OLED SSD1306:** `faketec/display_nrf.*` + `Adafruit SSD1306` / `GFX` в `nrf52_base` (`lib_deps`). Пины — `board_pins.h` (`PIN_I2C_SDA`/`SCL`). Бут-строка и самотест на экране; последнее сообщение mesh — через `queueDisplayLastMsg` → `display_nrf::poll()` в `loop`. Полноценное меню как на ESP (`ui/display.cpp`) не подключено.
 
-**План подключения дисплея в `faketec_v5`:** (1) добавить в `lib_deps` только нужные пакеты (SSD1306 + GFX или ST7789-драйвер), без лишней цепочки TinyUSB/SdFat; (2) в `variants/.../variant.h` задать `PIN_WIRE_*` / SPI под плату; (3) опционально `-D` в `platformio.ini` для выбора I2C vs SPI; (4) точка вызова — `setup`/`loop` рядом с `ble::update`, без блокировки `radio` mutex надолго.
+**ST7789** (встроенный TFT на T114 и т.п.) — отдельный драйвер/SPI, сюда не входит.
+
+**План расширения:** при необходимости — вкладки/кнопка как на Heltec; не тянуть TinyUSB/SdFat без нужды.
 
 Общие модули рефакторинга UI (`firmware/src/ui/ui_scroll.h`, `ui_menu_exec.*`, `ui_layout_profile.h`, `ui_icons.h` и т.д.) подключаются только в ESP-сборках (`heltec_*`, `lilygo_*`); env **faketec_v5** собирает `faketec/` + `protocol/` и не тянет эти файлы.
 
