@@ -46,6 +46,70 @@
 #include <cstring>
 #include <cstdio>
 
+#if __has_include(<nrf_sdh.h>)
+#include <nrf_sdh.h>
+#define RIFTLINK_HAS_NRF_SDH 1
+#else
+#define RIFTLINK_HAS_NRF_SDH 0
+#endif
+
+extern "C" __attribute__((weak)) size_t xPortGetFreeHeapSize(void);
+
+static uint32_t nrf_heap_kb() {
+  size_t f = xPortGetFreeHeapSize();
+#if RIFTLINK_HAS_NRF_SDH
+  uint32_t sd = nrf_sdh_get_free_heap_size();
+  if (sd > f) f = sd;
+#endif
+  return (uint32_t)(f / 1024U);
+}
+
+static void nrf_system_reset_now() {
+  Serial.flush();
+  delay(30);
+  __DSB();
+  *((volatile uint32_t*)0xE000ED0C) = 0x5FA0004U;
+  __DSB();
+  for (;;) {
+  }
+}
+
+/** Несколько экранов статуса на ST7789/OLED (кнопка T114 или Serial `status`/`dash`). */
+static uint8_t s_statusDashPage = 0;
+
+static void nrf_refresh_status_dashboard(uint8_t page) {
+  if (!display_nrf::is_ready()) return;
+  if (page > 2) page = 0;
+  char l1[32], l2[32], l3[40], l4[40];
+  const uint8_t* nid = node::getId();
+  char idshort[12];
+  snprintf(idshort, sizeof(idshort), "%02X%02X%02X%02X", nid[0], nid[1], nid[2], nid[3]);
+  if (page == 0) {
+    snprintf(l1, sizeof(l1), "RiftLink %s", RIFTLINK_VERSION);
+    snprintf(l2, sizeof(l2), "ID %s..", idshort);
+    snprintf(l3, sizeof(l3), "%s %.2f ch%d", region::getCode(), (double)region::getFreq(), region::getChannel());
+    snprintf(l4, sizeof(l4), "SF%u n=%d %s", (unsigned)radio::getSpreadingFactor(), neighbors::getCount(),
+        radio::modemPresetName(radio::getModemPreset()));
+  } else if (page == 1) {
+    snprintf(l1, sizeof(l1), "Mesh / BLE");
+    snprintf(l2, sizeof(l2), "n=%d", neighbors::getCount());
+    snprintf(l3, sizeof(l3), "%s", ble::isConnected() ? "BLE connected" : "BLE advertising");
+    if (neighbors::getCount() <= 0) {
+      snprintf(l4, sizeof(l4), "minRSSI --");
+    } else {
+      int mr = neighbors::getMinRssi();
+      snprintf(l4, sizeof(l4), "minRSSI %d", mr < 0 ? mr : -120);
+    }
+  } else {
+    uint16_t mv = telemetry::readBatteryMv();
+    snprintf(l1, sizeof(l1), "Power / time");
+    snprintf(l2, sizeof(l2), "Bat %umV", (unsigned)mv);
+    snprintf(l3, sizeof(l3), "heap %u kB", (unsigned)nrf_heap_kb());
+    snprintf(l4, sizeof(l4), "up %lus", (unsigned long)(millis() / 1000UL));
+  }
+  display_nrf::show_status_screen(l1, l2, l3, l4);
+}
+
 static uint8_t s_rxBuf[PACKET_BUF_SIZE];
 static constexpr uint32_t TELEM_INTERVAL_MS = 60000;
 static uint32_t s_lastTelemetryMs = 0;
@@ -412,6 +476,12 @@ void loop() {
       } else {
         Serial.println("[RiftLink] Region: EU|UK|RU|US|AU");
       }
+    } else if (cmd == "channel") {
+      if (region::getChannelCount() > 0) {
+        Serial.printf("[RiftLink] Channel: %d (%.1f MHz)\n", region::getChannel(), (double)region::getFreq());
+      } else {
+        Serial.println("[RiftLink] channel: только EU/UK (см. region)");
+      }
     } else if (cmd.startsWith("channel ")) {
       if (region::getChannelCount() > 0) {
         int ch = cmd.substring(8).toInt();
@@ -472,6 +542,12 @@ void loop() {
       Serial.println("[RiftLink] ESP-NOW не на nRF52840 (см. docs/API.md, Wi‑Fi не используется)");
     } else if (cmd == "espnow") {
       Serial.println("[RiftLink] ESP-NOW не на nRF52840");
+    } else if (cmd == "wifi" || cmd.startsWith("wifi ")) {
+      Serial.println("[RiftLink] Wi‑Fi не на nRF52840 (см. docs/API.md)");
+    } else if (cmd == "ota" || cmd.startsWith("ota ")) {
+      Serial.println("[RiftLink] OTA по Wi‑Fi AP не на nRF; прошивка: DFU/USB — docs/flasher/NRF52.md");
+    } else if (cmd == "ws" || cmd == "websocket" || cmd.startsWith("websocket")) {
+      Serial.println("[RiftLink] WebSocket/Web OTA на nRF не реализовано");
     } else if (cmd == "neighbors" || cmd == "nb") {
       int n = neighbors::getCount();
       Serial.printf("[RiftLink] neighbors: %d\n", n);
@@ -535,10 +611,24 @@ void loop() {
       Serial.println("[RiftLink] powersave on/off: на nRF52840 не реализовано (см. docs/API.md)");
     } else if (cmd.startsWith("powersave ")) {
       Serial.println("[RiftLink] powersave: на nRF52840 не реализовано (см. docs/API.md, evt:error powersave_unsupported)");
+    } else if (cmd == "status" || cmd.startsWith("status ")) {
+      int pg = 0;
+      if (cmd.startsWith("status ")) pg = cmd.substring(7).toInt();
+      if (pg < 0 || pg > 2) pg = 0;
+      s_statusDashPage = (uint8_t)pg;
+      nrf_refresh_status_dashboard(s_statusDashPage);
+      Serial.printf("[RiftLink] status page %u (0=RF 1=mesh 2=bat)\n", (unsigned)s_statusDashPage);
+    } else if (cmd == "dash") {
+      s_statusDashPage = 0;
+      nrf_refresh_status_dashboard(0);
+      Serial.println("[RiftLink] status page 0");
+    } else if (cmd == "reboot" || cmd == "rst") {
+      Serial.println("[RiftLink] reboot...");
+      nrf_system_reset_now();
     } else if (cmd == "help" || cmd == "?") {
       Serial.println(
           "[RiftLink] Serial: send|ping|node|region|channel|nickname|route|lang|memdiag|bat|neighbors|gps|selftest|sf|"
-          "modemscan|powersave|espnow|version|uptime|help");
+          "modemscan|powersave|espnow|wifi|ota|ws|status|dash|reboot|version|uptime|help");
     }
   }
 
@@ -546,10 +636,9 @@ void loop() {
   {
     bool pressed = digitalRead(T114_BUTTON_PIN) == LOW;
     if (pressed && !s_t114BtnPrev) {
-      Serial.println("[RiftLink] T114 button");
-      if (display_nrf::is_ready()) {
-        display_nrf::queue_last_msg("T114", "Button");
-      }
+      Serial.println("[RiftLink] T114 button: next screen");
+      s_statusDashPage = (uint8_t)((s_statusDashPage + 1) % 3);
+      nrf_refresh_status_dashboard(s_statusDashPage);
     }
     s_t114BtnPrev = pressed;
   }

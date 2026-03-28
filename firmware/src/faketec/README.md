@@ -26,7 +26,7 @@
 
 **ST7789 (Heltec Mesh Node T114):** при сборке **`heltec_t114`** (`RIFTLINK_BOARD_HELTEC_T114`) используется ветка в `display_nrf.cpp`: Adafruit ST7789 на **SPI1**, пины CS/DC/RST/SCK/MOSI и подсветка — в `board_pins.h` (ориентир — upstream Meshtastic `variants/nrf52840/heltec_mesh_node_t114`). Отрисовка упрощённая (текст, без полного UI ESP).
 
-**План расширения (отдельный эпик):** полноценное меню/`queueDisplayRedraw` как на V3, вкладки, кнопка — не в `nrf52_base` `build_src_filter`; при необходимости — урезанное меню или только доработка текстового слоя на ST7789. Не тянуть TinyUSB/SdFat без нужды.
+**Минимальный UI (паритет «на устройстве»):** три экрана статуса на **ST7789** (T114) и **OLED** (FakeTech) — `display_nrf::show_status_screen` + Serial `status` / `status 0..2` / `dash`; на T114 кнопка листает те же страницы. Полный `ui/display.cpp` (вкладки, long press, `queueDisplayRedraw`) — отдельный эпик; не тянуть TinyUSB/SdFat без нужды.
 
 Общие модули рефакторинга UI (`firmware/src/ui/ui_scroll.h`, `ui_menu_exec.*`, `ui_layout_profile.h`, `ui_icons.h` и т.д.) подключаются только в ESP-сборках (`heltec_*`, `lilygo_*`); env **faketec_v5** собирает `faketec/` + `protocol/` и не тянет эти файлы.
 

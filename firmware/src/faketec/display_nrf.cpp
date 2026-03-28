@@ -83,6 +83,18 @@ void queue_last_msg(const char* fromHex, const char* text) {
   g_last_dirty = true;
 }
 
+void show_status_screen(const char* line1, const char* line2, const char* line3, const char* line4) {
+  if (!g_ok) return;
+  g_tft.fillScreen(ST77XX_BLACK);
+  g_tft.setCursor(0, 0);
+  g_tft.setTextSize(2);
+  g_tft.setTextColor(ST77XX_WHITE);
+  if (line1) g_tft.println(line1);
+  if (line2) g_tft.println(line2);
+  if (line3) g_tft.println(line3);
+  if (line4) g_tft.println(line4);
+}
+
 void poll() {
   if (!g_ok || !g_last_dirty) return;
   uint32_t now = millis();
@@ -168,6 +180,19 @@ void show_selftest_summary(bool radioOk, bool antennaOk, uint16_t batteryMv, uin
   g_disp.printf("Ant   %s\n", antennaOk ? "OK" : "WARN");
   g_disp.printf("Bat %umV\n", (unsigned)batteryMv);
   g_disp.printf("Heap %u\n", (unsigned)heapFree);
+  g_disp.display();
+}
+
+void show_status_screen(const char* line1, const char* line2, const char* line3, const char* line4) {
+  if (!g_ok) return;
+  g_disp.clearDisplay();
+  g_disp.setCursor(0, 0);
+  g_disp.setTextSize(1);
+  g_disp.setTextColor(SSD1306_WHITE);
+  if (line1) g_disp.println(line1);
+  if (line2) g_disp.println(line2);
+  if (line3) g_disp.println(line3);
+  if (line4) g_disp.println(line4);
   g_disp.display();
 }
 

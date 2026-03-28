@@ -19,6 +19,9 @@ void show_selftest_summary(bool radioOk, bool antennaOk, uint16_t batteryMv, uin
 /** Последнее сообщение mesh (две строки, усечение); отрисовка в poll(). */
 void queue_last_msg(const char* fromHex, const char* text);
 
+/** Четыре строки статуса (ST7789 T114 — text size 2; OLED — size 1), без очереди poll. */
+void show_status_screen(const char* line1, const char* line2, const char* line3, const char* line4);
+
 /** Вызывать из loop: отложенная перерисовка last msg. */
 void poll();
 
