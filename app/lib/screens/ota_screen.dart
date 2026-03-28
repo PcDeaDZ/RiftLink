@@ -13,6 +13,7 @@ import '../theme/design_tokens.dart';
 import '../widgets/app_primitives.dart';
 import '../widgets/mesh_background.dart';
 import '../widgets/rift_dialogs.dart';
+import '../support/nrf_firmware_errors.dart';
 
 enum _OtaState { idle, picking, starting, uploading, verifying, done, error }
 
@@ -115,11 +116,13 @@ class _OtaFlowState extends State<_OtaFlow> {
   void _onEvent(RiftLinkEvent evt) {
     if (!mounted) return;
     if (evt is RiftLinkErrorEvent) {
-      if (_state == _OtaState.starting && evt.code == 'ble_ota_unsupported') {
+      if (_state == _OtaState.starting &&
+          (evt.code == 'ble_ota_unsupported' || evt.code == 'ota_unsupported')) {
         _startTimeout?.cancel();
+        final l = context.l10n;
         setState(() {
           _state = _OtaState.error;
-          _errorMsg = evt.msg.isNotEmpty ? evt.msg : evt.code;
+          _errorMsg = nrfFirmwareErrorUserMessage(l, evt.code, evt.msg);
         });
         return;
       }

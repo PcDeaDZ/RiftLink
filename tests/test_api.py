@@ -90,6 +90,20 @@ class TestBLEEvents:
         parsed = json.loads(json.dumps(evt))
         assert parsed['evt'] == 'msg'
 
+    def test_msg_event_long_ndjson_like_firmware(self):
+        """Длинный evt:msg склеивается на клиенте из фрагментов notify до финального \\n (docs/API.md §476)."""
+        long_text = 'Я' * 400
+        evt = {'evt': 'msg', 'from': 'A1B2C3D4E5F60708', 'text': long_text, 'msgId': 42}
+        line = json.dumps(evt, ensure_ascii=False)
+        assert len(line.encode('utf-8')) > 512
+        chunk_size = 512
+        chunks = [line[i : i + chunk_size] for i in range(0, len(line), chunk_size)]
+        assembled = ''.join(chunks)
+        parsed = json.loads(assembled)
+        assert parsed['evt'] == 'msg'
+        assert parsed['msgId'] == 42
+        assert len(parsed['text']) == 400
+
     def test_msg_event_group_context(self):
         evt = {
             'evt': 'msg',

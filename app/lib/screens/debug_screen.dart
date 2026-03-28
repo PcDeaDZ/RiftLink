@@ -86,8 +86,14 @@ class _DebugScreenState extends State<DebugScreen> {
   String _formatEvent(RiftLinkEvent evt) {
     if (evt is RiftLinkMsgEvent) return 'msg from=${_displayNodeLabel(evt.from)} lane=${evt.lane} type=${evt.type} text=${evt.text}';
     if (evt is RiftLinkSentEvent) return 'sent to=${_displayNodeLabel(evt.to)} msgId=${evt.msgId}';
-    if (evt is RiftLinkReadEvent) return 'read from=${_displayNodeLabel(evt.from)} msgId=${evt.msgId}';
-    if (evt is RiftLinkDeliveredEvent) return 'delivered from=${_displayNodeLabel(evt.from)} msgId=${evt.msgId}';
+    if (evt is RiftLinkReadEvent) {
+      return 'read from=${_displayNodeLabel(evt.from)} msgId=${evt.msgId}'
+          '${evt.rssi != null ? ' rssi=${evt.rssi}' : ''}';
+    }
+    if (evt is RiftLinkDeliveredEvent) {
+      return 'delivered from=${_displayNodeLabel(evt.from)} msgId=${evt.msgId}'
+          '${evt.rssi != null ? ' rssi=${evt.rssi}' : ''}';
+    }
     if (evt is RiftLinkUndeliveredEvent) return 'undelivered to=${_displayNodeLabel(evt.to)} msgId=${evt.msgId}';
     if (evt is RiftLinkInfoEvent) {
       return 'node/info id=${_displayNodeLabel(evt.id)} neighbors=${evt.neighbors.length} routes=${evt.routes.length} mode=${evt.radioMode}';
@@ -101,6 +107,9 @@ class _DebugScreenState extends State<DebugScreen> {
     if (evt is RiftLinkTimeCapsuleQueuedEvent) return 'timeCapsuleQueued to=${evt.to == null ? "-" : _displayNodeLabel(evt.to!)} trigger=${evt.trigger} at=${evt.triggerAtMs ?? 0}';
     if (evt is RiftLinkTimeCapsuleReleasedEvent) return 'timeCapsuleReleased to=${_displayNodeLabel(evt.to)} msgId=${evt.msgId} trigger=${evt.trigger}';
     if (evt is RiftLinkErrorEvent) return 'error code=${evt.code} msg=${evt.msg}';
+    if (evt is RiftLinkLoraScanEvent) {
+      return 'loraScan count=${evt.count} quick=${evt.quick} results=${evt.results.length} cmdId=${evt.cmdId}';
+    }
     return evt.runtimeType.toString();
   }
 

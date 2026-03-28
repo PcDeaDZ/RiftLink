@@ -11,11 +11,13 @@
 - **Голос по BLE** (`cmd: voice` → mesh `OP_VOICE_MSG`, `evt: voice` с эфира) — реализовано в `ble_nrf.cpp` (паритет с ESP).
 - **Wi‑Fi, ESP‑NOW** (`wifi`, `espnowChannel`, `espnowAdaptive`) — не применимо; явные ошибки в BLE. Команда **`ota`** (AP для OTA как в §2.3 API) — `ota_unsupported`; обновление только DFU/USB.
 - **Poweroff / powersave по BLE** — не реализованы; коды `poweroff_unsupported`, `powersave_unsupported`.
+- **BLS‑N** (BLE scan для RTS при активной GATT-сессии на ESP, `ble.cpp`) — на nRF **отключён** (`-DRIFTLINK_DISABLE_BLS_N`). Оценка переноса: конфликт по времени радио SoftDevice, отдельный объём интеграции с `bls_n`; не входит в контракт паритета по `docs/API.md` (эфир + BLE JSON). Детали поведения ESP — `firmware/src/ble/ble.cpp` (секции `RIFTLINK_DISABLE_BLS_N`).
 
 ### Архитектура (паритет с Heltec V3, без Wi‑Fi)
 
-- **Поток:** один **`loop()`** в `faketec/main.cpp`: `ble::update`, `msg_queue`/`routing`/`offline_queue`, **`flushDeferredSends()`** (`async_stubs_nrf.cpp`: `queueTxPacket` → `radio::sendDirectInternal`, отложенный TX, `ack_coalesce::flush`), затем **`mesh_hello_nrf_loop()`** (HELLO/POLL, тихое окно handshake), далее **периодический KEY retry** для соседей без сессионного ключа (интервалы как в ESP `main.cpp`, причина `"retry"`) и раз в 60 с **`MODEM_SNAPSHOT`** в `RIFTLINK_DIAG`. USB Serial: **`region`** (без аргументов — текущий регион), **`bat`** / **`battery`**, **`neighbors`** / **`nb`** (в т.ч. **bat_mv**), **`node`** / **`id`**, **`version`** / **`ver`**, **`uptime`**, **`sf`** (с bw/cr), **`espnow`** (заглушка) — полный перечень в `docs/API.md` §4. На **T114** нажатие кнопки дублирует подсказку на ST7789 (`queue_last_msg`). Приём LoRa — **`radio::receive`** под mutex (`radio_nrf.cpp`), разбор — **`handlePacket`** (`handle_packet_nrf.cpp` + `handle_packet_nrf_body.inc`), паритет с ESP по relay/XOR/очередям.
+- **Поток:** один **`loop()`** в `faketec/main.cpp`: `ble::update`, `msg_queue`/`routing`/`offline_queue`, **`flushDeferredSends()`** (`async_stubs_nrf.cpp`: `queueTxPacket` → `radio::sendDirectInternal`, отложенный TX, `ack_coalesce::flush`), затем **`mesh_hello_nrf_loop()`** (HELLO/POLL, тихое окно handshake), далее **периодический KEY retry** для соседей без сессионного ключа (интервалы как в ESP `main.cpp`, причина `"retry"`) и раз в 60 с **`MODEM_SNAPSHOT`** в `RIFTLINK_DIAG`. **Паритет с Heltec — по BLE и эфиру** (`docs/API.md`); USB Serial — только опциональная отладка с ПК (ветка в `main.cpp`, не критерий приёмки). На **T114** кнопка листает локальный дашборд на ST7789. Приём LoRa — **`radio::receive`** под mutex (`radio_nrf.cpp`), разбор — **`handlePacket`** (`handle_packet_nrf.cpp` + `handle_packet_nrf_body.inc`), паритет с ESP по relay/XOR/очередям.
 - **Хранилище:** InternalFS через **`kv.cpp`** (`riftlink_kv::` — блобы в `/rl_*`). При ошибке монтирования LittleFS вызывается **`InternalFS.format()`** и повторный `begin()` (как в Meshtastic `FSBegin` для nRF52). При полной порче раздела — factory erase UF2 (см. `docs/flasher/NRF52.md`). Перед записью ключа файл удаляется, чтобы не копить append на nRF. **Группы V2** и **offline_queue** — общие `groups/groups.cpp` и `offline_queue/offline_queue.cpp` с веткой **`RIFTLINK_NRF52`** (KV вместо NVS).
+- **Приём / XOR:** после снятия XOR и разбора заголовка обработка идёт в **`handle_packet_nrf`** в том же **`loop()`**, что и BLE/radio (без отдельной очереди уровня ESP `packetTask`). Для приёмки важен контракт **`docs/API.md`** и эфир (HELLO/KEY/MSG), а не копирование внутренних структур FreeRTOS.
 - **Сборка `nrf52_base` (`platformio.ini`):** подключаются те же модули, что и на ESP для mesh: `msg_queue`, `packet_fusion`, `mab`, `frag`, `routing`, `ack_coalesce`, `groups`, `offline_queue`, `beacon_sync`, `clock_drift`, `voice_frag`, `voice_buffers`, плюс порты в `faketec/*` (`gps_nrf.cpp` вместо `gps/gps.cpp`). Файла **`nrf_mesh_stubs.cpp`** больше нет — заглушки выведены.
 - **GPS:** **`gps_nrf.cpp`** — без модуля GNSS; время/координаты для гео и epoch — через **`setPhoneSync`** (BLE), пины/флаг питания в KV.
 - **Голос:** общий **`voice_frag`/`voice_buffers`** (на nRF память через `malloc` вместо `heap_caps`).
@@ -26,7 +28,7 @@
 
 **ST7789 (Heltec Mesh Node T114):** при сборке **`heltec_t114`** (`RIFTLINK_BOARD_HELTEC_T114`) используется ветка в `display_nrf.cpp`: Adafruit ST7789 на **SPI1**, пины CS/DC/RST/SCK/MOSI и подсветка — в `board_pins.h` (ориентир — upstream Meshtastic `variants/nrf52840/heltec_mesh_node_t114`). Отрисовка упрощённая (текст, без полного UI ESP).
 
-**Минимальный UI (паритет «на устройстве»):** три экрана статуса на **ST7789** (T114) и **OLED** (FakeTech) — `display_nrf::show_status_screen` + Serial `status` / `status 0..2` / `dash`; на T114 кнопка листает те же страницы. Полный `ui/display.cpp` (вкладки, long press, `queueDisplayRedraw`) — отдельный эпик; не тянуть TinyUSB/SdFat без нужды.
+**Минимальный UI:** три экрана статуса на **ST7789** (T114) и **OLED** (FakeTech) — `display_nrf::show_status_screen`; на T114 кнопка листает страницы (опционально то же с ПК через Serial — не цель паритета). Полный `ui/display.cpp` (вкладки, long press) — отдельный эпик.
 
 Общие модули рефакторинга UI (`firmware/src/ui/ui_scroll.h`, `ui_menu_exec.*`, `ui_layout_profile.h`, `ui_icons.h` и т.д.) подключаются только в ESP-сборках (`heltec_*`, `lilygo_*`); env **faketec_v5** собирает `faketec/` + `protocol/` и не тянет эти файлы.
 
@@ -94,7 +96,7 @@ pio run -t upload -e faketec_v5
 
 - **LoRa mesh:** HELLO, MSG, ACK, relay (в т.ч. XOR / deferred relay), маршрутизация и очереди исходящих как на V3 (без Wi‑Fi)
 - **Дисплей:** автоопределение I2C OLED (SSD1306 @ 0x3C)
-- **Команды:** BLE GATT (UUID как в `docs/API.md`) и USB Serial — JSON, до 512 байт на запись. В USB Serial для отладки — те же сценарии, что и в перечне **§4 `docs/API.md`**, в т.ч. паритет с **BLE JSON** по смыслу: `info`, `modem`/`modemCustom`, `sf N`, `traceroute`, `read`, `loraScan`, `signalTest`. Двухузловой ручной чеклист: [`docs/NRF52_PARITY_CHECKLIST.md`](../../../docs/NRF52_PARITY_CHECKLIST.md).
+- **Команды:** основной контракт — **BLE GATT** (JSON, до 512 байт на запись, см. `docs/API.md`). USB Serial — вспомогательные строки для стола; приёмка паритета — по приложению и эфиру, не по списку Serial-команд. Чеклист: [`docs/NRF52_PARITY_CHECKLIST.md`](../../../docs/NRF52_PARITY_CHECKLIST.md).
 - **Совместимость:** тот же протокол, что и Heltec — узлы в одной сети
 
 ## Совместимость с Heltec V3 (приём / «вижу только в одну сторону»)

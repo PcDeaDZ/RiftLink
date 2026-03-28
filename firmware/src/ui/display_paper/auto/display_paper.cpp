@@ -101,6 +101,8 @@ static_assert(kProfPaper.submenuContentLineHeight == LINE_H, "LINE_H vs profile 
 
 static void drawSubScreenChrome();
 static void drawTabBarPaper();
+static void prepareTabLayoutShiftPaper();
+static void drawChromeTabsOrIdleRowPaper();
 static int displayShowPopupMenu(const char* title, const char* items[], int count, int initialSel = 0, int mode = POPUP_MODE_CANCEL,
     const uint8_t* const* rowIcons = nullptr, bool lastRowNoIcon = false, bool noRowIcons = false);
 static int submenuListY0Paper(bool hasTitle);

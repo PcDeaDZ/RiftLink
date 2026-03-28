@@ -633,6 +633,39 @@ final Map<String, Map<String, String>> _strings = {
   },
   'reconnect_action_retry': {'en': 'Reconnect', 'ru': 'Переподключиться'},
   'reconnect_action_go_login': {'en': 'Go to login', 'ru': 'На страницу входа'},
+  // nRF52840 / T114: коды из docs/API.md (команды без Wi‑Fi / не реализовано)
+  'nrf_err_ota_unsupported': {
+    'en': 'Wi‑Fi OTA is not available on this device. Update firmware via USB/DFU (see docs/flasher/NRF52.md).',
+    'ru': 'Wi‑Fi OTA на этом устройстве недоступна. Обновление прошивки — по USB/DFU (см. docs/flasher/NRF52.md).',
+  },
+  'nrf_err_ble_ota_unsupported': {
+    'en': 'BLE firmware update is not supported on nRF in this build. Use USB/DFU.',
+    'ru': 'Обновление прошивки по BLE на nRF в этой сборке не поддерживается. Используйте USB/DFU.',
+  },
+  'nrf_err_poweroff_unsupported': {
+    'en': 'Power off via app is not supported on this device.',
+    'ru': 'Выключение по команде из приложения на этом устройстве не поддерживается.',
+  },
+  'nrf_err_powersave_unsupported': {
+    'en': 'Powersave mode via BLE is not supported on this device.',
+    'ru': 'Режим энергосбережения по BLE на этом устройстве не поддерживается.',
+  },
+  'nrf_err_espnow_unsupported': {
+    'en': 'ESP‑NOW is not available on nRF devices.',
+    'ru': 'ESP‑NOW на устройствах nRF недоступен.',
+  },
+  'nrf_err_wifi': {
+    'en': 'Wi‑Fi is not available on this device (nRF52840).',
+    'ru': 'Wi‑Fi на этом устройстве (nRF52840) недоступен.',
+  },
+  'nrf_err_radio_mode': {
+    'en': 'Only BLE radio mode is supported; Wi‑Fi STA/AP is not available on nRF.',
+    'ru': 'Поддерживается только режим BLE; Wi‑Fi STA/AP на nRF недоступен.',
+  },
+  'nrf_err_group_legacy': {
+    'en': 'Legacy group commands (V1) are not supported. Use Groups V2 in the app.',
+    'ru': 'Команды legacy-групп (V1) не поддерживаются. Используйте группы V2 в приложении.',
+  },
 };
 
 class AppLocalizations {

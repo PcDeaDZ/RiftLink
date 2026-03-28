@@ -2,6 +2,7 @@
  * RiftLink Radio — nRF52840 + SX1262 (RadioLib), HT-RA62 / Heltec T114.
  */
 
+#include "async_tasks.h"
 #include "radio/radio.h"
 #include "region/region.h"
 #include "duty_cycle/duty_cycle.h"
@@ -339,7 +340,10 @@ bool sendDirectInternal(const uint8_t* data, size_t len, char* reasonBuf, size_t
         }
         uint32_t backoff = (uint32_t)((uint32_t)random() % cw) * CAD_SLOT_TIME_MS;
         if (backoff > 0) {
+          queueDeferredSend(data, len, getSpreadingFactor(), backoff);
           radioSendReason(reasonBuf, reasonLen, "cad_defer");
+          RIFTLINK_DIAG("RADIO", "event=CAD_DEFER backoff_ms=%lu cw=%lu sf=%u len=%u", (unsigned long)backoff,
+              (unsigned long)cw, (unsigned)getSpreadingFactor(), (unsigned)len);
           return false;
         }
       }

@@ -29,15 +29,24 @@ char g_line_text[48] = "";
 
 bool init() {
   g_ok = false;
+  // Heltec T114: VTFT_CTRL включает питание матрицы (Meshtastic: LOW = on). Иначе подсветка/шина могут «моргать», картинки нет.
+  pinMode(TFT_VTFT_CTRL, OUTPUT);
+  digitalWrite(TFT_VTFT_CTRL, TFT_VTFT_PWR_ON);
+  delay(20);
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, TFT_BL_ON);
+  delay(5);
   SPI1.setPins(TFT_SPI_MISO, TFT_SPI_SCK, TFT_SPI_MOSI);
   SPI1.begin();
+  // 1.14" ST7789: Adafruit ожидает init(135, 240) для CASET/RASET (см. Adafruit_ST7789.cpp).
   g_tft.init(135, 240);
   g_tft.setRotation(0);
-  g_tft.fillScreen(ST77XX_BLACK);
-  g_tft.setTextColor(ST77XX_WHITE);
+  // Белый на чёрном — перерисовка символов без «просветов»; ниже кадры батчим startWrite/endWrite (меньше артефактов на ST7789).
+  g_tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
   g_tft.setTextSize(2);
+  g_tft.startWrite();
+  g_tft.fillScreen(ST77XX_BLACK);
+  g_tft.endWrite();
   g_tft.setCursor(0, 0);
   g_ok = true;
   return true;
@@ -49,64 +58,79 @@ bool is_ready() {
 
 void show_boot(const char* line1, const char* line2) {
   if (!g_ok) return;
+  g_tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  g_tft.setTextSize(2);
+  g_tft.startWrite();
   g_tft.fillScreen(ST77XX_BLACK);
   g_tft.setCursor(0, 0);
-  g_tft.setTextSize(2);
   if (line1) g_tft.println(line1);
   if (line2) g_tft.println(line2);
+  g_tft.endWrite();
 }
 
 void show_selftest_summary(bool radioOk, bool antennaOk, uint16_t batteryMv, uint32_t heapFree) {
   if (!g_ok) return;
+  g_tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  g_tft.setTextSize(2);
+  g_tft.startWrite();
   g_tft.fillScreen(ST77XX_BLACK);
   g_tft.setCursor(0, 0);
-  g_tft.setTextSize(2);
   g_tft.println(F("Selftest"));
   g_tft.printf("Radio %s\n", radioOk ? "OK" : "FAIL");
   g_tft.printf("Ant %s\n", antennaOk ? "OK" : "WARN");
   g_tft.printf("Bat %umV\n", (unsigned)batteryMv);
   g_tft.printf("Heap %u\n", (unsigned)heapFree);
+  g_tft.endWrite();
 }
 
 void queue_last_msg(const char* fromHex, const char* text) {
   if (!g_ok) return;
-  g_line_from[0] = 0;
-  g_line_text[0] = 0;
+  char nextFrom[20] = "";
+  char nextText[48] = "";
   if (fromHex) {
-    strncpy(g_line_from, fromHex, sizeof(g_line_from) - 1);
-    g_line_from[sizeof(g_line_from) - 1] = 0;
+    strncpy(nextFrom, fromHex, sizeof(nextFrom) - 1);
+    nextFrom[sizeof(nextFrom) - 1] = 0;
   }
   if (text) {
-    strncpy(g_line_text, text, sizeof(g_line_text) - 1);
-    g_line_text[sizeof(g_line_text) - 1] = 0;
+    strncpy(nextText, text, sizeof(nextText) - 1);
+    nextText[sizeof(nextText) - 1] = 0;
   }
+  if (strcmp(nextFrom, g_line_from) == 0 && strcmp(nextText, g_line_text) == 0) return;
+  memcpy(g_line_from, nextFrom, sizeof(g_line_from));
+  memcpy(g_line_text, nextText, sizeof(g_line_text));
   g_last_dirty = true;
 }
 
 void show_status_screen(const char* line1, const char* line2, const char* line3, const char* line4) {
   if (!g_ok) return;
+  g_tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  g_tft.setTextSize(2);
+  g_tft.startWrite();
   g_tft.fillScreen(ST77XX_BLACK);
   g_tft.setCursor(0, 0);
-  g_tft.setTextSize(2);
-  g_tft.setTextColor(ST77XX_WHITE);
   if (line1) g_tft.println(line1);
   if (line2) g_tft.println(line2);
   if (line3) g_tft.println(line3);
   if (line4) g_tft.println(line4);
+  g_tft.endWrite();
 }
 
 void poll() {
   if (!g_ok || !g_last_dirty) return;
   uint32_t now = millis();
-  if ((uint32_t)(now - g_last_poll_ms) < 400) return;
+  // Реже полный кадр — при активном mesh меньше вспышек чёрного.
+  if ((uint32_t)(now - g_last_poll_ms) < 750) return;
   g_last_poll_ms = now;
 
+  g_tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  g_tft.setTextSize(2);
+  g_tft.startWrite();
   g_tft.fillScreen(ST77XX_BLACK);
   g_tft.setCursor(0, 0);
-  g_tft.setTextSize(2);
   g_tft.println(F("Last msg"));
   if (g_line_from[0]) g_tft.println(g_line_from);
   if (g_line_text[0]) g_tft.println(g_line_text);
+  g_tft.endWrite();
   g_last_dirty = false;
 }
 

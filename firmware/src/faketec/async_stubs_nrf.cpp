@@ -1,5 +1,7 @@
 /**
  * Заглушки async_tasks / очередей для nRF — синхронный TX через radio::sendDirectInternal.
+ * Паритет с ESP (эпик NRF_ESP_STACK_PARITY): отложенные кадры (ACK/ретраи) — слоты FIFO по dueMs;
+ * порядок доставки на эфир — как flushDeferredSends + mutex радио (не отдельный FreeRTOS radioScheduler).
  */
 
 #include "ack_coalesce/ack_coalesce.h"
@@ -59,7 +61,8 @@ struct DeferredSlot {
   bool used = false;
 };
 
-static constexpr int kDeferredSlots = 24;
+/** Глубина отложенных TX (аналог части ESP deferred queue); при полном слоте — drop (возврат false из deferPacket). */
+static constexpr int kDeferredSlots = 32;
 static DeferredSlot s_deferred[kDeferredSlots];
 
 static bool deferPacket(const uint8_t* pkt, size_t len, uint32_t delayMs) {
@@ -96,10 +99,10 @@ void flushDeferredSends() {
     if (!s_deferred[i].used) continue;
     if ((int32_t)(now - s_deferred[i].dueMs) < 0) continue;
     if (radio::takeMutex(pdMS_TO_TICKS(500))) {
-      (void)radio::sendDirectInternal(s_deferred[i].buf, s_deferred[i].len, nullptr, 0, false);
+      bool ok = radio::sendDirectInternal(s_deferred[i].buf, s_deferred[i].len, nullptr, 0, false);
       radio::releaseMutex();
+      if (ok) s_deferred[i].used = false;
     }
-    s_deferred[i].used = false;
   }
 }
 

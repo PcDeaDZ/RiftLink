@@ -6,6 +6,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import '../ble/riftlink_ble.dart';
+import '../support/nrf_firmware_errors.dart';
 import '../voice/voice_service.dart';
 import '../voice/voice_assembly_service.dart';
 import '../contacts/contacts_service.dart';
@@ -1697,7 +1698,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         }
       },
       onErrorEvent: (event) {
-        var msg = event.msg;
+        var msg = nrfFirmwareErrorUserMessage(context.l10n, event.code, event.msg);
         if (event.code == 'voice_send_fail') {
           msg = context.l10n.tr('voice_send_fail');
         } else if (event.code == 'invite_peer_key_mismatch') {

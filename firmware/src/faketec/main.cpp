@@ -89,6 +89,10 @@ static int parse_modem_preset_arg(const String& arg) {
 
 static uint16_t s_serialDiagPktId = 1;
 
+/** Как ESP `main.cpp`: периодическая выкладка OP_LOCATION при фиксе GPS. */
+static constexpr uint32_t kGpsLocIntervalMs = 60000;
+static uint32_t s_lastGpsLocMs = 0;
+
 /** Паритет с BLE `signalTest`: PING всем соседям (до 8). */
 static void nrf_serial_signal_test() {
   int n = neighbors::getCount();
@@ -283,8 +287,7 @@ void setup() {
   log_line("[RiftLink] init: node");
   node::init();
   log_line("[RiftLink] init: node done");
-  // crypto::init() (libsodium) — после ble::init(): первый sodium_init() идёт из ble (loadOrGenerateGroupOwnerSigningKey);
-  // до SoftDevice/Bluefruit первый вызов sodium_init() на части nRF52 «висит».
+  // ChaCha/libsodium: при успешном ble::init() crypto поднимается внутри BLE после SoftDevice (см. ble_nrf.cpp).
   log_line("[RiftLink] init: region");
   region::init();
   log_line("[RiftLink] init: region done");
@@ -336,14 +339,14 @@ void setup() {
   }
 
   log_line("[RiftLink] init: BLE (Bluefruit)");
-  if (!ble::init()) {
+  const bool bleOk = ble::init();
+  if (!bleOk) {
     log_line("[RiftLink] BLE init failed");
+    log_line("[RiftLink] init: crypto (libsodium, без BLE)");
+    if (!crypto::init()) {
+      log_line("[RiftLink] crypto init failed");
+    }
   }
-  log_line("[RiftLink] init: crypto (libsodium, после BLE)");
-  if (!crypto::init()) {
-    log_line("[RiftLink] crypto init failed");
-  }
-  log_line("[RiftLink] init: crypto done");
   log_line("[RiftLink] init: x25519_keys");
   x25519_keys::init();
   log_line("[RiftLink] init: x25519_keys done");
@@ -386,13 +389,22 @@ void loop() {
   }
 
   display_nrf::poll();
-  ble::update();
-  msg_queue::update();
-  routing::update();
-  offline_queue::update();
-  flushDeferredSends();
 
   mesh_hello_nrf_loop();
+
+  // Паритет с ESP: телеметрия сразу после HELLO/POLL (до GPS и прочего).
+  if (radio::isReady() && !mesh_hello_is_handshake_quiet_active() &&
+      (uint32_t)(millis() - s_lastTelemetryMs) >= TELEM_INTERVAL_MS) {
+    telemetry::send();
+    s_lastTelemetryMs = millis();
+  }
+
+  gps::update();
+  if (gps::isPresent() && gps::isEnabled() && gps::hasFix() &&
+      (uint32_t)(millis() - s_lastGpsLocMs) >= kGpsLocIntervalMs) {
+    sendLocation(gps::getLat(), gps::getLon(), gps::getAlt(), 0, 0);
+    s_lastGpsLocMs = millis();
+  }
 
   // Паритет с ESP: периодический retry KEY_EXCHANGE (см. main.cpp KEY_RETRY_*).
   if (millis() >= s_lastKeyRetry && millis() >= s_keyRetryCooldownUntil) {
@@ -431,13 +443,12 @@ void loop() {
         (unsigned)radio::getCodingRate(), neighbors::getCount(), 0u, 0u);
   }
 
-  if (radio::isReady() && !mesh_hello_is_handshake_quiet_active() &&
-      (uint32_t)(millis() - s_lastTelemetryMs) >= TELEM_INTERVAL_MS) {
-    telemetry::send();
-    s_lastTelemetryMs = millis();
-  }
-
   if (!radio::isReady()) {
+    ble::update();
+    msg_queue::update();
+    routing::update();
+    offline_queue::update();
+    flushDeferredSends();
     delay(200);
     return;
   }
@@ -791,6 +802,13 @@ void loop() {
     s_t114BtnPrev = pressed;
   }
 #endif
+
+  /* Паритет с ESP main loop: BLE и очереди после эфира/Serial — отложенные notify из handlePacket снимаются здесь. */
+  ble::update();
+  msg_queue::update();
+  routing::update();
+  offline_queue::update();
+  flushDeferredSends();
 
   delay(20);
 }

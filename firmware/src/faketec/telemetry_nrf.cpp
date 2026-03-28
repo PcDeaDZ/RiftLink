@@ -75,15 +75,22 @@ uint16_t readBatteryMv() {
 }
 
 bool isCharging() {
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  uint16_t mv = readBatteryMv();
+  return mv > 4200;
+#else
   return false;
+#endif
 }
 
+/** Как ветка `#else` в `telemetry.cpp` (Heltec): те же пороги и шаг ~12 mV на %. */
 int batteryPercent() {
 #if defined(RIFTLINK_BOARD_HELTEC_T114)
   uint16_t mv = readBatteryMv();
-  if (mv < 3100) return -1;
+  if (mv < 2500) return -1;
   if (mv >= 4200) return 100;
-  return static_cast<int>((mv - 3100) * 100 / (4200 - 3100));
+  if (mv <= 3000) return 0;
+  return static_cast<int>((mv - 3000) / 12);
 #else
   return -1;
 #endif

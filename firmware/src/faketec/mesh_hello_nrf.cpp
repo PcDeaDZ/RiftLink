@@ -309,7 +309,7 @@ void mesh_hello_nrf_loop() {
   }
 
 #if AUTO_POLL_ENABLED
-  if (!is_handshake_quiet_active() && nNeigh > 1 && (uint32_t)(millis() - lastPoll) >= POLL_INTERVAL_MS) {
+  if (!is_handshake_quiet_active() && nNeigh > 1 && (uint32_t)(millis() - lastPoll) > POLL_INTERVAL_MS) {
     send_poll();
     lastPoll = millis();
   }

@@ -1,5 +1,6 @@
 /**
  * Пины LoRa / I2C для nRF (логические 0..47 = P0.n / P1.(n-32)), Meshtastic-совместимая схема.
+ * TCXO и DIO2 RF switch задаются в `platformio.ini` (`LORA_MODULE_HAS_TCXO`, `LORA_DIO2_RF_SWITCH`), не здесь.
  */
 #pragma once
 
@@ -20,6 +21,10 @@
 #define PIN_I2C_SDA 26
 #define PIN_I2C_SCL 27
 /** Встроенный ST7789 135×240 (SPI1, не общий с LoRa SPI). Сверено с Meshtastic variants/nrf52840/heltec_mesh_node_t114/variant.h (ST7789_*). */
+/** Питание панели TFT (VTFT_CTRL): без LOW на этом пине дисплей не получает питание / моргает. См. TFTDisplay.cpp DISPLAYON. */
+#define TFT_VTFT_CTRL 3
+#define TFT_VTFT_PWR_ON LOW
+#define TFT_VTFT_PWR_OFF HIGH
 #define TFT_SPI_CS 11
 #define TFT_SPI_DC 12
 #define TFT_SPI_RST 2

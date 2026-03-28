@@ -671,6 +671,7 @@ class RiftLinkBle {
       neighbors: p.neighbors,
       neighborsRssi: p.neighborsRssi,
       neighborsHasKey: p.neighborsHasKey,
+      neighborsBatMv: p.neighborsBatMv,
       groups: p.groups,
       routes: p.routes,
       sf: n.sf,
@@ -734,6 +735,7 @@ class RiftLinkBle {
       neighbors: n.neighbors,
       neighborsRssi: n.rssi,
       neighborsHasKey: n.hasKey,
+      neighborsBatMv: n.batMv,
       groups: p.groups,
       routes: p.routes,
       sf: has('sf') ? o.sf : p.sf,
@@ -793,6 +795,7 @@ class RiftLinkBle {
       neighbors: p.neighbors,
       neighborsRssi: p.neighborsRssi,
       neighborsHasKey: p.neighborsHasKey,
+      neighborsBatMv: p.neighborsBatMv,
       groups: p.groups,
       routes: r.routes,
       sf: p.sf,
@@ -885,6 +888,7 @@ class RiftLinkBle {
       neighbors: p.neighbors,
       neighborsRssi: p.neighborsRssi,
       neighborsHasKey: p.neighborsHasKey,
+      neighborsBatMv: p.neighborsBatMv,
       groups: nextGroups,
       routes: p.routes,
       sf: p.sf,
@@ -964,6 +968,7 @@ class RiftLinkBle {
       neighbors: p.neighbors,
       neighborsRssi: p.neighborsRssi,
       neighborsHasKey: p.neighborsHasKey,
+      neighborsBatMv: p.neighborsBatMv,
       groups: mergedGroups,
       routes: p.routes,
       sf: p.sf,
@@ -2211,6 +2216,8 @@ RiftLinkInfoEvent riftLinkInfoEventFromNodeJson(Map<String, dynamic> json) {
   final neighborsHasKey = hasKeyList is List
       ? (hasKeyList as List).map((e) => e == true || e == 1).toList()
       : <bool>[];
+  final batMvRaw = json['batMv'];
+  final neighborsBatMv = batMvRaw is List ? (batMvRaw as List).map(_jsonInt).toList() : <int>[];
   final groups = _parseGroupInfoList(json['groups']);
   final routesList = json['routes'];
   final routes = <Map<String, dynamic>>[];
@@ -2245,6 +2252,7 @@ RiftLinkInfoEvent riftLinkInfoEventFromNodeJson(Map<String, dynamic> json) {
     neighbors: neighbors,
     neighborsRssi: neighborsRssi,
     neighborsHasKey: neighborsHasKey,
+    neighborsBatMv: neighborsBatMv,
     groups: groups,
     routes: routes,
     sf: _jsonIntNullable(json['sf']),
@@ -2307,12 +2315,14 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     return RiftLinkDeliveredEvent(
       from: json['from'] as String? ?? '',
       msgId: (json['msgId'] as num?)?.toInt() ?? 0,
+      rssi: _jsonIntNullable(json['rssi']),
     );
   }
   if (evt == 'read') {
     return RiftLinkReadEvent(
       from: json['from'] as String? ?? '',
       msgId: (json['msgId'] as num?)?.toInt() ?? 0,
+      rssi: _jsonIntNullable(json['rssi']),
     );
   }
   if (evt == 'undelivered') {
@@ -2409,6 +2419,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       from: json['from'] as String? ?? '',
       batteryMv: bat,
       heapKb: heap,
+      rssi: _jsonIntNullable(json['rssi']),
     );
   }
   if (evt == 'location') {
@@ -2420,6 +2431,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       lat: lat,
       lon: lon,
       alt: alt,
+      rssi: _jsonIntNullable(json['rssi']),
     );
   }
   if (evt == 'region') {
@@ -2428,6 +2440,7 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       freq: (json['freq'] as num?)?.toDouble() ?? 868.0,
       power: (json['power'] as num?)?.toInt() ?? 14,
       channel: (json['channel'] as num?)?.toInt(),
+      cmdId: _jsonIntNullable(json['cmdId']),
     );
   }
   if (evt == 'neighbors') {
@@ -2438,11 +2451,14 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
     final hasKey = hasKeyList is List
         ? (hasKeyList as List).map((e) => e == true || e == 1).toList()
         : <bool>[];
+    final batMvRaw = json['batMv'];
+    final batMv = batMvRaw is List ? (batMvRaw as List).map(_jsonInt).toList() : <int>[];
     final keysPresent = json.keys.toSet();
     return RiftLinkNeighborsEvent(
       neighbors: neighbors,
       rssi: rssi,
       hasKey: hasKey,
+      batMv: batMv,
       nodeOverlay: riftLinkInfoEventFromNodeJson(json),
       jsonKeysPresent: keysPresent,
     );
@@ -2510,6 +2526,9 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       present: json['present'] == true,
       enabled: json['enabled'] == true,
       hasFix: json['hasFix'] == true,
+      rx: _jsonIntNullable(json['rx']),
+      tx: _jsonIntNullable(json['tx']),
+      en: _jsonIntNullable(json['en']),
     );
   }
   if (evt == 'invite') {
@@ -2554,6 +2573,28 @@ RiftLinkEvent? _jsonToEvent(Map<String, dynamic> json) {
       batteryPercent: _jsonIntNullable(json['batteryPercent']),
       charging: json['charging'] == true,
       heapFree: (json['heapFree'] as num?)?.toInt() ?? 0,
+    );
+  }
+  if (evt == 'loraScan') {
+    final raw = json['results'];
+    final out = <RiftLinkLoraScanResult>[];
+    if (raw is List) {
+      for (final e in raw) {
+        if (e is Map) {
+          final m = Map<String, dynamic>.from(e);
+          out.add(RiftLinkLoraScanResult(
+            sf: _jsonIntDefault(m['sf'], 0),
+            bw: (m['bw'] as num?)?.toDouble() ?? 0.0,
+            rssi: _jsonIntDefault(m['rssi'], 0),
+          ));
+        }
+      }
+    }
+    return RiftLinkLoraScanEvent(
+      count: _jsonIntDefault(json['count'], out.length),
+      quick: json['quick'] == true,
+      results: out,
+      cmdId: _jsonIntNullable(json['cmdId']),
     );
   }
   return null;
@@ -2644,13 +2685,15 @@ class RiftLinkSentEvent extends RiftLinkEvent {
 class RiftLinkDeliveredEvent extends RiftLinkEvent {
   final String from;
   final int msgId;
-  RiftLinkDeliveredEvent({required this.from, required this.msgId});
+  final int? rssi;
+  RiftLinkDeliveredEvent({required this.from, required this.msgId, this.rssi});
 }
 
 class RiftLinkReadEvent extends RiftLinkEvent {
   final String from;
   final int msgId;
-  RiftLinkReadEvent({required this.from, required this.msgId});
+  final int? rssi;
+  RiftLinkReadEvent({required this.from, required this.msgId, this.rssi});
 }
 
 /// Unicast: ACK не получен. Broadcast: delivered=0 при total>0.
@@ -2692,6 +2735,8 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
   final List<String> neighbors;
   final List<int> neighborsRssi;
   final List<bool> neighborsHasKey;
+  /// Напряжение соседей (мВ) из `batMv` в `evt:neighbors` (0 = неизвестно); длина по идее как у [neighbors].
+  final List<int> neighborsBatMv;
   /// Полные записи групп (в JSON ключ `groups`; legacy-массив id не используется).
   final List<RiftLinkGroupInfo> groups;
   final List<Map<String, dynamic>> routes;
@@ -2748,6 +2793,7 @@ class RiftLinkInfoEvent extends RiftLinkEvent {
     this.neighbors = const [],
     this.neighborsRssi = const [],
     this.neighborsHasKey = const [],
+    this.neighborsBatMv = const [],
     this.groups = const [],
     this.routes = const [],
     this.sf,
@@ -2794,7 +2840,18 @@ class RiftLinkGpsEvent extends RiftLinkEvent {
   final bool present;
   final bool enabled;
   final bool hasFix;
-  RiftLinkGpsEvent({required this.present, required this.enabled, required this.hasFix});
+  /// Пины UART/GPIO с прошивки (nRF/ESP), если есть.
+  final int? rx;
+  final int? tx;
+  final int? en;
+  RiftLinkGpsEvent({
+    required this.present,
+    required this.enabled,
+    required this.hasFix,
+    this.rx,
+    this.tx,
+    this.en,
+  });
 }
 
 class RiftLinkInviteEvent extends RiftLinkEvent {
@@ -2868,6 +2925,27 @@ class RiftLinkSelftestEvent extends RiftLinkEvent {
     this.batteryPercent,
     this.charging = false,
     required this.heapFree,
+  });
+}
+
+/// Элемент `results[]` в `evt:loraScan` (docs/API §2.10.1).
+class RiftLinkLoraScanResult {
+  final int sf;
+  final double bw;
+  final int rssi;
+  const RiftLinkLoraScanResult({required this.sf, required this.bw, required this.rssi});
+}
+
+class RiftLinkLoraScanEvent extends RiftLinkEvent {
+  final int count;
+  final bool quick;
+  final List<RiftLinkLoraScanResult> results;
+  final int? cmdId;
+  RiftLinkLoraScanEvent({
+    required this.count,
+    required this.quick,
+    required this.results,
+    this.cmdId,
   });
 }
 
@@ -2975,6 +3053,8 @@ class RiftLinkNeighborsEvent extends RiftLinkEvent {
   final List<String> neighbors;
   final List<int> rssi;
   final List<bool> hasKey;  // true = можно отправить
+  /// МВ по соседям (`batMv` в JSON nRF/ESP); длина как у [neighbors].
+  final List<int> batMv;
   /// Те же поля, что в evt:node (прошивка дублирует паспорт + метрики в evt:neighbors при малом MTU).
   final RiftLinkInfoEvent nodeOverlay;
   /// Какие ключи были в JSON — чтобы не затирать кэш значениями по умолчанию из парсера.
@@ -2983,6 +3063,7 @@ class RiftLinkNeighborsEvent extends RiftLinkEvent {
     required this.neighbors,
     this.rssi = const [],
     this.hasKey = const [],
+    this.batMv = const [],
     required this.nodeOverlay,
     required this.jsonKeysPresent,
   });
@@ -2993,11 +3074,13 @@ class RiftLinkRegionEvent extends RiftLinkEvent {
   final double freq;
   final int power;
   final int? channel;  // 0–2 для EU/UK
+  final int? cmdId;
   RiftLinkRegionEvent({
     required this.region,
     required this.freq,
     required this.power,
     this.channel,
+    this.cmdId,
   });
 }
 
@@ -3005,10 +3088,12 @@ class RiftLinkTelemetryEvent extends RiftLinkEvent {
   final String from;
   final int batteryMv;
   final int heapKb;
+  final int? rssi;
   RiftLinkTelemetryEvent({
     required this.from,
     required this.batteryMv,
     required this.heapKb,
+    this.rssi,
   });
 }
 
@@ -3017,11 +3102,13 @@ class RiftLinkLocationEvent extends RiftLinkEvent {
   final double lat;
   final double lon;
   final int alt;
+  final int? rssi;
   RiftLinkLocationEvent({
     required this.from,
     required this.lat,
     required this.lon,
     this.alt = 0,
+    this.rssi,
   });
 }
 
@@ -3123,6 +3210,7 @@ RiftLinkInfoEvent _mergeSystemMetricsFromPrevious(RiftLinkInfoEvent n, RiftLinkI
     neighbors: n.neighbors,
     neighborsRssi: n.neighborsRssi,
     neighborsHasKey: n.neighborsHasKey,
+    neighborsBatMv: n.neighborsBatMv.isNotEmpty ? n.neighborsBatMv : p.neighborsBatMv,
     groups: n.groups,
     routes: n.routes,
     sf: n.sf,
@@ -3181,6 +3269,7 @@ RiftLinkInfoEvent _copyInfoReplacingGroups(RiftLinkInfoEvent e, List<RiftLinkGro
     neighbors: e.neighbors,
     neighborsRssi: e.neighborsRssi,
     neighborsHasKey: e.neighborsHasKey,
+    neighborsBatMv: e.neighborsBatMv,
     groups: groups,
     routes: e.routes,
     sf: e.sf,

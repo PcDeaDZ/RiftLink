@@ -2,11 +2,13 @@
 
 Ручная проверка в поле; CI покрывает только сборку и native-тесты протокола.
 
+**Критерий приёмки** — поведение по **BLE** и **эфиру** (`docs/API.md`). USB Serial на nRF — вспомогательная отладка; строки ниже с Serial не заменяют проверку по приложению.
+
 ## Подготовка
 
-1. Один узел **Heltec V3** (или другой ESP) и один **nRF** (`faketec_v5` или `heltec_t114`), либо два nRF.
+1. Один узел **Heltec V3/V4** (или другой ESP) и один **nRF** (`faketec_v5` или `heltec_t114`), либо два nRF.
 2. Один регион и один пресет модема (SF/BW/CR) на обоих; антенны в диапазоне региона.
-3. Лог UART на обоих (115200 8N1) или только на отлаживаемом узле.
+3. Лог UART на обоих (115200 8N1) или только на отлаживаемом узле (опционально).
 
 ## Сценарии
 
@@ -16,6 +18,7 @@
 | 2 | KEY exchange | `KEY_STORE_OK` / `hasKey` у соседа |
 | 3 | Unicast MSG в обе стороны | Доставка, ACK при запросе |
 | 4 | Broadcast (если используете) | `evt` на телефоне согласовано с ESP |
+| **8** | **BLE:** `info` (волна node/neighbors/routes/groups), `region` / модем, `neighbors`, `send` — как в `docs/API.md` §2 | JSON и события согласованы с Heltec; `cmdId` повторяется в волне при запросе из приложения |
 | 5 | Serial `node` / `region` / `sf` / `bat` / `modemscan quick` / `neighbors` на nRF | ID, регион/канал, модем, локальная батарея, соседи с **bat_mv** |
 | 5b | `espnow` / `powersave` в Serial | Ответы-заглушки (нет Wi‑Fi / нет powersave как на ESP) |
 | 5c | Serial `info` / `modem` / `sf 9` / `signalTest` / `read` | Соответствуют BLE-командам по смыслу (см. `docs/API.md` §4) |
@@ -25,4 +28,4 @@
 
 ## Не применимо на nRF
 
-Wi‑Fi, ESP‑NOW, BLE OTA прошивки, poweroff/powersave по BLE — ожидаемые `evt:error` в приложении; см. `docs/API.md`.
+Wi‑Fi, ESP‑NOW, BLE OTA прошивки, poweroff/powersave по BLE — ожидаемые `evt:error` с кодами из таблицы в **`docs/API.md`** (раздел про прошивки nRF52840). Приложение должно показывать их без сбоя (см. локализацию `nrf_err_*` в клиенте).
