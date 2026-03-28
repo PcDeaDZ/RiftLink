@@ -529,7 +529,7 @@ channel 2
 
 Выбор канала LoRaWAN для EU/UK: 0 = 868.1 MHz, 1 = 868.3 MHz, 2 = 868.5 MHz.
 
-**Прошивки nRF52840 (USB Serial):** в `faketec/main.cpp` поддерживаются `send`, `ping`, `region`, `channel`, `nickname`, `route`, `lang`, `memdiag` (куча SoftDevice + задачи FreeRTOS), `gps` / `gps on` / `gps off` / `gps pins <rx> <tx> [en]` (на nRF без UART GNSS — в основном KV и синхронизация с телефоном), `selftest` или `test`, `sf` или `radio`, `modemscan` / `modemscan quick` / `modemscan full` (скан эфира, `full` дольше), `powersave` (строка-напоминание: на nRF не реализовано, в BLE — `powersave_unsupported`), `help`. Чеклист двух узлов: `docs/NRF52_PARITY_CHECKLIST.md`.
+**Прошивки nRF52840 (USB Serial):** в `faketec/main.cpp` поддерживаются `send`, `ping`, `region`, `channel`, `nickname`, `route`, `lang`, `memdiag` (куча SoftDevice + задачи FreeRTOS), `neighbors` или `nb` (список соседей, RSSI, наличие сессионного ключа), `gps` / `gps on` / `gps off` / `gps pins <rx> <tx> [en]` (на nRF без UART GNSS — в основном KV и синхронизация с телефоном), `selftest` или `test`, `sf` или `radio`, `modemscan` / `modemscan quick` / `modemscan full` (скан эфира, `full` дольше), `powersave` (строка-напоминание: на nRF не реализовано, в BLE — `powersave_unsupported`), `help`. В фоне, как на Heltec ESP, периодически выполняется **retry KEY_EXCHANGE** для соседей без ключа (лог `KEY_RETRY_*` при включённой диагностике). Чеклист двух узлов: `docs/NRF52_PARITY_CHECKLIST.md`.
 
 ### 4.6 NVS: настройки экрана (прошивка)
 

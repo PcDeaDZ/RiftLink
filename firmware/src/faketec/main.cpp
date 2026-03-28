@@ -51,6 +51,11 @@ static uint32_t s_lastTelemetryMs = 0;
 /** Периодический лог в USB CDC: в setup всё уходит одним пакетом; монитор часто открывают позже — в loop видно «живость». */
 static constexpr uint32_t SERIAL_HEARTBEAT_MS = 8000;
 static uint32_t s_lastSerialHeartbeatMs = 0;
+/** Паритет с ESP `main.cpp`: периодический KEY_EXCHANGE соседям без ключа (плотная сеть / редкий mesh). */
+static uint32_t s_lastKeyRetry = 0;
+static int s_keyRetryRoundRobin = 0;
+static uint32_t s_keyRetryCooldownUntil = 0;
+static uint32_t s_lastDiagSnapshotMs = 0;
 #if defined(RIFTLINK_BOARD_HELTEC_T114)
 static bool s_t114BtnPrev = false;
 #endif
@@ -228,6 +233,7 @@ void setup() {
   log_line("[RiftLink] init: x25519_keys done");
   neighbors::init();
   mesh_hello_nrf_init();
+  s_lastKeyRetry = millis() + (node::getId()[0] % 16) * 500;
 
   // OLED в конце: на nRF52 Wire без таймаута — неверные SDA/SCL зависают навсегда; до сюда уже видны LoRa/BLE в логе.
 #if defined(RIFTLINK_SKIP_OLED_INIT)
@@ -271,6 +277,49 @@ void loop() {
   flushDeferredSends();
 
   mesh_hello_nrf_loop();
+
+  // Паритет с ESP: периодический retry KEY_EXCHANGE (см. main.cpp KEY_RETRY_*).
+  #define KEY_RETRY_BASE_MS 45000
+  #define KEY_RETRY_JITTER_MS 15000
+  #define KEY_RETRY_EXTRA_JITTER_MS 3000
+  #define KEY_RETRY_SMALL_MESH_BASE_MS 12000
+  #define KEY_RETRY_SMALL_MESH_JITTER_MS 4000
+  #define KEY_RETRY_SMALL_MESH_EXTRA_JITTER_MS 1500
+  if (millis() >= s_lastKeyRetry && millis() >= s_keyRetryCooldownUntil) {
+    int n = neighbors::getCount();
+    const bool smallMesh = (n <= 2);
+    uint32_t base = smallMesh ? KEY_RETRY_SMALL_MESH_BASE_MS : KEY_RETRY_BASE_MS;
+    uint32_t jitSpan = smallMesh ? KEY_RETRY_SMALL_MESH_JITTER_MS : KEY_RETRY_JITTER_MS;
+    uint32_t extraSpan = smallMesh ? KEY_RETRY_SMALL_MESH_EXTRA_JITTER_MS : KEY_RETRY_EXTRA_JITTER_MS;
+    uint32_t phase = smallMesh ? ((node::getId()[0] % 8) * 200u) : ((node::getId()[0] % 16) * 500u);
+    uint32_t extraJitter = (uint32_t)random((long)extraSpan);
+    s_lastKeyRetry = millis() + base + (uint32_t)random((long)jitSpan) + phase + extraJitter;
+    RIFTLINK_DIAG("KEY", "event=KEY_RETRY_TICK neighbors=%d next_retry_in_ms=%lu cooldown_until=%lu small_mesh=%u", n,
+        (unsigned long)(s_lastKeyRetry - millis()), (unsigned long)s_keyRetryCooldownUntil, (unsigned)smallMesh);
+    if (n > 0) {
+      s_keyRetryRoundRobin %= n;
+      for (int k = 0; k < n; k++) {
+        int i = (s_keyRetryRoundRobin + k) % n;
+        uint8_t peerId[protocol::NODE_ID_LEN];
+        if (neighbors::getId(i, peerId) && !x25519_keys::hasKeyFor(peerId)) {
+          RIFTLINK_DIAG("KEY", "event=KEY_RETRY_TARGET peer=%02X%02X idx=%d rr=%d", peerId[0], peerId[1], i,
+              s_keyRetryRoundRobin);
+          x25519_keys::sendKeyExchange(peerId, false, false, "retry");
+          s_keyRetryRoundRobin = (i + 1) % n;
+          s_keyRetryCooldownUntil = millis() + 800 + (uint32_t)random(400);
+          break;
+        }
+      }
+    }
+  }
+
+  if (millis() - s_lastDiagSnapshotMs >= 60000) {
+    s_lastDiagSnapshotMs = millis();
+    RIFTLINK_DIAG("STATE",
+        "event=MODEM_SNAPSHOT region=%s freq_mhz=%.1f sf=%u bw=%.1f cr=%u neighbors=%d ps_enabled=%u ps_can=%u",
+        region::getCode(), region::getFreq(), (unsigned)radio::getSpreadingFactor(), radio::getBandwidth(),
+        (unsigned)radio::getCodingRate(), neighbors::getCount(), 0u, 0u);
+  }
 
   if (radio::isReady() && !mesh_hello_is_handshake_quiet_active() &&
       (uint32_t)(millis() - s_lastTelemetryMs) >= TELEM_INTERVAL_MS) {
@@ -391,6 +440,17 @@ void loop() {
       }
     } else if (cmd == "memdiag") {
       memoryDiagLog("serial");
+    } else if (cmd == "neighbors" || cmd == "nb") {
+      int n = neighbors::getCount();
+      Serial.printf("[RiftLink] neighbors: %d\n", n);
+      for (int i = 0; i < n; i++) {
+        uint8_t id[protocol::NODE_ID_LEN];
+        char hex[24];
+        if (!neighbors::getId(i, id)) continue;
+        neighbors::getIdHex(i, hex);
+        const bool hasKey = x25519_keys::hasKeyFor(id);
+        Serial.printf("  %d: %s rssi=%d key=%s\n", i, hex, neighbors::getRssi(i), hasKey ? "yes" : "no");
+      }
     } else if (cmd == "gps") {
       int rx = 0, tx = 0, en = 0;
       gps::getPins(&rx, &tx, &en);
@@ -434,7 +494,8 @@ void loop() {
       Serial.println("[RiftLink] powersave: на nRF52840 не реализовано (см. docs/API.md, evt:error powersave_unsupported)");
     } else if (cmd == "help" || cmd == "?") {
       Serial.println(
-          "[RiftLink] Serial: send|ping|region|channel|nickname|route|lang|memdiag|gps|selftest|sf|modemscan|help");
+          "[RiftLink] Serial: send|ping|region|channel|nickname|route|lang|memdiag|neighbors|gps|selftest|sf|modemscan|"
+          "powersave|help");
     }
   }
 
