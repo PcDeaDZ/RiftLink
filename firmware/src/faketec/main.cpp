@@ -36,6 +36,7 @@
 #include "memory_diag/memory_diag.h"
 #include "telemetry/telemetry.h"
 #include "mesh_hello_nrf.h"
+#include "board_pins.h"
 #include "voice_buffers/voice_buffers.h"
 #include "voice_frag/voice_frag.h"
 #include "x25519_keys/x25519_keys.h"
@@ -50,6 +51,9 @@ static uint32_t s_lastTelemetryMs = 0;
 /** Периодический лог в USB CDC: в setup всё уходит одним пакетом; монитор часто открывают позже — в loop видно «живость». */
 static constexpr uint32_t SERIAL_HEARTBEAT_MS = 8000;
 static uint32_t s_lastSerialHeartbeatMs = 0;
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+static bool s_t114BtnPrev = false;
+#endif
 
 /** USB CDC на nRF часто не принимает данные, пока хост не открыл COM — ранний println «теряется». Дублируем на Serial1 (TX=GPIO6 в variant). */
 #if !defined(RIFTLINK_NO_UART1_LOG)
@@ -237,6 +241,13 @@ void setup() {
   }
 #endif
 
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  pinMode(T114_LED_PIN, OUTPUT);
+  digitalWrite(T114_LED_PIN, T114_LED_ON);
+  pinMode(T114_BUTTON_PIN, INPUT_PULLUP);
+  log_line("[RiftLink] T114: LED/button pins (Meshtastic variant)");
+#endif
+
   log_line("[RiftLink] setup complete");
 }
 
@@ -380,8 +391,62 @@ void loop() {
       }
     } else if (cmd == "memdiag") {
       memoryDiagLog("serial");
+    } else if (cmd == "gps") {
+      int rx = 0, tx = 0, en = 0;
+      gps::getPins(&rx, &tx, &en);
+      Serial.printf("[RiftLink] GPS: %s %s rx=%d tx=%d en=%d\n", gps::isPresent() ? "present" : "absent",
+          gps::isEnabled() ? "on" : "off", rx, tx, en);
+      if (gps::hasFix()) {
+        Serial.printf("[RiftLink] Fix: %.5f, %.5f\n", (double)gps::getLat(), (double)gps::getLon());
+      }
+    } else if (cmd == "gps on") {
+      gps::setEnabled(true);
+      Serial.println("[RiftLink] GPS on");
+    } else if (cmd == "gps off") {
+      gps::setEnabled(false);
+      Serial.println("[RiftLink] GPS off");
+    } else if (cmd.startsWith("gps pins ")) {
+      int rx = -1, tx = -1, en = -1;
+      int n = sscanf(cmd.c_str() + 9, "%d %d %d", &rx, &tx, &en);
+      if (n >= 2) {
+        if (n < 3) en = -1;
+        gps::setPins(rx, tx, en);
+        gps::saveConfig();
+        Serial.printf("[RiftLink] GPS pins rx=%d tx=%d en=%d\n", rx, tx, en);
+      } else {
+        Serial.println("[RiftLink] gps pins <rx> <tx> [en]");
+      }
+    } else if (cmd == "selftest" || cmd == "test") {
+      selftest::Result r;
+      selftest::run(&r);
+    } else if (cmd == "sf" || cmd == "radio") {
+      Serial.printf("[RiftLink] SF=%u, %.1f MHz, neighbors=%d\n", (unsigned)radio::getSpreadingFactor(),
+          (double)region::getFreq(), neighbors::getCount());
+    } else if (cmd == "modemscan" || cmd == "modemscan quick") {
+      selftest::ScanResult sr[8];
+      int n = selftest::modemScanQuick(sr, 8);
+      Serial.printf("[RiftLink] modemScanQuick: found %d\n", n);
+    } else if (cmd == "modemscan full") {
+      selftest::ScanResult sr[16];
+      int n = selftest::modemScan(sr, 16);
+      Serial.printf("[RiftLink] modemScan: found %d\n", n);
+    } else if (cmd == "powersave" || cmd.startsWith("powersave ")) {
+      Serial.println("[RiftLink] powersave: на nRF52840 не реализовано (см. docs/API.md, evt:error powersave_unsupported)");
+    } else if (cmd == "help" || cmd == "?") {
+      Serial.println(
+          "[RiftLink] Serial: send|ping|region|channel|nickname|route|lang|memdiag|gps|selftest|sf|modemscan|help");
     }
   }
+
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  {
+    bool pressed = digitalRead(T114_BUTTON_PIN) == LOW;
+    if (pressed && !s_t114BtnPrev) {
+      Serial.println("[RiftLink] T114 button");
+    }
+    s_t114BtnPrev = pressed;
+  }
+#endif
 
   delay(20);
 }

@@ -94,7 +94,7 @@ pio run -t upload -e faketec_v5
 
 - **LoRa mesh:** HELLO, MSG, ACK, relay (в т.ч. XOR / deferred relay), маршрутизация и очереди исходящих как на V3 (без Wi‑Fi)
 - **Дисплей:** автоопределение I2C OLED (SSD1306 @ 0x3C)
-- **Команды:** BLE GATT (UUID как в `docs/API.md`) и USB Serial — JSON, до 512 байт на запись. В USB Serial для отладки также поддерживаются строки **`send`**, **`ping`**, **`region`**, **`channel`**, **`nickname`**, **`route`**, **`lang`**, **`memdiag`** (как на ESP `main.cpp` по смыслу, без перерисовки дисплея на nRF).
+- **Команды:** BLE GATT (UUID как в `docs/API.md`) и USB Serial — JSON, до 512 байт на запись. В USB Serial для отладки также поддерживаются строки **`send`**, **`ping`**, **`region`**, **`channel`**, **`nickname`**, **`route`**, **`lang`**, **`memdiag`**, **`gps`** / **`gps on|off`** / **`gps pins`**, **`selftest`** / **`test`**, **`sf`** / **`radio`**, **`modemscan`** / **`modemscan quick`** / **`modemscan full`**, **`powersave`** (заглушка с пояснением), **`help`** (как на ESP `main.cpp` по смыслу, без перерисовки дисплея на nRF). Двухузловой ручной чеклист: [`docs/NRF52_PARITY_CHECKLIST.md`](../../../docs/NRF52_PARITY_CHECKLIST.md).
 - **Совместимость:** тот же протокол, что и Heltec — узлы в одной сети
 
 ## Совместимость с Heltec V3 (приём / «вижу только в одну сторону»)

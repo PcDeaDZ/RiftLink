@@ -35,6 +35,10 @@
 #define T114_BATT_ADC_PIN 4
 #define T114_ADC_CTRL_PIN 6
 #define T114_ADC_CTRL_ON HIGH
+/** Meshtastic heltec_mesh_node_t114: PIN_LED1 = P1.3 (35), кнопка P1.10 (42), активный уровень LED — см. LED_STATE_ON в variant. */
+#define T114_LED_PIN 35
+#define T114_BUTTON_PIN 42
+#define T114_LED_ON LOW
 #else
 // FakeTech V5 / ProMicro DIY + HT-RA62
 #define LORA_NSS 45
