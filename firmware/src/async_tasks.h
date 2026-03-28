@@ -6,7 +6,7 @@
 #pragma once
 
 #include <Arduino.h>
-#include <freertos/FreeRTOS.h>
+#include "port/rtos_include.h"
 #include "async_queues.h"
 
 /** Очереди + задачи + async radio/display — по первому использованию (экономия heap на старте). */

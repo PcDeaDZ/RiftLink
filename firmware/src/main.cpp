@@ -891,6 +891,9 @@ void sendMsg(const uint8_t* to, const char* text, uint8_t ttlMinutes = 0,
     } else if (!isSos && !isBroadcastTo && to &&
         reason == msg_queue::SEND_FAIL_KEY_BUSY) {
       ble::notifyError("send_key_busy", "Ключ занят, повторите отправку");
+    } else if (reason == msg_queue::SEND_FAIL_FRAG_UNAVAILABLE) {
+      ble::notifyError("send_too_long",
+          "Сообщение слишком длинное для одного пакета; фрагментация недоступна или отказала");
     } else {
       ble::notifyError("send_queue_busy", "Очередь отправки занята, повторите");
     }

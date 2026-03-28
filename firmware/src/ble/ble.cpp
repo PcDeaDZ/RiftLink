@@ -351,6 +351,7 @@ static bool bleJsonCmdAllowsMissingCmdId(const char* cmd) {
   if (strcmp(cmd, "read") == 0) return true;
   if (strcmp(cmd, "voice") == 0) return true;
   if (strcmp(cmd, "signalTest") == 0) return true;
+  if (strcmp(cmd, "loraScan") == 0) return true;
   if (strcmp(cmd, "shutdown") == 0 || strcmp(cmd, "poweroff") == 0) return true;
   if (strncmp(cmd, "bleOta", 6) == 0) return true;
   return false;
@@ -2061,6 +2062,31 @@ static void bleHandleTxJson(const uint8_t* val, uint16_t len) {
     if (strcmp(cmd, "selftest") == 0 || strcmp(cmd, "test") == 0) {
       pendSet(PEND_SELFTEST);
       if (cmdId != 0) s_pendingSelftestCmdId = cmdId;
+      return;
+    }
+
+    if (strcmp(cmd, "loraScan") == 0) {
+      static selftest::ScanResult s_loraScanRes[8];
+      int n = selftest::modemScanQuick(s_loraScanRes, 8);
+      JsonDocument out(&s_bleJsonAllocator);
+      out["evt"] = "loraScan";
+      out["count"] = n;
+      out["quick"] = true;
+      JsonArray arr = out["results"].to<JsonArray>();
+      for (int i = 0; i < n; i++) {
+        JsonObject o = arr.add<JsonObject>();
+        o["sf"] = s_loraScanRes[i].sf;
+        o["bw"] = s_loraScanRes[i].bw;
+        o["rssi"] = s_loraScanRes[i].rssi;
+      }
+      if (cmdId != 0) out["cmdId"] = cmdId;
+      char buf[BLE_ATT_MAX_JSON_BYTES + 1];
+      size_t jsonLen = serializeJson(out, buf, sizeof(buf));
+      if (jsonLen == 0 || jsonLen > BLE_ATT_MAX_JSON_BYTES) {
+        ble::notifyError("lora_scan_serialize", "loraScan JSON exceeds BLE limit");
+        return;
+      }
+      notifyJsonToApp(buf, jsonLen);
       return;
     }
 

@@ -29,6 +29,8 @@ enum SendFailReason : uint8_t {
   SEND_FAIL_KEY_BUSY,
   SEND_FAIL_BUILD_PACKET,
   SEND_FAIL_RADIO_QUEUE,
+  /** Длинный текст: `frag::send` вернул false (на nRF фрагментация может быть отключена). */
+  SEND_FAIL_FRAG_UNAVAILABLE,
 };
 
 void init();

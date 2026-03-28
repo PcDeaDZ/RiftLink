@@ -8,8 +8,7 @@
 #include <Arduino.h>
 #include "protocol/packet.h"
 #include "crypto/crypto.h"
-#include <freertos/FreeRTOS.h>
-#include <freertos/queue.h>
+#include "port/rtos_include.h"
 
 // Размер буфера пакета: sync + header + payload + crypto overhead
 constexpr size_t PACKET_BUF_SIZE = protocol::SYNC_LEN + protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD;
@@ -92,9 +91,8 @@ extern QueueHandle_t displayQueue;
 
 #include "ptr_pool.h"
 
-inline constexpr size_t PACKET_POOL_SIZE = 32;
 /** Согласовано с TX_REQUEST_QUEUE_LEN: при burst BLE/ping + CAD-requeue иначе txreq_pool_empty, пока priority overflow (T-Beam) мал. */
-inline constexpr size_t TX_REQUEST_POOL_SIZE = 64;
+enum : size_t { PACKET_POOL_SIZE = 32, TX_REQUEST_POOL_SIZE = 64 };
 
 extern PtrPool<PacketQueueItem, PACKET_POOL_SIZE> packetPool;
 extern PtrPool<TxRequest, TX_REQUEST_POOL_SIZE> txRequestPool;

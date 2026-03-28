@@ -1,11 +1,13 @@
 #include "voice_buffers.h"
 #include "../crypto/crypto.h"
 #include "../voice_frag/voice_frag.h"
+#include "port/rtos_include.h"
 #include <Arduino.h>
-#include <esp_heap_caps.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#if defined(RIFTLINK_NRF52)
 #include <stdlib.h>
+#else
+#include <esp_heap_caps.h>
+#endif
 #include <string.h>
 
 static SemaphoreHandle_t s_mutex = nullptr;
@@ -23,7 +25,11 @@ bool voice_buffers_init() {
 
 void voice_buffers_deinit() {
   if (s_pool) {
+#if defined(RIFTLINK_NRF52)
+    free(s_pool);
+#else
     heap_caps_free(s_pool);
+#endif
     s_pool = nullptr;
   }
   if (s_mutex) {
@@ -35,7 +41,11 @@ void voice_buffers_deinit() {
 static bool ensure_pool() {
   if (s_pool) return true;
   size_t n = pool_total_bytes();
+#if defined(RIFTLINK_NRF52)
+  s_pool = (uint8_t*)malloc(n);
+#else
   s_pool = (uint8_t*)heap_caps_malloc(n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#endif
   if (!s_pool) {
     Serial.printf("[RiftLink] voice_buffers: OOM need=%u\n", (unsigned)n);
     return false;

@@ -1,0 +1,18 @@
+{
+  "name": "riftlink_sodium_sign",
+  "version": "1.0.0",
+  "description": "crypto_sign Ed25519 + crypto_hash_sha512 для esphome/libsodium на nRF (дополняет урезанный srcFilter)",
+  "license": "ISC",
+  "build": {
+    "srcDir": "src",
+    "flags": [
+      "-DCONFIGURED=1",
+      "-DNATIVE_LITTLE_ENDIAN",
+      "-DSODIUM_STATIC",
+      "-Wno-unused-function",
+      "-Wno-unknown-pragmas",
+      "-Wno-unused-variable",
+      "-Wno-type-limits"
+    ]
+  }
+}

@@ -6,7 +6,7 @@
 
 #include <cstdint>
 #include <cstddef>
-#include <freertos/FreeRTOS.h>
+#include "port/rtos_include.h"
 
 namespace radio {
 

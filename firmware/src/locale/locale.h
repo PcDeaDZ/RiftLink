@@ -1,6 +1,6 @@
 /**
  * RiftLink Locale — язык интерфейса
- * en, ru. Хранение в NVS.
+ * en, ru. ESP: NVS. nRF: riftlink_kv (InternalFS).
  */
 
 #pragma once

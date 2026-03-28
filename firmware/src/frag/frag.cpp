@@ -11,8 +11,17 @@
 #include "crypto/crypto.h"
 #include "compress/compress.h"
 #include <Arduino.h>
-#include <esp_random.h>
 #include <string.h>
+#if defined(RIFTLINK_NRF52)
+static inline uint32_t frag_rand32() {
+  return (uint32_t)random(0x7fffffff);
+}
+#else
+#include <esp_random.h>
+static inline uint32_t frag_rand32() {
+  return esp_random();
+}
+#endif
 
 #if defined(ARDUINO_LILYGO_T_BEAM)
 /** ESP32 (T-Beam): два слота × 4 KiB в .dram0.bss — линковка не проходит; один слот достаточен для типичного MSG_FRAG. */
@@ -79,7 +88,7 @@ namespace frag {
 void init() {
   memset(s_slots, 0, sizeof(s_slots));
   memset(s_txSlots, 0, sizeof(s_txSlots));
-  s_msgIdCounter = (uint32_t)esp_random();
+  s_msgIdCounter = frag_rand32();
   s_inited = true;
 }
 

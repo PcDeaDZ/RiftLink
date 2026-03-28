@@ -11,8 +11,12 @@
 #include "log.h"
 #include "crypto/crypto.h"
 #include <Arduino.h>
+#if defined(RIFTLINK_NRF52)
+#include <stdlib.h>
+#else
 #include <esp_heap_caps.h>
 #include <esp_random.h>
+#endif
 #include <string.h>
 
 #define FRAG_HEADER_LEN 6
@@ -60,11 +64,19 @@ static bool ensureSlotStorage(VoiceSlot* slot) {
   const size_t need = voice_frag::MAX_VOICE_PLAIN + 1024;
   if (slot->storage && slot->storageCap >= need) return true;
   if (slot->storage) {
+#if defined(RIFTLINK_NRF52)
+    free(slot->storage);
+#else
     heap_caps_free(slot->storage);
+#endif
     slot->storage = nullptr;
     slot->storageCap = 0;
   }
+#if defined(RIFTLINK_NRF52)
+  slot->storage = (uint8_t*)malloc(need);
+#else
   slot->storage = (uint8_t*)heap_caps_malloc(need, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#endif
   if (!slot->storage) {
     Serial.printf("[RiftLink] VOICE_SLOT OOM need=%u\n", (unsigned)need);
     return false;
@@ -75,7 +87,11 @@ static bool ensureSlotStorage(VoiceSlot* slot) {
 
 static void freeSlotStorage(VoiceSlot* slot) {
   if (slot->storage) {
+#if defined(RIFTLINK_NRF52)
+    free(slot->storage);
+#else
     heap_caps_free(slot->storage);
+#endif
     slot->storage = nullptr;
     slot->storageCap = 0;
   }
@@ -84,7 +100,11 @@ static void freeSlotStorage(VoiceSlot* slot) {
 static void lazyInit() {
   if (s_inited) return;
   memset(s_slots, 0, sizeof(s_slots));
+#if defined(RIFTLINK_NRF52)
+  s_msgIdCounter = (uint32_t)millis() ^ ((uint32_t)random() << 16 | (uint32_t)random());
+#else
   s_msgIdCounter = (uint32_t)esp_random();
+#endif
   s_inited = true;
 }
 

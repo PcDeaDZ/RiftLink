@@ -4,8 +4,18 @@
 
 #include "collision_slots.h"
 #include <Arduino.h>
-#include <esp_random.h>
 #include <string.h>
+
+#if defined(RIFTLINK_NRF52)
+static uint32_t collisionRandU32() {
+  return (uint32_t)random();
+}
+#else
+#include <esp_random.h>
+static uint32_t collisionRandU32() {
+  return esp_random();
+}
+#endif
 
 namespace collision_slots {
 
@@ -38,8 +48,8 @@ uint32_t getAvoidanceDelayMs() {
   uint32_t now = (uint32_t)millis();
   int curSlot = (int)((now / SLOT_MS) % N_SLOTS);
   int delta = (minIdx - curSlot + N_SLOTS) % N_SLOTS;
-  if (delta == 0) return (uint32_t)(esp_random() % 300);  // небольшой jitter
-  uint32_t delay = (uint32_t)delta * SLOT_MS + (esp_random() % 500);
+  if (delta == 0) return (uint32_t)(collisionRandU32() % 300);  // небольшой jitter
+  uint32_t delay = (uint32_t)delta * SLOT_MS + (collisionRandU32() % 500);
   return delay > 15000 ? 15000 : delay;  // cap 15 s
 }
 

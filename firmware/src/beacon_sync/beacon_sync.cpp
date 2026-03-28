@@ -6,8 +6,19 @@
 #include "node/node.h"
 #include <Arduino.h>
 #include "neighbors/neighbors.h"
+#if !defined(RIFTLINK_NRF52)
 #include <esp_random.h>
+#endif
 #include <string.h>
+
+#if defined(RIFTLINK_NRF52)
+static uint32_t jitter200() {
+  return (uint32_t)(random(200));
+}
+static uint32_t jitter300() {
+  return (uint32_t)(random(300));
+}
+#endif
 
 namespace beacon_sync {
 
@@ -51,9 +62,19 @@ uint32_t getAvoidanceDelayMs() {
     for (int j = 0; j < s_neighborCount; j++) {
       if (s_neighborSlots[j] == (uint8_t)s) { busy = true; break; }
     }
-    if (!busy && s != mySlot) return (uint32_t)i * SLOT_MS + (esp_random() % 200);
+    if (!busy && s != mySlot) {
+#if defined(RIFTLINK_NRF52)
+      return (uint32_t)i * SLOT_MS + jitter200();
+#else
+      return (uint32_t)i * SLOT_MS + (esp_random() % 200);
+#endif
+    }
   }
+#if defined(RIFTLINK_NRF52)
+  return jitter300();
+#else
   return (uint32_t)(esp_random() % 300);
+#endif
 }
 
 }  // namespace beacon_sync

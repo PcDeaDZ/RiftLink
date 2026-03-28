@@ -67,6 +67,10 @@ static bool tryCreateQueues(size_t pktLen, size_t sendLen, size_t dispLen) {
     return false;
   }
 
+  if (packetPool.storageInSpiram() && txRequestPool.storageInSpiram()) {
+    Serial.println("[RiftLink] Async PtrPool: packet + tx buffers in SPIRAM");
+  }
+
   return true;
 }
 

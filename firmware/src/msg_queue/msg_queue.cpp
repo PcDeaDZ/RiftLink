@@ -25,11 +25,19 @@
 #include "voice_frag/voice_frag.h"
 #include "ack_coalesce/ack_coalesce.h"
 #include <Arduino.h>
-#include <esp_random.h>
 #include <string.h>
 #include <atomic>
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include "port/rtos_include.h"
+#if defined(RIFTLINK_NRF52)
+static inline uint32_t rl_random_u32() {
+  return (uint32_t)random(0x7fffffff);
+}
+#else
+#include <esp_random.h>
+static inline uint32_t rl_random_u32() {
+  return esp_random();
+}
+#endif
 
 #define MAX_PENDING           12
 #define MAX_PENDING_BROADCAST 4
@@ -237,7 +245,7 @@ void init() {
     s_ackReplayGuard[i].seenAtMs.store(0, std::memory_order_relaxed);
   }
   s_ackReplayWriteIdx.store(0, std::memory_order_relaxed);
-  s_msgIdCounter = (uint32_t)esp_random();
+  s_msgIdCounter = (uint32_t)rl_random_u32();
   s_inited = true;
 }
 
@@ -346,7 +354,12 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
   if (textLen > maxSingle) {
     xSemaphoreGive(s_mutex);
     if (textLen > frag::MAX_MSG_PLAIN) textLen = frag::MAX_MSG_PLAIN;
-    return frag::send(to, (const uint8_t*)text, textLen, textLen >= compress::MIN_LEN_TO_COMPRESS);
+    bool fragOk =
+        frag::send(to, (const uint8_t*)text, textLen, textLen >= compress::MIN_LEN_TO_COMPRESS);
+    if (!fragOk) {
+      setLastSendFail(SEND_FAIL_FRAG_UNAVAILABLE);
+    }
+    return fragOk;
   }
 
   uint8_t plainBuf[256];
@@ -516,9 +529,9 @@ bool enqueue(const uint8_t* to, const char* text, uint8_t ttlMinutes,
       // Keep only primary TX to maximize delivery-status reliability.
       int deferredCopies = BROADCAST_DEFERRED_COPIES;
       if (neighCount <= 1) deferredCopies = 1;
-      if (deferredCopies >= 2) queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));
-      if (deferredCopies >= 3) queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));
-      if (deferredCopies >= 4) queueDeferredSend(pkt, len, sf, 800 + (esp_random() % 150));
+      if (deferredCopies >= 2) queueDeferredSend(pkt, len, sf, 220 + (rl_random_u32() % 130));
+      if (deferredCopies >= 3) queueDeferredSend(pkt, len, sf, 440 + (rl_random_u32() % 120));
+      if (deferredCopies >= 4) queueDeferredSend(pkt, len, sf, 800 + (rl_random_u32() % 150));
       return true;
     }
     return false;
@@ -588,9 +601,9 @@ bool enqueueGroup(uint32_t groupId, const char* text) {
     const int neighCount = neighbors::getCount();
     int deferredCopies = BROADCAST_DEFERRED_COPIES;
     if (neighCount <= 1) deferredCopies = 1;
-    if (deferredCopies >= 2) queueDeferredSend(pkt, len, sf, 220 + (esp_random() % 130));
-    if (deferredCopies >= 3) queueDeferredSend(pkt, len, sf, 440 + (esp_random() % 120));
-    if (deferredCopies >= 4) queueDeferredSend(pkt, len, sf, 800 + (esp_random() % 150));
+    if (deferredCopies >= 2) queueDeferredSend(pkt, len, sf, 220 + (rl_random_u32() % 130));
+    if (deferredCopies >= 3) queueDeferredSend(pkt, len, sf, 440 + (rl_random_u32() % 120));
+    if (deferredCopies >= 4) queueDeferredSend(pkt, len, sf, 800 + (rl_random_u32() % 150));
     return true;
   }
   return false;
@@ -849,7 +862,7 @@ void update() {
     // RIT: POLL от получателя — отправить с малым jitter (50–150 ms)
     if (p->triggerSend) {
       p->triggerSend = false;
-      uint32_t jitter = 50 + (uint32_t)(esp_random() % 100);
+      uint32_t jitter = 50 + (uint32_t)(rl_random_u32() % 100);
       if (now - p->lastSendTime >= jitter) {
         if (bls_n::shouldDeferTx(p->to) || esp_now_slots::shouldDeferTx(p->to)) continue;
         if (bls_n::sendRtsBeforeLora(p->to, p->pktLen)) delay(50);

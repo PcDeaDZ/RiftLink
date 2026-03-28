@@ -3,9 +3,19 @@
  */
 
 #include "mab.h"
-#include <esp_random.h>
 #include <math.h>
 #include <string.h>
+#if defined(RIFTLINK_NRF52)
+#include <Arduino.h>
+static inline uint32_t mab_rand32() {
+  return (uint32_t)random(0x7fffffff);
+}
+#else
+#include <esp_random.h>
+static inline uint32_t mab_rand32() {
+  return esp_random();
+}
+#endif
 
 namespace mab {
 
@@ -28,8 +38,8 @@ int selectAction() {
   for (int i = 0; i < NUM_ARMS; i++) {
     if (s_count[i] == 0) return i;  // explore неиспробованные
   }
-  if ((esp_random() % 100) < (int)(EPSILON * 100)) {
-    return esp_random() % NUM_ARMS;  // ε-greedy: случайное
+  if ((mab_rand32() % 100) < (int)(EPSILON * 100)) {
+    return mab_rand32() % NUM_ARMS;  // ε-greedy: случайное
   }
   float bestMean = -1e9f;
   int best = 0;
@@ -46,7 +56,7 @@ int selectAction() {
 uint32_t getDelayMs(int action) {
   if (action < 0 || action >= NUM_ARMS) action = 1;
   uint32_t range = s_delayMax[action] - s_delayMin[action];
-  return s_delayMin[action] + (esp_random() % (range + 1));
+  return s_delayMin[action] + (mab_rand32() % (range + 1));
 }
 
 void reward(int action, int rewardVal) {

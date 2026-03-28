@@ -15,7 +15,7 @@
 #include "log.h"
 #include <string.h>
 #include <Arduino.h>
-#include <freertos/semphr.h>
+#include "port/rtos_include.h"
 
 #define ACK_COALESCE_ENTRIES 4
 #define ACK_MSGIDS_MAX 8
@@ -128,8 +128,12 @@ static uint8_t currentTxFree() {
   if (asyncIsRadioFsmV2Enabled()) {
     return asyncTxQueueFree();
   }
+#if defined(RIFTLINK_NRF52)
+  return asyncTxQueueFree();
+#else
   if (!radioCmdQueue) return 0;
   return (uint8_t)uxQueueSpacesAvailable(radioCmdQueue);
+#endif
 }
 
 static uint8_t toaBoundIds(uint8_t txSf, uint8_t idsCap) {

@@ -1,6 +1,7 @@
-# RiftLink — ультимативный менеджер (setup + build + flash + APK)
+﻿# RiftLink — ультимативный менеджер (setup + build + flash + APK)
 # Использование: .\build.ps1  или  .\build.ps1 -Setup  или  .\build.ps1 -Flash -V4
 # Прошивка: .\build.ps1 -TBeam  |  .\build.ps1 -All (V3, Paper, V4, T-Beam 4MB)
+# nRF52840: .\build.ps1 -Faketec  |  .\build.ps1 -HeltecT114  (сборка/прошивка через nrfutil)
 # Пути: .env.local (FLUTTER_ROOT, ANDROID_SDK_ROOT)
 # После правок этого файла: .\scripts\fix_encoding.ps1 (UTF-8 BOM, CRLF — см. README.md)
 #
@@ -23,6 +24,8 @@ param(
     [switch]$V3,
     [switch]$V3Paper,
     [switch]$V4,
+    [switch]$Faketec,   # nRF52840 FakeTech V5 (env faketec_v5)
+    [switch]$HeltecT114, # nRF52840 Heltec Mesh Node T114 (env heltec_t114)
     [switch]$App,
     [switch]$InstallApk,
     [switch]$AdbHelp,    # Справка: отладка по USB, логи приложения
@@ -152,6 +155,7 @@ function Invoke-Setup {
     Write-Host "[7/7] Готово!" -ForegroundColor Green
     Write-Host ""
     Write-Host "Сборка: .\build.ps1 -V4" -ForegroundColor Cyan
+    Write-Host "nRF52840: .\build.ps1 -Faketec  |  .\build.ps1 -HeltecT114" -ForegroundColor Cyan
     Write-Host "Прошивка: .\build.ps1 -V4 -Flash" -ForegroundColor Cyan
     Write-Host "APK: .\build.ps1 -App -InstallApk" -ForegroundColor Cyan
     Write-Host 'ADB: .\build.ps1 -AdbHelp' -ForegroundColor Cyan
@@ -194,6 +198,8 @@ $EnvMap = @{
     "2" = @{ env = "heltec_v3_paper"; name = "V3 Paper (e-ink)" }
     "3" = @{ env = "heltec_v4";       name = "V4 (OLED)" }
     "4" = @{ env = "lilygo_t_beam_4mb"; name = "LilyGO T-Beam V1.1/V1.2 (OLED, 4MB flash)" }
+    "5" = @{ env = "faketec_v5";      name = "nRF52840 FakeTech V5 (NiceNano + LoRa)" }
+    "6" = @{ env = "heltec_t114";     name = "nRF52840 Heltec Mesh Node T114" }
 }
 
 function Get-SerialPorts {
@@ -224,8 +230,8 @@ function Get-SerialPorts {
                     $hint = "V4 (native USB)"
                 } elseif ($hwid -match "CP210|10C4:EA60|Silicon Labs" -or $desc -match "CP210|Silicon Labs") {
                     $hint = "T-Beam / Paper (CP210x)"
-                } elseif ($hwid -match "239A|VID_239A|Adafruit" -or $desc -match "Adafruit|последовательн") {
-                    $hint = "USB (Adafruit CDC)"
+                } elseif ($hwid -match "239A|VID_239A|Adafruit|NICENANO|nRF52|Nordic" -or $desc -match "Adafruit|Nice|nRF|последовательн") {
+                    $hint = "USB (nRF52840 / Adafruit CDC)"
                 }
                 $ports += [PSCustomObject]@{ Port = $port; Desc = $desc; HwId = $hwid; Hint = $hint }
             }
@@ -392,10 +398,20 @@ function Invoke-BuildFirmware {
             $outDir = Join-Path $FirmwareDir "out\$EnvName"
             New-Item -ItemType Directory -Force -Path $outDir | Out-Null
             $buildDir = Join-Path $FirmwareDir ".pio\build\$EnvName"
-            $src = Join-Path $buildDir "firmware.bin"
-            if (Test-Path $src) {
-                Copy-Item $src (Join-Path $outDir "firmware.bin") -Force
+            $srcBin = Join-Path $buildDir "firmware.bin"
+            if (Test-Path $srcBin) {
+                Copy-Item $srcBin (Join-Path $outDir "firmware.bin") -Force
                 Write-Host "[out] $EnvName/firmware.bin" -ForegroundColor Green
+            }
+            $srcHex = Join-Path $buildDir "firmware.hex"
+            if (Test-Path $srcHex) {
+                Copy-Item $srcHex (Join-Path $outDir "firmware.hex") -Force
+                Write-Host "[out] $EnvName/firmware.hex" -ForegroundColor Green
+            }
+            $srcZip = Join-Path $buildDir "firmware.zip"
+            if (Test-Path $srcZip) {
+                Copy-Item $srcZip (Join-Path $outDir "firmware.zip") -Force
+                Write-Host "[out] $EnvName/firmware.zip (DFU / nrfutil)" -ForegroundColor Green
             }
         }
         return $ok
@@ -569,9 +585,11 @@ if ($Monitor -and -not $Flash -and -not $App -and -not $InstallApk -and -not $Al
     }
     exit $LASTEXITCODE
 }
-if ($Flash -or $App -or $InstallApk -or $All -or $TBeam -or $TBeam4Mb -or $BuildEnv -ne "") {
+if ($Flash -or $App -or $InstallApk -or $All -or $TBeam -or $TBeam4Mb -or $Faketec -or $HeltecT114 -or $BuildEnv -ne "") {
     $envChoice = $BuildEnv
     if ($TBeam4Mb -or $TBeam) { $envChoice = "lilygo_t_beam_4mb" }
+    elseif ($HeltecT114) { $envChoice = "heltec_t114" }
+    elseif ($Faketec) { $envChoice = "faketec_v5" }
     elseif ($V4) { $envChoice = "heltec_v4" }
     elseif ($V3Paper) { $envChoice = "heltec_v3_paper" }
     elseif ($V3 -or $envChoice -eq "") { $envChoice = "heltec_v3" }
@@ -615,12 +633,14 @@ if ($Flash -or $App -or $InstallApk -or $All -or $TBeam -or $TBeam4Mb -or $Build
             $preferPaper = $envChoice -match "paper"
             $preferV4 = $envChoice -match "v4"
             $preferTBeam = $envChoice -match "lilygo_t_beam"
+            $preferNrf = $envChoice -match "faketec|heltec_t114"
             if ($ports.Count -eq 1) {
                 $uploadPort = $ports[0].Port
             } else {
                 $sorted = @($ports | ForEach-Object {
                     $s = 0
-                    if ($preferTBeam -and $_.Hint -match "T-Beam") { $s = 10 }
+                    if ($preferNrf -and $_.Hint -match "nRF") { $s = 10 }
+                    elseif ($preferTBeam -and $_.Hint -match "T-Beam") { $s = 10 }
                     elseif ($preferPaper -and $_.Hint -match "Paper") { $s = 10 }
                     elseif ($preferV4 -and $_.Hint -match "V4") { $s = 10 }
                     $comNum = [int]($_.Port -replace 'COM', '')
@@ -631,7 +651,8 @@ if ($Flash -or $App -or $InstallApk -or $All -or $TBeam -or $TBeam4Mb -or $Build
                 for ($i = 0; $i -lt $n; $i++) {
                     $p = $sorted[$i]
                     $m = ""
-                    if ($preferTBeam -and $p.Hint -match "T-Beam") { $m = " <- T-Beam" }
+                    if ($preferNrf -and $p.Hint -match "nRF") { $m = " <- nRF52840" }
+                    elseif ($preferTBeam -and $p.Hint -match "T-Beam") { $m = " <- T-Beam" }
                     elseif ($preferPaper -and $p.Hint -match "Paper") { $m = " <- Paper" }
                     elseif ($preferV4 -and $p.Hint -match "V4") { $m = " <- V4" }
                     Write-Host "  $($i+1). $($p.Port) - $($p.Hint)$m"
@@ -642,6 +663,9 @@ if ($Flash -or $App -or $InstallApk -or $All -or $TBeam -or $TBeam4Mb -or $Build
             }
         }
         if ($uploadPort) {
+            if ($Erase -and $envChoice -match "faketec|heltec_t114") {
+                Write-Host "[Предупреждение] Для nRF52840 полная очистка flash делается отдельно ( nrfjprog / UF2 ). Используется обычный upload." -ForegroundColor Yellow
+            }
             Invoke-FlashFirmware -EnvName $envChoice -UploadPort $uploadPort -Erase:$Erase
         }
     }

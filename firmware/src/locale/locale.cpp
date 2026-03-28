@@ -3,9 +3,14 @@
  */
 
 #include "locale.h"
+#include <cstring>
+
+#ifdef RIFTLINK_NRF52
+#include "faketec/kv.h"
+#else
 #include <nvs.h>
 #include <nvs_flash.h>
-#include <cstring>
+#endif
 
 #define NVS_NAMESPACE "riftlink"
 #define NVS_KEY_LANG "lang"
@@ -146,6 +151,18 @@ namespace locale {
 void init() {
   if (s_inited) return;
 
+#ifdef RIFTLINK_NRF52
+  if (riftlink_kv::begin()) {
+    uint8_t buf[8];
+    size_t len = sizeof(buf);
+    if (riftlink_kv::getBlob(NVS_KEY_LANG, buf, &len) && len > 0 && len < sizeof(buf)) {
+      buf[len] = '\0';
+      s_isSet = true;
+      if (strcmp(reinterpret_cast<char*>(buf), "ru") == 0) s_lang = LANG_RU;
+      else s_lang = LANG_EN;
+    }
+  }
+#else
   nvs_handle_t h;
   if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
     char buf[8] = {0};
@@ -157,6 +174,7 @@ void init() {
     }
     nvs_close(h);
   }
+#endif
   s_inited = true;
 }
 
@@ -171,12 +189,17 @@ int getLang() {
 bool setLang(int lang) {
   if (lang != LANG_EN && lang != LANG_RU) return false;
 
+#ifdef RIFTLINK_NRF52
+  const char* s = (lang == LANG_RU) ? "ru" : "en";
+  if (!riftlink_kv::setBlob(NVS_KEY_LANG, reinterpret_cast<const uint8_t*>(s), strlen(s) + 1)) return false;
+#else
   nvs_handle_t h;
   if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
 
   nvs_set_str(h, NVS_KEY_LANG, lang == LANG_RU ? "ru" : "en");
   nvs_commit(h);
   nvs_close(h);
+#endif
 
   s_lang = lang;
   s_isSet = true;

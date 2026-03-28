@@ -3,8 +3,12 @@
  */
 
 #include "groups.h"
+#if defined(RIFTLINK_NRF52)
+#include "faketec/kv.h"
+#else
 #include <nvs.h>
 #include <nvs_flash.h>
+#endif
 #include <string.h>
 
 #define NVS_NAMESPACE "riftlink"
@@ -82,12 +86,17 @@ static int findV2IndexByChannel(uint32_t channelId32) {
 }
 
 static void persistV2() {
+#if defined(RIFTLINK_NRF52)
+  (void)riftlink_kv::setBlob(NVS_KEY_GROUPS_V2, reinterpret_cast<const uint8_t*>(s_groupsV2), sizeof(s_groupsV2));
+  (void)riftlink_kv::setI8(NVS_KEY_GROUPS_V2_CNT, static_cast<int8_t>(s_countV2));
+#else
   nvs_handle_t h;
   if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
   nvs_set_blob(h, NVS_KEY_GROUPS_V2, s_groupsV2, sizeof(s_groupsV2));
   nvs_set_u8(h, NVS_KEY_GROUPS_V2_CNT, (uint8_t)s_countV2);
   nvs_commit(h);
   nvs_close(h);
+#endif
 }
 
 void init() {
@@ -95,6 +104,19 @@ void init() {
   memset(s_groupsV2, 0, sizeof(s_groupsV2));
   s_countV2 = 0;
 
+#if defined(RIFTLINK_NRF52)
+  {
+    size_t groupsV2Len = sizeof(s_groupsV2);
+    if (!riftlink_kv::getBlob(NVS_KEY_GROUPS_V2, reinterpret_cast<uint8_t*>(s_groupsV2), &groupsV2Len) ||
+        groupsV2Len != sizeof(s_groupsV2)) {
+      memset(s_groupsV2, 0, sizeof(s_groupsV2));
+    }
+    int8_t groupsV2Cnt = 0;
+    if (riftlink_kv::getI8(NVS_KEY_GROUPS_V2_CNT, &groupsV2Cnt) && groupsV2Cnt >= 0) {
+      s_countV2 = (groupsV2Cnt > MAX_GROUPS_V2) ? MAX_GROUPS_V2 : static_cast<int>(groupsV2Cnt);
+    }
+  }
+#else
   nvs_handle_t h;
   if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
     size_t groupsV2Len = sizeof(s_groupsV2);
@@ -118,6 +140,7 @@ void init() {
     nvs_commit(h);
     nvs_close(h);
   }
+#endif
 
   s_inited = true;
 }

@@ -33,4 +33,10 @@ struct ScanResult {
 /** Auto-scan: перебор SF/BW, слушает эфир. Возвращает количество найденных комбинаций (0 = ничего). */
 int modemScan(ScanResult* results, int maxResults);
 
+/**
+ * Короткий скан (BW 125 kHz, несколько SF, ~2 с на комбо) — для BLE/nRF без минутной блокировки обработчика.
+ * Полный перебор см. modemScan (UI на ESP).
+ */
+int modemScanQuick(ScanResult* results, int maxResults);
+
 }  // namespace selftest

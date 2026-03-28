@@ -10,8 +10,7 @@
 #include "log.h"
 #include <Arduino.h>
 #include <string.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include "port/rtos_include.h"
 
 // Payload: target[8], req_id[4], hops[1], sender[8] — sender = кто переслал этот REQ
 #define ROUTE_PAYLOAD_LEN 21

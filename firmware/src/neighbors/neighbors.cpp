@@ -8,8 +8,7 @@
 #include <Arduino.h>
 #include <string.h>
 #include <atomic>
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
+#include "port/rtos_include.h"
 
 #define MUTEX_TIMEOUT_MS 100
 

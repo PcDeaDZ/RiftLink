@@ -7,10 +7,9 @@
  */
 
 #include "clock_drift.h"
+#include "port/rtos_include.h"
 #include <Arduino.h>
 #include <string.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
 
 #define MUTEX_TIMEOUT_MS 20
 

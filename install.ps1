@@ -1,4 +1,4 @@
-# RiftLink — установка «в один клик»: git clone + build.ps1 -Setup
+﻿# RiftLink — установка «в один клик»: git clone + build.ps1 -Setup
 # Использование: irm https://raw.githubusercontent.com/PcDeaDZ/RiftLink/master/install.ps1 | iex
 # Или: Invoke-Expression (Invoke-WebRequest -Uri "https://raw.../install.ps1" -UseBasicParsing).Content
 #
