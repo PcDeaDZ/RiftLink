@@ -378,15 +378,23 @@ void loop() {
       if (parseNodeIdHex16(hex16, to)) {
         uint8_t pkt[protocol::SYNC_LEN + protocol::HEADER_LEN];
         size_t plen = protocol::buildPacket(pkt, sizeof(pkt), node::getId(), to, 31, protocol::OP_PING, nullptr, 0);
+        bool pingSent = false;
         if (plen > 0) {
           uint8_t txSf = neighbors::rssiToSf(neighbors::getRssiFor(to));
           char reasonBuf[40];
-          if (!queueTxPacket(pkt, plen, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
+          if (queueTxPacket(pkt, plen, txSf, true, TxRequestClass::control, reasonBuf, sizeof(reasonBuf))) {
+            pingSent = true;
+          } else {
             queueDeferredSend(pkt, plen, txSf, 60, true);
             RIFTLINK_DIAG("PING", "event=PING_TX_DEFER mode=serial to=%02X%02X cause=%s", to[0], to[1],
                 reasonBuf[0] ? reasonBuf : "?");
+            pingSent = true;
           }
+        }
+        if (pingSent) {
           Serial.printf("[RiftLink] PING sent to %s\n", hex16.c_str());
+        } else {
+          Serial.println("[RiftLink] PING failed");
         }
       } else {
         Serial.println("[RiftLink] ping <hex16>");
@@ -440,6 +448,19 @@ void loop() {
       }
     } else if (cmd == "memdiag") {
       memoryDiagLog("serial");
+    } else if (cmd == "node" || cmd == "id") {
+      const uint8_t* nid = node::getId();
+      char hex[protocol::NODE_ID_LEN * 2 + 1];
+      for (int i = 0; i < (int)protocol::NODE_ID_LEN; i++) {
+        snprintf(hex + i * 2, 3, "%02X", nid[i]);
+      }
+      char nick[20];
+      node::getNickname(nick, sizeof(nick));
+      Serial.printf("[RiftLink] node_id=%s nickname=%s\n", hex, nick);
+    } else if (cmd.startsWith("espnow ")) {
+      Serial.println("[RiftLink] ESP-NOW не на nRF52840 (см. docs/API.md, Wi‑Fi не используется)");
+    } else if (cmd == "espnow") {
+      Serial.println("[RiftLink] ESP-NOW не на nRF52840");
     } else if (cmd == "neighbors" || cmd == "nb") {
       int n = neighbors::getCount();
       Serial.printf("[RiftLink] neighbors: %d\n", n);
@@ -490,12 +511,16 @@ void loop() {
       selftest::ScanResult sr[16];
       int n = selftest::modemScan(sr, 16);
       Serial.printf("[RiftLink] modemScan: found %d\n", n);
-    } else if (cmd == "powersave" || cmd.startsWith("powersave ")) {
+    } else if (cmd == "powersave") {
+      Serial.printf("[RiftLink] Power save: не на nRF52840 (BLE %s)\n", ble::isConnected() ? "connected" : "disconnected");
+    } else if (cmd == "powersave on" || cmd == "powersave off") {
+      Serial.println("[RiftLink] powersave on/off: на nRF52840 не реализовано (см. docs/API.md)");
+    } else if (cmd.startsWith("powersave ")) {
       Serial.println("[RiftLink] powersave: на nRF52840 не реализовано (см. docs/API.md, evt:error powersave_unsupported)");
     } else if (cmd == "help" || cmd == "?") {
       Serial.println(
-          "[RiftLink] Serial: send|ping|region|channel|nickname|route|lang|memdiag|neighbors|gps|selftest|sf|modemscan|"
-          "powersave|help");
+          "[RiftLink] Serial: send|ping|node|region|channel|nickname|route|lang|memdiag|neighbors|gps|selftest|sf|"
+          "modemscan|powersave|espnow|help");
     }
   }
 

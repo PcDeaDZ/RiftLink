@@ -16,7 +16,8 @@
 | 2 | KEY exchange | `KEY_STORE_OK` / `hasKey` у соседа |
 | 3 | Unicast MSG в обе стороны | Доставка, ACK при запросе |
 | 4 | Broadcast (если используете) | `evt` на телефоне согласовано с ESP |
-| 5 | Serial `sf` / `modemscan quick` / `neighbors` на nRF | Частота, список соседей и флаг ключа без краша |
+| 5 | Serial `node` / `sf` / `modemscan quick` / `neighbors` на nRF | ID узла, частота, список соседей и флаг ключа без краша |
+| 5b | `espnow` / `powersave` в Serial | Ответы-заглушки (нет Wi‑Fi / нет powersave как на ESP) |
 | 5a | Фоновый **KEY retry** (как на ESP) | В логе `KEY_RETRY_TARGET` при соседе без ключа; сессия устанавливается без ручного `ping` |
 | 6 | T114: экран, кнопка (сообщение `T114 button`), LED при старте | Соответствует плате |
 | 7 | Телеметрия / `evt:telemetry` | На T114 — разумное напряжение батареи при питании от аккумулятора |
