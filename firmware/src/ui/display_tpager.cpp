@@ -537,15 +537,15 @@ static void displayRunModemScan() {
   }
 }
 
-/* Чуть шире OLED (18), чтобы при шрифте size 1 влезало «100%» без TomThumb в env без Adafruit GFX. */
-static constexpr int kBatBodyW = 22;
+/* Шире корпуса OLED (19), чтобы «100%» и центр молнии 14px совпадали с шириной корпуса. */
+static constexpr int kBatBodyW = 23;
 /** Чуть выше 8×8 глифа в строке BLE/WiFi (+1 px), один контур. */
 static constexpr int kBatBodyH = 9;
 static constexpr int kBatNubW = 2;
 static constexpr int kBatteryIconBarW = kBatBodyW + kBatNubW;
 
 static void drawBatteryChargingBoltGfx(int x, int y) {
-  const int ox = x + (kBatBodyW - 14) / 2 - 2;
+  const int ox = x + (kBatBodyW - 14) / 2 - 1;
   const int dy = (kBatBodyH - 7) / 2;
   const auto zig = [&](int dx) {
     gfx.drawLine(ox + 8 + dx, y + 1 + dy, ox + 6 + dx, y + 3 + dy, COL_FG);
@@ -604,6 +604,7 @@ static void drawStatusBarTpagerAt(int ySig) {
     rightClusterLeft -= (int)strlen(buf) * 6 + 4;
   }
   rightClusterLeft -= kBatteryIconBarW;
+  rightClusterLeft -= 1;
 
   drawSignalBars(8, ySig, tb.signalBars);
   const int leftBlockEnd = 30;
@@ -633,6 +634,7 @@ static void drawStatusBarTpagerAt(int ySig) {
     xRight -= 6;
   }
   xRight -= kBatteryIconBarW;
+  xRight -= 1;
   drawBatteryIcon(xRight, ySig - 1, pct, chg);
 }
 

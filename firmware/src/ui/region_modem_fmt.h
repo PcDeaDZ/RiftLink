@@ -1,6 +1,9 @@
 /**
  * Компактная строка региона и пресета модема для OLED/T-Pager/Paper:
- * EU[0] N, RU N, US M; для Custom — EU C7/125 (SF/BW).
+ * EU0 N, RU N, US M; для Custom — EU C7/125 (SF/BW).
+ *
+ * Канал без разделителя после кода региона: «[», «:» и др. в пропорциональном
+ * шрифте (T‑Pager) дают большой xAdvance — визуально как лишний пробел.
  */
 #pragma once
 
@@ -28,7 +31,7 @@ inline void regionModemShort(char* buf, size_t sz) {
     default: letter = '?'; break;
   }
   if (region::getChannelCount() > 1) {
-    snprintf(buf, sz, "%s[%d] %c", code, region::getChannel(), letter);
+    snprintf(buf, sz, "%s%u %c", code, (unsigned)region::getChannel(), letter);
   } else {
     snprintf(buf, sz, "%s %c", code, letter);
   }

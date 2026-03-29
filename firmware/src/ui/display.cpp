@@ -410,16 +410,16 @@ static void displayShowModemPicker() {
   if (sel < 4) radio::requestModemPreset((radio::ModemPreset)sel);
 }
 
-static constexpr int kBatBodyW = 18;
+static constexpr int kBatBodyW = 19;
 /** Чуть выше базового 8×8 глифа в топбаре (+1 px), один контур. */
 static constexpr int kBatBodyH = 9;
 static constexpr int kBatNubW = 2;
 /** Корпус + ножка справа (процент внутри TomThumb; зарядка — молния). */
 static constexpr int kBatteryIconBarW = kBatBodyW + kBatNubW;
 
-/** Молния: геометрия 14×7, ox ещё левее; dy — вертикальное центрирование в kBatBodyH. */
+/** Молния: геометрия 14×7; dy — вертикальное центрирование в kBatBodyH. */
 static void drawBatteryChargingBoltOled(Adafruit_SSD1306* d, int x, int y) {
-  const int ox = x + (kBatBodyW - 14) / 2 - 2;
+  const int ox = x + (kBatBodyW - 14) / 2 - 1;
   const int dy = (kBatBodyH - 7) / 2;
   const auto zig = [&](int dx) {
     d->drawLine(ox + 8 + dx, y + 1 + dy, ox + 6 + dx, y + 3 + dy, SSD1306_WHITE);
@@ -493,6 +493,7 @@ static void drawStatusBarCompactAt(int y0) {
     rightClusterLeft -= (int)strlen(buf) * 6 + 4;
   }
   rightClusterLeft -= kBatteryIconBarW;
+  rightClusterLeft -= 1;
 
   drawSignalBars(2, y0 + 2, tb.signalBars);
   /* Полоса сигнала: x=2, 4×4 шаг + ширина столбца 3 → ~19px; отступ до центра. */
@@ -524,6 +525,7 @@ static void drawStatusBarCompactAt(int y0) {
     xRight -= 4;
   }
   xRight -= kBatteryIconBarW;
+  xRight -= 1;
   drawBatteryIcon(xRight, y0 + 1, pct, chg);
 }
 
