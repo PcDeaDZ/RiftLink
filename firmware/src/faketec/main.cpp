@@ -323,7 +323,7 @@ void setup() {
   if (!display_nrf::init()) {
     log_line("[RiftLink] OLED init failed (проверьте I2C и env)");
   } else {
-    display_nrf::show_boot("RiftLink", "nRF52840");
+    display_nrf::show_boot(locale::getForDisplay("boot_line1"), locale::getForDisplay("boot_line2"));
     menu_nrf_init();
   }
 #endif
@@ -349,8 +349,6 @@ void loop() {
       log_line(hb);
     }
   }
-
-  if (!menu_nrf_owns_display()) display_nrf::poll();
 
   mesh_hello_nrf_loop();
 
@@ -575,8 +573,9 @@ void loop() {
       l.toLowerCase();
       int lang = (l == "ru") ? LANG_RU : LANG_EN;
       if (l == "en" || l == "ru") {
-        locale::setLang(lang);
-        menu_nrf_redraw_after_locale();
+        if (locale::getLang() != lang) {
+          if (locale::setLang(lang)) menu_nrf_redraw_after_locale();
+        }
         Serial.printf("[RiftLink] Language: %s\n", l.c_str());
       } else {
         Serial.println("[RiftLink] lang en|ru");

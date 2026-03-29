@@ -37,6 +37,7 @@
 #include <cstdio>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <Fonts/TomThumb.h>
 #include "utf8rus.h"
 #include "cp1251_to_rusfont.h"
 #include <Wire.h>
@@ -409,24 +410,53 @@ static void displayShowModemPicker() {
   if (sel < 4) radio::requestModemPreset((radio::ModemPreset)sel);
 }
 
-/** Battery icon: 16x7 outline with fill proportional to percent */
+static constexpr int kBatBodyW = 18;
+/** Чуть выше базового 8×8 глифа в топбаре (+1 px), один контур. */
+static constexpr int kBatBodyH = 9;
+static constexpr int kBatNubW = 2;
+/** Корпус + ножка справа (процент внутри TomThumb; зарядка — молния). */
+static constexpr int kBatteryIconBarW = kBatBodyW + kBatNubW;
+
+/** Молния: геометрия 14×7, ox ещё левее; dy — вертикальное центрирование в kBatBodyH. */
+static void drawBatteryChargingBoltOled(Adafruit_SSD1306* d, int x, int y) {
+  const int ox = x + (kBatBodyW - 14) / 2 - 2;
+  const int dy = (kBatBodyH - 7) / 2;
+  const auto zig = [&](int dx) {
+    d->drawLine(ox + 8 + dx, y + 1 + dy, ox + 6 + dx, y + 3 + dy, SSD1306_WHITE);
+    d->drawLine(ox + 6 + dx, y + 3 + dy, ox + 9 + dx, y + 3 + dy, SSD1306_WHITE);
+    d->drawLine(ox + 9 + dx, y + 3 + dy, ox + 7 + dx, y + 5 + dy, SSD1306_WHITE);
+  };
+  zig(0);
+  zig(1);
+}
+
+/** Батарея: один контур; TomThumb по центру; зарядка — молния. */
 static void drawBatteryIcon(int x, int y, int pct, bool charging) {
   if (!disp) return;
-  // Body: 14x7, nub: 2x3 on right
-  disp->drawRect(x, y, 14, 7, SSD1306_WHITE);
-  disp->fillRect(x + 14, y + 2, 2, 3, SSD1306_WHITE);
-  if (pct > 0) {
-    int fill = (pct * 10) / 100;
-    if (fill < 1 && pct > 0) fill = 1;
-    if (fill > 10) fill = 10;
-    disp->fillRect(x + 2, y + 2, fill, 3, SSD1306_WHITE);
-  }
+  disp->drawRect(x, y, kBatBodyW, kBatBodyH, SSD1306_WHITE);
+  disp->fillRect(x + kBatBodyW, y + (kBatBodyH - 3) / 2, kBatNubW, 3, SSD1306_WHITE);
   if (charging) {
-    // Lightning bolt: small zigzag inside icon
-    disp->drawLine(x + 8, y + 1, x + 6, y + 3, SSD1306_WHITE);
-    disp->drawLine(x + 6, y + 3, x + 9, y + 3, SSD1306_WHITE);
-    disp->drawLine(x + 9, y + 3, x + 7, y + 5, SSD1306_WHITE);
+    drawBatteryChargingBoltOled(disp, x, y);
+    return;
   }
+  char b[8];
+  if (pct >= 0) {
+    snprintf(b, sizeof(b), "%d%%", pct);
+  } else {
+    snprintf(b, sizeof(b), "--");
+  }
+  disp->setFont(&TomThumb);
+  disp->setTextSize(1);
+  disp->setTextColor(SSD1306_WHITE);
+  int16_t x1 = 0, y1 = 0;
+  uint16_t tw = 0, th = 0;
+  disp->getTextBounds(b, 0, 0, &x1, &y1, &tw, &th);
+  const int16_t tx = x + (kBatBodyW - (int)tw) / 2 - x1;
+  const int16_t ty = y + (kBatBodyH - (int)th) / 2 - y1;
+  disp->setCursor(tx, ty);
+  disp->print(b);
+  disp->setFont(nullptr);
+  disp->setTextSize((uint8_t)ui_typography::bodyTextSizeOled());
 }
 
 static void drawSignalBarsColored(int x, int y, int barsCount, uint16_t fillCol, uint16_t lineCol) {
@@ -456,19 +486,13 @@ static void drawStatusBarCompactAt(int y0) {
   const int pct = tb.batteryPercent;
   const bool chg = tb.charging;
 
-  /* Левый край блока времени/%/батареи — для центрирования региона и режима. */
+  /* Левый край блока время + батарея (процент внутри иконки) — для центрирования региона и режима. */
   int rightClusterLeft = SCREEN_WIDTH - 2;
   if (tb.hasTime) {
     snprintf(buf, sizeof(buf), "%02d:%02d", tb.hour, tb.minute);
     rightClusterLeft -= (int)strlen(buf) * 6 + 4;
   }
-  if (pct >= 0) {
-    snprintf(buf, sizeof(buf), "%d%%", pct);
-  } else {
-    snprintf(buf, sizeof(buf), "--");
-  }
-  rightClusterLeft -= (int)strlen(buf) * 6 + 4;
-  rightClusterLeft -= 16;
+  rightClusterLeft -= kBatteryIconBarW;
 
   drawSignalBars(2, y0 + 2, tb.signalBars);
   /* Полоса сигнала: x=2, 4×4 шаг + ширина столбца 3 → ~19px; отступ до центра. */
@@ -490,7 +514,7 @@ static void drawStatusBarCompactAt(int y0) {
     }
   }
 
-  /* Правый верх: время → % → иконка */
+  /* Правый верх: время → батарея (процент внутри корпуса; при зарядке — молния без цифр) */
   int xRight = SCREEN_WIDTH - 2;
   if (tb.hasTime) {
     snprintf(buf, sizeof(buf), "%02d:%02d", tb.hour, tb.minute);
@@ -499,19 +523,8 @@ static void drawStatusBarCompactAt(int y0) {
     drawTruncRaw(xRight, y0 + 3, buf, 5);
     xRight -= 4;
   }
-  if (pct >= 0) {
-    snprintf(buf, sizeof(buf), "%d%%", pct);
-  } else {
-    snprintf(buf, sizeof(buf), "--");
-  }
-  {
-    const int pw = (int)strlen(buf) * 6;
-    xRight -= pw;
-    drawTruncRaw(xRight, y0 + 3, buf, 4);
-    xRight -= 4;
-  }
-  xRight -= 16;
-  drawBatteryIcon(xRight, y0 + 2, pct >= 0 ? pct : 0, chg);
+  xRight -= kBatteryIconBarW;
+  drawBatteryIcon(xRight, y0 + 1, pct, chg);
 }
 
 static void drawStatusBarCompact() {

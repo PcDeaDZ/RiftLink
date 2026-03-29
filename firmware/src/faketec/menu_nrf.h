@@ -13,9 +13,6 @@ void menu_nrf_init();
 /** T114: вызывать из loop с текущим состоянием кнопки (LOW = нажата). */
 void menu_nrf_poll_t114_button(bool pressed, uint32_t now_ms);
 
-/** Пока открыто меню/детальный экран — не вызывать display_nrf::poll() (иначе затрёт экран). */
-bool menu_nrf_owns_display();
-
 /** Serial: открыть главное меню (FakeTech без физической кнопки). */
 void menu_nrf_open_menu();
 

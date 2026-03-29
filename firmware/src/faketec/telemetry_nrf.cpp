@@ -83,14 +83,10 @@ bool isCharging() {
 #endif
 }
 
-/** Как ветка `#else` в `telemetry.cpp` (Heltec): те же пороги и шаг ~12 mV на %. */
+/** Как `telemetry.cpp` (Heltec ESP): общая формула `batteryPercentFromMv`. */
 int batteryPercent() {
 #if defined(RIFTLINK_BOARD_HELTEC_T114)
-  uint16_t mv = readBatteryMv();
-  if (mv < 2500) return -1;
-  if (mv >= 4200) return 100;
-  if (mv <= 3000) return 0;
-  return static_cast<int>((mv - 3000) / 12);
+  return batteryPercentFromMv(readBatteryMv());
 #else
   return -1;
 #endif

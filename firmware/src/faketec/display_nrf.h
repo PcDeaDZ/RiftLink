@@ -26,8 +26,9 @@ void show_status_screen(const char* line1, const char* line2, const char* line3,
 /** Вызывать из loop: отложенная перерисовка last msg. */
 void poll();
 
-/** Список меню: [scroll..scroll+visible) строк, selected — индекс в полном списке. */
-void show_menu_list(const char* title, const char* const* labels, int count, int selected, int scroll);
+/** Список меню: [scroll..scroll+visible) строк, selected — индекс в полном списке. footerHint — подсказка внизу (можно nullptr). */
+void show_menu_list(const char* title, const char* const* labels, int count, int selected, int scroll,
+    const char* footerHint = nullptr);
 
 /** Многострочный экран (body с \\n). */
 void show_fullscreen_text(const char* title, const char* body);

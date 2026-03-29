@@ -994,8 +994,10 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
 
   Color _batteryColorForMv(int mv) {
     final v = mv / 1000.0;
-    if (v >= 3.75) return context.palette.success;
-    if (v >= 3.45) return const Color(0xFFFFB300);
+    // ~3.2 В под нагрузкой — нормальный диапазон для 1S Li-ion; красный только близко к отсечке ~3.0 В
+    if (v >= 3.55) return context.palette.success;
+    if (v >= 3.15) return const Color(0xFFFFB300);
+    if (v >= 3.0) return const Color(0xFFFF9800);
     return context.palette.error;
   }
 

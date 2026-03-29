@@ -122,6 +122,18 @@ static const StrEntry STRINGS[] = {
   {"selftest_ant_warn", "Ant WARN", "Ant WARN", "Ant WARN"},
   {"selftest_heap", "Heap", "Heap", "Heap"},
   {"power_nrf_note", "nRF: no WiFi off\nUSB/DFU update", "nRF: WiFi off\nUSB/DFU", "nRF: no WiFi\nUSB/DFU"},
+  {"gps_hw", "HW", "HW", "HW"},
+  {"peer_key_yes", "K", "K", "K"},
+  {"peer_key_no", "-", "-", "-"},
+  {"detail_unknown_title", "?", "?", "?"},
+  {"detail_unknown_body", "-", "-", "-"},
+  {"lora_sf", "SF", "SF", "SF"},
+  {"lora_bw", "BW", "BW", "BW"},
+  {"lora_cr", "CR", "CR", "CR"},
+  {"lora_mhz", "MHz", "MHz", "MHz"},
+  {"lora_dbm", "dBm", "dBm", "dBm"},
+  {"boot_line1", "RiftLink", "RiftLink", "RiftLink"},
+  {"boot_line2", "nRF52840", "nRF52840", "nRF52840"},
   {"menu_home_node", "Node", "\xCD\xEE\xE4\xE0", "Node"},
   {"menu_home_msg", "Messages", "\xD1\xEE\xEE\xE1\xF9\xE5\xED\xE8\xFF", "Soobshcheniya"},
   {"menu_home_peers", "Neighbors", "\xD1\xEE\xF1\xE5\xE4\xE8", "Sosedi"},
@@ -203,6 +215,8 @@ int getLang() {
 
 bool setLang(int lang) {
   if (lang != LANG_EN && lang != LANG_RU) return false;
+  /* Уже выбран — без повторной записи NVS (BLE/Serial могут слать lang часто → моргание TFT). */
+  if (s_inited && s_lang == lang) return true;
 
 #ifdef RIFTLINK_NRF52
   const char* s = (lang == LANG_RU) ? "ru" : "en";

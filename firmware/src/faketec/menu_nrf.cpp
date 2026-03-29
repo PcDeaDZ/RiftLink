@@ -48,12 +48,12 @@ void nrf_render_dashboard(uint8_t page) {
   char idshort[12];
   snprintf(idshort, sizeof(idshort), "%02X%02X%02X%02X", nid[0], nid[1], nid[2], nid[3]);
   if (page == 0) {
-    snprintf(l1, sizeof(l1), "RiftLink %s", RIFTLINK_VERSION);
+    snprintf(l1, sizeof(l1), "%s %s", locale::getForDisplay("boot_line1"), RIFTLINK_VERSION);
     snprintf(l2, sizeof(l2), "%s %s..", locale::getForDisplay("id"), idshort);
     snprintf(l3, sizeof(l3), "%s %.2f %s%d", region::getCode(), (double)region::getFreq(), locale::getForDisplay("dash_ch"),
         region::getChannel());
-    snprintf(l4, sizeof(l4), "SF%u %s=%d %s", (unsigned)radio::getSpreadingFactor(), locale::getForDisplay("dash_n_prefix"),
-        neighbors::getCount(), radio::modemPresetName(radio::getModemPreset()));
+    snprintf(l4, sizeof(l4), "%s%u %s=%d %s", locale::getForDisplay("lora_sf"), (unsigned)radio::getSpreadingFactor(),
+        locale::getForDisplay("dash_n_prefix"), neighbors::getCount(), radio::modemPresetName(radio::getModemPreset()));
   } else if (page == 1) {
     snprintf(l1, sizeof(l1), "%s", locale::getForDisplay("dash_mesh"));
     snprintf(l2, sizeof(l2), "%s=%d", locale::getForDisplay("dash_n_prefix"), neighbors::getCount());
@@ -99,11 +99,19 @@ static display_tabs::ContentTab s_detailTab = display_tabs::CT_MAIN;
 static char s_infoTitle[24];
 static char s_infoBody[420];
 static constexpr uint32_t kShortMs = 520;
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+/** T114: ложные фронты от шума/RF — выше порог, чем для OLED. */
+static constexpr uint32_t kDebounceMs = 85;
+#else
 static constexpr uint32_t kDebounceMs = 40;
+#endif
 
 #if defined(RIFTLINK_BOARD_HELTEC_T114)
 static bool s_btnPrev = false;
 static uint32_t s_btnDownAt = 0;
+/** Подавление дребезга/шума на линии кнопки: без этого периодически срабатывает short press и даёт полную перерисовку дашборда. */
+static uint32_t s_lastT114UiMs = 0;
+static constexpr uint32_t kT114UiCooldownMs = 800;
 #endif
 
 static const char* label_key_for_home_slot(int slot) {
@@ -155,6 +163,7 @@ static void cycle_region() {
 
 static void toggle_language() {
   (void)locale::setLang(locale::getLang() == 0 ? 1 : 0);
+  menu_nrf_redraw_after_locale();
 }
 
 static void draw_net_menu() {
@@ -166,7 +175,8 @@ static void draw_net_menu() {
     buf[i][sizeof(buf[i]) - 1] = 0;
     ptrs[i] = buf[i];
   }
-  display_nrf::show_menu_list(locale::getForDisplay("menu_home_lora"), ptrs, kNetMenuItems, s_netMenuSel, 0);
+  display_nrf::show_menu_list(locale::getForDisplay("menu_home_lora"), ptrs, kNetMenuItems, s_netMenuSel, 0,
+      locale::getForDisplay("ui_hint_home"));
 }
 
 static void draw_sys_menu() {
@@ -178,20 +188,23 @@ static void draw_sys_menu() {
     buf[i][sizeof(buf[i]) - 1] = 0;
     ptrs[i] = buf[i];
   }
-  display_nrf::show_menu_list(locale::getForDisplay("menu_home_settings"), ptrs, kSysMenuItems, s_sysMenuSel, 0);
+  display_nrf::show_menu_list(locale::getForDisplay("menu_home_settings"), ptrs, kSysMenuItems, s_sysMenuSel, 0,
+      locale::getForDisplay("ui_hint_home"));
 }
 
 static void draw_modem_edit_screen() {
   char body[280];
-  snprintf(body, sizeof(body), "%s\nSF%u BW%.0f CR%u\n\n%s", radio::modemPresetName(radio::getModemPreset()),
-      (unsigned)radio::getSpreadingFactor(), (double)radio::getBandwidth(), (unsigned)radio::getCodingRate(),
+  snprintf(body, sizeof(body), "%s\n%s%u %s%.0f %s%u\n\n%s", radio::modemPresetName(radio::getModemPreset()),
+      locale::getForDisplay("lora_sf"), (unsigned)radio::getSpreadingFactor(), locale::getForDisplay("lora_bw"),
+      (double)radio::getBandwidth(), locale::getForDisplay("lora_cr"), (unsigned)radio::getCodingRate(),
       locale::getForDisplay("short_long_hint"));
   display_nrf::show_fullscreen_text(locale::getForDisplay("menu_modem"), body);
 }
 
 static void draw_region_edit_screen() {
   char body[200];
-  snprintf(body, sizeof(body), "%s\n%.2f MHz\nch %d\n\n%s", region::getCode(), (double)region::getFreq(), region::getChannel(),
+  snprintf(body, sizeof(body), "%s\n%.2f %s\n%s %d\n\n%s", region::getCode(), (double)region::getFreq(),
+      locale::getForDisplay("lora_mhz"), locale::getForDisplay("dash_ch"), region::getChannel(),
       locale::getForDisplay("short_long_hint"));
   display_nrf::show_fullscreen_text(locale::getForDisplay("select_country"), body);
 }
@@ -206,8 +219,9 @@ static void run_modem_scan_ui() {
   } else {
     size_t off = 0;
     for (int i = 0; i < n && off < sizeof(s_infoBody) - 32; i++) {
-      off += (size_t)snprintf(s_infoBody + off, sizeof(s_infoBody) - off, "SF%u bw%.0f %ddBm\n", (unsigned)sr[i].sf,
-          (double)sr[i].bw, sr[i].rssi);
+      off += (size_t)snprintf(s_infoBody + off, sizeof(s_infoBody) - off, "%s%u %s%.0f %d%s\n",
+          locale::getForDisplay("lora_sf"), (unsigned)sr[i].sf, locale::getForDisplay("lora_bw"), (double)sr[i].bw,
+          sr[i].rssi, locale::getForDisplay("lora_dbm"));
     }
   }
   s_view = View::InfoScreen;
@@ -237,7 +251,7 @@ static void draw_home_menu() {
     buf[i][sizeof(buf[i]) - 1] = 0;
     ptrs[i] = buf[i];
   }
-  display_nrf::show_menu_list(locale::getForDisplay("tab_home"), ptrs, use, s_homeSel, 0);
+  display_nrf::show_menu_list(locale::getForDisplay("tab_home"), ptrs, use, s_homeSel, 0, locale::getForDisplay("ui_hint_home"));
 }
 
 static void draw_detail(display_tabs::ContentTab ct) {
@@ -253,8 +267,9 @@ static void draw_detail(display_tabs::ContentTab ct) {
       for (int i = 0; i < (int)protocol::NODE_ID_LEN; i++) snprintf(idfull + i * 2, 3, "%02X", nid[i]);
       char nick[20];
       node::getNickname(nick, sizeof(nick));
-      snprintf(body, sizeof(body), "%s\n%s\n%s %.2f\nSF%u %s", idfull, nick[0] ? nick : "-", region::getCode(),
-          (double)region::getFreq(), (unsigned)radio::getSpreadingFactor(), radio::modemPresetName(radio::getModemPreset()));
+      snprintf(body, sizeof(body), "%s\n%s\n%s %.2f\n%s%u %s", idfull,
+          nick[0] ? nick : locale::getForDisplay("detail_unknown_body"), region::getCode(), (double)region::getFreq(),
+          locale::getForDisplay("lora_sf"), (unsigned)radio::getSpreadingFactor(), radio::modemPresetName(radio::getModemPreset()));
       break;
     }
     case display_tabs::CT_MSG: {
@@ -262,7 +277,8 @@ static void draw_detail(display_tabs::ContentTab ct) {
       char from[20], text[48];
       display_nrf::get_last_msg_peek(from, sizeof(from), text, sizeof(text));
       if (from[0] || text[0]) {
-        snprintf(body, sizeof(body), "%s\n%s", from[0] ? from : "-", text[0] ? text : "-");
+        snprintf(body, sizeof(body), "%s\n%s", from[0] ? from : locale::getForDisplay("detail_unknown_body"),
+            text[0] ? text : locale::getForDisplay("detail_unknown_body"));
       } else {
         snprintf(body, sizeof(body), "%s", locale::getForDisplay("no_messages"));
       }
@@ -279,20 +295,22 @@ static void draw_detail(display_tabs::ContentTab ct) {
         int r = neighbors::getRssi(i);
         uint8_t pid[protocol::NODE_ID_LEN];
         bool hk = neighbors::getId(i, pid) && x25519_keys::hasKeyFor(pid);
-        off += (size_t)snprintf(body + off, sizeof(body) - off, "%s %ddBm %s\n", hx, r, hk ? "K" : "-");
+        off += (size_t)snprintf(body + off, sizeof(body) - off, "%s %ddBm %s\n", hx, r,
+            hk ? locale::getForDisplay("peer_key_yes") : locale::getForDisplay("peer_key_no"));
       }
       break;
     }
     case display_tabs::CT_GPS: {
       title = locale::getForDisplay("tab_gps");
-      snprintf(body, sizeof(body), "%s\n%s\n%.5f %.5f", gps::isPresent() ? "HW" : locale::getForDisplay("gps_not_present"),
+      snprintf(body, sizeof(body), "%s\n%s\n%.5f %.5f",
+          gps::isPresent() ? locale::getForDisplay("gps_hw") : locale::getForDisplay("gps_not_present"),
           gps::hasFix() ? locale::getForDisplay("gps_fix") : locale::getForDisplay("gps_no_fix"), (double)gps::getLat(),
           (double)gps::getLon());
       break;
     }
     default:
-      title = "?";
-      snprintf(body, sizeof(body), "-");
+      title = locale::getForDisplay("detail_unknown_title");
+      snprintf(body, sizeof(body), "%s", locale::getForDisplay("detail_unknown_body"));
       break;
   }
   display_nrf::show_fullscreen_text(title, body);
@@ -383,10 +401,6 @@ void menu_nrf_redraw_after_locale() {
     default:
       break;
   }
-}
-
-bool menu_nrf_owns_display() {
-  return s_view != View::Dashboard;
 }
 
 void menu_nrf_open_menu() {
@@ -499,7 +513,6 @@ static void on_long_press() {
         draw_home_menu();
       } else if (s_sysMenuSel == 0) {
         toggle_language();
-        draw_sys_menu();
       } else {
         run_selftest_ui();
       }
@@ -537,10 +550,15 @@ void menu_nrf_poll_t114_button(bool pressed, uint32_t now_ms) {
   if (!pressed && s_btnPrev) {
     uint32_t dur = now_ms - s_btnDownAt;
     if (dur >= kDebounceMs) {
-      if (dur < kShortMs)
-        on_short_press();
-      else
-        on_long_press();
+      const bool cooldownOk =
+          (s_lastT114UiMs == 0 || (uint32_t)(now_ms - s_lastT114UiMs) >= kT114UiCooldownMs);
+      if (cooldownOk) {
+        if (dur < kShortMs)
+          on_short_press();
+        else
+          on_long_press();
+        s_lastT114UiMs = now_ms;
+      }
     }
   }
   s_btnPrev = pressed;

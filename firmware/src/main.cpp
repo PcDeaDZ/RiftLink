@@ -155,7 +155,7 @@ static uint32_t s_bootPhaseStart = 0;
 static uint32_t s_lastDiagSnapshotMs = 0;
 static uint32_t s_lastBatCheckMs = 0;
 static uint8_t s_lowBatCount = 0;
-#define LOW_BAT_MV          3000
+#define LOW_BAT_MV          3100
 #define LOW_BAT_CHECK_MS    30000
 #define LOW_BAT_SHUTOFF_CNT 3
 static uint8_t rxBuf[protocol::SYNC_LEN + protocol::HEADER_LEN + protocol::MAX_PAYLOAD + crypto::OVERHEAD];

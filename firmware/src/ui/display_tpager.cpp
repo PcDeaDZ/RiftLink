@@ -537,20 +537,47 @@ static void displayRunModemScan() {
   }
 }
 
+/* Чуть шире OLED (18), чтобы при шрифте size 1 влезало «100%» без TomThumb в env без Adafruit GFX. */
+static constexpr int kBatBodyW = 22;
+/** Чуть выше 8×8 глифа в строке BLE/WiFi (+1 px), один контур. */
+static constexpr int kBatBodyH = 9;
+static constexpr int kBatNubW = 2;
+static constexpr int kBatteryIconBarW = kBatBodyW + kBatNubW;
+
+static void drawBatteryChargingBoltGfx(int x, int y) {
+  const int ox = x + (kBatBodyW - 14) / 2 - 2;
+  const int dy = (kBatBodyH - 7) / 2;
+  const auto zig = [&](int dx) {
+    gfx.drawLine(ox + 8 + dx, y + 1 + dy, ox + 6 + dx, y + 3 + dy, COL_FG);
+    gfx.drawLine(ox + 6 + dx, y + 3 + dy, ox + 9 + dx, y + 3 + dy, COL_FG);
+    gfx.drawLine(ox + 9 + dx, y + 3 + dy, ox + 7 + dx, y + 5 + dy, COL_FG);
+  };
+  zig(0);
+  zig(1);
+}
+
 static void drawBatteryIcon(int x, int y, int pct, bool charging) {
-  gfx.drawRect(x, y, 14, 7, COL_FG);
-  gfx.fillRect(x + 14, y + 2, 2, 3, COL_FG);
-  if (pct > 0) {
-    int fill = (pct * 10) / 100;
-    if (fill < 1 && pct > 0) fill = 1;
-    if (fill > 10) fill = 10;
-    gfx.fillRect(x + 2, y + 2, fill, 3, COL_FG);
-  }
+  gfx.drawRect(x, y, kBatBodyW, kBatBodyH, COL_FG);
+  gfx.fillRect(x + kBatBodyW, y + (kBatBodyH - 3) / 2, kBatNubW, 3, COL_FG);
   if (charging) {
-    gfx.drawLine(x + 8, y + 1, x + 6, y + 3, COL_FG);
-    gfx.drawLine(x + 6, y + 3, x + 9, y + 3, COL_FG);
-    gfx.drawLine(x + 9, y + 3, x + 7, y + 5, COL_FG);
+    drawBatteryChargingBoltGfx(x, y);
+    return;
   }
+  char b[8];
+  if (pct >= 0) {
+    snprintf(b, sizeof(b), "%d%%", pct);
+  } else {
+    snprintf(b, sizeof(b), "--");
+  }
+  gfx.setTextSize(1);
+  gfx.setTextColor(COL_FG);
+  int16_t x1 = 0, y1 = 0;
+  uint16_t tw = 0, th = 0;
+  gfx.getTextBounds(b, 0, 0, &x1, &y1, &tw, &th);
+  const int16_t tx = x + (kBatBodyW - (int)tw) / 2 - x1;
+  const int16_t ty = y + (kBatBodyH - (int)th) / 2 - y1;
+  gfx.setCursor(tx, ty);
+  gfx.print(b);
 }
 
 static void drawSignalBars(int x, int y, int barsCount) {
@@ -576,13 +603,7 @@ static void drawStatusBarTpagerAt(int ySig) {
     snprintf(buf, sizeof(buf), "%02d:%02d", tb.hour, tb.minute);
     rightClusterLeft -= (int)strlen(buf) * 6 + 4;
   }
-  if (pct >= 0) {
-    snprintf(buf, sizeof(buf), "%d%%", pct);
-  } else {
-    snprintf(buf, sizeof(buf), "--");
-  }
-  rightClusterLeft -= (int)strlen(buf) * 6 + 4;
-  rightClusterLeft -= 16;
+  rightClusterLeft -= kBatteryIconBarW;
 
   drawSignalBars(8, ySig, tb.signalBars);
   const int leftBlockEnd = 30;
@@ -611,19 +632,8 @@ static void drawStatusBarTpagerAt(int ySig) {
     drawTruncRaw(xRight, ySig + 2, buf, 6);
     xRight -= 6;
   }
-  if (pct >= 0) {
-    snprintf(buf, sizeof(buf), "%d%%", pct);
-  } else {
-    snprintf(buf, sizeof(buf), "--");
-  }
-  {
-    const int pw = (int)strlen(buf) * 6;
-    xRight -= pw;
-    drawTruncRaw(xRight, ySig + 2, buf, 5);
-    xRight -= 6;
-  }
-  xRight -= 16;
-  drawBatteryIcon(xRight, ySig, pct >= 0 ? pct : 0, chg);
+  xRight -= kBatteryIconBarW;
+  drawBatteryIcon(xRight, ySig - 1, pct, chg);
 }
 
 static void drawStatusBarTpager() {

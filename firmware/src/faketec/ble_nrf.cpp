@@ -1790,11 +1790,13 @@ static void handleJsonCommand(const char* json, size_t len) {
     const char* lang = doc["lang"];
     if (lang) {
       if (strcmp(lang, "ru") == 0) {
-        (void)locale::setLang(LANG_RU);
-        menu_nrf_redraw_after_locale();
+        if (locale::getLang() != LANG_RU) {
+          if (locale::setLang(LANG_RU)) menu_nrf_redraw_after_locale();
+        }
       } else if (strcmp(lang, "en") == 0) {
-        (void)locale::setLang(LANG_EN);
-        menu_nrf_redraw_after_locale();
+        if (locale::getLang() != LANG_EN) {
+          if (locale::setLang(LANG_EN)) menu_nrf_redraw_after_locale();
+        }
       }
     }
     /* Как ble.cpp: только смена локали, без emit info. */

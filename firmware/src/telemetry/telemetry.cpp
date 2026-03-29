@@ -29,6 +29,13 @@
 #include <esp_adc/adc_cali_scheme.h>
 #endif
 
+#if defined(ARDUINO_ARCH_ESP32) && __has_include(<driver/usb_serial_jtag.h>)
+#include <driver/usb_serial_jtag.h>
+#define RIFTLINK_USB_SERIAL_JTAG 1
+#else
+#define RIFTLINK_USB_SERIAL_JTAG 0
+#endif
+
 #define BAT_ADC_PIN      1      // GPIO1 (ADC1_CH0) — Heltec V3/V4 OLED
 #define BAT_ADC_CTRL     37     // GPIO37: HIGH = включить делитель батареи
 #define BAT_DIVIDER      4.9f   // резисторный делитель 390k / 100k
@@ -44,6 +51,14 @@ static SemaphoreHandle_t s_adcMutex = nullptr;
 static uint16_t s_lastBatteryMv = 0;
 static uint32_t s_lastBatteryReadMs = 0;
 static constexpr uint32_t BATTERY_CACHE_MS = 900;
+
+#if RIFTLINK_USB_SERIAL_JTAG
+/** Последний SOC только от батареи; при USB/зарядке напряжение на делителе завышено — не обновляем. */
+static int s_socOnBatteryOnly = -1;
+static bool usbSerialJtagHostConnected() {
+  return usb_serial_jtag_is_connected();
+}
+#endif
 // ESP32-S3 occasionally aborts inside adc_oneshot HAL under runtime load.
 // Keep legacy Arduino ADC path as default to avoid hard crashes in displayTask.
 static constexpr bool kUseEspIdfOneshotAdc = false;
@@ -314,6 +329,9 @@ bool isCharging() {
 #elif defined(ARDUINO_LILYGO_T_BEAM)
   return lilygoTbeamIsCharging();
 #else
+#if RIFTLINK_USB_SERIAL_JTAG
+  if (usbSerialJtagHostConnected()) return true;
+#endif
   uint16_t mv = readBatteryMv();
   return mv > 4200;
 #endif
@@ -324,26 +342,25 @@ int batteryPercent() {
   if (!s_inited) return -1;
   int soc = bq27220_tpager::readRelativeSocPercent();
   if (soc >= 0) return soc;
-  uint16_t mv = readBatteryMv();
-  if (mv < 2500) return -1;
-  if (mv >= 4200) return 100;
-  if (mv <= 3000) return 0;
-  return (int)((mv - 3000) / 12);
+  return batteryPercentFromMv(readBatteryMv());
 #elif defined(ARDUINO_LILYGO_T_BEAM)
   if (!s_inited) return -1;
   int soc = lilygoTbeamReadBatteryPercent();
   if (soc >= 0 && soc <= 100) return soc;
-  uint16_t mv = readBatteryMv();
-  if (mv < 2500) return -1;
-  if (mv >= 4200) return 100;
-  if (mv <= 3000) return 0;
-  return (int)((mv - 3000) / 12);
+  return batteryPercentFromMv(readBatteryMv());
 #else
   uint16_t mv = readBatteryMv();
-  if (mv < 2500) return -1;
-  if (mv >= 4200) return 100;
-  if (mv <= 3000) return 0;
-  return (int)((mv - 3000) / 12);
+#if RIFTLINK_USB_SERIAL_JTAG
+  const bool charging = usbSerialJtagHostConnected() || mv > 4200;
+  if (!charging) {
+    s_socOnBatteryOnly = batteryPercentFromMv(mv);
+    return s_socOnBatteryOnly;
+  }
+  if (s_socOnBatteryOnly >= 0) return s_socOnBatteryOnly;
+  return batteryPercentFromMv(mv);
+#else
+  return batteryPercentFromMv(mv);
+#endif
 #endif
 }
 
