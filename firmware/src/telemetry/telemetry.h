@@ -21,7 +21,7 @@ uint16_t readBatteryMv();
 
 /**
  * Зарядка: на ESP32 с USB Serial JTAG — только usb_serial_jtag (U>4.2 В давало ложный CHG на полной АКБ).
- * Без JTAG-драйвера — эвристика U>4.2 V. T‑Pager: BQ; T‑Beam: PMU. T114: U>4.2 V.
+ * Без JTAG-драйвера — эвристика U>4.2 V. T‑Pager: BQ; T‑Beam: PMU. T114: TinyUSB (сессия), не mV.
  */
 bool isCharging();
 

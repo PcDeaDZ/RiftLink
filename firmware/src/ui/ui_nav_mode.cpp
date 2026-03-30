@@ -50,6 +50,7 @@ void init() {
   if (s_inited) return;
   if (riftlink_kv::is_ready()) {
     int8_t v = 0;
+    /* Без ключа в KV — список (как раньше); вкладки только после явного выбора в SYS. */
     if (riftlink_kv::getI8("ui_nav", &v) && v != 0) s_tabMode = true;
   }
   s_inited = true;

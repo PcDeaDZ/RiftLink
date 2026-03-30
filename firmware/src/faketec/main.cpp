@@ -45,6 +45,7 @@
 
 #if defined(RIFTLINK_BOARD_HELTEC_T114)
 #include <Adafruit_NeoPixel.h>
+#include "ui_t114.h"
 #endif
 #include "voice_buffers/voice_buffers.h"
 #include "voice_frag/voice_frag.h"
@@ -231,7 +232,10 @@ void setup() {
 
   Serial.begin(115200);
   uart1_begin();
+#if !defined(RIFTLINK_BOARD_HELTEC_T114)
+  /* FakeTech и пр.: стабилизация UART после begin. T114 — без задержки, чтобы раньше показать бутскрин. */
   delay(300);
+#endif
 
 #if defined(RIFTLINK_BOARD_HELTEC_T114)
   {
@@ -246,12 +250,16 @@ void setup() {
   log_line("[RiftLink] T114: LED/button");
 #endif
 
-  // Пока хост не открёл виртуальный COM, TinyUSB CDC часто отбрасывает вывод — ждём до 15 с, затем первая строка уходит уже в открытый порт.
+  // Пока хост не открёл виртуальный COM, TinyUSB CDC часто отбрасывает вывод — ждём до 15 с (только не T114: там дисплей раньше).
+#if !defined(RIFTLINK_BOARD_HELTEC_T114)
   uint32_t usb_wait_start = millis();
   while (!Serial && (uint32_t)(millis() - usb_wait_start) < 15000) {
     delay(10);
   }
   uint32_t usb_wait_ms = (uint32_t)(millis() - usb_wait_start);
+#else
+  const uint32_t usb_wait_ms = 0;
+#endif
   {
     char b[140];
     snprintf(b, sizeof(b), "[RiftLink] nRF52840 boot usb_wait_ms=%lu serial_host=%d | no USB text: UART TX GPIO6 115200",
@@ -277,6 +285,8 @@ void setup() {
   log_line("[RiftLink] init: display (T114 ST7789 SPI — до node, экран загрузки как на ESP)");
   if (display_nrf::init()) {
     menu_nrf_init();
+    display_nrf::show_boot_screen();
+    delay(ui_t114::kBootSplashHoldMs);
     if (!locale::isSet()) {
       nrf_ui_run_language_until_done();
     }
@@ -395,6 +405,8 @@ void setup() {
     log_line("[RiftLink] init: T114 — повторная попытка display_nrf::init");
     if (display_nrf::init()) {
       menu_nrf_init();
+      display_nrf::show_boot_screen();
+      delay(ui_t114::kBootSplashHoldMs);
       if (!locale::isSet()) {
         nrf_ui_run_language_until_done();
       }
@@ -429,7 +441,7 @@ void setup() {
 
 #if !defined(RIFTLINK_SKIP_OLED_INIT)
   if (display_nrf::is_ready()) {
-    menu_nrf_goto_dashboard(0);
+    menu_nrf_show_boot_screen();
   }
 #endif
   if (!region::isSet()) {
@@ -857,6 +869,8 @@ void loop() {
 
 #if defined(RIFTLINK_BOARD_HELTEC_T114)
   menu_nrf_tab_idle_tick();
+  menu_nrf_periodic_refresh(millis());
+  display_nrf::poll();
   menu_nrf_poll_t114_button(digitalRead(T114_BUTTON_PIN) == LOW, millis());
 #endif
 

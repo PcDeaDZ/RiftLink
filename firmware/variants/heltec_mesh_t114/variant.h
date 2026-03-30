@@ -33,8 +33,9 @@ extern "C" {
 #define PIN_WIRE_SDA (26)
 #define PIN_WIRE_SCL (27)
 
-#define PIN_SERIAL1_RX (8)
-#define PIN_SERIAL1_TX (6)
+/** L76K UART: MCU RX=P1.5 (37), MCU TX=P1.7 (39) — как Meshtastic heltec_mesh_node_t114 (GPS_RX/GPS_TX). */
+#define PIN_SERIAL1_RX (37)
+#define PIN_SERIAL1_TX (39)
 
 #define SPI_INTERFACES_COUNT 2
 #define PIN_SPI_MISO (2)

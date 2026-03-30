@@ -30,8 +30,11 @@
 #define TFT_SPI_RST 2
 #define TFT_SPI_SCK 40
 #define TFT_SPI_MOSI 41
-/** MISO для SPI1 не используется чтением TFT — задан незадействованный GPIO (как «заглушка» для setPins). */
-#define TFT_SPI_MISO 39
+/**
+ * MISO для SPI1 не подключён к ST7789 (только запись). Не использовать P1.7 (лог. 39) — там UART TX к L76K GPS
+ * (Meshtastic: GPS_TX_PIN). Заглушка: P1.0 (32), не пересекается с LoRa/TFT/Neo/кнопкой.
+ */
+#define TFT_SPI_MISO 32
 /** Подсветка: VTFT_LEDA в upstream Meshtastic, не путать с закомментированным ST7789_BL (32+6). */
 #define TFT_BL 15
 /** Включение подсветки (Meshtastic: TFT_BACKLIGHT_ON LOW). */
@@ -48,6 +51,14 @@
 /** Два NeoPixel на шине данных (Meshtastic: NEOPIXEL_DATA 14, NEO_GRB + NEO_KHZ800). Без begin()/show() — мусор на линии. */
 #define T114_NEOPIXEL_PIN 14
 #define T114_NEOPIXEL_COUNT 2
+/** L76K: NMEA на UART1 — как Meshtastic PIN_SERIAL1_* / GPS_RX_PIN, GPS_TX_PIN. */
+#define T114_GPS_RX_PIN 37
+#define T114_GPS_TX_PIN 39
+/** STANDBY L76K: HIGH = не спать, LOW = sleep (см. Meshtastic PIN_GPS_STANDBY). */
+#define T114_GPS_STANDBY_PIN 34
+/** Питание периферии на разъёме / модуль GPS (Meshtastic VEXT_ENABLE). */
+#define T114_VEXT_EN_PIN 21
+#define T114_VEXT_ON HIGH
 #else
 // FakeTech V5 / ProMicro DIY + HT-RA62
 #define LORA_NSS 45

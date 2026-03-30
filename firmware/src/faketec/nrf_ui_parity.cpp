@@ -57,7 +57,7 @@ static int blocking_list_pick(const char* title, const char* const* labels, int 
   int scroll = 0;
   for (;;) {
     if (!display_nrf::is_ready()) return sel;
-    display_nrf::show_menu_list(title, labels, count, sel, scroll, locale::getForDisplay("short_long_hint"));
+    display_nrf::show_menu_list(title, labels, count, sel, scroll, nullptr);
     scroll = display_nrf::menu_list_last_scroll();
 #if !defined(RIFTLINK_BOARD_HELTEC_T114)
     if (Serial.available()) {
