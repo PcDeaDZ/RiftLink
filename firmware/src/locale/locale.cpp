@@ -69,6 +69,7 @@ static const StrEntry STRINGS[] = {
   {"gps_on", "GPS On", "GPS \xC2\xEA\xEB", "GPS On"},
   {"gps_no_fix", "No fix", "\xCD\xE5\xF2 \xF4\xE8\xEA\xF1\xE0", "No fix"},
   {"gps_fix", "Fix", "\xD4\xE8\xEA\xF1", "Fix"},
+  {"gps_search", "Searching", "\xCF\xEE\xE8\xF1\xEA", "Searching"},
   {"gps_not_present", "Not present", "\xCD\xE5\xF2 \xEC\xEE\xE4\xF3\xEB\xFF", "No module"},
   {"gps_toggle_on_off", "ON->OFF", "ON->OFF", "ON->OFF"},
   {"gps_toggle_off_on", "OFF->ON", "OFF->ON", "OFF->ON"},

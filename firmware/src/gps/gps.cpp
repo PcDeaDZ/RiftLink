@@ -498,7 +498,12 @@ void toggle() {
 }
 
 bool hasFix() {
-  return s_gps.location.isValid() && s_gps.location.isUpdated();
+  if (!s_gps.location.isValid()) return false;
+  /* isUpdated() в TinyGPS++ истинен только один проход после NMEA — на экране «фикс» дёргается.
+   * Достаточно свежей валидной позиции по age(); 0xFFFFFFFF — нет данных (см. TinyGPSPlus). */
+  const unsigned long age = s_gps.location.age();
+  if (age == 0xFFFFFFFFUL) return false;
+  return age < 30000UL;
 }
 
 float getLat() {

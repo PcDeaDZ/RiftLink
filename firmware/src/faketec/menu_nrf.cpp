@@ -302,10 +302,25 @@ static void draw_detail(display_tabs::ContentTab ct) {
     }
     case display_tabs::CT_GPS: {
       title = locale::getForDisplay("tab_gps");
-      snprintf(body, sizeof(body), "%s\n%s\n%.5f %.5f",
-          gps::isPresent() ? locale::getForDisplay("gps_hw") : locale::getForDisplay("gps_not_present"),
-          gps::hasFix() ? locale::getForDisplay("gps_fix") : locale::getForDisplay("gps_no_fix"), (double)gps::getLat(),
-          (double)gps::getLon());
+      if (!gps::isPresent()) {
+        snprintf(body, sizeof(body), "%s", locale::getForDisplay("gps_not_present"));
+      } else if (gps::isEnabled() && !gps::hasFix()) {
+        snprintf(body, sizeof(body), "%s", locale::getForDisplay("gps_search"));
+      } else if (gps::isEnabled() && gps::hasFix()) {
+        uint32_t sat = gps::getSatellites();
+        float course = gps::getCourseDeg();
+        const char* card = gps::getCourseCardinal();
+        char line1[48];
+        if (course >= 0 && card && card[0])
+          snprintf(line1, sizeof(line1), "%u sat %.0f %s", (unsigned)sat, (double)course, card);
+        else
+          snprintf(line1, sizeof(line1), "%u sat", (unsigned)sat);
+        snprintf(body, sizeof(body), "%s\n%.5f %.5f", line1, (double)gps::getLat(), (double)gps::getLon());
+      } else if (gps::hasFix()) {
+        snprintf(body, sizeof(body), "%.5f %.5f", (double)gps::getLat(), (double)gps::getLon());
+      } else {
+        snprintf(body, sizeof(body), "%s", locale::getForDisplay("gps_off"));
+      }
       break;
     }
     default:

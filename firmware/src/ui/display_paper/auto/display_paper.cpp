@@ -1613,7 +1613,7 @@ static void drawContentGps() {
   const bool gpsSel = !ui_nav_mode::isTabMode() || s_tabDrillIn;
   const bool showGpsToggleRow = gps::isPresent() && (tabDrill || !ui_nav_mode::isTabMode());
   const bool showBackFooter = !ui_nav_mode::isTabMode() || tabDrill;
-  const int yInfoEnd = showBackFooter ? (yBack - PAPER_MSG_BACK_GAP_PX) : (SCREEN_HEIGHT - 2);
+  const int yInfoEnd = showBackFooter ? yBack : (SCREEN_HEIGHT - 2);
   int y = listY0;
 
   if (showGpsToggleRow) {
@@ -1657,8 +1657,8 @@ static void drawContentGps() {
     return;
   }
 
-  if (y + lh <= yInfoEnd + 1) {
-    if (gpsSel && gps::isPresent() && s_gpsMenuIndex == 0 && !showGpsToggleRow) {
+  if (!showGpsToggleRow && y + lh <= yInfoEnd + 1) {
+    if (gpsSel && gps::isPresent() && s_gpsMenuIndex == 0) {
       disp->fillRect(0, y - 1, SCREEN_WIDTH, lh + 1, GxEPD_BLACK);
       disp->setTextColor(GxEPD_WHITE);
     } else {
@@ -1669,34 +1669,34 @@ static void drawContentGps() {
     disp->setTextColor(GxEPD_BLACK);
     y += lh;
   }
-  if (y + lh <= yInfoEnd + 1) {
-    drawTruncUtf8(CONTENT_X, y + 4, gps::hasFix() ? locale::getForDisplay("gps_fix") : locale::getForDisplay("gps_no_fix"),
-        MAX_LINE_CHARS - 4);
-    y += lh;
-  }
-  {
-    char line2[40];
-    line2[0] = '\0';
-    if (gps::isEnabled()) {
+
+  const int yMid0 = y;
+  int lineY = yMid0;
+  char coordLine[40];
+
+  if (gps::isEnabled()) {
+    if (!gps::hasFix()) {
+      if (lineY + lh <= yInfoEnd + 1) {
+        drawTruncUtf8(CONTENT_X, lineY + 4, locale::getForDisplay("gps_search"), MAX_LINE_CHARS - 4);
+      }
+    } else {
       uint32_t sat = gps::getSatellites();
       float course = gps::getCourseDeg();
       const char* card = gps::getCourseCardinal();
-      if (sat > 0 && course >= 0) snprintf(buf, sizeof(buf), "%u sat %0.0f %s", (unsigned)sat, course, card);
-      else if (sat > 0) snprintf(buf, sizeof(buf), "%u sat", (unsigned)sat);
-      else if (course >= 0) snprintf(buf, sizeof(buf), "%0.0f %s", course, card);
-      else snprintf(buf, sizeof(buf), "-");
-      if (gps::hasFix()) {
-        snprintf(line2, sizeof(line2), "%s %.3f %.3f", buf, (double)gps::getLat(), (double)gps::getLon());
-      } else {
-        strncpy(line2, buf, sizeof(line2));
-        line2[sizeof(line2) - 1] = '\0';
+      if (course >= 0 && card && card[0])
+        snprintf(buf, sizeof(buf), "%u sat %0.0f %s", (unsigned)sat, course, card);
+      else
+        snprintf(buf, sizeof(buf), "%u sat", (unsigned)sat);
+      if (lineY + lh <= yInfoEnd + 1) {
+        drawTruncRaw(CONTENT_X, lineY + 4, buf, MAX_LINE_CHARS - 4);
+        lineY += lh;
       }
-    } else if (gps::hasFix()) {
-      snprintf(line2, sizeof(line2), "%.4f %.4f", (double)gps::getLat(), (double)gps::getLon());
+      snprintf(coordLine, sizeof(coordLine), "%.5f %.5f", (double)gps::getLat(), (double)gps::getLon());
+      if (lineY + lh <= yInfoEnd + 1) drawTruncRaw(CONTENT_X, lineY + 4, coordLine, MAX_LINE_CHARS - 4);
     }
-    if (line2[0] && y + lh <= yInfoEnd + 1) {
-      drawTruncRaw(CONTENT_X, y + 4, line2, MAX_LINE_CHARS - 4);
-    }
+  } else if (gps::hasFix()) {
+    snprintf(coordLine, sizeof(coordLine), "%.5f %.5f", (double)gps::getLat(), (double)gps::getLon());
+    if (lineY + lh <= yInfoEnd + 1) drawTruncRaw(CONTENT_X, lineY + 4, coordLine, MAX_LINE_CHARS - 4);
   }
   if (showBackFooter) {
     const bool hiBack = gpsSel && gps::isPresent() && (s_gpsMenuIndex == 1);
