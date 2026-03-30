@@ -40,7 +40,7 @@ void setPhoneSync(int64_t utcMs, float lat, float lon, int16_t alt);
 /** Есть ли данные от телефона (для beacon с timestamp) */
 bool hasPhoneSync();
 
-/** Есть ли валидное время (GPS NMEA или phone sync) */
+/** Есть ли валидное время (GPS NMEA или phone sync). При наличии NMEA ZDA UTC берётся из неё в приоритете. */
 bool hasTime();
 /** Есть ли epoch-время (секунды UTC) для проверок expiry. */
 bool hasEpochTime();
@@ -50,5 +50,12 @@ bool getEpochSec(uint32_t* outEpochSec);
 int getHour();
 /** Минуты (0-59), -1 если нет источника */
 int getMinute();
+
+/**
+ * Локальное время для UI: UTC с приёмника + ltzh/ltzm из последней ZDA (только RAM, без NVS).
+ * Синхронизация с телефоном (UTC) — без смещения ZDA. Обновление offset на каждой ZDA.
+ */
+int getLocalHour();
+int getLocalMinute();
 
 }  // namespace gps

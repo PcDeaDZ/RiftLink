@@ -20,8 +20,8 @@ void fill(Model& m) {
   ui_fmt::regionModemShort(m.regionModem, sizeof(m.regionModem));
   m.hasTime = gps::hasTime();
   if (m.hasTime) {
-    m.hour = (uint8_t)gps::getHour();
-    m.minute = (uint8_t)gps::getMinute();
+    m.hour = (uint8_t)gps::getLocalHour();
+    m.minute = (uint8_t)gps::getLocalMinute();
   } else {
     m.hour = 0;
     m.minute = 0;

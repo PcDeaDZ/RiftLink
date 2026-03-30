@@ -150,4 +150,12 @@ int getMinute() {
   return static_cast<int>((now / 60000ULL) % 60);
 }
 
+int getLocalHour() {
+  return getHour();
+}
+
+int getLocalMinute() {
+  return getMinute();
+}
+
 }  // namespace gps

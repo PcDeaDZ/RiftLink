@@ -84,6 +84,7 @@ static constexpr int MENU_LIST_ICON_OFF_PP = kProfPaper.menuListIconTopOffsetY;
 static int s_layoutTabShiftY = 0;
 static bool s_tabDrillIn = false;
 static int s_powerMenuIndex = 0;
+static int s_gpsMenuIndex = 0;
 /** Экран «Сообщения» без полосы заголовка: как «Узел» — отступ от разделителя и строка «Назад». */
 #define PAPER_STATUS_SEP_BOTTOM 15
 #define PAPER_MSG_LIST_TOP_PAD_PX 2
@@ -290,6 +291,7 @@ static uint32_t computeContentHash(int tab) {
     for (int i = 0; s_lastMsgFrom[i] && i < 16; i++) h = h * 31 + (uint8_t)s_lastMsgFrom[i];
     for (int i = 0; s_lastMsgText[i] && i < 63; i++) h = h * 31 + (uint8_t)s_lastMsgText[i];
   } else if (ct == display_tabs::CT_GPS) {
+    h ^= (uint32_t)s_gpsMenuIndex * 47u;
     h ^= gps::isEnabled() ? 1 : 0;
     h ^= gps::hasFix() ? 2 : 0;
     h ^= gps::hasPhoneSync() ? 4 : 0;
@@ -1022,13 +1024,10 @@ static void drawStatusBarPaperAt(int y0) {
   }
 
   int xRight = SCREEN_WIDTH - 2;
-  if (tb.hasTime) {
-    snprintf(buf, sizeof(buf), "%02d:%02d", tb.hour, tb.minute);
-    const int tw = (int)strlen(buf) * 6;
-    xRight -= tw;
-    drawTruncRaw(xRight, y0 + 4, buf, 5);
-    xRight -= 4;
-  }
+  xRight -= 16;
+  const int batX = xRight;
+  drawBatteryIconPaper(batX, y0 + 2, pct >= 0 ? pct : 0, chg);
+  xRight -= 4;
   if (pct >= 0) {
     snprintf(buf, sizeof(buf), "%d%%", pct);
   } else {
@@ -1040,8 +1039,12 @@ static void drawStatusBarPaperAt(int y0) {
     drawTruncRaw(xRight, y0 + 4, buf, 4);
     xRight -= 4;
   }
-  xRight -= 16;
-  drawBatteryIconPaper(xRight, y0 + 2, pct >= 0 ? pct : 0, chg);
+  if (tb.hasTime) {
+    snprintf(buf, sizeof(buf), "%02d:%02d", tb.hour, tb.minute);
+    const int tw = (int)strlen(buf) * 6;
+    xRight -= tw;
+    drawTruncRaw(xRight, y0 + 4, buf, 5);
+  }
 }
 
 /** drawUpperTopbar: false — только разделители; статус рисуется отдельно (см. drawChromeTabsOrIdleRowPaper). */
@@ -1215,11 +1218,6 @@ static void drawContentMain() {
     drawTruncUtf8(CONTENT_X, listY0, nick, MAX_LINE_CHARS - 2);
   } else {
     drawTruncRaw(CONTENT_X, listY0, idHex, MAX_LINE_CHARS);
-  }
-  if (gps::hasTime()) {
-    char clk[6];
-    snprintf(clk, sizeof(clk), "%02d:%02d", gps::getHour(), gps::getMinute());
-    drawTruncRaw(SCREEN_WIDTH - 36, listY0, clk, 5);
   }
   disp->setTextColor(GxEPD_BLACK);
 
@@ -1585,24 +1583,97 @@ static void drawContentMsg() {
   }
 }
 
+static void drawGpsBackFooterPaper(bool highlight) {
+  if (!disp) return;
+  const int lh = LINE_H;
+  const int bottomPad = 6;
+  const int yBack = SCREEN_HEIGHT - bottomPad - lh - 1;
+  if (highlight) {
+    disp->fillRect(0, yBack - 1, SCREEN_WIDTH, lh + 1, GxEPD_BLACK);
+    disp->setTextColor(GxEPD_WHITE);
+  } else {
+    disp->fillRect(0, yBack - 1, SCREEN_WIDTH, lh + 1, GxEPD_WHITE);
+    disp->setTextColor(GxEPD_BLACK);
+  }
+  drawTruncUtf8(CONTENT_X, yBack, locale::getForDisplay("menu_back"), MAX_LINE_CHARS);
+  disp->setTextColor(GxEPD_BLACK);
+}
+
 static void drawContentGps() {
   if (!disp) return;
-  char buf[32];
+  disp->setTextSize((uint8_t)ui_typography::bodyTextSizePaper());
+  char buf[40];
+  const int lh = LINE_H;
+  const int listY0Raw = submenuListY0Paper(false) + PAPER_MSG_LIST_TOP_PAD_PX;
+  const int minY = PAPER_MSG_MIN_BASELINE_Y + s_layoutTabShiftY;
+  const int listY0 = (listY0Raw < minY) ? minY : listY0Raw;
+  const int bottomPad = 6;
+  const int yBack = SCREEN_HEIGHT - bottomPad - lh - 1;
+  const bool tabDrill = ui_nav_mode::isTabMode() && s_tabDrillIn;
+  const bool gpsSel = !ui_nav_mode::isTabMode() || s_tabDrillIn;
+  const bool showGpsToggleRow = gps::isPresent() && (tabDrill || !ui_nav_mode::isTabMode());
+  const bool showBackFooter = !ui_nav_mode::isTabMode() || tabDrill;
+  const int yInfoEnd = showBackFooter ? (yBack - PAPER_MSG_BACK_GAP_PX) : (SCREEN_HEIGHT - 2);
+  int y = listY0;
+
+  if (showGpsToggleRow) {
+    const bool on = gps::isEnabled();
+    snprintf(buf, sizeof(buf), "%s", locale::getForDisplay(on ? "gps_toggle_on_off" : "gps_toggle_off_on"));
+    if (s_gpsMenuIndex == 0) {
+      disp->fillRect(0, y - 1, SCREEN_WIDTH, lh + 1, GxEPD_BLACK);
+      disp->setTextColor(GxEPD_WHITE);
+    } else {
+      disp->setTextColor(GxEPD_BLACK);
+    }
+    drawTruncUtf8(CONTENT_X, y + 4, buf, MAX_LINE_CHARS - 4);
+    disp->setTextColor(GxEPD_BLACK);
+    y += lh;
+  }
+
   if (!gps::isPresent() && gps::hasPhoneSync()) {
-    drawContentLine(0, locale::getForDisplay("gps_phone"));
-    if (gps::hasTime()) {
-      snprintf(buf, sizeof(buf), "%02d:%02d UTC", gps::getHour(), gps::getMinute());
-      drawContentLine(1, buf);
+    if (y + lh <= yInfoEnd + 1) {
+      drawTruncUtf8(CONTENT_X, y + 4, locale::getForDisplay("gps_phone"), MAX_LINE_CHARS - 4);
+      y += lh;
+    }
+    if (showBackFooter) {
+      const bool hiBack = gpsSel && !gps::isPresent() && (s_gpsMenuIndex == 0);
+      drawGpsBackFooterPaper(hiBack);
     }
     return;
   }
   if (!gps::isPresent()) {
-    drawContentLine(0, locale::getForDisplay("gps_not_present"));
-    drawContentLine(1, "BLE: gps rx,tx,en");
+    if (y + lh <= yInfoEnd + 1) {
+      drawTruncUtf8(CONTENT_X, y + 4, locale::getForDisplay("gps_not_present"), MAX_LINE_CHARS - 4);
+      y += lh;
+    }
+    if (y + lh <= yInfoEnd + 1) {
+      drawTruncRaw(CONTENT_X, y + 4, "BLE: gps rx,tx,en", MAX_LINE_CHARS - 4);
+      y += lh;
+    }
+    if (showBackFooter) {
+      const bool hiBack = gpsSel && !gps::isPresent() && (s_gpsMenuIndex == 0);
+      drawGpsBackFooterPaper(hiBack);
+    }
     return;
   }
-  drawContentLine(0, gps::isEnabled() ? locale::getForDisplay("gps_on") : locale::getForDisplay("gps_off"));
-  drawContentLine(1, gps::hasFix() ? locale::getForDisplay("gps_fix") : locale::getForDisplay("gps_no_fix"));
+
+  if (y + lh <= yInfoEnd + 1) {
+    if (gpsSel && gps::isPresent() && s_gpsMenuIndex == 0 && !showGpsToggleRow) {
+      disp->fillRect(0, y - 1, SCREEN_WIDTH, lh + 1, GxEPD_BLACK);
+      disp->setTextColor(GxEPD_WHITE);
+    } else {
+      disp->setTextColor(GxEPD_BLACK);
+    }
+    drawTruncUtf8(CONTENT_X, y + 4, gps::isEnabled() ? locale::getForDisplay("gps_on") : locale::getForDisplay("gps_off"),
+        MAX_LINE_CHARS - 4);
+    disp->setTextColor(GxEPD_BLACK);
+    y += lh;
+  }
+  if (y + lh <= yInfoEnd + 1) {
+    drawTruncUtf8(CONTENT_X, y + 4, gps::hasFix() ? locale::getForDisplay("gps_fix") : locale::getForDisplay("gps_no_fix"),
+        MAX_LINE_CHARS - 4);
+    y += lh;
+  }
   {
     char line2[40];
     line2[0] = '\0';
@@ -1623,7 +1694,13 @@ static void drawContentGps() {
     } else if (gps::hasFix()) {
       snprintf(line2, sizeof(line2), "%.4f %.4f", (double)gps::getLat(), (double)gps::getLon());
     }
-    if (line2[0]) drawContentLine(2, line2);
+    if (line2[0] && y + lh <= yInfoEnd + 1) {
+      drawTruncRaw(CONTENT_X, y + 4, line2, MAX_LINE_CHARS - 4);
+    }
+  }
+  if (showBackFooter) {
+    const bool hiBack = gpsSel && gps::isPresent() && (s_gpsMenuIndex == 1);
+    drawGpsBackFooterPaper(hiBack);
   }
 }
 
@@ -1663,7 +1740,7 @@ static void drawScreenContent(int tab) {
     drawChromeTabsOrIdleRowPaper();
     display_tabs::ContentTab ct = display_tabs::contentForNavTab(tab);
     if (ct != display_tabs::CT_MAIN && ct != display_tabs::CT_MSG && ct != display_tabs::CT_INFO &&
-        ct != display_tabs::CT_NET && ct != display_tabs::CT_SYS && ct != display_tabs::CT_POWER) {
+        ct != display_tabs::CT_NET && ct != display_tabs::CT_SYS && ct != display_tabs::CT_GPS && ct != display_tabs::CT_POWER) {
       drawSubmenuTitleBarPaper(ui_section::sectionTitleForContent(ct));
     }
     switch (ct) {
@@ -1686,7 +1763,7 @@ static void drawScreenContent(int tab) {
   {
     display_tabs::ContentTab ct = display_tabs::contentForTab(tab);
     if (ct != display_tabs::CT_MAIN && ct != display_tabs::CT_MSG && ct != display_tabs::CT_INFO &&
-        ct != display_tabs::CT_NET && ct != display_tabs::CT_SYS) {
+        ct != display_tabs::CT_NET && ct != display_tabs::CT_SYS && ct != display_tabs::CT_GPS) {
       drawSubmenuTitleBarPaper(ui_section::sectionTitleForContent(ct));
     }
   }
@@ -1832,6 +1909,7 @@ void displayShowScreen(int screen) {
       s_sysInDisplaySubmenu = false;
     }
     s_powerMenuIndex = 0;
+    s_gpsMenuIndex = 0;
   }
   onPaperTabSwitch(s_currentScreen, screen);
   s_currentScreen = screen;
@@ -1866,6 +1944,7 @@ void displayShowScreenForceFull(int screen) {
       s_sysInDisplaySubmenu = false;
     }
     s_powerMenuIndex = 0;
+    s_gpsMenuIndex = 0;
   }
   onPaperTabSwitch(s_currentScreen, screen);
   s_currentScreen = screen;
@@ -1902,6 +1981,12 @@ int displayHandleShortPress() {
       s_netMenuIndex = (s_netMenuIndex + 1) % 2;
       return s_currentScreen;
     }
+    if (ct == display_tabs::CT_GPS && s_tabDrillIn) {
+      if (gps::isPresent()) {
+        s_gpsMenuIndex = (s_gpsMenuIndex + 1) % 2;
+      }
+      return s_currentScreen;
+    }
     if (ct == display_tabs::CT_SYS) {
       s_sysMenuIndex = (s_sysMenuIndex + 1) % 7;
       return s_currentScreen;
@@ -1926,6 +2011,12 @@ int displayHandleShortPress() {
       s_sysMenuIndex = (s_sysMenuIndex + 1) % sysDisplaySubMenuCountPp();
     } else {
       s_sysMenuIndex = (s_sysMenuIndex + 1) % 7;
+    }
+    return s_currentScreen;
+  }
+  if (display_tabs::contentForTab(s_currentScreen) == display_tabs::CT_GPS) {
+    if (gps::isPresent()) {
+      s_gpsMenuIndex = (s_gpsMenuIndex + 1) % 2;
     }
     return s_currentScreen;
   }
@@ -2155,19 +2246,18 @@ void displayOnLongPress(int screen) {
   }
 
   if (ui_nav_mode::isTabMode()) {
-    if (ct == display_tabs::CT_GPS) {
-      bool gpsOn = gps::isPresent() && gps::isEnabled();
-      char gpsBuf[24];
-      snprintf(gpsBuf, sizeof(gpsBuf), "GPS: %s", gpsOn ? "ON -> OFF" : "OFF -> ON");
-      const char* items[] = {
-        gpsBuf,
-        locale::getForDisplay("menu_back")
-      };
-      const uint8_t* gIcons[2] = {ui_icons::gpsMenuIcon(0), ui_icons::gpsMenuIcon(1)};
-      int sel = displayShowPopupMenu("", items, 2, 0, POPUP_MODE_CANCEL, gIcons, true, false);
-      ui_menu_exec::exec_gps_menu(sel);
+    if (ct == display_tabs::CT_GPS && s_tabDrillIn) {
+      if (!gps::isPresent() || s_gpsMenuIndex == 1) {
+        s_tabDrillIn = false;
+        s_gpsMenuIndex = 0;
+      } else {
+        ui_menu_exec::exec_gps_menu(0);
+      }
       s_menuActive = false;
-      (void)drawScreen(s_currentScreen, powersave::isEnabled());
+      s_previousImageHash = 0;
+      s_fastRefreshCount = 0;
+      s_msgPartialStreak = 0;
+      (void)drawScreen(s_currentScreen, true);
       return;
     }
     if (s_tabDrillIn && (ct == display_tabs::CT_MAIN || ct == display_tabs::CT_MSG || ct == display_tabs::CT_INFO)) {
@@ -2189,6 +2279,7 @@ void displayOnLongPress(int screen) {
         s_sysInDisplaySubmenu = false;
       }
       if (ct == display_tabs::CT_POWER) s_powerMenuIndex = 0;
+      if (ct == display_tabs::CT_GPS) s_gpsMenuIndex = 0;
       s_menuActive = false;
       (void)drawScreen(s_currentScreen, powersave::isEnabled());
       return;
@@ -2321,16 +2412,19 @@ void displayOnLongPress(int screen) {
   }
 
   if (ct == display_tabs::CT_GPS) {
-    bool gpsOn = gps::isPresent() && gps::isEnabled();
-    char gpsBuf[24];
-    snprintf(gpsBuf, sizeof(gpsBuf), "GPS: %s", gpsOn ? "ON -> OFF" : "OFF -> ON");
-    const char* items[] = {
-      gpsBuf,
-      locale::getForDisplay("menu_back")
-    };
-    const uint8_t* gIcons[2] = {ui_icons::gpsMenuIcon(0), ui_icons::gpsMenuIcon(1)};
-    int sel = displayShowPopupMenu("", items, 2, 0, POPUP_MODE_CANCEL, gIcons, true, false);
-    ui_menu_exec::exec_gps_menu(sel);
+    if (!gps::isPresent() || s_gpsMenuIndex == 1) {
+      s_homeMenuIndex = display_tabs::homeMenuSlotForContent(display_tabs::CT_GPS);
+      s_currentScreen = 0;
+      s_gpsMenuIndex = 0;
+    } else {
+      ui_menu_exec::exec_gps_menu(0);
+    }
+    s_menuActive = false;
+    s_previousImageHash = 0;
+    s_fastRefreshCount = 0;
+    s_msgPartialStreak = 0;
+    (void)drawScreen(s_currentScreen, true);
+    return;
   }
 
   s_menuActive = false;
