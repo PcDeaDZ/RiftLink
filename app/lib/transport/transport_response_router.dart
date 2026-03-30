@@ -89,7 +89,15 @@ class TransportResponseRouter {
     final body = <String, dynamic>{...(payload ?? const <String, dynamic>{})};
     body['cmd'] = cmd;
     final raw = body['cmdId'];
-    final cmdId = (raw is int && raw > 0) ? raw : (_commandIdFactory?.call() ?? nextCmdId());
+    // Не только int: при merge/JSON иногда num (double); иначе генерировался новый id и ломался матч с узлом.
+    final int cmdId;
+    if (raw is int && raw > 0) {
+      cmdId = raw;
+    } else if (raw is num && raw > 0) {
+      cmdId = raw.round();
+    } else {
+      cmdId = _commandIdFactory?.call() ?? nextCmdId();
+    }
     body['cmdId'] = cmdId;
 
     final completer = Completer<Map<String, dynamic>>();

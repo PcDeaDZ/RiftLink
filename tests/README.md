@@ -29,3 +29,4 @@ flutter test
 | test_api.py | BLE/Serial JSON команды и события |
 | test_serial.py | Интеграционные тесты Serial API |
 | app/test/widget_test.dart | Flutter: события BLE, ChatScreen |
+| SMOKE_APP_NODE.md | Чеклист смоука приложение ↔ узел (BLE/Wi‑Fi); статика: `python scripts/verify_app_node_chain.py` |

@@ -308,6 +308,11 @@ class RiftLinkBle {
   int _extractOrAttachCmdId(Map<String, dynamic> payload) {
     final raw = payload['cmdId'];
     if (raw is int && raw > 0) return raw;
+    if (raw is num && raw > 0) {
+      final id = raw.round();
+      payload['cmdId'] = id;
+      return id;
+    }
     final next = _allocateCmdId();
     payload['cmdId'] = next;
     return next;

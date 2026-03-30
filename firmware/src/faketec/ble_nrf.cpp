@@ -712,6 +712,21 @@ static uint32_t parseJsonChannelId32(JsonVariant v) {
     if (ul > 4294967295UL) return 0;
     return static_cast<uint32_t>(ul);
   }
+  if (v.is<int>()) {
+    int i = v.as<int>();
+    if (i < 2) return 0;
+    return static_cast<uint32_t>(i);
+  }
+  if (v.is<long>()) {
+    long i = v.as<long>();
+    if (i < 2L || i > 4294967295L) return 0;
+    return static_cast<uint32_t>(i);
+  }
+  if (v.is<long long>()) {
+    long long i = v.as<long long>();
+    if (i < 2LL || i > 4294967295LL) return 0;
+    return static_cast<uint32_t>(i);
+  }
   const double d = v.as<double>();
   if (d < 2.0 || d > 4294967295.0) return 0;
   return static_cast<uint32_t>(static_cast<uint64_t>(d + 0.5));
@@ -729,6 +744,21 @@ static uint32_t parseCmdIdFromDoc(JsonDocument& doc) {
     if (end == s) return 0;
     if (ul > 4294967295UL) return 0;
     return static_cast<uint32_t>(ul);
+  }
+  if (v.is<int>()) {
+    int i = v.as<int>();
+    if (i < 1) return 0;
+    return static_cast<uint32_t>(i);
+  }
+  if (v.is<long>()) {
+    long i = v.as<long>();
+    if (i < 1L || i > 4294967295L) return 0;
+    return static_cast<uint32_t>(i);
+  }
+  if (v.is<long long>()) {
+    long long i = v.as<long long>();
+    if (i < 1LL || i > 4294967295LL) return 0;
+    return static_cast<uint32_t>(i);
   }
   const double d = v.as<double>();
   if (d < 1.0 || d > 4294967295.0) return 0;
@@ -750,6 +780,7 @@ static bool bleJsonCmdAllowsMissingCmdId(const char* cmd) {
   if (strcmp(cmd, "loraScan") == 0) return true;
   if (strcmp(cmd, "shutdown") == 0 || strcmp(cmd, "poweroff") == 0) return true;
   if (strncmp(cmd, "bleOta", 6) == 0) return true;
+  if (strcmp(cmd, "nickname") == 0) return true;
   return false;
 }
 

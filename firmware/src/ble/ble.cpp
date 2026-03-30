@@ -321,7 +321,7 @@ struct PendingPingCmdId {
 };
 static PendingPingCmdId s_pendingPingCmdIds[8];
 
-/// cmdId из JSON: как у channelId32 — число может лежать в double/int64; только is<int>() даёт 0 и ломает cmd:info.
+/// cmdId из JSON: как у channelId32 — число может быть int/long/double; только `as<double>()` без ветки int давало 0 на части сборок.
 static inline uint32_t parseCmdIdFromDoc(const JsonDocument& doc) {
   JsonVariantConst v = doc["cmdId"];
   if (v.isNull()) return 0;
@@ -333,6 +333,21 @@ static inline uint32_t parseCmdIdFromDoc(const JsonDocument& doc) {
     if (end == s) return 0;
     if (ul > 4294967295UL) return 0;
     return static_cast<uint32_t>(ul);
+  }
+  if (v.is<int>()) {
+    int i = v.as<int>();
+    if (i < 1) return 0;
+    return static_cast<uint32_t>(i);
+  }
+  if (v.is<long>()) {
+    long i = v.as<long>();
+    if (i < 1L || i > 4294967295L) return 0;
+    return static_cast<uint32_t>(i);
+  }
+  if (v.is<long long>()) {
+    long long i = v.as<long long>();
+    if (i < 1LL || i > 4294967295LL) return 0;
+    return static_cast<uint32_t>(i);
   }
   const double d = v.as<double>();
   if (d < 1.0 || d > 4294967295.0) return 0;
@@ -354,6 +369,8 @@ static bool bleJsonCmdAllowsMissingCmdId(const char* cmd) {
   if (strcmp(cmd, "loraScan") == 0) return true;
   if (strcmp(cmd, "shutdown") == 0 || strcmp(cmd, "poweroff") == 0) return true;
   if (strncmp(cmd, "bleOta", 6) == 0) return true;
+  /** nickname/region/channel/sf — обычно с cmdId из приложения; без cmdId не режем (ручной клиент / старый клиент). */
+  if (strcmp(cmd, "nickname") == 0) return true;
   return false;
 }
 
@@ -1096,6 +1113,21 @@ static uint32_t parseJsonChannelId32(JsonVariant v) {
     if (end == s) return 0;
     if (ul > 4294967295UL) return 0;
     return static_cast<uint32_t>(ul);
+  }
+  if (v.is<int>()) {
+    int i = v.as<int>();
+    if (i < 2) return 0;
+    return static_cast<uint32_t>(i);
+  }
+  if (v.is<long>()) {
+    long i = v.as<long>();
+    if (i < 2L || i > 4294967295L) return 0;
+    return static_cast<uint32_t>(i);
+  }
+  if (v.is<long long>()) {
+    long long i = v.as<long long>();
+    if (i < 2LL || i > 4294967295LL) return 0;
+    return static_cast<uint32_t>(i);
   }
   const double d = v.as<double>();
   if (d < 2.0 || d > 4294967295.0) return 0;
