@@ -20,8 +20,8 @@ void send();  // Отправка broadcast TELEMETRY
 uint16_t readBatteryMv();
 
 /**
- * Внешнее питание / зарядка: на ESP32-S3 при наличии драйвера — USB host (CDC);
- * иначе эвристика напряжения > 4.2 V. На nRF T114 — только по напряжению.
+ * Зарядка: на ESP32 с USB Serial JTAG — только usb_serial_jtag (U>4.2 В давало ложный CHG на полной АКБ).
+ * Без JTAG-драйвера — эвристика U>4.2 V. T‑Pager: BQ; T‑Beam: PMU. T114: U>4.2 V.
  */
 bool isCharging();
 

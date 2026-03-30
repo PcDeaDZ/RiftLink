@@ -1,7 +1,7 @@
 /**
  * RiftLink — телеметрия
  * Heltec V3/V4 (OLED): GPIO1 = ADC1_CH0 для батареи, GPIO37 = ADC_CTRL (HIGH = вкл. делитель)
- *   Делитель 390k+100k → коэффициент 4.9.  Meshtastic variant.h: BATTERY_PIN=1, ADC_CTRL=37
+ *   Делитель 390k+100k; множитель как Meshtastic heltec_v4 (4.9·1.045). GPIO1, ADC_CTRL=37.
  * Heltec V3 Paper: GPIO7 = E-Ink BUSY. Батарея на GPIO19/20 (ADC2, divider ~50%).
  */
 
@@ -38,7 +38,8 @@
 
 #define BAT_ADC_PIN      1      // GPIO1 (ADC1_CH0) — Heltec V3/V4 OLED
 #define BAT_ADC_CTRL     37     // GPIO37: HIGH = включить делитель батареи
-#define BAT_DIVIDER      4.9f   // резисторный делитель 390k / 100k
+/** 4.9 (делитель) ×1.045 — heltec_v4 в Meshtastic; не универсально для всех их плат. */
+#define BAT_DIVIDER      (4.9f * 1.045f)
 
 #if defined(USE_EINK)
 #define PAPER_ADC_CTRL  19  // GPIO19: LOW = включить делитель батареи
@@ -330,10 +331,11 @@ bool isCharging() {
   return lilygoTbeamIsCharging();
 #else
 #if RIFTLINK_USB_SERIAL_JTAG
-  if (usbSerialJtagHostConnected()) return true;
-#endif
+  return usbSerialJtagHostConnected();
+#else
   uint16_t mv = readBatteryMv();
   return mv > 4200;
+#endif
 #endif
 }
 
@@ -351,7 +353,7 @@ int batteryPercent() {
 #else
   uint16_t mv = readBatteryMv();
 #if RIFTLINK_USB_SERIAL_JTAG
-  const bool charging = usbSerialJtagHostConnected() || mv > 4200;
+  const bool charging = usbSerialJtagHostConnected();
   if (!charging) {
     s_socOnBatteryOnly = batteryPercentFromMv(mv);
     return s_socOnBatteryOnly;

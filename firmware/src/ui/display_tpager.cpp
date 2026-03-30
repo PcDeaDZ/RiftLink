@@ -604,6 +604,7 @@ static void drawStatusBarTpagerAt(int ySig) {
     rightClusterLeft -= (int)strlen(buf) * 6 + 4;
   }
   rightClusterLeft -= kBatteryIconBarW;
+  rightClusterLeft += 1;
 
   drawSignalBars(8, ySig, tb.signalBars);
   const int leftBlockEnd = 30;
@@ -633,6 +634,7 @@ static void drawStatusBarTpagerAt(int ySig) {
     xRight -= 6;
   }
   xRight -= kBatteryIconBarW;
+  xRight += 1;
   drawBatteryIcon(xRight, ySig - 1, pct, chg);
 }
 
