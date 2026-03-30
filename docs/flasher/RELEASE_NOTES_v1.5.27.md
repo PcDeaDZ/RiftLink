@@ -1,0 +1,4 @@
+- Релиз **1.5.27**: прошивки Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam; приложение **1.5.27+13**.
+- Веб-флешер: `docs/flasher/firmware/*_full.bin`, манифесты **1.5.27**, `embedded-release.json`.
+- BLE JSON: устойчивый разбор **cmdId** и **channel**; в приложении сопоставление по **cmdId** как `num`.
+- Скрипт `scripts/verify_app_node_chain.py`, смоук `tests/SMOKE_APP_NODE.md`.

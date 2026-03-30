@@ -1,20 +1,20 @@
 {
-  "tag": "v1.5.26",
-  "firmwareVersion": "1.5.26",
-  "appVersion": "1.5.26",
-  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.26/RiftLink-1.5.26-arm64-v8a.apk",
+  "tag": "v1.5.27",
+  "firmwareVersion": "1.5.27",
+  "appVersion": "1.5.27",
+  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.27/RiftLink-1.5.27-arm64-v8a.apk",
   "notesRu": [
-    "Веб-флешер (ESP Web Tools): образы *_full.bin и манифесты 1.5.26 для Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam; GitHub Pages.",
-    "Экран GPS: «Поиск» без фикса; при фиксе — спутники и курс в одной строке, координаты ниже; без прокрутки, скрывавшей спутники. Стабильный hasFix(). Статус-бар и батарея.",
-    "LilyGO T-Lora Pager: исправлена сборка display_tpager (forward-declarations, textWidth/fontHeight вместо getTextBounds).",
-    "Прошивки nRF/T114 в этом релизе не пересобирались; приложение 1.5.26+12.",
-    "Android: APK **RiftLink-1.5.26-arm64-v8a.apk** в GitHub Release **v1.5.26** (см. apkDownloadUrl)."
+    "Веб-флешер (ESP Web Tools): образы *_full.bin и манифесты 1.5.27 для Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam; GitHub Pages.",
+    "BLE JSON: устойчивый разбор cmdId и channel при разных типах числа; в приложении — сопоставление ответов по cmdId как num.",
+    "Скрипт scripts/verify_app_node_chain.py и смоук tests/SMOKE_APP_NODE.md.",
+    "Прошивки nRF/T114 в этом релизе не пересобирались; приложение 1.5.27+13.",
+    "Android: APK **RiftLink-1.5.27-arm64-v8a.apk** в GitHub Release **v1.5.27** (см. apkDownloadUrl)."
   ],
   "notesEn": [
-    "Web flasher (ESP Web Tools): *_full.bin images and manifests 1.5.26 for Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam; GitHub Pages.",
-    "GPS screen: «Searching» without fix; with fix — satellites+course on one line, coordinates below; no scroll hiding satellites. Stable hasFix(). Status bar and battery.",
-    "LilyGO T-Lora Pager: display_tpager build fix (forward declarations, textWidth/fontHeight instead of getTextBounds).",
-    "nRF/T114 firmware not rebuilt in this release; app 1.5.26+12.",
-    "Android: **RiftLink-1.5.26-arm64-v8a.apk** in GitHub Release **v1.5.26** (see apkDownloadUrl)."
+    "Web flasher (ESP Web Tools): *_full.bin images and manifests 1.5.27 for Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam; GitHub Pages.",
+    "BLE JSON: robust cmdId and channel parsing for different numeric types; app matches responses by cmdId as num.",
+    "Script scripts/verify_app_node_chain.py and smoke tests/SMOKE_APP_NODE.md.",
+    "nRF/T114 firmware not rebuilt in this release; app 1.5.27+13.",
+    "Android: **RiftLink-1.5.27-arm64-v8a.apk** in GitHub Release **v1.5.27** (see apkDownloadUrl)."
   ]
 }

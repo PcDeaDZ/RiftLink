@@ -1,6 +1,34 @@
 # Журнал изменений RiftLink
 
-Формат: версия **прошивки и приложения** синхронизированы по семантике релиза (например `1.5.26`).
+Формат: версия **прошивки и приложения** синхронизированы по семантике релиза (например `1.5.27`).
+
+---
+
+## 1.5.27 — 2026-03-30
+
+### Прошивка (ESP: Heltec V3/V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam)
+
+- **BLE JSON:** разбор **`cmdId`** и **`channel`** из полей документа — учёт целочисленных и вещественных представлений (`int` / `long` / `double`), чтобы ответы по отслеживаемым запросам не терялись при иной сериализации числа. Аналогично в **`ble_nrf.cpp`** (паритет nRF).
+
+### Приложение
+
+- **Транспорт BLE:** при сопоставлении ответа с `sendTrackedRequest` учитывается **`cmdId` как `num`** (включая `double`), не только `int`. В **`riftlink_ble.dart`** — извлечение/привязка `cmdId` для положительных `num`.
+
+### Сборка и артефакты релиза
+
+- Версии: **`firmware/src/version.h`** → **1.5.27**, **`app/pubspec.yaml`** → **1.5.27+13**.
+- **Пересобраны и выложены только ESP-окружения:** `heltec_v3`, `heltec_v4`, `heltec_v3_paper`, `lilygo_t_lora_pager`, `lilygo_t_beam_4mb` — merged `*_full.bin` в **`docs/flasher/firmware/`**.
+- **Прошивки nRF52840 / Heltec T114 в этом релизе не собирались и не публиковались.**
+
+### Веб-флешер и приложение
+
+- Манифесты **`docs/flasher/manifests/*.json`** — поле `version` **1.5.27**; **`embedded-release.json`**, **`release-github.json`**, **`RELEASE_NOTES_v1.5.27.md`**.
+- Android APK: **`RiftLink-1.5.27-arm64-v8a.apk`** в GitHub Release **v1.5.27**.
+
+### Документация и проверки
+
+- Обновлены **README**, **PROTOCOL**, **API**, **CUSTOM_PROTOCOL_PLAN**, **WEB_FLASH_GITHUB**, **CHANGELOG**.
+- Скрипт **`scripts/verify_app_node_chain.py`** и смоук **`tests/SMOKE_APP_NODE.md`** — проверка согласованности цепочки приложение ↔ узел.
 
 ---
 

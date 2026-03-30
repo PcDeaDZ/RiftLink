@@ -254,7 +254,7 @@ Groups V2 работает по `groupUid` и signed grants. Команды `gro
 Пример фрагмента (одна строка NDJSON):
 
 ```json
-{"evt":"node","seq":7,"cmdId":42,"id":"A1B2C3D4E5F60708","nickname":"Alice","region":"EU","freq":868.1,"power":14,"channel":0,"version":"1.5.26"}
+{"evt":"node","seq":7,"cmdId":42,"id":"A1B2C3D4E5F60708","nickname":"Alice","region":"EU","freq":868.1,"power":14,"channel":0,"version":"1.5.27"}
 ```
 
 `nickname` — опционально. `channel` — только для EU/UK (0–2). `version` — версия прошивки.  

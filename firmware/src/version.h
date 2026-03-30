@@ -4,6 +4,6 @@
 #ifndef RIFTLINK_VERSION_H
 #define RIFTLINK_VERSION_H
 
-#define RIFTLINK_VERSION "1.5.26"
+#define RIFTLINK_VERSION "1.5.27"
 
 #endif
