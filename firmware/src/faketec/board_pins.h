@@ -44,6 +44,10 @@
 #define T114_LED_PIN 35
 #define T114_BUTTON_PIN 42
 #define T114_LED_ON LOW
+#define T114_LED_OFF HIGH
+/** Два NeoPixel на шине данных (Meshtastic: NEOPIXEL_DATA 14, NEO_GRB + NEO_KHZ800). Без begin()/show() — мусор на линии. */
+#define T114_NEOPIXEL_PIN 14
+#define T114_NEOPIXEL_COUNT 2
 #else
 // FakeTech V5 / ProMicro DIY + HT-RA62
 #define LORA_NSS 45

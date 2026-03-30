@@ -1,5 +1,7 @@
 #include "ui_nav_mode.h"
 #include <Arduino.h>
+
+#if defined(ARDUINO_ARCH_ESP32)
 #include <nvs.h>
 #include <nvs_flash.h>
 
@@ -35,3 +37,42 @@ bool setTabMode(bool tabs) {
 }
 
 }  // namespace ui_nav_mode
+
+#elif defined(RIFTLINK_NRF52)
+#include "../faketec/kv.h"
+
+static bool s_tabMode = false;
+static bool s_inited = false;
+
+namespace ui_nav_mode {
+
+void init() {
+  if (s_inited) return;
+  if (riftlink_kv::is_ready()) {
+    int8_t v = 0;
+    if (riftlink_kv::getI8("ui_nav", &v) && v != 0) s_tabMode = true;
+  }
+  s_inited = true;
+}
+
+bool isTabMode() { return s_tabMode; }
+
+bool setTabMode(bool tabs) {
+  s_tabMode = tabs;
+  if (!riftlink_kv::is_ready()) return false;
+  return riftlink_kv::setI8("ui_nav", tabs ? (int8_t)1 : (int8_t)0);
+}
+
+}  // namespace ui_nav_mode
+
+#else
+
+namespace ui_nav_mode {
+
+void init() {}
+bool isTabMode() { return false; }
+bool setTabMode(bool) { return false; }
+
+}  // namespace ui_nav_mode
+
+#endif

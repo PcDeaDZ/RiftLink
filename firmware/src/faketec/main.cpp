@@ -19,6 +19,7 @@
 #include "handle_packet_nrf.h"
 #include "display_nrf.h"
 #include "menu_nrf.h"
+#include "nrf_ui_parity.h"
 #include "kv.h"
 #include "mab/mab.h"
 #include "msg_queue/msg_queue.h"
@@ -37,7 +38,14 @@
 #include "memory_diag/memory_diag.h"
 #include "telemetry/telemetry.h"
 #include "mesh_hello_nrf.h"
+#include "ui/ui_nav_mode.h"
+#include "ui/ui_display_prefs.h"
+#include "ui/ui_tab_bar_idle.h"
 #include "board_pins.h"
+
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+#include <Adafruit_NeoPixel.h>
+#endif
 #include "voice_buffers/voice_buffers.h"
 #include "voice_frag/voice_frag.h"
 #include "x25519_keys/x25519_keys.h"
@@ -218,9 +226,25 @@ static void sendLocation(float lat, float lon, int16_t alt, uint16_t radiusM, ui
 }
 
 void setup() {
+  bool radioOk = false;
+  bool antennaOk = true;
+
   Serial.begin(115200);
   uart1_begin();
   delay(300);
+
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  {
+    Adafruit_NeoPixel np(T114_NEOPIXEL_COUNT, T114_NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+    np.begin();
+    np.clear();
+    np.show();
+  }
+  pinMode(T114_LED_PIN, OUTPUT);
+  digitalWrite(T114_LED_PIN, T114_LED_OFF);
+  pinMode(T114_BUTTON_PIN, INPUT_PULLUP);
+  log_line("[RiftLink] T114: LED/button");
+#endif
 
   // Пока хост не открёл виртуальный COM, TinyUSB CDC часто отбрасывает вывод — ждём до 15 с, затем первая строка уходит уже в открытый порт.
   uint32_t usb_wait_start = millis();
@@ -241,10 +265,27 @@ void setup() {
   } else {
     log_line("[RiftLink] init: InternalFS ok");
   }
+  ui_nav_mode::init();
+  ui_display_prefs::init();
+  ui_tab_bar_idle::init();
 
   log_line("[RiftLink] init: locale");
   locale::init();
   log_line("[RiftLink] init: locale done");
+
+#if !defined(RIFTLINK_SKIP_OLED_INIT) && defined(RIFTLINK_BOARD_HELTEC_T114)
+  log_line("[RiftLink] init: display (T114 ST7789 SPI — до node, экран загрузки как на ESP)");
+  if (display_nrf::init()) {
+    menu_nrf_init();
+    if (!locale::isSet()) {
+      nrf_ui_run_language_until_done();
+    }
+    display_nrf::show_init_progress(0, 4, locale::getForDisplay("init_step_identity"));
+  } else {
+    log_line("[RiftLink] T114: display_nrf::init failed");
+  }
+#endif
+
   log_line("[RiftLink] init: node");
   node::init();
   log_line("[RiftLink] init: node done");
@@ -290,16 +331,41 @@ void setup() {
   telemetry::init();
   log_line("[RiftLink] init: mesh stack done (pkt..telemetry)");
   log_line("[RiftLink] init: radio");
-  if (!radio::init()) {
+#if !defined(RIFTLINK_SKIP_OLED_INIT)
+  if (display_nrf::is_ready()) {
+    display_nrf::show_init_progress(1, 4, locale::getForDisplay("init_step_radio"));
+  }
+#endif
+  radioOk = radio::init();
+  antennaOk = true;
+  if (!radioOk) {
     log_line("[RiftLink] radio init failed");
   } else {
     log_line("[RiftLink] boot: selftest::quickAntennaCheck");
-    if (!selftest::quickAntennaCheck()) {
+    antennaOk = selftest::quickAntennaCheck();
+    if (!antennaOk) {
       log_line("[RiftLink] LoRa TX ping failed — проверьте антенну и регион");
     }
   }
+#if !defined(RIFTLINK_SKIP_OLED_INIT)
+  if (display_nrf::is_ready()) {
+    display_nrf::show_init_progress(2, 4,
+        radioOk ? locale::getForDisplay("radio_ok") : locale::getForDisplay("radio_fail"));
+    if (radioOk && radio::isReady() && !antennaOk) {
+      display_nrf::show_warning_blocking(locale::getForDisplay("antenna_warn"),
+          locale::getForDisplay("antenna_check"), 3000);
+    }
+    display_nrf::show_init_progress(2, 4, locale::getForDisplay("init_step_region"));
+  }
+#endif
+  nrf_ui_run_region_until_done();
 
   log_line("[RiftLink] init: BLE (Bluefruit)");
+#if !defined(RIFTLINK_SKIP_OLED_INIT)
+  if (display_nrf::is_ready()) {
+    display_nrf::show_init_progress(3, 4, locale::getForDisplay("init_step_ble"));
+  }
+#endif
   const bool bleOk = ble::init();
   if (!bleOk) {
     log_line("[RiftLink] BLE init failed");
@@ -311,29 +377,64 @@ void setup() {
   log_line("[RiftLink] init: x25519_keys");
   x25519_keys::init();
   log_line("[RiftLink] init: x25519_keys done");
+#if !defined(RIFTLINK_SKIP_OLED_INIT)
+  if (display_nrf::is_ready()) {
+    display_nrf::show_init_progress(4, 4, locale::getForDisplay("init_step_done"));
+  }
+#endif
   neighbors::init();
   mesh_hello_nrf_init();
   s_lastKeyRetry = millis() + (node::getId()[0] % 16) * 500;
 
-  // OLED в конце: на nRF52 Wire без таймаута — неверные SDA/SCL зависают навсегда; до сюда уже видны LoRa/BLE в логе.
+  // FakeTech: OLED I2C в конце — при неверных SDA/SCL Wire зависает; T114 ST7789 SPI поднимается сразу после locale.
 #if defined(RIFTLINK_SKIP_OLED_INIT)
   log_line("[RiftLink] OLED skipped (RIFTLINK_SKIP_OLED_INIT)");
 #else
-  log_line("[RiftLink] init: OLED (I2C) — если дальше нет строк, завис I2C: env faketec_v5 vs heltec_t114 или нет SSD1306");
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  if (!display_nrf::is_ready()) {
+    log_line("[RiftLink] init: T114 — повторная попытка display_nrf::init");
+    if (display_nrf::init()) {
+      menu_nrf_init();
+      if (!locale::isSet()) {
+        nrf_ui_run_language_until_done();
+      }
+      if (radioOk && radio::isReady() && !antennaOk) {
+        display_nrf::show_warning_blocking(locale::getForDisplay("antenna_warn"),
+            locale::getForDisplay("antenna_check"), 3000);
+      }
+      if (!region::isSet()) {
+        nrf_ui_run_region_until_done();
+      }
+      display_nrf::show_init_progress(4, 4, locale::getForDisplay("init_step_done"));
+    }
+  }
+#else
+  log_line("[RiftLink] init: FakeTech OLED (I2C)");
   if (!display_nrf::init()) {
     log_line("[RiftLink] OLED init failed (проверьте I2C и env)");
   } else {
-    display_nrf::show_boot(locale::getForDisplay("boot_line1"), locale::getForDisplay("boot_line2"));
     menu_nrf_init();
+    if (!locale::isSet()) {
+      nrf_ui_run_language_until_done();
+    }
+    if (radioOk && radio::isReady() && !antennaOk) {
+      display_nrf::show_warning_blocking(locale::getForDisplay("antenna_warn"),
+          locale::getForDisplay("antenna_check"), 3000);
+    }
+    nrf_ui_run_region_until_done();
+    display_nrf::show_init_progress(4, 4, locale::getForDisplay("init_step_done"));
   }
 #endif
-
-#if defined(RIFTLINK_BOARD_HELTEC_T114)
-  pinMode(T114_LED_PIN, OUTPUT);
-  digitalWrite(T114_LED_PIN, T114_LED_ON);
-  pinMode(T114_BUTTON_PIN, INPUT_PULLUP);
-  log_line("[RiftLink] T114: LED/button pins (Meshtastic variant)");
 #endif
+
+#if !defined(RIFTLINK_SKIP_OLED_INIT)
+  if (display_nrf::is_ready()) {
+    menu_nrf_goto_dashboard(0);
+  }
+#endif
+  if (!region::isSet()) {
+    (void)region::setRegion("EU");
+  }
 
   log_line("[RiftLink] setup complete");
 }
@@ -755,6 +856,7 @@ void loop() {
   }
 
 #if defined(RIFTLINK_BOARD_HELTEC_T114)
+  menu_nrf_tab_idle_tick();
   menu_nrf_poll_t114_button(digitalRead(T114_BUTTON_PIN) == LOW, millis());
 #endif
 

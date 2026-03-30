@@ -10,6 +10,9 @@ void nrf_render_dashboard(uint8_t page);
 
 void menu_nrf_init();
 
+/** T114: таймер скрытия полоски вкладок (как displayUpdate + ui_tab_bar_idle на ESP). */
+void menu_nrf_tab_idle_tick();
+
 /** T114: вызывать из loop с текущим состоянием кнопки (LOW = нажата). */
 void menu_nrf_poll_t114_button(bool pressed, uint32_t now_ms);
 

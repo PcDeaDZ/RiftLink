@@ -1,5 +1,7 @@
 #include "ui_display_prefs.h"
 #include <Arduino.h>
+
+#if defined(ARDUINO_ARCH_ESP32)
 #include <nvs.h>
 #include <nvs_flash.h>
 
@@ -81,3 +83,85 @@ void cycleTabBarHideIdleSeconds() {
 }
 
 }  // namespace ui_display_prefs
+
+#elif defined(RIFTLINK_NRF52)
+#include "faketec/kv.h"
+
+static bool s_inited = false;
+static bool s_flip180 = false;
+static uint8_t s_tabHideS = 10;
+
+static constexpr const char* KV_DISP_FLIP = "disp_flip";
+static constexpr const char* KV_TAB_HIDE = "tab_hide_s";
+
+static uint8_t normalizeTabHideFromNvs(uint8_t raw) {
+  if (raw == 5 || raw == 10 || raw == 15) return raw;
+  if (raw == 0) return 10;
+  if (raw == 30) return 15;
+  return 10;
+}
+
+namespace ui_display_prefs {
+
+void init() {
+  if (s_inited) return;
+  s_flip180 = false;
+  s_tabHideS = 10;
+  if (riftlink_kv::is_ready()) {
+    int8_t f = 0;
+    if (riftlink_kv::getI8(KV_DISP_FLIP, &f) && f != 0) s_flip180 = true;
+    int8_t th = 10;
+    if (riftlink_kv::getI8(KV_TAB_HIDE, &th)) {
+      s_tabHideS = normalizeTabHideFromNvs((uint8_t)th);
+    }
+  }
+  s_inited = true;
+}
+
+bool getFlip180() { return s_flip180; }
+
+bool setFlip180(bool on) {
+  s_flip180 = on;
+  if (!riftlink_kv::is_ready()) return false;
+  return riftlink_kv::setI8(KV_DISP_FLIP, on ? (int8_t)1 : (int8_t)0);
+}
+
+uint8_t getTabBarHideIdleSeconds() { return s_tabHideS; }
+
+bool setTabBarHideIdleSeconds(uint8_t seconds) {
+  if (seconds != 5 && seconds != 10 && seconds != 15) return false;
+  s_tabHideS = seconds;
+  if (!riftlink_kv::is_ready()) return false;
+  return riftlink_kv::setI8(KV_TAB_HIDE, (int8_t)s_tabHideS);
+}
+
+void cycleTabBarHideIdleSeconds() {
+  if (s_tabHideS == 5)
+    (void)setTabBarHideIdleSeconds(10);
+  else if (s_tabHideS == 10)
+    (void)setTabBarHideIdleSeconds(15);
+  else
+    (void)setTabBarHideIdleSeconds(5);
+}
+
+}  // namespace ui_display_prefs
+
+#else
+
+namespace ui_display_prefs {
+
+void init() {}
+
+bool getFlip180() { return false; }
+
+bool setFlip180(bool) { return false; }
+
+uint8_t getTabBarHideIdleSeconds() { return 10; }
+
+bool setTabBarHideIdleSeconds(uint8_t) { return false; }
+
+void cycleTabBarHideIdleSeconds() {}
+
+}  // namespace ui_display_prefs
+
+#endif

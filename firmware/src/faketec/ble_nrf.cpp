@@ -1883,7 +1883,12 @@ bool init() {
 
   loadOrCreatePasskey();
 
+  // T114: зелёный GPIO35 — conn LED Bluefruit (мигание при рекламе BLE). Отключаем: не цель паритета, раздражает рядом с NeoPixel.
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  Bluefruit.autoConnLed(false);
+#else
   Bluefruit.autoConnLed(true);
+#endif
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
   // Сначала SoftDevice (Bluefruit.begin): иначе первый sodium_init() в loadOrGenerateGroupOwnerSigningKey()
   // до поднятия SD на части nRF52840 блокируется навсегда.

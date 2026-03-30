@@ -72,7 +72,7 @@ pio run -t upload -e faketec_v5
 | FakeTech V5 / NiceNano / Pro Micro DIY (как ниже) | **`faketec_v5`** | Таблица пинов — эта секция |
 | Heltec Mesh Node **T114** | **`heltec_t114`** | Другие I2C/SPI в `board_pins.h` (OLED: 26/27); не прошивать `faketec_v5` на T114 и наоборот |
 
-Плата `heltec_mesh_t114.json` в репозитории использует **тот же** вариант `faketec_nrf52840`, что и FakeTech; различие только **макрос** `RIFTLINK_BOARD_HELTEC_T114` и строки в `board_pins.h`.
+Плата `heltec_mesh_t114.json` указывает **variant** `heltec_mesh_t114` (`variants/heltec_mesh_t114/variant.h`: LED **35**, активный LOW; I2C по умолчанию **26/27**; пин **15** не LED — подсветка TFT). Сборка **`faketec_v5`** по-прежнему **variant** `faketec_nrf52840`. Различие плат — макрос `RIFTLINK_BOARD_HELTEC_T114` и `board_pins.h`.
 
 ### FakeTech / Pro Micro (env `faketec_v5`)
 
@@ -178,4 +178,4 @@ pio run -t upload -e faketec_v5
 - **Wi‑Fi:** на nRF52840 **нет** модуля Wi‑Fi (в отличие от Heltec ESP32). Только **BLE** (телефон) и **LoRa** (mesh). В JSON для приложения: `radioMode: "ble"`, `wifiConnected: false`.
 - **OTA:** только USB DFU (`firmware.zip`), не Wi‑Fi AP как на ESP.
 - **Голос:** общий **`voice_frag` / `voice_buffers`** (приём/сборка фрагментов, шифрование). **Location / GPS:** **`gps_nrf.cpp`** — без GNSS; координаты и epoch с телефона (**`gps::setPhoneSync`** по BLE). Входящие `OP_LOCATION` с mesh → `evt:location` (relay). Периодический **`OP_TELEMETRY`** (broadcast, как на ESP) — **`telemetry_nrf.cpp`**, интервал в **`main.cpp`** (`TELEM_INTERVAL_MS`). На **T114** напряжение батареи в телеметрии берётся с АЦП (делитель как в Meshtastic: `T114_BATT_ADC_PIN` / `T114_ADC_CTRL_PIN` в `board_pins.h`); на **FakeTech** без схемы делителя в прошивке поле батареи может оставаться 0.
-- **Board:** `faketec_v5` + variant `faketec_nrf52840` (48 GPIO, см. `platformio.ini`)
+- **Board:** `faketec_v5` + variant `faketec_nrf52840`; `heltec_t114` + variant `heltec_mesh_t114` (см. `boards/heltec_mesh_t114.json`, `platformio.ini`)

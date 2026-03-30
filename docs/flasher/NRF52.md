@@ -4,7 +4,10 @@
 
 ## Какая плата → какой env (`-e`)
 
-Оба окружения используют один Arduino-вариант [`firmware/variants/faketec_nrf52840`](../../firmware/variants/faketec_nrf52840); отличие только в **макросах** и таблице пинов [`firmware/src/faketec/board_pins.h`](../../firmware/src/faketec/board_pins.h). Прошивка **не того** env даёт неверные **I2C (OLED)** и **SPI (LoRa)** — типично «чёрный экран», «тишина» на эфире.
+- **`faketec_v5`** — Arduino-variant [`firmware/variants/faketec_nrf52840`](../../firmware/variants/faketec_nrf52840).
+- **`heltec_t114`** — variant [`firmware/variants/heltec_mesh_t114`](../../firmware/variants/heltec_mesh_t114) (LED на GPIO **35**, не на **15**=TFT BL; I2C по умолчанию 26/27).
+
+Отличие плат — ещё **макросы** и [`firmware/src/faketec/board_pins.h`](../../firmware/src/faketec/board_pins.h). Прошивка **не того** env даёт неверные **I2C** и **SPI (LoRa)** — типично «чёрный экран», «тишина» на эфире.
 
 | Физическое устройство | PlatformIO | I2C OLED (логические GPIO) |
 |------------------------|------------|----------------------------|
@@ -15,7 +18,7 @@
 
 ### Serial (USB CDC) пустой
 
-После прошивки выберите **COM-порт устройства в режиме приложения** (иногда он отличается от порта bootloader). На TinyUSB CDC **первые строки часто теряются**, пока хост не открыл виртуальный COM: в `faketec/main.cpp` перед первым логом ждётся до **15 с** готовности `Serial`, строки дублируются на **аппаратный UART `Serial1`** (в варианте `faketec_nrf52840`: **TX = GPIO 6**, 115200 8N1) — при «пустом» USB подключите внешний USB–UART к TX. Отключить UART1: `-D RIFTLINK_NO_UART1_LOG`. Если порт верный, а строк нет — проверьте драйвер CDC и bootloader (см. ниже).
+После прошивки выберите **COM-порт устройства в режиме приложения** (иногда он отличается от порта bootloader). На TinyUSB CDC **первые строки часто теряются**, пока хост не открыл виртуальный COM: в `faketec/main.cpp` перед первым логом ждётся до **15 с** готовности `Serial`, строки дублируются на **аппаратный UART `Serial1`** (`faketec_nrf52840` / `heltec_mesh_t114`: **TX = GPIO 6**, 115200 8N1) — при «пустом» USB подключите внешний USB–UART к TX. Отключить UART1: `-D RIFTLINK_NO_UART1_LOG`. Если порт верный, а строк нет — проверьте драйвер CDC и bootloader (см. ниже).
 
 ## Сборка
 
