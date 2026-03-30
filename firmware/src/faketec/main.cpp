@@ -452,6 +452,9 @@ void setup() {
 }
 
 void loop() {
+  /* BLE раньше тяжёлой работы итерации: на T114/nRF меньше «окна» без pumping SoftDevice/NUS. */
+  ble::update();
+
   {
     uint32_t now = millis();
     if ((uint32_t)(now - s_lastSerialHeartbeatMs) >= SERIAL_HEARTBEAT_MS) {

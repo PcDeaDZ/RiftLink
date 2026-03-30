@@ -4,7 +4,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart' show debugPrint, kDebugMode, kIsWeb;
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import 'riftlink_transport.dart';
@@ -62,9 +62,7 @@ class BleTransport implements RiftLinkTransport {
       return false;
     }
 
-    if (!kIsWeb) {
-      try { await dev.requestMtu(517); } catch (_) {}
-    }
+    // MTU уже запрошен внутри BluetoothDevice.connect() на Android (дефолт 512); повтор — GATT_INVALID_PDU.
 
     await _startRx();
     return true;

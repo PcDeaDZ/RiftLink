@@ -42,11 +42,20 @@ extern "C" size_t xPortGetFreeHeapSize(void);
 #ifndef RIFTLINK_BLE_RX_LINE_MAX
 #define RIFTLINK_BLE_RX_LINE_MAX 512
 #endif
+/**
+ * Типичный Android после обмена MTU: ATT payload ≈ MTU−3 (часто 244 B). Одна NDJSON-строка без разрыва
+ * по нескольким notify — JSON должен укладываться в один фрейм (+ '\n' отдельным байтом в том же write).
+ * Иначе Flutter склеивает чанки, но отладочный jsonDecode на неполном буфере даёт «Unterminated string».
+ */
+#ifndef RIFTLINK_BLE_ATT_SAFE_JSON_BYTES
+#define RIFTLINK_BLE_ATT_SAFE_JSON_BYTES 230
+#endif
 
 namespace ble {
 
 static void emitJsonDoc(JsonDocument& doc);
 
+void notifyInfo();
 void notifyInvite();
 void getAdvertisingName(char* out, size_t outLen);
 
@@ -66,12 +75,22 @@ static volatile uint8_t s_outHead = 0;
 static volatile uint8_t s_outTail = 0;
 static volatile uint8_t s_outCount = 0;
 
+static void resetBleOutQueueOnDisconnect() {
+  s_outHead = 0;
+  s_outTail = 0;
+  s_outCount = 0;
+}
+
 static char s_rxLine[kRxLineMax];
 static size_t s_rxLen = 0;
 static uint32_t s_lastRxLineTooLongNotifyMs = 0;
 
 static bool s_inited = false;
 static bool s_connected = false;
+/** После BLE connect — волна info из `update()`, не из callback SoftDevice (там нельзя `delay`). */
+static bool s_pendingInfoAfterConnect = false;
+/** Не слать волну, пока централь не включил notify (CCCD); иначе первая отдача — в пустоту. Таймаут — как на медленных телефонах. */
+static uint32_t s_pendingInfoDeadlineMs = 0;
 static uint32_t s_passkey = 0;
 
 static uint8_t s_inviteToken[8];
@@ -379,6 +398,55 @@ static void trimBlePassportDoc(JsonDocument& doc) {
   doc.remove("offlinePending");
 }
 
+/** Ужать документ под один BLE notify (типичный Android ~244 B payload), не нарушая NDJSON одной строкой. */
+static void shrinkJsonDocToAttSafe(JsonDocument& doc) {
+  static const char* kTrimOrder[] = {
+      "heapFree",
+      "nickname",
+      "timeHour",
+      "timeMinute",
+      "offlineDirectPending",
+      "offlineCourierPending",
+      "offlinePending",
+      "gpsPresent",
+      "gpsEnabled",
+      "gpsFix",
+      "batteryPercent",
+      "charging",
+      "batteryMv",
+      "wifiConnected",
+      "espnowChannel",
+      "espnowAdaptive",
+      "powersave",
+      "channel",
+      "radioMode",
+      "freq",
+      "power",
+      "region",
+      "modemPreset",
+      "cr",
+      "bw",
+      "lang",
+      "platform",
+      "version",
+  };
+  for (size_t i = 0; i < sizeof(kTrimOrder) / sizeof(kTrimOrder[0]); i++) {
+    if (measureJson(doc) <= (size_t)RIFTLINK_BLE_ATT_SAFE_JSON_BYTES) return;
+    doc.remove(kTrimOrder[i]);
+  }
+  while (measureJson(doc) > (size_t)RIFTLINK_BLE_ATT_SAFE_JSON_BYTES) {
+    if (!doc["sf"].isNull()) {
+      doc.remove("sf");
+      continue;
+    }
+    if (!doc["region"].isNull()) {
+      doc.remove("region");
+      continue;
+    }
+    break;
+  }
+}
+
 /** Как ESP `appendNodeSysMetricsToDoc` — только то, что умещается в 512 B (nRF без flash/NVS в JSON). */
 static void appendNrfSysMetricsToDoc(JsonDocument& doc) {
   const uint32_t heap = xPortGetFreeHeapSize();
@@ -429,6 +497,7 @@ static void emitNodeSnapshotForWave(uint32_t seq, uint32_t cmdId) {
   appendNrfSysMetricsToDoc(doc);
   appendNrfPassportFields(doc);
   trimBlePassportDoc(doc);
+  shrinkJsonDocToAttSafe(doc);
   emitJsonDoc(doc);
 }
 
@@ -473,6 +542,15 @@ static void notifyNeighborsWithSeq(uint32_t seq, uint32_t cmdId) {
   appendNrfPassportFields(doc);
   trimBlePassportDoc(doc);
   shrinkNeighborEvtToFit(doc, arr, rssiArr, keyArr, &batMvArr);
+  while (measureJson(doc) > (size_t)RIFTLINK_BLE_ATT_SAFE_JSON_BYTES && arr.size() > 0) {
+    const size_t last = arr.size() - 1;
+    arr.remove(last);
+    if (rssiArr.size() > last) rssiArr.remove(last);
+    if (keyArr.size() > last) keyArr.remove(last);
+    if (batMvArr.size() > last) batMvArr.remove(last);
+    doc["neighborsTruncated"] = true;
+  }
+  shrinkJsonDocToAttSafe(doc);
   emitJsonDoc(doc);
 }
 
@@ -511,6 +589,11 @@ static void notifyRoutesWithSeq(uint32_t seq, uint32_t cmdId) {
       break;
     }
   }
+  while (measureJson(doc) > (size_t)RIFTLINK_BLE_ATT_SAFE_JSON_BYTES && arr.size() > 0) {
+    arr.remove(arr.size() - 1);
+    doc["routesTruncated"] = true;
+  }
+  shrinkJsonDocToAttSafe(doc);
   emitJsonDoc(doc);
 }
 
@@ -552,6 +635,11 @@ static void notifyGroupsWithSeq(uint32_t seq, uint32_t cmdId) {
       break;
     }
   }
+  while (measureJson(doc) > (size_t)RIFTLINK_BLE_ATT_SAFE_JSON_BYTES && arr.size() > 0) {
+    arr.remove(arr.size() - 1);
+    doc["groupsTruncated"] = true;
+  }
+  shrinkJsonDocToAttSafe(doc);
   emitJsonDoc(doc);
 }
 
@@ -1853,6 +1941,8 @@ static void onBleUartRx(uint16_t) {
 static void connect_callback(uint16_t conn_handle) {
   (void)conn_handle;
   s_connected = true;
+  s_pendingInfoAfterConnect = true;
+  s_pendingInfoDeadlineMs = millis() + 8000;
   RIFTLINK_DIAG("BLE", "event=CONNECTED");
 }
 
@@ -1860,11 +1950,14 @@ static void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
   (void)conn_handle;
   (void)reason;
   s_connected = false;
+  s_pendingInfoAfterConnect = false;
+  s_pendingInfoDeadlineMs = 0;
+  resetBleOutQueueOnDisconnect();
   RIFTLINK_DIAG("BLE", "event=DISCONNECTED reason=0x%02X", (unsigned)reason);
 }
 
 static void startAdvertising() {
-  char name[20];
+  char name[24];
   getAdvertisingName(name, sizeof(name));
 
   Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
@@ -1957,6 +2050,18 @@ void update() {
   }
 
   s_connected = (Bluefruit.connected() > 0);
+  if (s_pendingInfoAfterConnect && s_connected) {
+    const bool cccdReady = bleuart.notifyEnabled();
+    const bool timedOut = s_pendingInfoDeadlineMs != 0 && (int32_t)(millis() - s_pendingInfoDeadlineMs) >= 0;
+    if (cccdReady || timedOut) {
+      s_pendingInfoAfterConnect = false;
+      s_pendingInfoDeadlineMs = 0;
+      if (!cccdReady && timedOut) {
+        RIFTLINK_DIAG("BLE", "event=INFO_WAVE_PENDING reason=cccd_timeout (flush when notify enables)");
+      }
+      notifyInfo();
+    }
+  }
   pingRetryTick();
   flushPendingBleOutbound();
   flushOutQueue();
@@ -2412,9 +2517,10 @@ void processCommand(const uint8_t* data, size_t len) {
 }
 
 void getAdvertisingName(char* out, size_t outLen) {
-  if (!out || outLen < 12) return;
+  if (!out || outLen < 20) return;
   const uint8_t* id = node::getId();
-  snprintf(out, outLen, "RL-%02X%02X%02X%02X", id[0], id[1], id[2], id[3]);
+  /* Паритет с `ble.cpp` (ESP): RL- + полный 8-байтовый node id (16 hex). */
+  snprintf(out, outLen, "RL-%02X%02X%02X%02X%02X%02X%02X%02X", id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7]);
 }
 
 uint32_t getPasskey() {

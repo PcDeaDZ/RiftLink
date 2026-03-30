@@ -413,21 +413,16 @@ class RiftLinkBle {
         await disconnect();
         return false;
       }
-      if (!kIsWeb) {
-        try {
-          await dev.requestMtu(517);
-        } catch (_) {}
-      }
+      // MTU: BluetoothDevice.connect() на Android уже делает один MTU Exchange (по умолчанию mtu=512).
+      // Повторный requestMtu(517) даёт GATT_INVALID_PDU (4) и шум в логах — второй раз не вызываем.
       await _startRxDispatcher();
       _lastBleRemoteId = dev.remoteId.toString();
       // Параллельный залп tracked-команд переполняет очередь BLE на узле; серийно снижает cmd_drop / потерю ответов.
       unawaited(() async {
         try {
+          // Одна волна cmd:info даёт evt:node → neighbors → routes → groups с общим seq/cmdId.
+          // Отдельные getGroups/getRoutes с другим cmdId давали response_timeout (роутер ждёт свой cmdId).
           await getInfo(force: true);
-          await Future<void>.delayed(const Duration(milliseconds: 60));
-          await getGroups();
-          await Future<void>.delayed(const Duration(milliseconds: 40));
-          await getRoutes();
         } catch (_) {}
       }());
       _wifiReconnectIp = null;

@@ -12,6 +12,7 @@
 #include "board_pins.h"
 
 #include <RadioLib.h>
+#include <modules/SX126x/SX126x.h>
 #include <SPI.h>
 #include <atomic>
 #include <cmath>
@@ -56,6 +57,9 @@ static inline void radioSendReason(char* buf, size_t buflen, const char* msg) {
 
 static SemaphoreHandle_t s_radioMutex = nullptr;
 static std::atomic<bool> s_rxListenActive{false};
+/** RadioLib `receive()` (короткое окно ~100 символов + standby) оставляет эфир непрослушиваемым между вызовами из `loop()`.
+ *  Держим SX1262 в continuous RX (`startReceive()` без таймаута) и снимаем кадры по IRQ RX_DONE. */
+static std::atomic<bool> s_rxContinuousArmed{false};
 static std::atomic<bool> s_arbiterHold{false};
 static std::atomic<uint32_t> s_dio1IrqCount{0};
 static std::atomic<uint32_t> s_rxLenOversizeDrops{0};
@@ -64,6 +68,10 @@ static std::atomic<uint32_t> s_rxReadErrors{0};
 
 static void onDio1Rise() {
   s_dio1IrqCount.fetch_add(1, std::memory_order_relaxed);
+}
+
+static void nrfInvalidateContinuousRx() {
+  s_rxContinuousArmed.store(false, std::memory_order_relaxed);
 }
 
 #define CAD_SLOT_TIME_MS 4
@@ -181,6 +189,7 @@ static void saveModemToKv(radio::ModemPreset preset, uint8_t sf, float bw, uint8
 
 static void applyModemToChip(uint8_t sf, float bw, uint8_t cr) {
   if (!chipOk()) return;
+  nrfInvalidateContinuousRx();
   uint16_t preamble = (sf >= 10) ? 16 : 8;
   s_lora->setSpreadingFactor(sf);
   s_lora->setBandwidth(bw);
@@ -267,6 +276,7 @@ void setRxListenActive(bool on) {
 void standbyChipUnderMutex() {
   if (!chipOk()) return;
   s_lora->standby();
+  nrfInvalidateContinuousRx();
 }
 
 uint32_t getTimeOnAir(size_t len) {
@@ -279,6 +289,7 @@ bool isChannelFree() {
   if (s_rxListenActive.load(std::memory_order_relaxed)) return false;
   if (!takeMutex(pdMS_TO_TICKS(50))) return false;
   s_lora->standby();
+  nrfInvalidateContinuousRx();
   int16_t cad = s_lora->scanChannel();
   releaseMutex();
   return (cad == RADIOLIB_CHANNEL_FREE);
@@ -323,6 +334,7 @@ bool sendDirectInternal(const uint8_t* data, size_t len, char* reasonBuf, size_t
   }
 
   s_lora->standby();
+  nrfInvalidateContinuousRx();
   if (!skipCad) {
     for (int attempt = 0; attempt < CAD_MAX_RETRIES; attempt++) {
       int16_t cad = s_lora->scanChannel();
@@ -385,22 +397,6 @@ bool sendDirect(const uint8_t* data, size_t len, char* reasonBuf, size_t reasonL
   return send(data, len, 0, true, reasonBuf, reasonLen);
 }
 
-int receive(uint8_t* buf, size_t maxLen) {
-  if (!chipOk()) return -1;
-  int16_t st = s_lora->receive(buf, maxLen);
-  if (st == RADIOLIB_ERR_RX_TIMEOUT) return 0;
-  if (st < 0) return -1;
-  return (int)st;
-}
-
-bool startReceiveWithTimeout(uint32_t timeoutMs) {
-  if (!chipOk()) return false;
-  uint32_t units = (uint32_t)((uint64_t)timeoutMs * 1000 / 16);
-  if (units > 0xFFFFF) units = 0xFFFFF;
-  int16_t st = s_lora->startReceive(units);
-  return (st == RADIOLIB_ERR_NONE);
-}
-
 static int normalizeReadLength(size_t requestedLen, int16_t readStatus) {
   if (readStatus < 0) return -1;
   if (readStatus == RADIOLIB_ERR_NONE) return (int)requestedLen;
@@ -408,6 +404,55 @@ static int normalizeReadLength(size_t requestedLen, int16_t readStatus) {
   if (normalized <= 0) return -1;
   if ((size_t)normalized > requestedLen) normalized = (int)requestedLen;
   return normalized;
+}
+
+int receive(uint8_t* buf, size_t maxLen) {
+  if (!chipOk()) return -1;
+  if (!s_rxContinuousArmed.load(std::memory_order_relaxed)) {
+    int16_t st = s_lora->startReceive();
+    if (st != RADIOLIB_ERR_NONE) {
+      return -1;
+    }
+    s_rxContinuousArmed.store(true, std::memory_order_relaxed);
+  }
+  uint16_t irq = s_lora->getIrqStatus();
+  if ((irq & RADIOLIB_SX126X_IRQ_RX_DONE) == 0) {
+    return 0;
+  }
+  size_t len = s_lora->getPacketLength();
+  if (len == 0 || len > maxLen) {
+    if (len > maxLen) {
+      s_rxLenOversizeDrops.fetch_add(1, std::memory_order_relaxed);
+    }
+    (void)s_lora->standby();
+    nrfInvalidateContinuousRx();
+    return -1;
+  }
+  int16_t st = s_lora->readData(buf, len);
+  int readLen = normalizeReadLength(len, st);
+  if (st == RADIOLIB_ERR_RX_TIMEOUT) {
+    nrfInvalidateContinuousRx();
+    return 0;
+  }
+  if (readLen < 0) {
+    s_rxReadErrors.fetch_add(1, std::memory_order_relaxed);
+    nrfInvalidateContinuousRx();
+    return -1;
+  }
+  if ((size_t)readLen < len) {
+    s_rxShortReads.fetch_add(1, std::memory_order_relaxed);
+  }
+  nrfInvalidateContinuousRx();
+  return readLen;
+}
+
+bool startReceiveWithTimeout(uint32_t timeoutMs) {
+  if (!chipOk()) return false;
+  nrfInvalidateContinuousRx();
+  uint32_t units = (uint32_t)((uint64_t)timeoutMs * 1000 / 16);
+  if (units > 0xFFFFF) units = 0xFFFFF;
+  int16_t st = s_lora->startReceive(units);
+  return (st == RADIOLIB_ERR_NONE);
 }
 
 int receiveAsync(uint8_t* buf, size_t maxLen) {
@@ -418,6 +463,7 @@ int receiveAsync(uint8_t* buf, size_t maxLen) {
       s_rxLenOversizeDrops.fetch_add(1, std::memory_order_relaxed);
     }
     s_lora->standby();
+    nrfInvalidateContinuousRx();
     return 0;
   }
   int16_t st = s_lora->readData(buf, len);
@@ -425,12 +471,14 @@ int receiveAsync(uint8_t* buf, size_t maxLen) {
   if (st == RADIOLIB_ERR_RX_TIMEOUT) return 0;
   if (readLen < 0) {
     s_rxReadErrors.fetch_add(1, std::memory_order_relaxed);
+    nrfInvalidateContinuousRx();
     return -1;
   }
   if ((size_t)readLen < len) {
     s_rxShortReads.fetch_add(1, std::memory_order_relaxed);
   }
   s_lora->standby();
+  nrfInvalidateContinuousRx();
   return readLen;
 }
 
@@ -446,6 +494,7 @@ int readReceivedPacketUnderMutex(uint8_t* buf, size_t maxLen) {
   if (len > maxLen) {
     s_rxLenOversizeDrops.fetch_add(1, std::memory_order_relaxed);
     s_lora->standby();
+    nrfInvalidateContinuousRx();
     return -1;
   }
   int16_t st = s_lora->readData(buf, len);
@@ -453,8 +502,10 @@ int readReceivedPacketUnderMutex(uint8_t* buf, size_t maxLen) {
   if (st == RADIOLIB_ERR_RX_TIMEOUT) return 0;
   if (readLen < 0) {
     s_rxReadErrors.fetch_add(1, std::memory_order_relaxed);
+    nrfInvalidateContinuousRx();
     return -1;
   }
+  nrfInvalidateContinuousRx();
   return readLen;
 }
 
@@ -478,6 +529,7 @@ int getLastRssi() {
 
 void applyRegion(float freq, int power) {
   if (!chipOk()) return;
+  nrfInvalidateContinuousRx();
   s_lora->setFrequency(freq);
   s_lora->setOutputPower(power);
 }
@@ -551,6 +603,7 @@ void setSpreadingFactor(uint8_t sf) {
 void applyHardwareSpreadingFactor(uint8_t sf) {
   if (!chipOk() || sf < 7 || sf > 12) return;
   if (sf == s_hwSf) return;
+  nrfInvalidateContinuousRx();
   uint16_t preamble = (sf >= 10) ? 16 : 8;
   s_lora->setSpreadingFactor(sf);
   s_lora->setPreambleLength(preamble);
@@ -561,6 +614,7 @@ void applyHardwareModem(uint8_t sf, float bw, uint8_t cr) {
   if (!chipOk()) return;
   if (sf < 7 || sf > 12) return;
   if (!isValidBw(bw) || cr < 5 || cr > 8) return;
+  nrfInvalidateContinuousRx();
   uint16_t preamble = (sf >= 10) ? 16 : 8;
   s_lora->setSpreadingFactor(sf);
   s_lora->setBandwidth(bw);
