@@ -72,7 +72,8 @@ class BleTransport implements RiftLinkTransport {
   Future<bool> sendJson(String json) async {
     if (_txChar == null || !isConnected) return false;
     try {
-      await _txChar!.write(utf8.encode(json), withoutResponse: true);
+      final b = utf8.encode(json);
+      await _txChar!.write([...b, 0x0A], withoutResponse: true);
       return true;
     } catch (_) {
       return false;

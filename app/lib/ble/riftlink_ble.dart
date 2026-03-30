@@ -29,8 +29,9 @@ class RiftLinkBle {
   static const deviceName = 'RiftLink';
   static const int bleAttMaxJsonBytes = 512;
 
+  /// Учитывает завершающий LF NDJSON при записи в NUS (см. [_writeBleBytesSerialized]).
   static bool exceedsBleAttLimit(String json) =>
-      utf8.encode(json).length > bleAttMaxJsonBytes;
+      utf8.encode(json).length + 1 > bleAttMaxJsonBytes;
 
   BluetoothDevice? _device;
   String? _lastBleRemoteId;
@@ -278,7 +279,10 @@ class RiftLinkBle {
     }
     _txInFlight++;
     try {
-      await _txChar!.write(bytes, withoutResponse: true);
+      // NDJSON: прошивка nRF (ble_nrf.cpp) читает NUS в строку до \n; без LF команда не парсится.
+      // ESP (NimBLE) принимает целый GATT write без обязательного \n — для паритета с nRF шлём всегда.
+      final out = List<int>.from(bytes)..add(0x0A);
+      await _txChar!.write(out, withoutResponse: true);
       _diagInc('tx_ok');
       _trace(traceOnSuccess);
       _diagMaybeDump('tx_ok');

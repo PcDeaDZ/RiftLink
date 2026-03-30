@@ -38,6 +38,7 @@
 #include "memory_diag/memory_diag.h"
 #include "telemetry/telemetry.h"
 #include "mesh_hello_nrf.h"
+#include "nrf_wdt_feed.h"
 #include "ui/ui_nav_mode.h"
 #include "ui/ui_display_prefs.h"
 #include "ui/ui_tab_bar_idle.h"
@@ -449,9 +450,11 @@ void setup() {
   }
 
   log_line("[RiftLink] setup complete");
+  riftlink_wdt_init();
 }
 
 void loop() {
+  riftlink_wdt_feed();
   /* BLE раньше тяжёлой работы итерации: на T114/nRF меньше «окна» без pumping SoftDevice/NUS. */
   ble::update();
 
@@ -526,6 +529,7 @@ void loop() {
     offline_queue::update();
     flushDeferredSends();
     delay(200);
+    riftlink_wdt_feed();
     return;
   }
 
@@ -885,4 +889,5 @@ void loop() {
   flushDeferredSends();
 
   delay(20);
+  riftlink_wdt_feed();
 }

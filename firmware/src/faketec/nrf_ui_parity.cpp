@@ -4,6 +4,7 @@
 #include "locale/locale.h"
 #include "region/region.h"
 #include "ble/ble.h"
+#include "nrf_wdt_feed.h"
 
 #include <Arduino.h>
 #include <cstring>
@@ -29,11 +30,13 @@ static int blocking_press_short_or_long() {
       }
     }
     prev = pressed;
+    riftlink_wdt_feed();
     delay(5);
   }
 #else
   for (;;) {
     ble::update();
+    riftlink_wdt_feed();
     if (Serial.available()) {
       String line = Serial.readStringUntil('\n');
       line.trim();
@@ -41,6 +44,7 @@ static int blocking_press_short_or_long() {
       if (line == "l" || line == "long") return 1;
       if (line == "s" || line == "short") return 0;
     }
+    riftlink_wdt_feed();
     delay(20);
   }
 #endif

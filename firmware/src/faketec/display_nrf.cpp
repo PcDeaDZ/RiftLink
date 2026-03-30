@@ -5,6 +5,7 @@
 #include "display_nrf.h"
 #include "board_pins.h"
 #include "ble/ble.h"
+#include "nrf_wdt_feed.h"
 #include "locale/locale.h"
 #include "version.h"
 
@@ -954,6 +955,7 @@ void show_warning_blocking(const char* line1, const char* line2, uint32_t durati
   const uint32_t t0 = millis();
   while ((uint32_t)(millis() - t0) < durationMs) {
     ble::update();
+    riftlink_wdt_feed();
     delay(50);
   }
 }
@@ -1579,6 +1581,7 @@ void show_warning_blocking(const char* line1, const char* line2, uint32_t durati
   const uint32_t t0 = millis();
   while ((uint32_t)(millis() - t0) < durationMs) {
     ble::update();
+    riftlink_wdt_feed();
     delay(50);
   }
 }

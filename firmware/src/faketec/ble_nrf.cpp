@@ -87,6 +87,16 @@ static uint32_t s_lastRxLineTooLongNotifyMs = 0;
 
 static bool s_inited = false;
 static bool s_connected = false;
+/** Конец предыдущего `ble::update()`: был ли активный линк (для сброса TX-очереди только на нисходящем фронте). */
+static bool s_bleConnAtPrevUpdateEnd = false;
+
+/** Волна info разнесена по вызовам `update()` — иначе один кадр: глубокий стек (несколько JsonDocument) + долгие delay → HardFault/«мёртвый» loop. */
+enum class InfoWavePhase : uint8_t { Idle, EmitNode, EmitNeighbors, EmitRoutes, EmitGroups };
+static InfoWavePhase s_infoWavePhase = InfoWavePhase::Idle;
+static bool s_infoWavePending = false;
+static uint32_t s_infoWavePendingCmdId = 0;
+static uint32_t s_infoWaveSeq = 0;
+static uint32_t s_infoWaveCmdId = 0;
 /** После BLE connect — волна info из `update()`, не из callback SoftDevice (там нельзя `delay`). */
 static bool s_pendingInfoAfterConnect = false;
 /** Не слать волну, пока централь не включил notify (CCCD); иначе первая отдача — в пустоту. Таймаут — как на медленных телефонах. */
@@ -468,11 +478,6 @@ static void shrinkNeighborEvtToFit(JsonDocument& doc, JsonArray& arr, JsonArray&
   }
 }
 
-static void bleWaveDelayMs(uint32_t ms) {
-  delay(ms);
-  yield();
-}
-
 static const char* groupRoleToStr(groups::GroupRole role);
 
 /** Первый кадр волны info: как evt:node на ESP (паспорт + seq/cmdId). */
@@ -494,6 +499,9 @@ static void emitNodeSnapshotForWave(uint32_t seq, uint32_t cmdId) {
   doc["modemPreset"] = (int)radio::getModemPreset();
   doc["blePin"] = s_passkey;
   doc["lang"] = (locale::getLang() == LANG_RU) ? "ru" : "en";
+  /* Явно: соседи по эфиру (LoRa mesh), не «BLE-соседи». 0 — норма при одном узле / вне зоны / другом регионе. */
+  doc["loraMeshPeers"] = neighbors::getCount();
+  doc["radioReady"] = radio::isReady();
   appendNrfSysMetricsToDoc(doc);
   appendNrfPassportFields(doc);
   trimBlePassportDoc(doc);
@@ -643,16 +651,47 @@ static void notifyGroupsWithSeq(uint32_t seq, uint32_t cmdId) {
   emitJsonDoc(doc);
 }
 
-/** Волна как notifyInfo() на ESP: node → neighbors → routes → groups. */
-static void emitInfoWave(uint32_t cmdId) {
-  const uint32_t seq = ++s_bleSyncSeq;
-  emitNodeSnapshotForWave(seq, cmdId);
-  bleWaveDelayMs(6);
-  notifyNeighborsWithSeq(seq, cmdId);
-  bleWaveDelayMs(6);
-  notifyRoutesWithSeq(seq, cmdId);
-  bleWaveDelayMs(4);
-  notifyGroupsWithSeq(seq, cmdId);
+/** Запрос волны info (node→neighbors→routes→groups); выполнение по одному кадру на вызов `ble::update()`. */
+static void emitInfoWaveRequest(uint32_t cmdId) {
+  if (s_infoWavePhase != InfoWavePhase::Idle || s_infoWavePending) {
+    RIFTLINK_DIAG("BLE", "event=INFO_WAVE_SKIP reason=busy");
+    return;
+  }
+  s_infoWavePending = true;
+  s_infoWavePendingCmdId = cmdId;
+}
+
+static void processInfoWaveStep() {
+  if (s_infoWavePending && s_infoWavePhase == InfoWavePhase::Idle) {
+    s_infoWavePending = false;
+    s_infoWaveSeq = ++s_bleSyncSeq;
+    s_infoWaveCmdId = s_infoWavePendingCmdId;
+    s_infoWavePhase = InfoWavePhase::EmitNode;
+    return;
+  }
+  if (s_infoWavePhase == InfoWavePhase::Idle) return;
+
+  switch (s_infoWavePhase) {
+    case InfoWavePhase::EmitNode:
+      emitNodeSnapshotForWave(s_infoWaveSeq, s_infoWaveCmdId);
+      s_infoWavePhase = InfoWavePhase::EmitNeighbors;
+      break;
+    case InfoWavePhase::EmitNeighbors:
+      notifyNeighborsWithSeq(s_infoWaveSeq, s_infoWaveCmdId);
+      s_infoWavePhase = InfoWavePhase::EmitRoutes;
+      break;
+    case InfoWavePhase::EmitRoutes:
+      notifyRoutesWithSeq(s_infoWaveSeq, s_infoWaveCmdId);
+      s_infoWavePhase = InfoWavePhase::EmitGroups;
+      break;
+    case InfoWavePhase::EmitGroups:
+      notifyGroupsWithSeq(s_infoWaveSeq, s_infoWaveCmdId);
+      s_infoWavePhase = InfoWavePhase::Idle;
+      break;
+    default:
+      s_infoWavePhase = InfoWavePhase::Idle;
+      break;
+  }
 }
 
 static const char* groupRoleToStr(groups::GroupRole role) {
@@ -689,10 +728,18 @@ static bool enqueueJsonLine(const char* json) {
   return true;
 }
 
-static void flushOutQueue() {
+/** За один вызов `ble::update()` не слать слишком много notify подряд — иначе централь рвёт линк / SoftDevice захлёбывается. */
+static constexpr unsigned kBleOutLinesPerUpdateFlush = 4;
+
+/**
+ * Отправить до maxLines строк из очереди; между строками — yield + короткая пауза (как между чанками в writeJsonNdjsonChunked).
+ * Всю очередь — через flushOutQueueAll() (несколько порций с паузами между ними).
+ */
+static void flushOutQueueLimited(unsigned maxLines) {
   if (!s_connected || Bluefruit.connected() == 0) return;
   if (!bleuart.notifyEnabled()) return;
-  while (s_outCount > 0) {
+  while (s_outCount > 0 && maxLines > 0) {
+    if (!s_connected || Bluefruit.connected() == 0) return;
     const char* line = s_outQ[s_outTail];
     size_t L = strlen(line);
     if (L > 0) {
@@ -701,6 +748,27 @@ static void flushOutQueue() {
     }
     s_outTail = (uint8_t)((s_outTail + 1) % kOutQDepth);
     s_outCount--;
+    maxLines--;
+    if (s_outCount > 0 && maxLines > 0) {
+      yield();
+      delay(1);
+    }
+  }
+}
+
+static void flushOutQueue() {
+  flushOutQueueLimited(kBleOutLinesPerUpdateFlush);
+}
+
+/** Слить всю очередь перед крупным NDJSON (чанки); между порциями — пауза, чтобы не рвать соединение. */
+static void flushOutQueueAll() {
+  while (s_outCount > 0) {
+    if (!s_connected || Bluefruit.connected() == 0) return;
+    if (!bleuart.notifyEnabled()) return;
+    const unsigned before = s_outCount;
+    flushOutQueueLimited(kBleOutLinesPerUpdateFlush);
+    if (s_outCount == before) return;
+    yield();
   }
 }
 
@@ -1001,7 +1069,7 @@ static bool handleGroupV2Commands(JsonDocument& doc, const char* cmd, uint32_t c
       (void)groups::ackKeyAppliedV2(groupUid, appliedKv);
     }
     notifyGroupStatusV2(groupUid, false, cmdId);
-    emitInfoWave(cmdId);
+    emitInfoWaveRequest(cmdId);
     return true;
   }
   if (strcmp(cmd, "groupStatus") == 0) {
@@ -1038,7 +1106,7 @@ static bool handleGroupV2Commands(JsonDocument& doc, const char* cmd, uint32_t c
       return true;
     }
     notifyGroupStatusV2(groupUid, false, cmdId);
-    emitInfoWave(cmdId);
+    emitInfoWaveRequest(cmdId);
     return true;
   }
   if (strcmp(cmd, "groupInviteCreate") == 0) {
@@ -1145,7 +1213,7 @@ static bool handleGroupV2Commands(JsonDocument& doc, const char* cmd, uint32_t c
       out[outLen] = '\0';
       (void)enqueueJsonLine(out);
     } else {
-      flushOutQueue();
+      flushOutQueueAll();
       if (!writeJsonNdjsonChunked(out, outLen)) {
         notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Invite TX failed", cmdId);
         return true;
@@ -1234,7 +1302,7 @@ static bool handleGroupV2Commands(JsonDocument& doc, const char* cmd, uint32_t c
     }
     if (groups::getGroupV2(gu, nullptr, nullptr, 0, nullptr, 0, nullptr, nullptr, nullptr, nullptr)) {
       notifyGroupStatusV2(gu, true, cmdId);
-      emitInfoWave(0);
+      emitInfoWaveRequest(0);
       return true;
     }
     if (!groups::upsertGroupV2(gu, channelId32, groupTag, canonicalName, gkey, keyVersion > 0 ? keyVersion : 1, role,
@@ -1250,7 +1318,7 @@ static bool handleGroupV2Commands(JsonDocument& doc, const char* cmd, uint32_t c
       const uint16_t appliedKv = keyVersion > 0 ? keyVersion : 1;
       (void)groups::ackKeyAppliedV2(gu, appliedKv);
     }
-    emitInfoWave(0);
+    emitInfoWaveRequest(0);
     notifyGroupStatusV2(gu, false, cmdId);
     return true;
   }
@@ -1302,7 +1370,7 @@ static bool handleGroupV2Commands(JsonDocument& doc, const char* cmd, uint32_t c
       notifyGroupSecurityErrorV2(groupUid, "group_v2_leave_bad", "Unknown group", cmdId);
       return true;
     }
-    emitInfoWave(cmdId);
+    emitInfoWaveRequest(cmdId);
     return true;
   }
   if (strcmp(cmd, "groupRekey") == 0) {
@@ -1397,7 +1465,7 @@ static bool handleGroupV2Commands(JsonDocument& doc, const char* cmd, uint32_t c
       if (!groups::upsertGroupV2(groupUid, channelId32, gtag, canonicalName, gkey, keyVersion, role, revEpoch)) continue;
       if (g["ackApplied"] == true) groups::ackKeyAppliedV2(groupUid, keyVersion);
     }
-    emitInfoWave(cmdId);
+    emitInfoWaveRequest(cmdId);
     return true;
   }
   return false;
@@ -1430,7 +1498,7 @@ static void handleJsonCommand(const char* json, size_t len) {
   if (handleGroupV2Commands(doc, cmd, cmdId)) return;
 
   if (strcmp(cmd, "info") == 0) {
-    emitInfoWave(cmdId);
+    emitInfoWaveRequest(cmdId);
     return;
   }
   if (strcmp(cmd, "neighbors") == 0) {
@@ -1527,7 +1595,7 @@ static void handleJsonCommand(const char* json, size_t len) {
     if (keyB64) {
       uint8_t key[32];
       if (b64Decode32(keyB64, key) && crypto::setChannelKey(key)) {
-        emitInfoWave(cmdId);
+        emitInfoWaveRequest(cmdId);
       }
     }
     return;
@@ -1575,7 +1643,7 @@ static void handleJsonCommand(const char* json, size_t len) {
             s_inviteExpiryMs = 0;
           }
         }
-        emitInfoWave(cmdId);
+        emitInfoWaveRequest(cmdId);
       }
     }
     return;
@@ -1628,7 +1696,7 @@ static void handleJsonCommand(const char* json, size_t len) {
       if (!radio::requestSpreadingFactor((uint8_t)sf)) {
         ble::notifyError("sf", "Queue busy, retry");
       } else {
-        emitInfoWave(cmdId);
+        emitInfoWaveRequest(cmdId);
       }
     }
     return;
@@ -1639,7 +1707,7 @@ static void handleJsonCommand(const char* json, size_t len) {
       if (!radio::requestModemPreset((radio::ModemPreset)p)) {
         ble::notifyError("modemPreset", "Queue busy, retry");
       } else {
-        emitInfoWave(cmdId);
+        emitInfoWaveRequest(cmdId);
       }
     } else {
       ble::notifyError("modemPreset", "Invalid preset (0..3 or speed/normal/range/maxrange)");
@@ -1654,7 +1722,7 @@ static void handleJsonCommand(const char* json, size_t len) {
       if (!radio::requestCustomModem((uint8_t)sf, bw, (uint8_t)cr)) {
         ble::notifyError("modemCustom", "Queue busy, retry");
       } else {
-        emitInfoWave(cmdId);
+        emitInfoWaveRequest(cmdId);
       }
     }
     return;
@@ -1664,14 +1732,14 @@ static void handleJsonCommand(const char* json, size_t len) {
     const char* nick = doc["nickname"];
     if (nick && strnlen(nick, 34) <= 32) {
       (void)node::setNickname(nick);
-      emitInfoWave(cmdId);
+      emitInfoWaveRequest(cmdId);
     }
     return;
   }
 
   if (strcmp(cmd, "regeneratePin") == 0) {
     ble::regeneratePasskey();
-    emitInfoWave(cmdId);
+    emitInfoWaveRequest(cmdId);
     return;
   }
 
@@ -1952,7 +2020,10 @@ static void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
   s_connected = false;
   s_pendingInfoAfterConnect = false;
   s_pendingInfoDeadlineMs = 0;
-  resetBleOutQueueOnDisconnect();
+  s_infoWavePending = false;
+  s_infoWavePhase = InfoWavePhase::Idle;
+  /* Очередь NDJSON (s_outQ) не трогаем здесь: flushOutQueue* идёт из loop в ble::update(),
+   * параллельный сброс из колбэка SoftDevice даёт гонку по head/tail/count и «рвёт» сессию/стек. */
   RIFTLINK_DIAG("BLE", "event=DISCONNECTED reason=0x%02X", (unsigned)reason);
 }
 
@@ -2026,7 +2097,13 @@ void deinit() {
 void update() {
   if (!s_inited) return;
 
-  while (bleuart.available()) {
+  /* Не опустошать FIFO одним вызовом без лимита: при залпе данных/глюке стека возможен долгий spin
+   * и «мёртвое» зависание всего loop (в т.ч. во время connect). Остальное — на следующий тик. */
+  constexpr unsigned kBleRxMaxBytesPerUpdate = 4096;
+  /* Не обрабатывать неограниченно много JSON-команд за один update (волна info + несколько cmd — тяжёлый стек/SoftDevice). */
+  constexpr unsigned kBleRxMaxCommandsPerUpdate = 2;
+  unsigned rxCommandsThisUpdate = 0;
+  for (unsigned nread = 0; nread < kBleRxMaxBytesPerUpdate && bleuart.available(); nread++) {
     int c = bleuart.read();
     if (c < 0) break;
     if (c == '\n' || c == '\r') {
@@ -2034,6 +2111,7 @@ void update() {
         s_rxLine[s_rxLen] = '\0';
         handleJsonCommand(s_rxLine, s_rxLen);
         s_rxLen = 0;
+        if (++rxCommandsThisUpdate >= kBleRxMaxCommandsPerUpdate) break;
       }
     } else if (s_rxLen < sizeof(s_rxLine) - 1) {
       s_rxLine[s_rxLen++] = (char)c;
@@ -2062,9 +2140,19 @@ void update() {
       notifyInfo();
     }
   }
+  processInfoWaveStep();
   pingRetryTick();
   flushPendingBleOutbound();
   flushOutQueue();
+
+  /* Сброс TX-очереди только на нисходящем фронте линка (после flush), не при любом connected()==0:
+   * иначе кратковременный «ещё не connected» при установлении связи или между двумя ble::update() в loop
+   * мог снести очередь между enqueue волны info и отправкой — обрыв/рестарт сразу после connect. */
+  {
+    const bool connEnd = (Bluefruit.connected() > 0);
+    if (s_bleConnAtPrevUpdateEnd && !connEnd && s_outCount > 0) resetBleOutQueueOnDisconnect();
+    s_bleConnAtPrevUpdateEnd = connEnd;
+  }
 }
 
 void setOnSend(void (*cb)(const uint8_t* to, const char* text, uint8_t ttlMinutes, bool critical,
@@ -2110,7 +2198,7 @@ static bool emitMsgEvt(const uint8_t* from, const char* text, uint32_t msgId, in
       free(heap);
       return false;
     }
-    flushOutQueue();
+    flushOutQueueAll();
     const bool ok = writeJsonNdjsonChunked(heap, w);
     free(heap);
     return ok;
@@ -2284,7 +2372,7 @@ void notifyTimeCapsuleReleased(const uint8_t* to, uint32_t msgId, uint8_t trigge
 }
 
 void notifyInfo() {
-  emitInfoWave(0);
+  emitInfoWaveRequest(0);
 }
 
 void notifyInvite() {

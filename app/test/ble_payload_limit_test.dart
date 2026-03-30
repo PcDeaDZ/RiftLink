@@ -5,18 +5,17 @@ import 'package:riftlink_app/ble/riftlink_ble.dart';
 
 void main() {
   group('RiftLinkBle.exceedsBleAttLimit', () {
-    test('accepts payload exactly at 512 bytes', () {
+    test('accepts payload when JSON+LF fits in 512 bytes (max JSON 511 B)', () {
       var textLen = 0;
       var json = jsonEncode({'cmd': 'send', 'text': ''});
-      while (utf8.encode(json).length < RiftLinkBle.bleAttMaxJsonBytes) {
+      // NDJSON на провод: utf8(json) + \\n <= 512
+      while (utf8.encode(json).length + 1 <= RiftLinkBle.bleAttMaxJsonBytes) {
         textLen++;
         json = jsonEncode({'cmd': 'send', 'text': 'A' * textLen});
       }
-      while (utf8.encode(json).length > RiftLinkBle.bleAttMaxJsonBytes && textLen > 0) {
-        textLen--;
-        json = jsonEncode({'cmd': 'send', 'text': 'A' * textLen});
-      }
-      expect(utf8.encode(json).length, RiftLinkBle.bleAttMaxJsonBytes);
+      textLen--;
+      json = jsonEncode({'cmd': 'send', 'text': 'A' * textLen});
+      expect(utf8.encode(json).length + 1, RiftLinkBle.bleAttMaxJsonBytes);
       expect(RiftLinkBle.exceedsBleAttLimit(json), isFalse);
     });
 
@@ -34,7 +33,10 @@ void main() {
         'text': 'Привет' * 40,
       };
       final json = jsonEncode(payload);
-      expect(RiftLinkBle.exceedsBleAttLimit(json), utf8.encode(json).length > RiftLinkBle.bleAttMaxJsonBytes);
+      expect(
+        RiftLinkBle.exceedsBleAttLimit(json),
+        utf8.encode(json).length + 1 > RiftLinkBle.bleAttMaxJsonBytes,
+      );
     });
   });
 }
