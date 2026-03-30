@@ -493,7 +493,6 @@ static void drawStatusBarCompactAt(int y0) {
     rightClusterLeft -= (int)strlen(buf) * 6 + 4;
   }
   rightClusterLeft -= kBatteryIconBarW;
-  rightClusterLeft -= 1;
 
   drawSignalBars(2, y0 + 2, tb.signalBars);
   /* Полоса сигнала: x=2, 4×4 шаг + ширина столбца 3 → ~19px; отступ до центра. */
@@ -525,7 +524,6 @@ static void drawStatusBarCompactAt(int y0) {
     xRight -= 4;
   }
   xRight -= kBatteryIconBarW;
-  xRight -= 1;
   drawBatteryIcon(xRight, y0 + 1, pct, chg);
 }
 
