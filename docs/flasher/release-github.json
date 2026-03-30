@@ -1,4 +1,4 @@
 {
-  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.25/RiftLink-1.5.25-arm64-v8a.apk",
-  "releaseBody": "- Релиз **1.5.25**: прошивки Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam; приложение **1.5.25+11**.\n- Веб-флешер: `docs/flasher/firmware/*_full.bin`, манифесты **1.5.25**, `embedded-release.json`.\n- **Heltec V3 Paper (E-Ink)**: доработки `display_paper` — ghosting/SPI/вкладки (см. CHANGELOG).\n- Документация: README, PROTOCOL, API, CUSTOM_PROTOCOL_PLAN, WEB_FLASH_GITHUB."
+  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.26/RiftLink-1.5.26-arm64-v8a.apk",
+  "releaseBody": "- Релиз **1.5.26**: прошивки Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam; приложение **1.5.26+12**.\n- Веб-флешер: `docs/flasher/firmware/*_full.bin`, манифесты **1.5.26**, `embedded-release.json`.\n- **GPS UI**: «Поиск», компактные строки с фиксом, стабильный `hasFix()`, статус-бар/батарея.\n- **T-Lora Pager**: сборка `display_tpager` (forward-decl, LovyanGFX textWidth).\n- nRF/T114 в релизе не пересобирались.\n- APK: **RiftLink-1.5.26-arm64-v8a.apk**."
 }

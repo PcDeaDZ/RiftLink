@@ -1,0 +1,4 @@
+- Релиз **1.5.26**: прошивки Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam; приложение **1.5.26+12**.
+- Веб-флешер: `docs/flasher/firmware/*_full.bin`, манифесты **1.5.26**, `embedded-release.json`.
+- GPS UI, `hasFix()`, статус-бар; T-Pager: исправление сборки `display_tpager`.
+- nRF/T114 в этом релизе не пересобирались.

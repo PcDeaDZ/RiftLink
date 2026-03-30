@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-firmware_1.5.25_|_app_1.5.25-888?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/version-firmware_1.5.26_|_app_1.5.26-888?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/license-See_project-888?style=flat-square" alt="License" />
 </p>
 
@@ -55,7 +55,7 @@
 | **LilyGO T-Beam** V1.1/V1.2 | OLED SSD1306, GPS | `lilygo_t_beam_4mb` |
 | **FakeTech V5 / Heltec T114** | nRF52840 + SX1262 | `faketec_v5`, `heltec_t114` |
 
-Текущий релиз прошивки и приложения: **1.5.25** (см. [`firmware/src/version.h`](firmware/src/version.h), [`app/pubspec.yaml`](app/pubspec.yaml), [`CHANGELOG.md`](CHANGELOG.md)). Android APK: [релиз v1.5.25 на GitHub](https://github.com/PcDeaDZ/RiftLink/releases/tag/v1.5.25). Веб-прошивка из браузера: [`docs/flasher/`](docs/flasher/) → [`WEB_FLASH_GITHUB.md`](docs/WEB_FLASH_GITHUB.md). Платы **nRF52840** не прошиваются через этот веб-инструмент; см. [`docs/flasher/NRF52.md`](docs/flasher/NRF52.md) и [`firmware/src/faketec/README.md`](firmware/src/faketec/README.md).
+Текущий релиз прошивки и приложения: **1.5.26** (см. [`firmware/src/version.h`](firmware/src/version.h), [`app/pubspec.yaml`](app/pubspec.yaml), [`CHANGELOG.md`](CHANGELOG.md)). Android APK: [релиз v1.5.26 на GitHub](https://github.com/PcDeaDZ/RiftLink/releases/tag/v1.5.26). Веб-прошивка из браузера: [`docs/flasher/`](docs/flasher/) → [`WEB_FLASH_GITHUB.md`](docs/WEB_FLASH_GITHUB.md). Платы **nRF52840** не прошиваются через этот веб-инструмент; см. [`docs/flasher/NRF52.md`](docs/flasher/NRF52.md) и [`firmware/src/faketec/README.md`](firmware/src/faketec/README.md).
 
 ---
 

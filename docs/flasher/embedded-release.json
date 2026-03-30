@@ -1,21 +1,20 @@
 {
-  "tag": "v1.5.25",
-  "firmwareVersion": "1.5.25",
-  "appVersion": "1.5.25",
-  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.25/RiftLink-1.5.25-arm64-v8a.apk",
+  "tag": "v1.5.26",
+  "firmwareVersion": "1.5.26",
+  "appVersion": "1.5.26",
+  "apkDownloadUrl": "https://github.com/PcDeaDZ/RiftLink/releases/download/v1.5.26/RiftLink-1.5.26-arm64-v8a.apk",
   "notesRu": [
-    "Веб-флешер (ESP Web Tools): образы *_full.bin и манифесты 1.5.25 для Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam; GitHub Pages.",
-    "Heltec V3 Paper (E-Ink): стабильность UI — анти-ghosting (отдельный счётчик partial для вкладки сообщений, общий EINK_LIMIT_FASTREFRESH для остальных вкладок), всегда setFullWindow вместо полноэкранного setPartialWindow, doDisplay() возвращает успех только после реального display(), флаги wake/full и хеш кадра не сбрасываются при сбое SPI.",
-    "Paper: опционально EINK_FORCE_FULL_LUT; первый full после ухода с вкладки «Сообщения» на другую (без принудительного full на каждое короткое нажатие между MAIN/INFO/NET).",
-    "Синхронизация версий: firmware/src/version.h, app 1.5.25+11, PROTOCOL/API/CUSTOM_PROTOCOL_PLAN/README, CHANGELOG.",
-    "LilyGO T-Beam: образ в docs/flasher/firmware при линковочном overflow DRAM не пересобирался — нужна отдельная оптимизация; манифест на 1.5.25 для единой версии страницы.",
-    "Android-приложение: APK **RiftLink-1.5.25-arm64-v8a.apk** в GitHub Release **v1.5.25** (см. apkDownloadUrl)."
+    "Веб-флешер (ESP Web Tools): образы *_full.bin и манифесты 1.5.26 для Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam; GitHub Pages.",
+    "Экран GPS: «Поиск» без фикса; при фиксе — спутники и курс в одной строке, координаты ниже; без прокрутки, скрывавшей спутники. Стабильный hasFix(). Статус-бар и батарея.",
+    "LilyGO T-Lora Pager: исправлена сборка display_tpager (forward-declarations, textWidth/fontHeight вместо getTextBounds).",
+    "Прошивки nRF/T114 в этом релизе не пересобирались; приложение 1.5.26+12.",
+    "Android: APK **RiftLink-1.5.26-arm64-v8a.apk** в GitHub Release **v1.5.26** (см. apkDownloadUrl)."
   ],
   "notesEn": [
-    "Web flasher (ESP Web Tools): *_full.bin images and manifests 1.5.25 for Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam; GitHub Pages.",
-    "Heltec V3 Paper (E-Ink): UI stability — anti-ghosting (separate partial streak for MSG tab, global refresh counter for other tabs), always setFullWindow, doDisplay() reports success only after real refresh, no stale state on SPI failure.",
-    "Paper: optional EINK_FORCE_FULL_LUT; one full refresh after leaving Messages tab (not on every tab switch).",
-    "Version sync: firmware version.h, app 1.5.25+11, docs and CHANGELOG.",
-    "Android app: **RiftLink-1.5.25-arm64-v8a.apk** in GitHub Release **v1.5.25** (see apkDownloadUrl)."
+    "Web flasher (ESP Web Tools): *_full.bin images and manifests 1.5.26 for Heltec V3, V4, V3 Paper, LilyGO T-Lora Pager, LilyGO T-Beam; GitHub Pages.",
+    "GPS screen: «Searching» without fix; with fix — satellites+course on one line, coordinates below; no scroll hiding satellites. Stable hasFix(). Status bar and battery.",
+    "LilyGO T-Lora Pager: display_tpager build fix (forward declarations, textWidth/fontHeight instead of getTextBounds).",
+    "nRF/T114 firmware not rebuilt in this release; app 1.5.26+12.",
+    "Android: **RiftLink-1.5.26-arm64-v8a.apk** in GitHub Release **v1.5.26** (see apkDownloadUrl)."
   ]
 }

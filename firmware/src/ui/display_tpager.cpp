@@ -99,6 +99,8 @@ static void drawTabBarTpager();
 static int submenuListY0Tpager(bool hasTitle);
 static void drawSubmenuTitleBarTpager(const char* title);
 static void drawSubmenuFooterSepTpager();
+static void prepareTabLayoutShiftTpager();
+static void drawChromeTabsOrIdleRowTpager();
 
 static constexpr uint32_t COL_BG = 0x000000u;
 static constexpr uint32_t COL_FG = 0xFFFFu;
@@ -572,11 +574,10 @@ static void drawBatteryIcon(int x, int y, int pct, bool charging) {
   }
   gfx.setTextSize(1);
   gfx.setTextColor(COL_FG);
-  int16_t x1 = 0, y1 = 0;
-  uint16_t tw = 0, th = 0;
-  gfx.getTextBounds(b, 0, 0, &x1, &y1, &tw, &th);
-  const int16_t tx = x + (kBatBodyW - (int)tw) / 2 - x1;
-  const int16_t ty = y + (kBatBodyH - (int)th) / 2 - y1;
+  const int tw = gfx.textWidth(b);
+  const int th = gfx.fontHeight();
+  const int16_t tx = x + (kBatBodyW - tw) / 2;
+  const int16_t ty = y + (kBatBodyH - th) / 2;
   gfx.setCursor(tx, ty);
   gfx.print(b);
 }
