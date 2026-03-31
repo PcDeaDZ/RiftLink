@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../app_navigator.dart';
+import '../ble/device_sync_reason.dart';
 import '../ble/riftlink_ble.dart';
 import '../ble/riftlink_ble_scope.dart';
 import '../chat/chat_models.dart';
@@ -97,7 +98,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
     if (ble == null) return;
     final li = ble.lastInfo;
     if (li != null) _setNeighbors(li.neighbors);
-    ble.getInfo();
+    ble.requestDeviceSync(DeviceSyncReason.screenVisible);
     _bleSub = ble.events.listen((evt) {
       if (!mounted) return;
       if (evt is RiftLinkInfoEvent) {

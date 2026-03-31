@@ -83,20 +83,6 @@ RiftLinkEvent? parseEvent(Map<String, dynamic> json) {
 }
 
 void main() {
-  group('retainRxTailFromLastBraceBytes', () {
-    test('retains bytes from last opening brace', () {
-      final src = utf8.encode('junk{"evt":"msg"}noise{"evt":"info"}');
-      final tail = retainRxTailFromLastBraceBytes(src, maxRetain: 4096);
-      expect(utf8.decode(tail), '{"evt":"info"}');
-    });
-
-    test('returns empty list when no brace exists', () {
-      final src = utf8.encode('abcdef');
-      final tail = retainRxTailFromLastBraceBytes(src, maxRetain: 4096);
-      expect(tail, isEmpty);
-    });
-  });
-
   group('parseEvent: msg', () {
     test('parses msg event', () {
       final json = jsonDecode('{"evt":"msg","from":"A1B2C3D4E5F60708","text":"Hello","msgId":42}') as Map<String, dynamic>;

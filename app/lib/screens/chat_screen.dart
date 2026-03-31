@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
+import '../ble/device_sync_reason.dart';
 import '../ble/riftlink_ble.dart';
 import '../support/nrf_firmware_errors.dart';
 import '../voice/voice_service.dart';
@@ -647,11 +648,11 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
         final cachedInfo = widget.ble.lastInfo;
         if (cachedInfo != null) _onInfoEvent(cachedInfo);
         _reconcileNeighborsFromBleCache();
-        if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo();
+        if (mounted && widget.ble.isTransportConnected) widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible);
         if (cachedInfo == null) {
           Future.delayed(const Duration(milliseconds: 450), () {
             if (mounted && widget.ble.isTransportConnected && widget.ble.lastInfo == null) {
-              widget.ble.getInfo();
+              widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible);
             }
           });
         }
@@ -661,14 +662,14 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       if (mounted && _messages.any((m) => m.deleteAt != null && DateTime.now().isAfter(m.deleteAt!))) setState(() {});
     });
     _voiceRxCleanupTimer = Timer.periodic(const Duration(seconds: 5), (_) => _cleanupStaleVoiceAssemblies());
-    // Периодический getInfo: пустые соседи — discovery; есть без ключа — обновить hasKey после KEY_EXCHANGE
+    // Периодический снимок узла: пустые соседи — discovery; есть без ключа — обновить hasKey после KEY_EXCHANGE
     _neighborsPollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (!mounted || !widget.ble.isTransportConnected) return;
       _reconcileNeighborsFromBleCache();
       final needRefresh = _neighbors.isEmpty ||
           _neighborsHasKey.length != _neighbors.length ||
           _neighborsHasKey.any((k) => !k);
-      if (needRefresh) widget.ble.getInfo();
+      if (needRefresh) widget.ble.requestDeviceSync(DeviceSyncReason.generic);
       // Онлайн собеседника в личке проверяем только при входе в чат / смене получателя, не в цикле.
     });
     // GPS sync от телефона: UTC + координаты для beacon-sync (устройство без GPS)
@@ -808,8 +809,8 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
       return;
     }
 
-    // Если активен TransportReconnectManager — idle/probe/getInfo делает только он,
-    // иначе два таймера (~1.2 с) параллельно дергают getInfo и перегружают BLE.
+    // Если активен TransportReconnectManager — idle/probe/cmd:info делает только он,
+    // иначе два таймера (~1.2 с) параллельно дергают синхронизацию и перегружают BLE.
     if (transportReconnectManager != null) return;
 
     const idleThreshold = Duration(seconds: 25);
@@ -820,7 +821,7 @@ class _ChatScreenState extends State<ChatScreen> with TickerProviderStateMixin, 
     if (!_transportProbePending) {
       _transportProbePending = true;
       _transportProbeAt = now;
-      unawaited(widget.ble.getInfo(force: true).then((ok) {
+      unawaited(widget.ble.requestDeviceSync(DeviceSyncReason.userRefresh, force: true).then((ok) {
         if (!mounted || _intentionalDisconnect || (transportReconnectManager?.uiState.value.reconnecting ?? false)) {
           if (mounted) {
             _transportProbePending = false;

@@ -76,4 +76,15 @@ void refresh_top_chrome_only(const StatusScreenChrome* chrome);
 /** Последнее сообщение для экрана «Сообщения». */
 void get_last_msg_peek(char* fromBuf, size_t fromLen, char* textBuf, size_t textLen);
 
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+/** Подсветка ST7789 (TFT_BL). «Сон» в меню — только BL off; VTFT не трогаем — быстрее выход без полного init. */
+void t114_set_backlight_power(bool on);
+bool t114_backlight_is_on();
+#else
+inline void t114_set_backlight_power(bool) {}
+inline bool t114_backlight_is_on() {
+  return true;
+}
+#endif
+
 }  // namespace display_nrf

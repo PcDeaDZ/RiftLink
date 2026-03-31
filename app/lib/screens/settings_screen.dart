@@ -6,6 +6,7 @@ import 'dart:math' show min;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../ble/device_sync_reason.dart';
 import '../ble/riftlink_ble.dart';
 import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
@@ -831,7 +832,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
       if (!widget.ble.isConnected) return;
       final cached = widget.ble.lastInfo;
       if (cached != null) _applyRiftLinkInfo(cached);
-      widget.ble.getInfo();
+      widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible);
       final id = _nodeIdForClipboard(_nodeIdLive);
       if (id.isNotEmpty) {
         final saved = await WifiStaPrefs.load(id);
@@ -848,7 +849,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
       _infoRetryTimer?.cancel();
       _infoRetryTimer = Timer(const Duration(milliseconds: 700), () {
         if (!mounted || !widget.ble.isConnected || _infoReceivedSinceOpen) return;
-        widget.ble.getInfo();
+        widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible);
       });
     });
   }
@@ -859,7 +860,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     if (state == AppLifecycleState.resumed && mounted && widget.ble.isConnected) {
       final c = widget.ble.lastInfo;
       if (c != null) _applyRiftLinkInfo(c);
-      widget.ble.getInfo();
+      widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible);
     }
   }
 
@@ -1003,7 +1004,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
     int? cr,
   }) async {
     for (var i = 0; i < 5; i++) {
-      await widget.ble.getInfo(force: true);
+      await widget.ble.requestDeviceSync(DeviceSyncReason.userRefresh, force: true);
       await Future<void>.delayed(const Duration(milliseconds: 280));
       final li = widget.ble.lastInfo;
       if (li != null && _isModemMatch(li, preset: preset, sf: sf, bw: bw, cr: cr)) {
@@ -1087,7 +1088,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
           }
           return;
         }
-        await widget.ble.getInfo(force: true);
+        await widget.ble.requestDeviceSync(DeviceSyncReason.userRefresh, force: true);
         final li = widget.ble.lastInfo;
         if (li != null && li.radioMode == 'wifi' && li.radioVariant == 'sta') {
           if (mounted) {
@@ -1373,7 +1374,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                       onPressed: linkUp
                           ? () async {
                               final ok = await widget.ble.regeneratePin();
-                              if (ok) await widget.ble.getInfo();
+                              if (ok) await widget.ble.requestDeviceSync(DeviceSyncReason.postSettingsChange);
                               if (mounted) _snack(ok ? l.tr('saved') : l.tr('error'));
                             }
                           : null,
@@ -1514,7 +1515,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                                 if (v == null) return;
                                 if (await widget.ble.setEspNowChannel(v)) {
                                   setState(() => _espNowChannel = v);
-                                  widget.ble.getInfo();
+                                  widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible);
                                 }
                               }
                             : null,
@@ -1533,7 +1534,7 @@ class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObse
                             ? (v) async {
                                 if (await widget.ble.setEspNowAdaptive(v)) {
                                   setState(() => _espNowAdaptive = v);
-                                  widget.ble.getInfo();
+                                  widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible);
                                 }
                               }
                             : null,

@@ -5,6 +5,7 @@ import 'dart:ui' show FontFeature;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../ble/device_sync_reason.dart';
 import '../ble/riftlink_ble.dart';
 import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
@@ -212,11 +213,11 @@ class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
       if (!mounted || !widget.ble.isTransportConnected) return;
       final c = widget.ble.lastInfo;
       if (c != null) _apply(c);
-      widget.ble.getInfo();
+      widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible);
     });
     _infoPollTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       if (!mounted || !widget.ble.isTransportConnected) return;
-      widget.ble.getInfo();
+      widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible);
     });
   }
 
@@ -225,7 +226,7 @@ class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
     if (s == AppLifecycleState.resumed && mounted && widget.ble.isTransportConnected) {
       final c = widget.ble.lastInfo;
       if (c != null) _apply(c);
-      widget.ble.getInfo();
+      widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible);
     }
   }
 
@@ -334,7 +335,7 @@ class _HubState extends State<SettingsHubScreen> with WidgetsBindingObserver {
 
   void _push(Widget page) {
     Navigator.push(context, MaterialPageRoute(builder: (_) => page)).then((_) {
-      if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo();
+      if (mounted && widget.ble.isTransportConnected) widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible);
     });
   }
 }
@@ -547,7 +548,7 @@ class _DevicePageState extends State<_DevicePage> {
         }
       }
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo(); });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible); });
   }
 
   @override
@@ -668,7 +669,7 @@ class _NetworkModemPageState extends State<_NetworkModemPage> {
         setState(() { _region = evt.region; _channel = evt.channel; });
       }
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo(); });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible); });
   }
 
   @override
@@ -678,7 +679,7 @@ class _NetworkModemPageState extends State<_NetworkModemPage> {
     // Firmware scheduleInfoNotify fires after ~600ms; wait before first poll.
     await Future<void>.delayed(const Duration(milliseconds: 700));
     for (var i = 0; i < 8; i++) {
-      await widget.ble.getInfo(force: true);
+      await widget.ble.requestDeviceSync(DeviceSyncReason.userRefresh, force: true);
       await Future<void>.delayed(const Duration(milliseconds: 400));
       final li = widget.ble.lastInfo;
       if (li != null && li.modemPreset == preset) {
@@ -773,14 +774,14 @@ class _NetworkModemPageState extends State<_NetworkModemPage> {
               items: List.generate(13, (i) => DropdownMenuItem(value: i + 1, child: Text('${i + 1}'))),
               onChanged: conn ? (v) async {
                 if (v == null) return;
-                if (await widget.ble.setEspNowChannel(v)) { setState(() => _espCh = v); widget.ble.getInfo(); }
+                if (await widget.ble.setEspNowChannel(v)) { setState(() => _espCh = v); widget.ble.requestDeviceSync(DeviceSyncReason.postSettingsChange); }
               } : null),
             const SizedBox(height: AppSpacing.sm),
             RiftSwitchTile(
               title: Text(l.tr('espnow_adaptive'), style: TextStyle(color: pal.onSurface)),
               value: _espAdapt,
               onChanged: conn ? (v) async {
-                if (await widget.ble.setEspNowAdaptive(v)) { setState(() => _espAdapt = v); widget.ble.getInfo(); }
+                if (await widget.ble.setEspNowAdaptive(v)) { setState(() => _espAdapt = v); widget.ble.requestDeviceSync(DeviceSyncReason.postSettingsChange); }
               } : null),
           ],
         )),
@@ -828,7 +829,7 @@ class _ConnectionPageState extends State<_ConnectionPage> {
         });
       }
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo(); });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible); });
   }
 
   @override
@@ -841,7 +842,7 @@ class _ConnectionPageState extends State<_ConnectionPage> {
     final ok = await widget.ble.switchToBle();
     if (!mounted) return;
     if (ok) {
-      // После команды узел гасит Wi‑Fi/WebSocket — getInfo по старому каналу недоступен; как при BLE→Wi‑Fi — на поиск.
+      // После команды узел гасит Wi‑Fi/WebSocket — снимок по старому каналу недоступен; как при BLE→Wi‑Fi — на поиск.
       await widget.ble.disconnect();
       if (!mounted) return;
       await appResetTo(
@@ -903,7 +904,7 @@ class _ConnectionPageState extends State<_ConnectionPage> {
           }
           return;
         }
-        await widget.ble.getInfo(force: true);
+        await widget.ble.requestDeviceSync(DeviceSyncReason.userRefresh, force: true);
         final li = widget.ble.lastInfo;
         if (li != null && li.radioMode == 'wifi' && li.radioVariant == 'sta') {
           if (mounted) {
@@ -947,7 +948,7 @@ class _ConnectionPageState extends State<_ConnectionPage> {
           FilledButton.tonalIcon(
             onPressed: transportOk ? () async {
               final ok = await widget.ble.regeneratePin();
-              if (ok) await widget.ble.getInfo();
+              if (ok) await widget.ble.requestDeviceSync(DeviceSyncReason.postSettingsChange);
               HapticFeedback.lightImpact();
               if (mounted) setState(() { _pinSt = ok ? l.tr('saved') : l.tr('error'); _pinErr = !ok; });
             } : null,
@@ -1088,7 +1089,7 @@ class _SecurityPageState extends State<_SecurityPage> {
         setState(() { _invErr = true; _invSt = mapped; });
       }
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo(); });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible); });
   }
 
   @override
@@ -1241,7 +1242,7 @@ class _EnergyThemePageState extends State<_EnergyThemePage> {
       if (evt is RiftLinkInfoEvent) setState(() { _ps = evt.powersave; _gpsPresent = evt.gpsPresent; _gpsOn = evt.gpsEnabled; _gpsFix = evt.gpsFix; });
       else if (evt is RiftLinkGpsEvent) setState(() { _gpsPresent = evt.present; _gpsOn = evt.enabled; _gpsFix = evt.hasFix; });
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo(); });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible); });
   }
 
   @override
@@ -1372,7 +1373,7 @@ class _DiagnosticsPageState extends State<_DiagnosticsPage> {
       }
     });
     _loadVoicePrefs();
-    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.getInfo(); });
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && widget.ble.isTransportConnected) widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible); });
   }
 
   @override

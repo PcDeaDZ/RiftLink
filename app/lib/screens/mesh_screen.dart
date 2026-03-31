@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../app_navigator.dart';
+import '../ble/device_sync_reason.dart';
 import '../ble/riftlink_ble.dart';
 import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
@@ -236,7 +237,7 @@ class _MeshScreenState extends State<MeshScreen> with TickerProviderStateMixin {
       _reconcileNeighborsFromLastInfo();
       unawaited(() async {
         try {
-          await widget.ble.getInfo();
+          await widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible);
           await Future<void>.delayed(const Duration(milliseconds: 90));
           if (mounted) await widget.ble.getRoutes();
           if (mounted) _reconcileNeighborsFromLastInfo();
@@ -335,13 +336,13 @@ class _MeshScreenState extends State<MeshScreen> with TickerProviderStateMixin {
   Future<void> _runSignalTest() async {
     if (_signalTestRunning) return;
     // Синхронизируем список соседей с узлом: signalTest на прошивке шлёт OP_PING только по neighbors::getCount().
-    // Без свежего getInfo UI мог показывать соседей из кэша, а на устройстве — 0 соседей → «тишина».
-    await widget.ble.getInfo(force: true);
+    // Без свежего cmd:info UI мог показывать соседей из кэша, а на устройстве — 0 соседей → «тишина».
+    await widget.ble.requestDeviceSync(DeviceSyncReason.userRefresh, force: true);
     if (!mounted) return;
     if (_neighbors.isEmpty) {
       await Future<void>.delayed(const Duration(milliseconds: 1000));
       if (!mounted) return;
-      await widget.ble.getInfo(force: true);
+      await widget.ble.requestDeviceSync(DeviceSyncReason.userRefresh, force: true);
       if (!mounted) return;
     }
     if (_neighbors.isEmpty) {

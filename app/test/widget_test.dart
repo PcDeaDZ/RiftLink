@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'package:riftlink_app/ble/device_sync_reason.dart';
 import 'package:riftlink_app/ble/riftlink_ble.dart';
 import 'package:riftlink_app/screens/chat_screen.dart';
 
@@ -21,6 +22,10 @@ class FakeRiftLinkBle implements RiftLinkBle {
   Future<void> disconnect() async {}
   @override
   Future<bool> getInfo({bool force = false}) async => false;
+
+  @override
+  Future<bool> requestDeviceSync(DeviceSyncReason reason, {bool force = false}) async =>
+      getInfo(force: force);
   @override
   Future<bool> getRoutes() async => false;
   @override

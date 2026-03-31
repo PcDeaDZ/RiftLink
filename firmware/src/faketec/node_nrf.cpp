@@ -15,6 +15,13 @@ static bool s_inited = false;
 #define KEY_NICKNAME "nick"
 #define NICKNAME_MAX 32
 
+/** Убираем управляющие символы (0x00–0x1F): иначе в JSON на телефоне jsonDecode падает (Control character in string). */
+static void sanitizeNicknameStorage() {
+  for (size_t i = 0; i < sizeof(s_nickname) && s_nickname[i]; i++) {
+    if ((unsigned char)s_nickname[i] < 0x20u) s_nickname[i] = ' ';
+  }
+}
+
 namespace node {
 
 void init() {
@@ -30,6 +37,7 @@ void init() {
         s_nickname[0] = '\0';
       } else {
         s_nickname[sizeof(s_nickname) - 1] = '\0';
+        sanitizeNicknameStorage();
       }
       s_inited = true;
       return;
@@ -95,6 +103,7 @@ bool setNickname(const char* name) {
 
   strncpy(s_nickname, name, NICKNAME_MAX);
   s_nickname[NICKNAME_MAX] = '\0';
+  sanitizeNicknameStorage();
 
   (void)riftlink_kv::setBlob(KEY_NICKNAME, (const uint8_t*)s_nickname, strlen(s_nickname) + 1);
   return true;

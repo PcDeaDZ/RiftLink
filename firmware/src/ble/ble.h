@@ -15,6 +15,9 @@ bool init();
 void deinit();
 void update();  // вызов из loop()
 
+/** nRF: пошаговая диагностика после CONNECT (окно ~20 с). Вызов из main между тяжёлыми блоками — tag для Serial. */
+void postConnectTrace(const char* tag);
+
 void setOnSend(void (*cb)(const uint8_t* to, const char* text, uint8_t ttlMinutes,
     bool critical, uint8_t triggerType, uint32_t triggerValueMs, bool isSos));
 void setOnLocation(void (*cb)(float lat, float lon, int16_t alt, uint16_t radiusM, uint32_t expiryEpochSec));

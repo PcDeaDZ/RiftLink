@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
+import '../ble/device_sync_reason.dart';
 import '../ble/riftlink_ble.dart';
 import '../chat/chat_repository.dart';
 import '../recent_devices/recent_devices_service.dart';
@@ -93,6 +94,19 @@ class TransportReconnectManager {
           // to an active reconnect flow.
           reconnectOverlayController.hide();
         }
+        // Без этого _lastTransportActivityAt может быть «со времён до линка» (нет evt в шине, пока узел не ответил).
+        // Тогда idle > 25s и следующий тик watchdog сразу шлёт probe getInfo(force) поверх onTransportUp — второй cmd:info, перегруз nRF / обрыв GATT.
+        if (!_ble.isWifiMode) {
+          final rid = event.device.remoteId.toString();
+          final tracked = _ble.device?.remoteId.toString() ?? _ble.lastBleRemoteId;
+          if (tracked == null ||
+              tracked.isEmpty ||
+              RiftLinkBle.remoteIdsMatch(rid, tracked)) {
+            _lastTransportActivityAt = DateTime.now();
+            _probePending = false;
+            _probeAt = null;
+          }
+        }
       }
       if (_reconnecting || _awaitingUserActionAfterFailure || _autoReconnectSuppressed) return;
       if (_ble.isWifiMode) return;
@@ -141,7 +155,7 @@ class TransportReconnectManager {
       // Wi‑Fi WebSocket без notify: короче порог — иначе при выключенном узле полуоткрытый TCP долго «жив».
       final idleThreshold =
           _ble.isWifiMode ? const Duration(seconds: 10) : const Duration(seconds: 25);
-      // Ждём завершения getInfo дольше, чем timeout запроса (5s): длинный multi-chunk notify блокирует ответ.
+      // Ждём завершения cmd:info дольше, чем timeout запроса (5s): длинный multi-chunk notify блокирует ответ.
       const probeTimeout = Duration(seconds: 12);
       final idleFor = now.difference(_lastTransportActivityAt);
       if (idleFor < idleThreshold) return;
@@ -149,20 +163,20 @@ class TransportReconnectManager {
       if (!_probePending) {
         _probePending = true;
         _probeAt = now;
-        unawaited(_ble.getInfo(force: true).then((ok) {
+        unawaited(_ble.requestDeviceSync(DeviceSyncReason.watchdogIdle, force: true).then((ok) {
           _probePending = false;
           _probeAt = null;
           if (ok) {
             _lastTransportActivityAt = DateTime.now();
             return;
           }
-          // Wi‑Fi: таймаут getInfo почти всегда мёртвый узел / полуоткрытый TCP, не «занят notify».
+          // Wi‑Fi: таймаут cmd:info почти всегда мёртвый узел / полуоткрытый TCP, не «занят notify».
           if (_ble.isWifiMode && _ble.isTransportConnected) {
             _ble.abandonWifiSession();
             unawaited(triggerReconnect(reason: 'wifi_probe_failed'));
             return;
           }
-          // BLE: таймаут getInfo ≠ разрыв GATT — при занятом notify ответ может не уложиться.
+          // BLE: таймаут cmd:info ≠ разрыв GATT — при занятом notify ответ может не уложиться.
           if (_ble.isTransportConnected) {
             _lastTransportActivityAt = DateTime.now();
             return;
@@ -356,7 +370,7 @@ class TransportReconnectManager {
           if (remainingMs > 0) {
             await Future<void>.delayed(Duration(milliseconds: remainingMs));
           }
-          await _ble.getInfo(force: true);
+          // Снимок узла уже запрашивается в connect()/connectWifi (requestDeviceSync); повторный cmd:info не шлём.
           _reconnecting = false;
           _attemptProgressTimer?.cancel();
           uiState.value = TransportReconnectUiState(

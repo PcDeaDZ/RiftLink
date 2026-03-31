@@ -3462,4 +3462,6 @@ void regeneratePasskey() {
   Serial.printf("[BLE] New passkey: %06u\n", (unsigned)s_passkey);
 }
 
+void postConnectTrace(const char*) {}
+
 }  // namespace ble

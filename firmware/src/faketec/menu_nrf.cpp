@@ -18,6 +18,7 @@
 #include "telemetry/telemetry.h"
 #include "ui/ui_display_prefs.h"
 #if defined(RIFTLINK_BOARD_HELTEC_T114)
+#include "t114_power.h"
 #include "ui/ui_icons.h"
 #endif
 #include "ui/ui_tab_bar_idle.h"
@@ -179,6 +180,10 @@ static int s_netMenuSel = 0;
 static int s_sysMenuSel = 0;
 /** Как s_powerMenuIndex в display.cpp: выбор в drill-меню POWER (0 off, 1 sleep, 2 back). */
 static int s_powerMenuSel = 0;
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+/** «Сон»: только подсветка off; пробуждение по нажатию кнопки (см. menu_nrf_poll_t114_button). */
+static bool s_t114DisplaySleep = false;
+#endif
 /** Как display.cpp s_gpsMenuIndex: 0 — строка вкл/выкл GPS, 1 — «Назад». */
 static int s_gpsMenuIndex = 0;
 /** Подменю «Дисплей» в SYS — как s_sysInDisplaySubmenu в display.cpp. */
@@ -1174,6 +1179,10 @@ void menu_nrf_init() {
   s_detailTab = display_tabs::CT_MAIN;
 }
 
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+static bool s_menuLocaleRedrawPending = false;
+#endif
+
 void menu_nrf_redraw_after_locale() {
   if (!display_nrf::is_ready()) return;
   switch (s_view) {
@@ -1228,6 +1237,22 @@ void menu_nrf_redraw_after_locale() {
 #endif
 }
 
+void menu_nrf_request_redraw_after_locale() {
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  s_menuLocaleRedrawPending = true;
+#else
+  menu_nrf_redraw_after_locale();
+#endif
+}
+
+void menu_nrf_flush_pending_locale_redraw() {
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  if (!s_menuLocaleRedrawPending) return;
+  s_menuLocaleRedrawPending = false;
+  menu_nrf_redraw_after_locale();
+#endif
+}
+
 void menu_nrf_open_menu() {
   if (!display_nrf::is_ready()) return;
   s_view = View::MenuHome;
@@ -1274,6 +1299,8 @@ void menu_nrf_goto_dashboard(uint8_t page) {
 
 void menu_nrf_periodic_refresh(uint32_t) {
   if (!display_nrf::is_ready()) return;
+  if (s_t114DisplaySleep) return;
+  menu_nrf_flush_pending_locale_redraw();
   /* Полный дайджест меняется от эфира/АКБ/времени; тело меню «Режим»/SYS/Power — нет. Без чёрной вспышки: только полоска. */
   const uint64_t d = t114_compute_digest(true);
   if (d == s_t114LiveDigest) return;
@@ -1291,6 +1318,7 @@ void menu_nrf_periodic_refresh(uint32_t) {
 }
 
 void menu_nrf_tab_idle_tick() {
+  if (s_t114DisplaySleep) return;
   ui_tab_bar_idle::tick(s_tabDrillIn);
   static bool s_prevStrip = true;
   if (!ui_nav_mode::isTabMode()) {
@@ -1641,6 +1669,13 @@ static void on_long_press() {
             s_tabDrillIn = false;
             s_powerMenuSel = 0;
             draw_power_screen();
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+          } else if (s_powerMenuSel == 0) {
+            t114_power_enter_system_off();
+          } else if (s_powerMenuSel == 1) {
+            s_t114DisplaySleep = true;
+            display_nrf::t114_set_backlight_power(false);
+#endif
           } else {
             s_infoTitle[0] = 0;
             snprintf(s_infoBody, sizeof(s_infoBody), "%s", locale::getForDisplay("power_nrf_note"));
@@ -1663,6 +1698,13 @@ static void on_long_press() {
           s_powerMenuSel = 0;
           s_view = View::MenuHome;
           draw_home_menu();
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+        } else if (s_powerMenuSel == 0) {
+          t114_power_enter_system_off();
+        } else if (s_powerMenuSel == 1) {
+          s_t114DisplaySleep = true;
+          display_nrf::t114_set_backlight_power(false);
+#endif
         } else {
           s_infoTitle[0] = 0;
           snprintf(s_infoBody, sizeof(s_infoBody), "%s", locale::getForDisplay("power_nrf_note"));
@@ -1745,6 +1787,17 @@ static void on_long_press() {
 }
 
 void menu_nrf_poll_t114_button(bool pressed, uint32_t now_ms) {
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  if (s_t114DisplaySleep) {
+    if (pressed && !s_btnPrev) {
+      s_t114DisplaySleep = false;
+      display_nrf::t114_set_backlight_power(true);
+      menu_nrf_redraw_after_locale();
+    }
+    s_btnPrev = pressed;
+    return;
+  }
+#endif
   if (pressed && !s_btnPrev) {
     s_btnDownAt = now_ms;
   }

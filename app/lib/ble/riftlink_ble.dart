@@ -13,6 +13,7 @@ import '../transport/transport_response_router.dart'
     show GroupSecurityResponseError, TransportResponseRouter;
 import '../transport/wifi_transport.dart';
 import '../utils/group_invite_normalize.dart';
+import 'device_sync_reason.dart';
 
 /// Волна ответа на `cmd:info`: node + neighbors + routes + groups с одним `seq`/`cmdId`.
 /// Tracked-команду завершает первое событие из этого набора с подходящим `cmdId` (см. [TransportResponseRouter]).
@@ -28,6 +29,10 @@ class RiftLinkBle {
   static const charRxUuid = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
   static const deviceName = 'RiftLink';
   static const int bleAttMaxJsonBytes = 512;
+
+  /// Одна NDJSON-строка с nRF: `serializeDocToHeapForChunkedLine` — до 64 KiB + финальный `\\n` (см. `ble_nrf.cpp`).
+  /// Буфер RX держит не более **одной** неполной строки; склейка чанков ATT — до этого предела.
+  static const int _kBleRxMaxAccumBytes = 65536;
 
   /// Учитывает завершающий LF NDJSON при записи в NUS (см. [_writeBleBytesSerialized]).
   static bool exceedsBleAttLimit(String json) =>
@@ -78,9 +83,8 @@ class RiftLinkBle {
       'tx_fail=${_diagCounters['tx_fail'] ?? 0} '
       'tx_fail_no_transport=${_diagCounters['tx_fail_no_transport'] ?? 0} '
       'rx_chunk=${_diagCounters['rx_chunk'] ?? 0} '
-      'rx_retain_overflow=${_diagCounters['rx_retain_overflow'] ?? 0} '
-      'rx_retain_timeout=${_diagCounters['rx_retain_timeout'] ?? 0} '
-      'rx_retain_large_partial=${_diagCounters['rx_retain_large_partial'] ?? 0} '
+      'rx_drop_overflow=${_diagCounters['rx_drop_overflow'] ?? 0} '
+      'rx_drop_timeout=${_diagCounters['rx_drop_timeout'] ?? 0} '
       'drop_unknown_evt=${_diagCounters['drop_unknown_evt'] ?? 0} '
       'drop_json_to_event=${_diagCounters['drop_json_to_event'] ?? 0} '
       'drop_parse_ndjson=${_diagCounters['drop_parse_ndjson'] ?? 0} '
@@ -134,6 +138,8 @@ class RiftLinkBle {
   bool _groupInviteAcceptNoop = false;
   Timer? _queuedInfoTimer;
   bool _hasQueuedInfoRequest = false;
+  /// Параллельные [requestDeviceSync] сливаются в один вызов [getInfo].
+  Future<bool>? _deviceSyncInFlight;
 
   /// Последний успешно распарсенный снимок узла (склейка `evt:node` + neighbors/routes/groups).
   RiftLinkInfoEvent? _lastInfo;
@@ -186,7 +192,7 @@ class RiftLinkBle {
       timeout: timeout,
       androidUsesFineLocation: true,
       androidCheckLocationServices: false,
-      androidLegacy: true,
+      androidLegacy: false,
     );
   }
 
@@ -425,8 +431,7 @@ class RiftLinkBle {
       unawaited(() async {
         try {
           // Одна волна cmd:info даёт evt:node → neighbors → routes → groups с общим seq/cmdId.
-          // Отдельные getGroups/getRoutes с другим cmdId давали response_timeout (роутер ждёт свой cmdId).
-          await getInfo(force: true);
+          await requestDeviceSync(DeviceSyncReason.onTransportUp, force: true);
         } catch (_) {}
       }());
       _wifiReconnectIp = null;
@@ -528,7 +533,22 @@ class RiftLinkBle {
     return true;
   }
 
+  /// Запрос полного снимка узла через [getInfo] с **single-flight**: параллельные вызовы получают один и тот же Future.
+  /// Предпочитать этому прямому [getInfo] из UI и фоновых обработчиков.
+  Future<bool> requestDeviceSync(DeviceSyncReason reason, {bool force = false}) {
+    _trace('stage=app_sync action=request reason=${reason.name} force=$force');
+    final existing = _deviceSyncInFlight;
+    if (existing != null) return existing;
+    final f = getInfo(force: force);
+    _deviceSyncInFlight = f;
+    f.whenComplete(() {
+      if (identical(_deviceSyncInFlight, f)) _deviceSyncInFlight = null;
+    });
+    return f;
+  }
+
   Future<void> disconnect() async {
+    _deviceSyncInFlight = null;
     _responseRouter.cancelAll();
     _lastInfo = null;
     _compositeInfo = null;
@@ -607,36 +627,33 @@ class RiftLinkBle {
     _diagInc('rx_chunk');
     _trace('stage=app_rx action=chunk len=${chunk.length} accum_before=${_rxAccum.length}');
     _rxAccum.addAll(chunk);
-    const maxAccum = 16384;
-    if (_rxAccum.length > maxAccum) {
-      final retained = retainRxTailFromLastBraceBytes(_rxAccum, maxRetain: 4096);
+    if (_rxAccum.length > _kBleRxMaxAccumBytes) {
       debugPrint(
-        'RiftLinkBle: RX buffer overflow (${_rxAccum.length} bytes), retaining tail ${retained.length} bytes',
+        'RiftLinkBle: RX overflow (${_rxAccum.length} B > $_kBleRxMaxAccumBytes): drop incomplete NDJSON line, resync from last chunk',
       );
-      _trace('stage=app_rx action=retain reason=overflow before=${_rxAccum.length} after=${retained.length}');
-      _diagInc('rx_retain_overflow');
-      _diagMaybeDump('rx_retain_overflow');
+      _trace('stage=app_rx action=drop reason=overflow bytes=${_rxAccum.length}');
+      _diagInc('rx_drop_overflow');
+      _diagMaybeDump('rx_drop_overflow');
+      final last = chunk;
       _rxAccum
         ..clear()
-        ..addAll(retained);
+        ..addAll(last);
       _rxAccumTimeout?.cancel();
+      _drainRxAccum();
       return;
     }
     _rxAccumTimeout?.cancel();
-    _rxAccumTimeout = Timer(const Duration(seconds: 5), () {
-      if (_rxAccum.isNotEmpty) {
-        final retained = retainRxTailFromLastBraceBytes(_rxAccum, maxRetain: 2048);
-        debugPrint(
-          'RiftLinkBle: RX timeout, retaining tail ${retained.length} of ${_rxAccum.length} bytes',
-        );
-        _trace('stage=app_rx action=retain reason=timeout before=${_rxAccum.length} after=${retained.length}');
-        _diagInc('rx_retain_timeout');
-        _diagMaybeDump('rx_retain_timeout');
-        _rxAccum
-          ..clear()
-          ..addAll(retained);
-        _lastRxIncompleteLogLen = 0;
-      }
+    /* Chunked NDJSON (evt:node на nRF) может идти >5 с между notify; обрыв по таймауту склеивает хвост со следующей строкой → radioMod {"evt":… */
+    _rxAccumTimeout = Timer(const Duration(seconds: 20), () {
+      if (_rxAccum.isEmpty) return;
+      debugPrint(
+        'RiftLinkBle: RX timeout (${_rxAccum.length} B) without NDJSON line end (\\n): drop partial line',
+      );
+      _trace('stage=app_rx action=drop reason=timeout bytes=${_rxAccum.length}');
+      _diagInc('rx_drop_timeout');
+      _diagMaybeDump('rx_drop_timeout');
+      _rxAccum.clear();
+      _lastRxIncompleteLogLen = 0;
     });
     _drainRxAccum();
   }
@@ -1135,20 +1152,86 @@ class RiftLinkBle {
     }
   }
 
+  /// Заменяет сырые байты U+0000..U+001F **только внутри** JSON-строк `"..."` (учёт `\` и `\uXXXX`).
+  /// Иначе прошивка/мусор в нике даёт `FormatException: Control character in string` на Android
+  /// при **неполной** NDJSON-строке (чанки до финального `\n`) — [jsonDecode] всё равно вызывается.
+  void _sanitizeRawControlBytesInsideJsonStringsInPlace(List<int> raw) {
+    var inString = false;
+    var escape = false;
+    var i = 0;
+    while (i < raw.length) {
+      final b = raw[i];
+      if (!inString) {
+        if (b == 0x22) {
+          inString = true;
+        }
+        i++;
+        continue;
+      }
+      if (escape) {
+        if (b == 0x75) {
+          var j = i + 1;
+          var cnt = 0;
+          while (cnt < 4 && j < raw.length && _isJsonHexDigit(raw[j])) {
+            cnt++;
+            j++;
+          }
+          if (cnt == 4) {
+            i = j;
+          } else {
+            i++;
+          }
+        } else {
+          i++;
+        }
+        escape = false;
+        continue;
+      }
+      if (b == 0x5C) {
+        escape = true;
+        i++;
+        continue;
+      }
+      if (b == 0x22) {
+        inString = false;
+        i++;
+        continue;
+      }
+      if (b < 0x20) {
+        raw[i] = 0x20;
+      }
+      i++;
+    }
+  }
+
   /// NDJSON: после каждого JSON на прошивке — `\n` (или `\r\n`).
   ///
   /// Важно: префикс до последнего `0x0A` режем **только по байтам** [raw], декодируем его в строку
   /// и парсим строки. Нельзя брать `s.lastIndexOf('\\n')` по полному [utf8.decode] буфера: индекс
   /// символа в [String] не совпадает с байтовым смещением при кириллице в JSON — тогда
   /// `removeRange` по `lastIndexOf(0x0A)` съедал не тот префикс и первым эмитился evt:routes.
+  ///
+  /// Разделитель строки — **только** `0x0A` / `0x0D` **вне** JSON-строк (см. [_ndjsonLineTerminatorBounds]).
+  /// Иначе сырой `0x0A` внутри значения (некорректный JSON) или середина UTF-8 ломали разбор
+  /// (Control character in string / Unterminated string при chunked notify).
   int? _tryDrainNewlineDelimitedJsonBytes(List<int> raw) {
-    final lastNl = raw.lastIndexOf(0x0A);
-    if (lastNl < 0) return null;
-    final completeBytes = raw.sublist(0, lastNl + 1);
-    final text = utf8.decode(completeBytes, allowMalformed: true);
-    for (final line in text.split('\n')) {
-      final lineNoCr = line.trim().replaceAll('\r', '');
-      if (lineNoCr.isEmpty) continue;
+    // Построчно: граница NDJSON — не любой indexOf(0x0A), а перевод строки вне кавычек JSON-строки.
+    int start = 0;
+    int consumed = 0;
+    while (start < raw.length) {
+      final term = _ndjsonLineTerminatorBounds(raw, start);
+      if (term == null) break;
+      final lineEndExclusive = term.$1;
+      final consumeEnd = term.$2;
+      final lineBytes = raw.sublist(start, lineEndExclusive);
+      final lineNoCr = utf8.decode(lineBytes, allowMalformed: true).trim().replaceAll('\r', '');
+      if (lineNoCr.isEmpty) {
+        start = consumeEnd;
+        consumed = consumeEnd;
+        continue;
+      }
+
+      var lineConsumed = false;
       try {
         final decoded = jsonDecode(lineNoCr);
         if (decoded is Map) {
@@ -1158,6 +1241,7 @@ class RiftLinkBle {
             _emitParsedJson(m);
           }
         }
+        lineConsumed = true;
       } catch (e) {
         // Несколько корневых JSON подряд без \n между объектами: `}{` — jsonDecode падает,
         // иначе теряются evt:node / neighbors, остаётся только следующая строка (routes).
@@ -1167,26 +1251,84 @@ class RiftLinkBle {
           _lastRxIncompleteLogLen = 0;
           _emitParsedJson(m);
         });
-        if (emitted == 0) {
+        if (emitted > 0) {
+          if (remainder.trim().isNotEmpty) {
+            _trace('stage=app_parse action=ndjson_concat_tail len=${remainder.length}');
+            break;
+          }
+          lineConsumed = true;
+        } else {
           if (kDebugMode) debugPrint('RiftLinkBle: NDJSON parse error: $e');
           _trace('stage=app_parse action=parse_error reason=ndjson err=$e');
           _diagInc('drop_parse_ndjson');
-        } else if (remainder.trim().isNotEmpty) {
-          _trace('stage=app_parse action=ndjson_concat_tail len=${remainder.length}');
+          break;
         }
       }
+
+      if (!lineConsumed) break;
+
+      start = consumeEnd;
+      consumed = consumeEnd;
     }
-    return lastNl + 1;
+    if (consumed == 0) return null;
+    return consumed;
+  }
+
+  /// Граница одной NDJSON-строки: первый байт терминатора (`\n`, `\r` или `\r` из `\r\n`) **вне** `"..."`.
+  /// Возвращает `(lineEndExclusive, consumeEnd)` — `line = raw.sublist(start, lineEndExclusive)`.
+  (int, int)? _ndjsonLineTerminatorBounds(List<int> raw, int start) {
+    bool inString = false;
+    bool escape = false;
+    for (var i = start; i < raw.length; i++) {
+      final b = raw[i];
+      if (inString) {
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (b == 0x5C) {
+          escape = true;
+          continue;
+        }
+        if (b == 0x22) {
+          inString = false;
+          continue;
+        }
+        continue;
+      }
+      if (b == 0x22) {
+        inString = true;
+        continue;
+      }
+      if (b == 0x0D) {
+        if (i + 1 < raw.length && raw[i + 1] == 0x0A) {
+          return (i, i + 2);
+        }
+        return (i, i + 1);
+      }
+      if (b == 0x0A) {
+        return (i, i + 1);
+      }
+    }
+    return null;
   }
 
   /// Разбор RX: отрезка мусора до первого `{` по **байтам** (не ждём целого UTF-8),
   /// затем decode с lenient для границ чанков внутри многобайтовых символов.
   /// Далее — один объект jsonDecode или несколько подряд по скобкам (осторожно с `\"` в строках).
   void _drainRxAccum() {
+    if (_rxAccum.length > _kBleRxMaxAccumBytes) {
+      _trace('stage=app_rx action=drop reason=drain_guard bytes=${_rxAccum.length}');
+      _diagInc('rx_drop_overflow');
+      _rxAccum.clear();
+      return;
+    }
     for (var iter = 0; iter < 32; iter++) {
       if (_rxAccum.isEmpty) return;
       _stripToFirstAsciiBraceByte();
       if (_rxAccum.isEmpty) return;
+
+      _sanitizeRawControlBytesInsideJsonStringsInPlace(_rxAccum);
 
       final s = _decodeUtf8Lenient(_rxAccum);
       final i0 = s.indexOf('{');
@@ -1242,6 +1384,21 @@ class RiftLinkBle {
         continue;
       }
 
+      /* Длинная NDJSON-строка с прошивки идёт несколькими notify (ATT ≈ MTU−3). Пока нет «конца строки»
+       * в виде 0x0A/0x0D в буфере — это неполный префикс; jsonDecode даёт Unterminated string и мусорит логами. */
+      final rawHasLineBreak = _rxAccum.any((b) => b == 0x0A || b == 0x0D);
+      if (!rawHasLineBreak && !skipNdjson) {
+        if (kDebugMode && t.length >= 64) {
+          if (t.length - _lastRxIncompleteLogLen >= 300 || _lastRxIncompleteLogLen == 0) {
+            _lastRxIncompleteLogLen = t.length;
+            debugPrint(
+              'RiftLinkBle: RX no complete NDJSON line yet len=${_rxAccum.length} (need \\n after chunked notify) head=${_rxDebugPreview(t)}',
+            );
+          }
+        }
+        return;
+      }
+
       // Один полный объект в буфере (редкий путь, если concat ничего не извлёк).
       try {
         final decoded = jsonDecode(t);
@@ -1281,15 +1438,6 @@ class RiftLinkBle {
             'RiftLinkBle: RX no complete JSON yet len=${t.length} (waiting for more notify) head=${_rxDebugPreview(t)}',
           );
         }
-      }
-      if (_rxAccum.length > 4096) {
-        final retained = retainRxTailFromLastBraceBytes(_rxAccum, maxRetain: 4096);
-        _trace('stage=app_rx action=retain reason=large_partial before=${_rxAccum.length} after=${retained.length}');
-        _diagInc('rx_retain_large_partial');
-        _diagMaybeDump('rx_retain_large_partial');
-        _rxAccum
-          ..clear()
-          ..addAll(retained);
       }
       return;
     }
@@ -1726,14 +1874,12 @@ class RiftLinkBle {
     // Wi-Fi transport does not push initial state automatically like BLE connect flow.
     // Request baseline payload right after WS attach (чуть больше задержки — очередь cmd на узле после смены режима).
     await Future<void>.delayed(const Duration(milliseconds: 280));
-    var infoOk = await getInfo(force: true);
+    var infoOk = await requestDeviceSync(DeviceSyncReason.onTransportUp, force: true);
     if (!infoOk) {
       await Future<void>.delayed(const Duration(milliseconds: 900));
-      await getInfo(force: true);
+      await requestDeviceSync(DeviceSyncReason.onTransportUp, force: true);
     }
     await Future<void>.delayed(const Duration(milliseconds: 80));
-    await getGroups();
-    await getRoutes();
     unawaited(
       Future<void>.delayed(const Duration(milliseconds: 450), () {
         transportReconnectManager?.resumeAutoReconnect();
@@ -1970,16 +2116,6 @@ class RiftLinkBle {
   Stream<Map<String, dynamic>> get rawEvents => _rawEventBus.stream;
 }
 
-List<int> retainRxTailFromLastBraceBytes(List<int> bytes, {int maxRetain = 4096}) {
-  if (bytes.isEmpty) return const <int>[];
-  final lastBrace = bytes.lastIndexOf(0x7B);
-  if (lastBrace < 0) return const <int>[];
-  var start = lastBrace;
-  final minStart = bytes.length - maxRetain;
-  if (minStart > 0 && start < minStart) start = minStart;
-  return List<int>.from(bytes.sublist(start));
-}
-
 int _jsonInt(dynamic e) {
   if (e == null) return 0;
   if (e is int) return e;
@@ -2024,6 +2160,9 @@ String? _trimmedStringOrNull(dynamic v) {
   final s = v.toString().trim();
   return s.isEmpty ? null : s;
 }
+
+bool _isJsonHexDigit(int b) =>
+    (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x46) || (b >= 0x61 && b <= 0x66);
 
 /// Сколько байт [raw] соответствует префиксу [prefix] из [full] (оба из одного lenient decode).
 /// Сначала канонический UTF-8 префикса — совпадает с «сырыми» байтами почти всегда; иначе линейный

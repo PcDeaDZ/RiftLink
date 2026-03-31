@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../ble/device_sync_reason.dart';
 import '../ble/riftlink_ble.dart';
 import '../contacts/contacts_service.dart';
 import '../l10n/app_localizations.dart';
@@ -255,10 +256,10 @@ class _ChatsListScreenState extends State<ChatsListScreen> {
         _snack(localizedGroupSecurityError(context.l10n, evt));
       }
     });
-    widget.ble.getInfo();
+    widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible);
     _infoRefreshTimer = Timer.periodic(const Duration(seconds: 12), (_) {
       if (!mounted || !widget.ble.isTransportConnected) return;
-      widget.ble.getInfo();
+      widget.ble.requestDeviceSync(DeviceSyncReason.screenVisible);
     });
     _load();
   }

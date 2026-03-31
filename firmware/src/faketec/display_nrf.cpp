@@ -1470,6 +1470,23 @@ void refresh_top_chrome_only(const StatusScreenChrome* chrome) {
   t114_redraw_top_chrome_only(chrome);
 }
 
+static bool s_t114_bl_on = true;
+
+void t114_set_backlight_power(bool on) {
+  if (!g_ok) return;
+  s_t114_bl_on = on;
+  pinMode(TFT_BL, OUTPUT);
+  if (on) {
+    digitalWrite(TFT_BL, TFT_BL_ON);
+  } else {
+    digitalWrite(TFT_BL, TFT_BL_ON == LOW ? HIGH : LOW);
+  }
+}
+
+bool t114_backlight_is_on() {
+  return g_ok && s_t114_bl_on;
+}
+
 }  // namespace display_nrf
 
 #else

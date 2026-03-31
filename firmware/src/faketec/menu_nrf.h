@@ -37,3 +37,12 @@ void menu_nrf_goto_dashboard(uint8_t page);
 
 /** После locale::setLang (Serial/BLE): перерисовать текущий экран меню/дашборда. */
 void menu_nrf_redraw_after_locale();
+
+/**
+ * Запланировать перерисовку после смены локали. На T114 не вызывать тяжёлую отрисовку SPI из контекста BLE RX
+ * (ble::update / handleJsonCommand) — иначе зависание/стоп SoftDevice; фактическая отрисовка — [menu_nrf_flush_pending_locale_redraw].
+ */
+void menu_nrf_request_redraw_after_locale();
+
+/** Снять отложенную перерисовку локали (вызывать из loop после ble::update, не из RX-колбэка). T114: no-op на других платах если pending не было. */
+void menu_nrf_flush_pending_locale_redraw();

@@ -3,6 +3,9 @@
  */
 
 #include <Arduino.h>
+#if defined(NRF_POWER)
+#include <nrf.h>
+#endif
 
 #include "async_queues.h"
 #include "async_tasks.h"
@@ -66,7 +69,7 @@
 
 extern "C" __attribute__((weak)) size_t xPortGetFreeHeapSize(void);
 
-static uint32_t nrf_heap_kb() {
+__attribute__((unused)) static uint32_t nrf_heap_kb() {
   size_t f = xPortGetFreeHeapSize();
 #if RIFTLINK_HAS_NRF_SDH
   uint32_t sd = nrf_sdh_get_free_heap_size();
@@ -156,19 +159,36 @@ static constexpr uint32_t KEY_RETRY_SMALL_MESH_EXTRA_JITTER_MS = 1500;
 static void uart1_begin() {
   Serial1.begin(115200);
 }
+/** Без Serial.flush(): USB CDC на nRF при полном TX-буфере (хост не читает COM) может блокировать навсегда — «зависание» после BLE. */
 static void log_line(const char* s) {
-  Serial.println(s);
-  Serial.flush();
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  /* На T114 heartbeat и прочий поток логов — только UART1 (GPIO6): USB Serial.println может заблокировать loop. */
   Serial1.println(s);
-  Serial1.flush();
+#else
+  Serial.println(s);
+  Serial1.println(s);
+#endif
 }
 #else
 static void uart1_begin() {}
 static void log_line(const char* s) {
   Serial.println(s);
-  Serial.flush();
 }
 #endif
+
+/** Причина последнего сброса (nRF POWER->RESETREAS). После лога очищаем — следующий boot покажет только новое событие. */
+static void log_nrf_reset_reason_and_clear() {
+#if defined(NRF_POWER)
+  const uint32_t rr = NRF_POWER->RESETREAS;
+  char b[180];
+  snprintf(b, sizeof(b),
+      "[RiftLink] RESETREAS=0x%08lX RESETPIN=%u DOG=%u SREQ=%u LOCKUP=%u OFF=%u LPCOMP=%u DIF=%u",
+      (unsigned long)rr, (unsigned)((rr >> 0) & 1u), (unsigned)((rr >> 1) & 1u), (unsigned)((rr >> 2) & 1u),
+      (unsigned)((rr >> 3) & 1u), (unsigned)((rr >> 4) & 1u), (unsigned)((rr >> 5) & 1u), (unsigned)((rr >> 6) & 1u));
+  log_line(b);
+  NRF_POWER->RESETREAS = 0xFFFFFFFFu;
+#endif
+}
 
 /** Как sendMsg в main.cpp ESP: BLE-команда send → msg_queue (SOS → enqueueSos). */
 static void sendMsg(const uint8_t* to, const char* text, uint8_t ttlMinutes, bool critical,
@@ -267,6 +287,7 @@ void setup() {
         (unsigned long)usb_wait_ms, Serial ? 1 : 0);
     log_line(b);
   }
+  log_nrf_reset_reason_and_clear();
 
   log_line("[RiftLink] init: InternalFS (KV)");
   if (!riftlink_kv::begin()) {
@@ -457,6 +478,20 @@ void loop() {
   riftlink_wdt_feed();
   /* BLE раньше тяжёлой работы итерации: на T114/nRF меньше «окна» без pumping SoftDevice/NUS. */
   ble::update();
+  ble::postConnectTrace("main_after_ble1");
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  /* Два pump подряд до SPI: иначе полный кадр ST7789 между ble1 и ble2 голодал SoftDevice → обрывы/«виснет». */
+  ble::update();
+  ble::postConnectTrace("main_after_ble2");
+  riftlink_wdt_feed();
+  /* Отложенная перерисовка после cmd:lang — не из RX-пути (SPI + SoftDevice). */
+  menu_nrf_flush_pending_locale_redraw();
+  ble::postConnectTrace("main_after_locale_redraw");
+  riftlink_wdt_feed();
+  /* Третий pump после SPI — chunked evt:node / NUS не залипают за кадром. */
+  ble::update();
+  ble::postConnectTrace("main_after_ble3");
+#endif
 
   {
     uint32_t now = millis();

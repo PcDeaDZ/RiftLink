@@ -26,6 +26,7 @@
 #include "voice_buffers/voice_buffers.h"
 #include "voice_frag/voice_frag.h"
 #include "x25519_keys/x25519_keys.h"
+#include "nrf_wdt_feed.h"
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -33,6 +34,7 @@
 #include <cstdlib>
 #include <sodium.h>
 #include <string.h>
+#include <atomic>
 
 extern "C" size_t xPortGetFreeHeapSize(void);
 
@@ -51,9 +53,17 @@ extern "C" size_t xPortGetFreeHeapSize(void);
 #define RIFTLINK_BLE_ATT_SAFE_JSON_BYTES 230
 #endif
 
+/** Nordic SoftDevice: нет валидного соединения (см. ble_gap.h). Не вызывать notify с «мёртвым» handle. */
+#ifndef BLE_CONN_HANDLE_INVALID
+#define BLE_CONN_HANDLE_INVALID ((uint16_t)0xFFFFu)
+#endif
+
 namespace ble {
 
 static void emitJsonDoc(JsonDocument& doc);
+static void emitJsonDocStackOrChunked(JsonDocument& doc);
+static bool scheduleNdjsonLineOwned(char* heap, size_t len);
+static void pumpBleTx(size_t maxChunkBytes, unsigned maxLineLines);
 
 void notifyInfo();
 void notifyInvite();
@@ -66,29 +76,196 @@ static void (*s_onLocation)(float lat, float lon, int16_t alt, uint16_t radiusM,
 static constexpr size_t kTxJsonMax = (size_t)RIFTLINK_BLE_JSON_LINE_MAX;
 static constexpr size_t kRxLineMax = (size_t)RIFTLINK_BLE_RX_LINE_MAX;
 
-BLEUart bleuart(kTxJsonMax);
+/** Те же 128-bit UUID, что Nordic UART / Adafruit BLEUart (см. BLEUart.cpp в Bluefruit52Lib). */
+static const uint8_t kNusUuidService[16] = {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5,
+    0x01, 0x00, 0x40, 0x6E};
+static const uint8_t kNusUuidChrRxd[16] = {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x02, 0x00,
+    0x40, 0x6E}; /* central write → узел */
+static const uint8_t kNusUuidChrTxd[16] = {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00,
+    0x40, 0x6E}; /* notify → телефон */
+
+static BLEService s_riftNus(kNusUuidService);
+static BLECharacteristic s_riftNusTxd(kNusUuidChrTxd);
+static BLECharacteristic s_riftNusRxd(kNusUuidChrRxd);
+
+/** Паритет с ESP ble.cpp: одна GATT-запись от приложения = один элемент очереди, разбор в ble::update(). */
+static constexpr uint8_t kInCmdQDepth = 12;
+/** Меньше чем на ESP FreeRTOS: один поток + SoftDevice — длинная пачка JSON за один ble::update голод радио/BLE. */
+static constexpr uint8_t kInCmdConsumePerUpdate = 2;
+struct NrfBleInCmdItem {
+  uint16_t len;
+  uint8_t data[kRxLineMax];
+};
+static NrfBleInCmdItem s_inCmdQ[kInCmdQDepth];
+static volatile uint8_t s_inCmdQHead = 0;
+static volatile uint8_t s_inCmdQTail = 0;
+static std::atomic<uint8_t> s_inCmdQCount{0};
+static uint32_t s_inCmdDroppedQueueFull = 0;
+
+static void resetIncomingCmdQueue() {
+  s_inCmdQHead = s_inCmdQTail = 0;
+  s_inCmdQCount.store(0, std::memory_order_relaxed);
+}
+
+/**
+ * Добавление команды в RX-очередь из колбэка SoftDevice (IRQ контекст).
+ * Защита от гонки с consumeIncomingCmdQueue() через отключение прерываний.
+ */
+static bool enqueueIncomingCmd(const uint8_t* data, uint16_t len) {
+  if (!data || len == 0 || len > (uint16_t)kRxLineMax) return false;
+  
+  // Критическая секция: гонка между IRQ (enqueue) и main loop (consume)
+  uint32_t irq_flags = __get_PRIMASK();
+  __disable_irq();
+  
+  if (s_inCmdQCount.load(std::memory_order_relaxed) >= kInCmdQDepth) {
+    s_inCmdDroppedQueueFull++;
+    if (!irq_flags) __enable_irq();
+    return false;
+  }
+  
+  memcpy(s_inCmdQ[s_inCmdQHead].data, data, len);
+  s_inCmdQ[s_inCmdQHead].len = len;
+  s_inCmdQHead = (uint8_t)((s_inCmdQHead + 1) % kInCmdQDepth);
+  s_inCmdQCount.fetch_add(1, std::memory_order_relaxed);
+  
+  if (!irq_flags) __enable_irq();
+  return true;
+}
 
 /** Глубина BLE TX-очереди (строки NDJSON); при переполнении — drop старейших (как burst на ESP). */
 static constexpr unsigned kOutQDepth = 8;
-static char s_outQ[kOutQDepth][RIFTLINK_BLE_JSON_LINE_MAX];
+
+/** Один элемент FIFO: короткая строка ≤512 B или одна длинная NDJSON-строка (чанки + \\n в конце). Порядок строгий — «труба» без перемешивания. */
+struct BleOutSlot {
+  enum Kind : uint8_t { K_LINE = 0, K_CHUNKED = 1 } kind;
+  union {
+    char line[RIFTLINK_BLE_JSON_LINE_MAX];
+    struct {
+      char* heap;
+      size_t len;
+      size_t off;
+    } ch;
+  };
+};
+static BleOutSlot s_outQ[kOutQDepth];
 static volatile uint8_t s_outHead = 0;
 static volatile uint8_t s_outTail = 0;
 static volatile uint8_t s_outCount = 0;
 
+/** Куча evt:node из волны info (chunked): ждём drain перед neighbors/routes/groups. */
+static char* s_infoWaveNodeChunkHeap = nullptr;
+static bool s_emittingFromInfoWaveNode = false;
+static uint32_t s_txQueueDroppedCount = 0;
+
+static void bleOutQueueDropOldestSlot() {
+  if (s_outCount == 0) return;
+  BleOutSlot& s = s_outQ[s_outTail];
+  const char* slotType = (s.kind == BleOutSlot::K_CHUNKED) ? "chunked_ndjson" : "short_line";
+  if (s.kind == BleOutSlot::K_CHUNKED) {
+    if (s.ch.heap == s_infoWaveNodeChunkHeap) s_infoWaveNodeChunkHeap = nullptr;
+    free(s.ch.heap);
+  }
+  s_outTail = (uint8_t)((s_outTail + 1) % kOutQDepth);
+  s_outCount--;
+  s_txQueueDroppedCount++;
+  RIFTLINK_DIAG("BLE", "event=TX_DROP reason=out_queue_full type=%s total_dropped=%u", 
+      slotType, (unsigned)s_txQueueDroppedCount);
+}
+
 static void resetBleOutQueueOnDisconnect() {
+  for (unsigned i = 0; i < s_outCount; i++) {
+    unsigned idx = (s_outTail + i) % kOutQDepth;
+    BleOutSlot& s = s_outQ[idx];
+    if (s.kind == BleOutSlot::K_CHUNKED) {
+      free(s.ch.heap);
+    }
+  }
+  s_infoWaveNodeChunkHeap = nullptr;
   s_outHead = 0;
   s_outTail = 0;
   s_outCount = 0;
 }
 
-static char s_rxLine[kRxLineMax];
-static size_t s_rxLen = 0;
-static uint32_t s_lastRxLineTooLongNotifyMs = 0;
-
 static bool s_inited = false;
 static bool s_connected = false;
+
+static inline bool bleLinkUpForNus() {
+  if (!s_connected) return false;
+  if (Bluefruit.connected() == 0) return false;
+  const uint16_t hdl = Bluefruit.connHandle();
+  if (hdl == BLE_CONN_HANDLE_INVALID) return false;
+  return true;
+}
+
+static inline bool nusNotifyEnabled() {
+  if (!bleLinkUpForNus()) return false;
+  return s_riftNusTxd.notifyEnabled(Bluefruit.connHandle());
+}
+
+/**
+ * Отправка notify с retry при временной ошибке SoftDevice.
+ * Экспоненциальная задержка между попытками для восстановления ресурсов.
+ */
+static bool nusNotifyBytesWithRetry(const uint8_t* p, uint16_t len, uint8_t maxRetries = 3) {
+  if (len == 0) return true;
+  if (!bleLinkUpForNus()) return false;
+  
+  for (uint8_t attempt = 0; attempt < maxRetries; attempt++) {
+    if (s_riftNusTxd.notify(Bluefruit.connHandle(), p, len)) {
+      return true;
+    }
+    // Пауза для восстановления SoftDevice: 2ms, 4ms, 6ms
+    yield();
+    delay(2 + attempt * 2);
+  }
+  
+  RIFTLINK_DIAG("BLE", "event=TX_FAIL reason=nus_notify_retry_exhausted len=%u", (unsigned)len);
+  return false;
+}
+
+static inline bool nusNotifyBytes(const uint8_t* p, uint16_t len) {
+  if (len == 0) return true;
+  if (!bleLinkUpForNus()) return false;
+  return s_riftNusTxd.notify(Bluefruit.connHandle(), p, len);
+}
+
 /** Конец предыдущего `ble::update()`: был ли активный линк (для сброса TX-очереди только на нисходящем фронте). */
 static bool s_bleConnAtPrevUpdateEnd = false;
+/** Лог CONNECTED/DISCONNECTED только из `syncBleConnectionAtUpdateEntry` — не из BLE-колбэка (Serial/SoftDevice). */
+static bool s_bleConnPrevForDiag = false;
+static uint8_t s_lastBleDiscReason = 0;
+/** После CONNECT — ~20 с пошаговых POST_CONN_TRACE (где оборвалось до ребута/зависания). 0 = выкл. */
+static uint32_t s_postConnTraceUntilMs = 0;
+/** Сколько полных проходов ble::update() с цепочкой u01…u11 (чтобы не заспамить USB при каждом loop). */
+static uint8_t s_postConnBleDetailPassesLeft = 0;
+static uint8_t s_postConnMainTraceLeft = 0;
+
+/** Трасса после connect: на T114 только Serial1 (GPIO6) — USB CDC Serial.printf может блокироваться навсегда при полном TX. */
+static void bleEmitPostConnTraceLine(const char* tag) {
+  char buf[112];
+  snprintf(buf, sizeof(buf), "[RiftLink] POST_CONN_TRACE tag=%s ms=%lu", tag, (unsigned long)millis());
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  Serial1.println(buf);
+#else
+  RIFTLINK_DIAG("BLE", "event=POST_CONN_TRACE tag=%s ms=%lu", tag, (unsigned long)millis());
+#endif
+}
+
+static void postConnTraceIf(const char* tag) {
+  if (!tag || !tag[0]) return;
+  if (s_postConnTraceUntilMs == 0) return;
+  if ((int32_t)(millis() - s_postConnTraceUntilMs) >= 0) {
+    s_postConnTraceUntilMs = 0;
+    s_postConnBleDetailPassesLeft = 0;
+    s_postConnMainTraceLeft = 0;
+    return;
+  }
+  if (tag[0] == 'u' && s_postConnBleDetailPassesLeft == 0) return;
+  if (strncmp(tag, "main_", 5) == 0 && s_postConnMainTraceLeft == 0) return;
+  bleEmitPostConnTraceLine(tag);
+  if (strncmp(tag, "main_", 5) == 0 && s_postConnMainTraceLeft > 0) s_postConnMainTraceLeft--;
+}
 
 /** Волна info разнесена по вызовам `update()` — иначе один кадр: глубокий стек (несколько JsonDocument) + долгие delay → HardFault/«мёртвый» loop. */
 enum class InfoWavePhase : uint8_t { Idle, EmitNode, EmitNeighbors, EmitRoutes, EmitGroups };
@@ -97,11 +274,28 @@ static bool s_infoWavePending = false;
 static uint32_t s_infoWavePendingCmdId = 0;
 static uint32_t s_infoWaveSeq = 0;
 static uint32_t s_infoWaveCmdId = 0;
-/** После BLE connect — волна info из `update()`, не из callback SoftDevice (там нельзя `delay`). */
-static bool s_pendingInfoAfterConnect = false;
-/** Не слать волну, пока централь не включил notify (CCCD); иначе первая отдача — в пустоту. Таймаут — как на медленных телефонах. */
-static uint32_t s_pendingInfoDeadlineMs = 0;
+/** Волна info: по одному evt на фазу; при длинном NDJSON ждём drain pending перед следующей фазой. */
+static bool s_infoWaveNodeEmitted = false;
+static bool s_infoWaveNeighborsEmitted = false;
+static bool s_infoWaveRoutesEmitted = false;
+static bool s_infoWaveGroupsEmitted = false;
 static uint32_t s_passkey = 0;
+
+/** Полный сброс волны info при disconnect — иначе processInfoWaveStep() зависает на проверке chunked heap. */
+static void resetInfoWaveOnDisconnect() {
+  s_infoWavePending = false;
+  s_infoWavePhase = InfoWavePhase::Idle;
+  s_infoWaveNodeEmitted = false;
+  s_infoWaveNeighborsEmitted = false;
+  s_infoWaveRoutesEmitted = false;
+  s_infoWaveGroupsEmitted = false;
+  s_emittingFromInfoWaveNode = false;
+  /* Критично: освободить chunked heap, иначе утечка памяти + блокировка волны */
+  if (s_infoWaveNodeChunkHeap) {
+    free(s_infoWaveNodeChunkHeap);
+    s_infoWaveNodeChunkHeap = nullptr;
+  }
+}
 
 static uint8_t s_inviteToken[8];
 static uint32_t s_inviteExpiryMs = 0;
@@ -360,12 +554,39 @@ static uint32_t takePingCmdIdForFrom(const uint8_t from[protocol::NODE_ID_LEN]) 
   return 0;
 }
 
+/** Сырые байты 0x00–0x1F в сериализованном JSON: строгий jsonDecode на Android (Control character in string). */
+static bool bleSerializedJsonHasRawControlChars(const char* s, size_t len) {
+  if (!s) return true;
+  for (size_t i = 0; i < len; i++) {
+    if ((unsigned char)s[i] < 0x20u) return true;
+  }
+  return false;
+}
+
+/** Любая C-строка из внешнего источника перед присвоением в JsonDocument (копия в буфер + in-place). */
+static void sanitizeBleJsonCStringInPlace(char* s) {
+  if (!s) return;
+  for (size_t i = 0; s[i]; i++) {
+    if ((unsigned char)s[i] < 0x20u) s[i] = ' ';
+  }
+}
+
 /** Поля паспорта узла — паритет с ESP `appendNodePassportFieldsToDoc` (без Wi‑Fi/ESP‑NOW как «живых»). */
 static void appendNrfPassportFields(JsonDocument& doc) {
   char nick[33];
   node::getNickname(nick, sizeof(nick));
+  sanitizeBleJsonCStringInPlace(nick);
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  /* Полный ник в evt:node (до 32), BLE — chunked NDJSON при необходимости. */
+  if (nick[0]) doc["nickname"] = nick;
+#else
   if (nick[0] && strlen(nick) <= 24) doc["nickname"] = nick;
-  doc["region"] = region::getCode();
+#endif
+  char regionBuf[16];
+  strncpy(regionBuf, region::getCode(), sizeof(regionBuf) - 1);
+  regionBuf[sizeof(regionBuf) - 1] = '\0';
+  sanitizeBleJsonCStringInPlace(regionBuf);
+  doc["region"] = regionBuf;
   doc["freq"] = region::getFreq();
   doc["power"] = region::getPower();
   if (region::getChannelCount() > 0) doc["channel"] = region::getChannel();
@@ -502,11 +723,17 @@ static void emitNodeSnapshotForWave(uint32_t seq, uint32_t cmdId) {
   /* Явно: соседи по эфиру (LoRa mesh), не «BLE-соседи». 0 — норма при одном узле / вне зоны / другом регионе. */
   doc["loraMeshPeers"] = neighbors::getCount();
   doc["radioReady"] = radio::isReady();
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  doc["board"] = "heltec_t114";
+#endif
   appendNrfSysMetricsToDoc(doc);
   appendNrfPassportFields(doc);
+  /* T114: раньше отключали trim «для полного паспорта» — это тянуло multi‑KiB chunked NDJSON, долгий pumpBleTx и
+   * гонку со SoftDevice (узел «виснет», телефон рвёт GATT). Тот же trim, что на остальных nRF — паритет с ESP по полям. */
   trimBlePassportDoc(doc);
-  shrinkJsonDocToAttSafe(doc);
-  emitJsonDoc(doc);
+  s_emittingFromInfoWaveNode = true;
+  emitJsonDocStackOrChunked(doc);
+  s_emittingFromInfoWaveNode = false;
 }
 
 static void notifyNeighborsWithSeq(uint32_t seq, uint32_t cmdId) {
@@ -550,16 +777,8 @@ static void notifyNeighborsWithSeq(uint32_t seq, uint32_t cmdId) {
   appendNrfPassportFields(doc);
   trimBlePassportDoc(doc);
   shrinkNeighborEvtToFit(doc, arr, rssiArr, keyArr, &batMvArr);
-  while (measureJson(doc) > (size_t)RIFTLINK_BLE_ATT_SAFE_JSON_BYTES && arr.size() > 0) {
-    const size_t last = arr.size() - 1;
-    arr.remove(last);
-    if (rssiArr.size() > last) rssiArr.remove(last);
-    if (keyArr.size() > last) keyArr.remove(last);
-    if (batMvArr.size() > last) batMvArr.remove(last);
-    doc["neighborsTruncated"] = true;
-  }
-  shrinkJsonDocToAttSafe(doc);
-  emitJsonDoc(doc);
+  /* Полная строка через emitJsonDocStackOrChunked (как evt:node); без shrinkJsonDocToAttSafe — иначе соседи «пропадают». */
+  emitJsonDocStackOrChunked(doc);
 }
 
 static void notifyRoutesWithSeq(uint32_t seq, uint32_t cmdId) {
@@ -597,12 +816,7 @@ static void notifyRoutesWithSeq(uint32_t seq, uint32_t cmdId) {
       break;
     }
   }
-  while (measureJson(doc) > (size_t)RIFTLINK_BLE_ATT_SAFE_JSON_BYTES && arr.size() > 0) {
-    arr.remove(arr.size() - 1);
-    doc["routesTruncated"] = true;
-  }
-  shrinkJsonDocToAttSafe(doc);
-  emitJsonDoc(doc);
+  emitJsonDocStackOrChunked(doc);
 }
 
 static void notifyGroupsWithSeq(uint32_t seq, uint32_t cmdId) {
@@ -624,6 +838,9 @@ static void notifyGroupsWithSeq(uint32_t seq, uint32_t cmdId) {
     if (!groups::getV2At(i, uid, sizeof(uid), &channelId32, tag, sizeof(tag), canonicalName, sizeof(canonicalName),
             &keyVersion, &role, &revEpoch, &ackApplied))
       continue;
+    sanitizeBleJsonCStringInPlace(uid);
+    sanitizeBleJsonCStringInPlace(tag);
+    sanitizeBleJsonCStringInPlace(canonicalName);
     JsonObject gv2 = arr.add<JsonObject>();
     gv2["groupUid"] = uid;
     gv2["groupTag"] = tag;
@@ -643,12 +860,7 @@ static void notifyGroupsWithSeq(uint32_t seq, uint32_t cmdId) {
       break;
     }
   }
-  while (measureJson(doc) > (size_t)RIFTLINK_BLE_ATT_SAFE_JSON_BYTES && arr.size() > 0) {
-    arr.remove(arr.size() - 1);
-    doc["groupsTruncated"] = true;
-  }
-  shrinkJsonDocToAttSafe(doc);
-  emitJsonDoc(doc);
+  emitJsonDocStackOrChunked(doc);
 }
 
 /** Запрос волны info (node→neighbors→routes→groups); выполнение по одному кадру на вызов `ble::update()`. */
@@ -662,36 +874,83 @@ static void emitInfoWaveRequest(uint32_t cmdId) {
 }
 
 static void processInfoWaveStep() {
+  /* Линк уже оборван (в т.ч. в середине этого update) — не крутить фазу и не трогать notify до следующего sync. */
+  if (!bleLinkUpForNus()) {
+    /* T114: если линк мёртв, но chunked heap остался — это баг, сбрасываем принудительно */
+    if (s_infoWaveNodeChunkHeap) {
+      RIFTLINK_DIAG("BLE", "event=INFO_WAVE_FORCE_RESET reason=link_down_heap_stuck");
+      s_infoWaveNodeChunkHeap = nullptr;
+      s_infoWavePhase = InfoWavePhase::Idle;
+      s_infoWavePending = false;
+    }
+    return;
+  }
+
   if (s_infoWavePending && s_infoWavePhase == InfoWavePhase::Idle) {
     s_infoWavePending = false;
     s_infoWaveSeq = ++s_bleSyncSeq;
     s_infoWaveCmdId = s_infoWavePendingCmdId;
     s_infoWavePhase = InfoWavePhase::EmitNode;
+    s_infoWaveNodeEmitted = false;
+    s_infoWaveNeighborsEmitted = false;
+    s_infoWaveRoutesEmitted = false;
+    s_infoWaveGroupsEmitted = false;
     return;
   }
   if (s_infoWavePhase == InfoWavePhase::Idle) return;
 
   switch (s_infoWavePhase) {
     case InfoWavePhase::EmitNode:
-      emitNodeSnapshotForWave(s_infoWaveSeq, s_infoWaveCmdId);
+      if (!s_infoWaveNodeEmitted) {
+        emitNodeSnapshotForWave(s_infoWaveSeq, s_infoWaveCmdId);
+        s_infoWaveNodeEmitted = true;
+      }
+      /* Длинный evt:node — ждём, пока chunked NDJSON не уйдёт из FIFO целиком. */
+      if (s_infoWaveNodeChunkHeap) {
+        break;
+      }
+      s_infoWaveNodeEmitted = false;
       s_infoWavePhase = InfoWavePhase::EmitNeighbors;
       break;
     case InfoWavePhase::EmitNeighbors:
-      notifyNeighborsWithSeq(s_infoWaveSeq, s_infoWaveCmdId);
+      if (s_infoWaveNodeChunkHeap) break;
+      if (!s_infoWaveNeighborsEmitted) {
+        notifyNeighborsWithSeq(s_infoWaveSeq, s_infoWaveCmdId);
+        s_infoWaveNeighborsEmitted = true;
+      }
+      if (s_infoWaveNodeChunkHeap) break;
+      s_infoWaveNeighborsEmitted = false;
       s_infoWavePhase = InfoWavePhase::EmitRoutes;
       break;
     case InfoWavePhase::EmitRoutes:
-      notifyRoutesWithSeq(s_infoWaveSeq, s_infoWaveCmdId);
+      if (s_infoWaveNodeChunkHeap) break;
+      if (!s_infoWaveRoutesEmitted) {
+        notifyRoutesWithSeq(s_infoWaveSeq, s_infoWaveCmdId);
+        s_infoWaveRoutesEmitted = true;
+      }
+      if (s_infoWaveNodeChunkHeap) break;
+      s_infoWaveRoutesEmitted = false;
       s_infoWavePhase = InfoWavePhase::EmitGroups;
       break;
     case InfoWavePhase::EmitGroups:
-      notifyGroupsWithSeq(s_infoWaveSeq, s_infoWaveCmdId);
+      if (s_infoWaveNodeChunkHeap) break;
+      if (!s_infoWaveGroupsEmitted) {
+        notifyGroupsWithSeq(s_infoWaveSeq, s_infoWaveCmdId);
+        s_infoWaveGroupsEmitted = true;
+      }
+      if (s_infoWaveNodeChunkHeap) break;
+      s_infoWaveGroupsEmitted = false;
       s_infoWavePhase = InfoWavePhase::Idle;
       break;
     default:
       s_infoWavePhase = InfoWavePhase::Idle;
       break;
   }
+}
+
+/** Волна cmd:info (node→…→groups) или chunked evt:node в FIFO — нельзя вставлять отдельный evt:neighbors из mesh (flushPendingBleOutbound). */
+static bool infoWavePipelineBusy() {
+  return s_infoWavePending || s_infoWavePhase != InfoWavePhase::Idle || s_infoWaveNodeChunkHeap != nullptr;
 }
 
 static const char* groupRoleToStr(groups::GroupRole role) {
@@ -717,12 +976,16 @@ static bool enqueueJsonLine(const char* json) {
   if (!json) return false;
   size_t L = strlen(json);
   if (L == 0 || L >= kTxJsonMax) return false;
-  if (s_outCount >= kOutQDepth) {
-    s_outTail = (uint8_t)((s_outTail + 1) % kOutQDepth);
-    s_outCount--;
-    RIFTLINK_DIAG("BLE", "event=TX_DROP reason=out_queue_full");
+  if (bleSerializedJsonHasRawControlChars(json, L)) {
+    RIFTLINK_DIAG("BLE", "event=TX_FAIL reason=raw_ctrl_in_serialized line len=%u", (unsigned)L);
+    return false;
   }
-  memcpy(s_outQ[s_outHead], json, L + 1);
+  if (s_outCount >= kOutQDepth) {
+    bleOutQueueDropOldestSlot();
+  }
+  BleOutSlot& slot = s_outQ[s_outHead];
+  slot.kind = BleOutSlot::K_LINE;
+  memcpy(slot.line, json, L + 1);
   s_outHead = (uint8_t)((s_outHead + 1) % kOutQDepth);
   s_outCount++;
   return true;
@@ -731,65 +994,162 @@ static bool enqueueJsonLine(const char* json) {
 /** За один вызов `ble::update()` не слать слишком много notify подряд — иначе централь рвёт линк / SoftDevice захлёбывается. */
 static constexpr unsigned kBleOutLinesPerUpdateFlush = 4;
 
+/** Сколько байт payload длинной NDJSON-строки отдать за один вызов pump (несколько вызовов за один ble::update()). */
+static constexpr size_t kBleNdjsonTxBudgetBytes = 1024;
+
+/** Минимальный размер кучи для chunked NDJSON: measureJson(n) на сложных doc иногда заметно меньше фактического serialize. */
+static constexpr size_t kChunkedJsonHeapMinBytes = 4096;
+
 /**
- * Отправить до maxLines строк из очереди; между строками — yield + короткая пауза (как между чанками в writeJsonNdjsonChunked).
- * Всю очередь — через flushOutQueueAll() (несколько порций с паузами между ними).
+ * Сериализация JsonDocument в кучу для одной NDJSON-строки (chunked по эфиру). Несколько попыток с ростом cap.
+ * Иначе на телефон уходит обрезанный JSON + \\n → FormatException.
  */
-static void flushOutQueueLimited(unsigned maxLines) {
-  if (!s_connected || Bluefruit.connected() == 0) return;
-  if (!bleuart.notifyEnabled()) return;
-  while (s_outCount > 0 && maxLines > 0) {
-    if (!s_connected || Bluefruit.connected() == 0) return;
-    const char* line = s_outQ[s_outTail];
-    size_t L = strlen(line);
-    if (L > 0) {
-      bleuart.write((const uint8_t*)line, L);
-      bleuart.write('\n');
+static bool serializeDocToHeapForChunkedLine(JsonDocument& doc, char** heapOut, size_t* lenOut) {
+  const size_t n = measureJson(doc);
+  if (n == 0) return false;
+  size_t cap = n + 1 + 1024;
+  if (cap < kChunkedJsonHeapMinBytes) cap = kChunkedJsonHeapMinBytes;
+  for (unsigned attempt = 0; attempt < 5u; attempt++) {
+    char* heap = (char*)malloc(cap);
+    if (!heap) return false;
+    const size_t w = serializeJson(doc, heap, cap);
+    const bool truncated = (w + 1 >= cap);
+    const bool looksClosed = (w >= 2 && heap[w - 1] == '}');
+    if (w > 0 && !truncated && looksClosed) {
+      heap[w] = '\0';
+      *heapOut = heap;
+      *lenOut = w;
+      return true;
     }
-    s_outTail = (uint8_t)((s_outTail + 1) % kOutQDepth);
-    s_outCount--;
-    maxLines--;
-    if (s_outCount > 0 && maxLines > 0) {
-      yield();
-      delay(1);
+    free(heap);
+    if (w == 0) return false;
+    {
+      const size_t doubled = cap * 2u;
+      cap = (doubled > cap) ? doubled : (cap + 8192u);
     }
+    if (cap < n + 2048u) cap = n + 2048u;
+    if (cap > 65536u) return false;
   }
+  return false;
 }
 
-static void flushOutQueue() {
-  flushOutQueueLimited(kBleOutLinesPerUpdateFlush);
-}
+/**
+ * Единый drain FIFO: хвост очереди — короткая строка или chunked NDJSON; порядок байт в одной «трубе» не нарушается.
+ * maxLineLines — лимит коротких строк за вызов; maxChunkBytes — бюджет payload chunked (чанки по 32 B).
+ */
+static void pumpBleTx(size_t maxChunkBytes, unsigned maxLineLines) {
+  if (!s_connected || Bluefruit.connected() == 0) {
+    resetBleOutQueueOnDisconnect();
+    return;
+  }
+  if (!nusNotifyEnabled()) return;
 
-/** Слить всю очередь перед крупным NDJSON (чанки); между порциями — пауза, чтобы не рвать соединение. */
-static void flushOutQueueAll() {
+  size_t chunkBudget = maxChunkBytes;
+  unsigned lineBurst = 0;
+  static const uint8_t kNlByte = '\n';
+
   while (s_outCount > 0) {
-    if (!s_connected || Bluefruit.connected() == 0) return;
-    if (!bleuart.notifyEnabled()) return;
-    const unsigned before = s_outCount;
-    flushOutQueueLimited(kBleOutLinesPerUpdateFlush);
-    if (s_outCount == before) return;
-    yield();
+    /* Обрыв во время pump: иначе notify может зависнуть в SoftDevice при мёртвом линке. */
+    if (!s_connected || Bluefruit.connected() == 0) {
+      resetBleOutQueueOnDisconnect();
+      return;
+    }
+    BleOutSlot& slot = s_outQ[s_outTail];
+    if (slot.kind == BleOutSlot::K_LINE) {
+      if (lineBurst >= maxLineLines) return;
+      const char* line = slot.line;
+      size_t L = strlen(line);
+      if (L > 0) {
+        if (L > 65535u) L = 65535u;
+        // Retry для надёжной отправки коротких JSON-строк
+        if (!nusNotifyBytesWithRetry((const uint8_t*)line, (uint16_t)L)) {
+          if (Bluefruit.connected() == 0) resetBleOutQueueOnDisconnect();
+          return;
+        }
+        if (!nusNotifyBytesWithRetry(&kNlByte, 1)) {
+          if (Bluefruit.connected() == 0) resetBleOutQueueOnDisconnect();
+          return;
+        }
+      }
+      s_outTail = (uint8_t)((s_outTail + 1) % kOutQDepth);
+      s_outCount--;
+      lineBurst++;
+      if (s_outCount > 0 && lineBurst < maxLineLines) {
+        BleOutSlot& next = s_outQ[s_outTail];
+        if (next.kind == BleOutSlot::K_LINE) {
+          yield();
+          delay(1);
+        }
+      }
+      continue;
+    }
+
+    constexpr size_t kChunk = 32;
+    unsigned chunkInPump = 0;
+    while (slot.ch.off < slot.ch.len && chunkBudget > 0) {
+      if (!s_connected || Bluefruit.connected() == 0) {
+        resetBleOutQueueOnDisconnect();
+        return;
+      }
+      size_t remain = slot.ch.len - slot.ch.off;
+      size_t n = remain > kChunk ? kChunk : remain;
+      if (n > chunkBudget) n = chunkBudget;
+      // Retry для каждого чанка длинного NDJSON
+      if (!nusNotifyBytesWithRetry((const uint8_t*)(slot.ch.heap + slot.ch.off), (uint16_t)n)) {
+        if (Bluefruit.connected() == 0) resetBleOutQueueOnDisconnect();
+        return;
+      }
+      slot.ch.off += n;
+      chunkBudget -= n;
+      yield();
+      if ((++chunkInPump & 7u) == 0) riftlink_wdt_feed();
+    }
+    if (slot.ch.off >= slot.ch.len) {
+      if (!nusNotifyBytesWithRetry(&kNlByte, 1)) {
+        if (Bluefruit.connected() == 0) resetBleOutQueueOnDisconnect();
+        return;
+      }
+      if (slot.ch.heap == s_infoWaveNodeChunkHeap) s_infoWaveNodeChunkHeap = nullptr;
+      free(slot.ch.heap);
+      s_outTail = (uint8_t)((s_outTail + 1) % kOutQDepth);
+      s_outCount--;
+      continue;
+    }
+    return;
   }
 }
 
-/** Как ESP `notifyJsonToApp`: длинный NDJSON — несколько `write` подряд, `\n` только после последнего байта. */
-static bool writeJsonNdjsonChunked(const char* payload, size_t len) {
-  if (!payload || len == 0) return false;
-  if (!s_connected || Bluefruit.connected() == 0) return false;
-  if (!bleuart.notifyEnabled()) return false;
-  constexpr size_t kChunk = 512;
-  size_t off = 0;
-  while (off < len) {
-    const size_t remain = len - off;
-    const size_t n = remain > kChunk ? kChunk : remain;
-    bleuart.write((const uint8_t*)(payload + off), n);
-    off += n;
-    if (off < len) {
-      yield();
-      delay(2);
-    }
+static bool scheduleNdjsonLineOwned(char* heap, size_t len) {
+  if (!heap || len == 0) {
+    if (heap) free(heap);
+    return false;
   }
-  bleuart.write('\n');
+  if (bleSerializedJsonHasRawControlChars(heap, len)) {
+    RIFTLINK_DIAG("BLE", "event=TX_FAIL reason=raw_ctrl_in_serialized owned len=%u", (unsigned)len);
+    free(heap);
+    return false;
+  }
+  if (!s_connected || Bluefruit.connected() == 0) {
+    free(heap);
+    return false;
+  }
+  if (!nusNotifyEnabled()) {
+    free(heap);
+    return false;
+  }
+  if (s_outCount >= kOutQDepth) {
+    bleOutQueueDropOldestSlot();
+  }
+  BleOutSlot& slot = s_outQ[s_outHead];
+  slot.kind = BleOutSlot::K_CHUNKED;
+  slot.ch.heap = heap;
+  slot.ch.len = len;
+  slot.ch.off = 0;
+  if (s_emittingFromInfoWaveNode) {
+    s_infoWaveNodeChunkHeap = heap;
+  }
+  s_outHead = (uint8_t)((s_outHead + 1) % kOutQDepth);
+  s_outCount++;
   return true;
 }
 
@@ -801,7 +1161,45 @@ static void emitJsonDoc(JsonDocument& doc) {
     return;
   }
   buf[n] = '\0';
+  if (n < 2 || buf[n - 1] != '}') {
+    RIFTLINK_DIAG("BLE", "event=TX_FAIL reason=serialize_not_closed n=%u", (unsigned)n);
+    return;
+  }
   (void)enqueueJsonLine(buf);
+}
+
+/**
+ * Одна строка NDJSON: если сериализация ≥ kTxJsonMax — в кучу и в общую FIFO-очередь TX; pumpBleTx по тикам.
+ * (несколько ATT notify до завершающего \\n; клиент склеивает — см. docs/API.md §476).
+ */
+static void emitJsonDocStackOrChunked(JsonDocument& doc) {
+  const size_t n = measureJson(doc);
+  if (n == 0) return;
+  if (n < kTxJsonMax) {
+    emitJsonDoc(doc);
+    return;
+  }
+  /* Без CCCD notify не уйдёт; не держим pending — ужимаем и шлём ≤511 B, иначе волна info зависает навсегда. */
+  if (!nusNotifyEnabled()) {
+    trimBlePassportDoc(doc);
+    shrinkJsonDocToAttSafe(doc);
+    emitJsonDoc(doc);
+    return;
+  }
+  char* heap = nullptr;
+  size_t w = 0;
+  if (!serializeDocToHeapForChunkedLine(doc, &heap, &w)) {
+    RIFTLINK_DIAG("BLE", "event=TX_FAIL reason=chunked_serialize n=%u", (unsigned)n);
+    trimBlePassportDoc(doc);
+    shrinkJsonDocToAttSafe(doc);
+    emitJsonDoc(doc);
+    return;
+  }
+  if (!scheduleNdjsonLineOwned(heap, w)) {
+    trimBlePassportDoc(doc);
+    shrinkJsonDocToAttSafe(doc);
+    emitJsonDoc(doc);
+  }
 }
 
 /** Паритет с ESP `notifyJsonToApp` для oversize: поля `len` и `limit`. */
@@ -814,6 +1212,47 @@ static void notifyPayloadTooLong(uint16_t droppedLen) {
   doc["len"] = droppedLen;
   doc["limit"] = (uint32_t)kRxLineMax;
   emitJsonDoc(doc);
+}
+
+/** Одна ATT WRITE на NUS RXD — паритет с ESP: writeEvent → очередь, разбор в ble::update(). */
+static void onRiftNusRxdWrite(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
+  (void)conn_hdl;
+  (void)chr;
+  if (Bluefruit.connected() == 0) return;
+  if (len == 0 || data == nullptr) return;
+  
+  // Диагностика переполнения
+  if (len > (uint16_t)kRxLineMax) {
+    notifyPayloadTooLong(len);
+    RIFTLINK_DIAG("BLE", "event=RX_DROP reason=payload_too_long len=%u max=%u", 
+        (unsigned)len, (unsigned)kRxLineMax);
+    return;
+  }
+  
+  // Обрезка CR/LF с конца
+  uint16_t trim = len;
+  while (trim > 0 && (data[trim - 1] == '\n' || data[trim - 1] == '\r')) trim--;
+  if (trim == 0) return;
+  
+  // Попытка постановки в очередь
+  if (!enqueueIncomingCmd(data, trim)) {
+    s_inCmdDroppedQueueFull++;
+    RIFTLINK_DIAG("BLE", "event=RX_CMD_DROP reason=in_queue_full count=%u", 
+        (unsigned)s_inCmdDroppedQueueFull);
+    
+    // Backpressure: уведомление телефона о перегрузке
+    JsonDocument doc;
+    doc["evt"] = "error";
+    doc["code"] = "ble_rx_queue_full";
+    doc["msg"] = "Node RX queue overflow, reduce send rate";
+    doc["dropped"] = (unsigned)s_inCmdDroppedQueueFull;
+    char buf[256];
+    size_t n = serializeJson(doc, buf, sizeof(buf));
+    if (n > 0 && n < sizeof(buf)) {
+      buf[n] = '\0';
+      nusNotifyBytesWithRetry((const uint8_t*)buf, (uint16_t)n);
+    }
+  }
 }
 
 static void emitLoraScanDoc(uint32_t cmdId, int n, const selftest::ScanResult* res) {
@@ -955,9 +1394,23 @@ static bool b64DecodeTo(const char* b64, uint8_t* out, size_t outMax, size_t* ou
 static void notifyGroupSecurityErrorV2(const char* groupUid, const char* code, const char* msg, uint32_t cmdId) {
   JsonDocument ev;
   ev["evt"] = "groupSecurityError";
-  if (groupUid && groupUid[0]) ev["groupUid"] = groupUid;
-  ev["code"] = code ? code : "group_v2_unknown";
-  ev["msg"] = msg ? msg : "";
+  if (groupUid && groupUid[0]) {
+    char uidBuf[groups::GROUP_UID_MAX_LEN + 1];
+    strncpy(uidBuf, groupUid, sizeof(uidBuf) - 1);
+    uidBuf[sizeof(uidBuf) - 1] = '\0';
+    sanitizeBleJsonCStringInPlace(uidBuf);
+    ev["groupUid"] = uidBuf;
+  }
+  char codeBuf[96];
+  char msgBuf[256];
+  strncpy(codeBuf, code ? code : "group_v2_unknown", sizeof(codeBuf) - 1);
+  codeBuf[sizeof(codeBuf) - 1] = '\0';
+  strncpy(msgBuf, msg ? msg : "", sizeof(msgBuf) - 1);
+  msgBuf[sizeof(msgBuf) - 1] = '\0';
+  sanitizeBleJsonCStringInPlace(codeBuf);
+  sanitizeBleJsonCStringInPlace(msgBuf);
+  ev["code"] = codeBuf;
+  ev["msg"] = msgBuf;
   if (cmdId != 0) ev["cmdId"] = cmdId;
   emitJsonDoc(ev);
 }
@@ -974,9 +1427,15 @@ static void notifyGroupStatusV2(const char* groupUid, bool inviteAcceptNoop, uin
   if (!groups::getGroupV2(groupUid, &channelId32, groupTag, sizeof(groupTag), canonicalName, sizeof(canonicalName),
           &keyVersion, &role, &revocationEpoch, &ackApplied))
     return;
+  sanitizeBleJsonCStringInPlace(groupTag);
+  sanitizeBleJsonCStringInPlace(canonicalName);
+  char uidBuf[groups::GROUP_UID_MAX_LEN + 1];
+  strncpy(uidBuf, groupUid, sizeof(uidBuf) - 1);
+  uidBuf[sizeof(uidBuf) - 1] = '\0';
+  sanitizeBleJsonCStringInPlace(uidBuf);
   JsonDocument ev;
   ev["evt"] = "groupStatus";
-  ev["groupUid"] = groupUid;
+  ev["groupUid"] = uidBuf;
   ev["channelId32"] = channelId32;
   ev["groupTag"] = groupTag;
   ev["canonicalName"] = canonicalName;
@@ -1194,10 +1653,20 @@ static bool handleGroupV2Commands(JsonDocument& doc, const char* cmd, uint32_t c
       notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Invite encode failed", cmdId);
       return true;
     }
+    char uidSan[groups::GROUP_UID_MAX_LEN + 1];
+    strncpy(uidSan, groupUid, sizeof(uidSan) - 1);
+    uidSan[sizeof(uidSan) - 1] = '\0';
+    sanitizeBleJsonCStringInPlace(uidSan);
+    char roleSan[32];
+    strncpy(roleSan, roleStr, sizeof(roleSan) - 1);
+    roleSan[sizeof(roleSan) - 1] = '\0';
+    sanitizeBleJsonCStringInPlace(roleSan);
+    sanitizeBleJsonCStringInPlace(gtag);
+    sanitizeBleJsonCStringInPlace(cname);
     JsonDocument ev;
     ev["evt"] = "groupInvite";
-    ev["groupUid"] = groupUid;
-    ev["role"] = roleStr;
+    ev["groupUid"] = uidSan;
+    ev["role"] = roleSan;
     ev["invite"] = inviteB64;
     ev["expiresAt"] = expiresAt;
     ev["channelId32"] = channelId32;
@@ -1213,8 +1682,14 @@ static bool handleGroupV2Commands(JsonDocument& doc, const char* cmd, uint32_t c
       out[outLen] = '\0';
       (void)enqueueJsonLine(out);
     } else {
-      flushOutQueueAll();
-      if (!writeJsonNdjsonChunked(out, outLen)) {
+      char* heap = (char*)malloc(outLen + 1);
+      if (!heap) {
+        notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Invite TX failed", cmdId);
+        return true;
+      }
+      memcpy(heap, out, outLen);
+      heap[outLen] = '\0';
+      if (!scheduleNdjsonLineOwned(heap, outLen)) {
         notifyGroupSecurityErrorV2(groupUid, "group_v2_invite_bad", "Invite TX failed", cmdId);
         return true;
       }
@@ -1472,7 +1947,7 @@ static bool handleGroupV2Commands(JsonDocument& doc, const char* cmd, uint32_t c
 }
 
 static void handleJsonCommand(const char* json, size_t len) {
-  if (!json || len == 0 || len >= kRxLineMax) return;
+  if (!json || len == 0 || len > kRxLineMax) return;
 
   JsonDocument doc;
   DeserializationError err = deserializeJson(doc, json, len);
@@ -1502,7 +1977,8 @@ static void handleJsonCommand(const char* json, size_t len) {
     return;
   }
   if (strcmp(cmd, "neighbors") == 0) {
-    ble::notifyNeighbors();
+    /* Не вызывать notifyNeighbors() сразу — та же очередь, что и волна info; иначе interleave с chunked node. */
+    requestNeighborsNotify();
     return;
   }
   if (strcmp(cmd, "send") == 0) {
@@ -1978,11 +2454,11 @@ static void handleJsonCommand(const char* json, size_t len) {
     if (lang) {
       if (strcmp(lang, "ru") == 0) {
         if (locale::getLang() != LANG_RU) {
-          if (locale::setLang(LANG_RU)) menu_nrf_redraw_after_locale();
+          if (locale::setLang(LANG_RU)) menu_nrf_request_redraw_after_locale();
         }
       } else if (strcmp(lang, "en") == 0) {
         if (locale::getLang() != LANG_EN) {
-          if (locale::setLang(LANG_EN)) menu_nrf_redraw_after_locale();
+          if (locale::setLang(LANG_EN)) menu_nrf_request_redraw_after_locale();
         }
       }
     }
@@ -2002,29 +2478,31 @@ static void handleJsonCommand(const char* json, size_t len) {
   ble::notifyError("unknown_cmd", unknownBuf);
 }
 
-static void onBleUartRx(uint16_t) {
-  /* Данные читаются в ble::update() из FIFO bleuart. */
-}
-
 static void connect_callback(uint16_t conn_handle) {
   (void)conn_handle;
-  s_connected = true;
-  s_pendingInfoAfterConnect = true;
-  s_pendingInfoDeadlineMs = millis() + 8000;
-  RIFTLINK_DIAG("BLE", "event=CONNECTED");
+  /* Не Serial/DIAG здесь — колбэк SoftDevice; s_connected и лог — в syncBleConnectionAtUpdateEntry(). */
+  /* Но для отладки зависаний — минимальный лог в Serial1 (T114) */
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  {
+    char b[96];
+    snprintf(b, sizeof(b), "[RiftLink] BLE CB event=CONNECT cb_t=%lu", (unsigned long)millis());
+    Serial1.println(b);
+  }
+#endif
 }
 
 static void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
   (void)conn_handle;
-  (void)reason;
-  s_connected = false;
-  s_pendingInfoAfterConnect = false;
-  s_pendingInfoDeadlineMs = 0;
-  s_infoWavePending = false;
-  s_infoWavePhase = InfoWavePhase::Idle;
-  /* Очередь NDJSON (s_outQ) не трогаем здесь: flushOutQueue* идёт из loop в ble::update(),
-   * параллельный сброс из колбэка SoftDevice даёт гонку по head/tail/count и «рвёт» сессию/стек. */
-  RIFTLINK_DIAG("BLE", "event=DISCONNECTED reason=0x%02X", (unsigned)reason);
+  s_lastBleDiscReason = reason;
+  /* Лог DISCONNECTED — в syncBleConnectionAtUpdateEntry() при нисходящем фронте (не из колбэка). */
+  /* Но для отладки зависаний — минимальный лог в Serial1 (T114) */
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  {
+    char b[96];
+    snprintf(b, sizeof(b), "[RiftLink] BLE CB event=DISCONNECT reason=0x%02X cb_t=%lu", (unsigned)reason, (unsigned long)millis());
+    Serial1.println(b);
+  }
+#endif
 }
 
 static void startAdvertising() {
@@ -2033,7 +2511,7 @@ static void startAdvertising() {
 
   Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
   Bluefruit.Advertising.addTxPower();
-  Bluefruit.Advertising.addService(bleuart);
+  Bluefruit.Advertising.addService(s_riftNus);
   Bluefruit.ScanResponse.addName();
   Bluefruit.Advertising.restartOnDisconnect(true);
   Bluefruit.Advertising.setInterval(32, 244);
@@ -2079,9 +2557,37 @@ bool init() {
   Bluefruit.setTxPower(4);
   Bluefruit.Periph.setConnectCallback(connect_callback);
   Bluefruit.Periph.setDisconnectCallback(disconnect_callback);
+  /* Как Meshtastic NRF52Bluetooth::setup(): slave latency 0 (SoftDevice + iOS), интервал 12–80 ×1.25 ms ≈ 15–100 ms. */
+  Bluefruit.Periph.setConnSlaveLatency(0);
+  Bluefruit.Periph.setConnInterval(12, 80);
 
-  bleuart.begin();
-  bleuart.setRxCallback(onBleUartRx, true);
+  {
+    uint16_t max_mtu = Bluefruit.getMaxMtu(BLE_GAP_ROLE_PERIPH);
+    err_t err = s_riftNus.begin();
+    if (err != ERROR_NONE) {
+      Serial.printf("[RiftLink] BLE: NUS service begin failed err=%u\n", (unsigned)err);
+      return false;
+    }
+    s_riftNusTxd.setProperties(CHR_PROPS_NOTIFY);
+    s_riftNusTxd.setPermission(SECMODE_OPEN, SECMODE_NO_ACCESS);
+    s_riftNusTxd.setMaxLen(max_mtu);
+    s_riftNusTxd.setUserDescriptor("TXD");
+    err = s_riftNusTxd.begin();
+    if (err != ERROR_NONE) {
+      Serial.printf("[RiftLink] BLE: NUS TXD begin failed err=%u\n", (unsigned)err);
+      return false;
+    }
+    s_riftNusRxd.setProperties(CHR_PROPS_WRITE | CHR_PROPS_WRITE_WO_RESP);
+    s_riftNusRxd.setPermission(SECMODE_NO_ACCESS, SECMODE_OPEN);
+    s_riftNusRxd.setMaxLen(max_mtu);
+    s_riftNusRxd.setUserDescriptor("RXD");
+    s_riftNusRxd.setWriteCallback(onRiftNusRxdWrite, true);
+    err = s_riftNusRxd.begin();
+    if (err != ERROR_NONE) {
+      Serial.printf("[RiftLink] BLE: NUS RXD begin failed err=%u\n", (unsigned)err);
+      return false;
+    }
+  }
 
   startAdvertising();
   s_inited = true;
@@ -2090,60 +2596,128 @@ bool init() {
 }
 
 void deinit() {
+  resetBleOutQueueOnDisconnect();
+  resetIncomingCmdQueue();
   Bluefruit.Advertising.stop();
   s_inited = false;
+}
+
+/**
+ * В начале каждого `update()`: зеркалировать SoftDevice и при обрыве сразу освободить TX (chunked heap) и волну info.
+ * Иначе после disconnect колбэк мог обнулить флаги, а очередь ещё ждать первого `pumpBleTx` — гонка/«залипание» узла
+ * (processInfoWaveStep / pending notify при отсутствии линка).
+ */
+static void syncBleConnectionAtUpdateEntry() {
+  const bool conn = (Bluefruit.connected() > 0);
+  if (conn && !s_bleConnPrevForDiag) {
+    /* Сначала окно трассы, потом строка CONNECTED — иначе postConnTraceIf отсекает до arm. */
+    s_postConnTraceUntilMs = millis() + 20000;
+    s_postConnBleDetailPassesLeft = 40;
+    s_postConnMainTraceLeft = 48;
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+    {
+      char b[96];
+      snprintf(b, sizeof(b), "[RiftLink] BLE event=CONNECTED t=%lu", (unsigned long)millis());
+      Serial1.println(b);
+    }
+#else
+    RIFTLINK_DIAG("BLE", "event=CONNECTED");
+#endif
+    postConnTraceIf("sync_arm_trace");
+  }
+  if (!conn && s_bleConnPrevForDiag) {
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+    {
+      char b[96];
+      snprintf(b, sizeof(b), "[RiftLink] BLE event=DISCONNECTED reason=0x%02X t=%lu", (unsigned)s_lastBleDiscReason,
+          (unsigned long)millis());
+      Serial1.println(b);
+    }
+#else
+    RIFTLINK_DIAG("BLE", "event=DISCONNECTED reason=0x%02X", (unsigned)s_lastBleDiscReason);
+#endif
+  }
+  s_bleConnPrevForDiag = conn;
+  s_connected = conn;
+  if (!conn) {
+    s_postConnTraceUntilMs = 0;
+    s_postConnBleDetailPassesLeft = 0;
+    s_postConnMainTraceLeft = 0;
+    /* 1. Сброс info wave ДО очистки очередей — иначе chunked heap остаётся висеть */
+    resetInfoWaveOnDisconnect();
+    /* 2. Очистка TX-очереди (освобождает всю кучу chunked NDJSON) */
+    resetBleOutQueueOnDisconnect();
+    /* 3. Очистка RX-очереди */
+    resetIncomingCmdQueue();
+    /* 4. Отдача времени SoftDevice — только один короткий delay, иначе блокировка loop на 300мс!
+     * SoftDevice требует ~10-20мс на завершение, не 100мс. */
+    yield();
+    delay(10);  // Один короткий delay вместо 5×20мс
+  }
+}
+
+static void consumeIncomingCmdQueue() {
+  if (!s_connected) return;
+  for (uint8_t i = 0; i < kInCmdConsumePerUpdate && s_inCmdQCount.load(std::memory_order_relaxed) > 0; i++) {
+    NrfBleInCmdItem& it = s_inCmdQ[s_inCmdQTail];
+    s_inCmdQTail = (uint8_t)((s_inCmdQTail + 1) % kInCmdQDepth);
+    s_inCmdQCount.fetch_sub(1, std::memory_order_relaxed);
+    postConnTraceIf("u03b_before_handle_json");
+    riftlink_wdt_feed();
+    yield();
+    handleJsonCommand((const char*)it.data, it.len);
+    riftlink_wdt_feed();
+    yield();
+    postConnTraceIf("u03c_after_handle_json");
+  }
 }
 
 void update() {
   if (!s_inited) return;
 
-  /* Не опустошать FIFO одним вызовом без лимита: при залпе данных/глюке стека возможен долгий spin
-   * и «мёртвое» зависание всего loop (в т.ч. во время connect). Остальное — на следующий тик. */
-  constexpr unsigned kBleRxMaxBytesPerUpdate = 4096;
-  /* Не обрабатывать неограниченно много JSON-команд за один update (волна info + несколько cmd — тяжёлый стек/SoftDevice). */
-  constexpr unsigned kBleRxMaxCommandsPerUpdate = 2;
-  unsigned rxCommandsThisUpdate = 0;
-  for (unsigned nread = 0; nread < kBleRxMaxBytesPerUpdate && bleuart.available(); nread++) {
-    int c = bleuart.read();
-    if (c < 0) break;
-    if (c == '\n' || c == '\r') {
-      if (s_rxLen > 0) {
-        s_rxLine[s_rxLen] = '\0';
-        handleJsonCommand(s_rxLine, s_rxLen);
-        s_rxLen = 0;
-        if (++rxCommandsThisUpdate >= kBleRxMaxCommandsPerUpdate) break;
-      }
-    } else if (s_rxLen < sizeof(s_rxLine) - 1) {
-      s_rxLine[s_rxLen++] = (char)c;
-    } else {
-      const uint16_t badLen = (uint16_t)(s_rxLen + 1);
-      s_rxLen = 0;
-      RIFTLINK_DIAG("BLE", "event=RX_DROP reason=line_too_long");
-      const uint32_t now = millis();
-      if ((uint32_t)(now - s_lastRxLineTooLongNotifyMs) >= 2000) {
-        s_lastRxLineTooLongNotifyMs = now;
-        notifyPayloadTooLong(badLen);
-      }
+  riftlink_wdt_feed();
+  
+  /* T114: отладка — лог каждого вызова update() */
+#if defined(RIFTLINK_BOARD_HELTEC_T114) && defined(RIFTLINK_BLE_DEBUG_UPDATE)
+  {
+    static uint32_t s_lastUpdateLogMs = 0;
+    if ((uint32_t)(millis() - s_lastUpdateLogMs) >= 1000) {
+      char b[128];
+      snprintf(b, sizeof(b), "[RiftLink] BLE_UPDATE t=%lu conn=%d inited=%d outCount=%u",
+          (unsigned long)millis(), (int)Bluefruit.connected(), (int)s_inited, (unsigned)s_outCount);
+      Serial1.println(b);
+      s_lastUpdateLogMs = millis();
     }
   }
+#endif
+  
+  syncBleConnectionAtUpdateEntry();
+  postConnTraceIf("u01_after_sync");
+  /* Как ESP ble.cpp: очередь команд из GATT до pump TX (порядок обработки входящих). */
+  postConnTraceIf("u03_rx_queue_enter");
+  consumeIncomingCmdQueue();
+  postConnTraceIf("u04_rx_queue_exit");
+  pumpBleTx(kBleNdjsonTxBudgetBytes, kBleOutLinesPerUpdateFlush);
+  postConnTraceIf("u02_after_pump_tx_a");
 
-  s_connected = (Bluefruit.connected() > 0);
-  if (s_pendingInfoAfterConnect && s_connected) {
-    const bool cccdReady = bleuart.notifyEnabled();
-    const bool timedOut = s_pendingInfoDeadlineMs != 0 && (int32_t)(millis() - s_pendingInfoDeadlineMs) >= 0;
-    if (cccdReady || timedOut) {
-      s_pendingInfoAfterConnect = false;
-      s_pendingInfoDeadlineMs = 0;
-      if (!cccdReady && timedOut) {
-        RIFTLINK_DIAG("BLE", "event=INFO_WAVE_PENDING reason=cccd_timeout (flush when notify enables)");
-      }
-      notifyInfo();
-    }
-  }
+  pumpBleTx(kBleNdjsonTxBudgetBytes, kBleOutLinesPerUpdateFlush);
+  postConnTraceIf("u05_after_pump_tx_b");
+
+  postConnTraceIf("u06_before_info_wave");
   processInfoWaveStep();
+  postConnTraceIf("u07_after_info_wave");
+
   pingRetryTick();
+  postConnTraceIf("u08_after_ping_retry");
+
   flushPendingBleOutbound();
-  flushOutQueue();
+  postConnTraceIf("u09_after_flush_pending");
+
+  pumpBleTx(kBleNdjsonTxBudgetBytes, kBleOutLinesPerUpdateFlush);
+  postConnTraceIf("u10_after_pump_tx_c");
+  pumpBleTx(kBleNdjsonTxBudgetBytes, kBleOutLinesPerUpdateFlush);
+  postConnTraceIf("u11_update_end");
+  if (s_postConnBleDetailPassesLeft > 0) s_postConnBleDetailPassesLeft--;
 
   /* Сброс TX-очереди только на нисходящем фронте линка (после flush), не при любом connected()==0:
    * иначе кратковременный «ещё не connected» при установлении связи или между двумя ble::update() в loop
@@ -2153,6 +2727,10 @@ void update() {
     if (s_bleConnAtPrevUpdateEnd && !connEnd && s_outCount > 0) resetBleOutQueueOnDisconnect();
     s_bleConnAtPrevUpdateEnd = connEnd;
   }
+}
+
+void postConnectTrace(const char* tag) {
+  if (tag && tag[0]) postConnTraceIf(tag);
 }
 
 void setOnSend(void (*cb)(const uint8_t* to, const char* text, uint8_t ttlMinutes, bool critical,
@@ -2166,7 +2744,7 @@ void setOnLocation(void (*cb)(float lat, float lon, int16_t alt, uint16_t radius
 
 /**
  * Отправка evt:msg. Длинный JSON (≥512 B сериализации) — NDJSON-чанки, как ESP `notifyJsonToApp` / docs/API.md §476.
- * Возвращает false, если нет транспорта или сериализация не удалась (pending в flush остаётся для повтора).
+ * Возвращает false, если нет транспорта или сериализация не удалась (запись в FIFO TX не удалась).
  */
 static bool emitMsgEvt(const uint8_t* from, const char* text, uint32_t msgId, int rssi, uint8_t ttlMinutes,
     const char* lane, const char* type, uint32_t groupId, const char* groupUid) {
@@ -2177,36 +2755,55 @@ static bool emitMsgEvt(const uint8_t* from, const char* text, uint32_t msgId, in
   char fromHex[17] = {0};
   for (int i = 0; i < 8; i++) snprintf(fromHex + i * 2, 3, "%02X", from[i]);
   doc["from"] = fromHex;
-  doc["text"] = text;
+  char textBuf[kBlePendingMsgTextMax + 1];
+  strncpy(textBuf, text, kBlePendingMsgTextMax);
+  textBuf[kBlePendingMsgTextMax] = '\0';
+  sanitizeBleJsonCStringInPlace(textBuf);
+  doc["text"] = textBuf;
   if (msgId != 0) doc["msgId"] = msgId;
   if (rssi != 0) doc["rssi"] = rssi;
   if (ttlMinutes != 0) doc["ttl"] = ttlMinutes;
-  if (lane && lane[0]) doc["lane"] = lane;
-  if (type && type[0]) doc["type"] = type;
+  if (lane && lane[0]) {
+    char laneBuf[sizeof(s_pendingMsgLane)];
+    strncpy(laneBuf, lane, sizeof(laneBuf) - 1);
+    laneBuf[sizeof(laneBuf) - 1] = '\0';
+    sanitizeBleJsonCStringInPlace(laneBuf);
+    doc["lane"] = laneBuf;
+  }
+  if (type && type[0]) {
+    char typeBuf[sizeof(s_pendingMsgType)];
+    strncpy(typeBuf, type, sizeof(typeBuf) - 1);
+    typeBuf[sizeof(typeBuf) - 1] = '\0';
+    sanitizeBleJsonCStringInPlace(typeBuf);
+    doc["type"] = typeBuf;
+  }
   if (groupId > 0) doc["group"] = groupId;
-  if (groupUid && groupUid[0]) doc["groupUid"] = groupUid;
+  if (groupUid && groupUid[0]) {
+    char gidBuf[groups::GROUP_UID_MAX_LEN + 1];
+    strncpy(gidBuf, groupUid, sizeof(gidBuf) - 1);
+    gidBuf[sizeof(gidBuf) - 1] = '\0';
+    sanitizeBleJsonCStringInPlace(gidBuf);
+    doc["groupUid"] = gidBuf;
+  }
   const size_t n = measureJson(doc);
   if (n == 0) return false;
   if (n >= kTxJsonMax) {
-    char* heap = (char*)malloc(n + 1);
-    if (!heap) {
-      RIFTLINK_DIAG("BLE", "event=MSG_TX_FAIL reason=oom n=%u", (unsigned)n);
+    char* heap = nullptr;
+    size_t w = 0;
+    if (!serializeDocToHeapForChunkedLine(doc, &heap, &w)) {
+      RIFTLINK_DIAG("BLE", "event=MSG_TX_FAIL reason=chunked_serialize n=%u", (unsigned)n);
       return false;
     }
-    const size_t w = serializeJson(doc, heap, n + 1);
-    if (w == 0 || w > n) {
-      free(heap);
+    if (!scheduleNdjsonLineOwned(heap, w)) {
       return false;
     }
-    flushOutQueueAll();
-    const bool ok = writeJsonNdjsonChunked(heap, w);
-    free(heap);
-    return ok;
+    return true;
   }
   char buf[kTxJsonMax];
   const size_t w = serializeJson(doc, buf, sizeof(buf));
   if (w == 0 || w >= sizeof(buf)) return false;
   buf[w] = '\0';
+  if (w < 2 || buf[w - 1] != '}') return false;
   return enqueueJsonLine(buf);
 }
 
@@ -2444,8 +3041,12 @@ static void flushPendingBleOutbound() {
     if (sent) s_pendingMsg = false;
   }
   if (s_pendingNeighbors) {
-    s_pendingNeighbors = false;
-    notifyNeighbors();
+    if (infoWavePipelineBusy()) {
+      /* Флаг остаётся true — снимем после волны info в следующем update(). */
+    } else {
+      s_pendingNeighbors = false;
+      notifyNeighbors();
+    }
   }
 }
 
@@ -2472,8 +3073,20 @@ void notifyWifi(bool connected, const char* ssid, const char* ip) {
   JsonDocument doc;
   doc["evt"] = "wifi";
   doc["connected"] = connected;
-  if (ssid) doc["ssid"] = ssid;
-  if (ip) doc["ip"] = ip;
+  if (ssid) {
+    char ssidBuf[33];
+    strncpy(ssidBuf, ssid, sizeof(ssidBuf) - 1);
+    ssidBuf[sizeof(ssidBuf) - 1] = '\0';
+    sanitizeBleJsonCStringInPlace(ssidBuf);
+    doc["ssid"] = ssidBuf;
+  }
+  if (ip) {
+    char ipBuf[24];
+    strncpy(ipBuf, ip, sizeof(ipBuf) - 1);
+    ipBuf[sizeof(ipBuf) - 1] = '\0';
+    sanitizeBleJsonCStringInPlace(ipBuf);
+    doc["ip"] = ipBuf;
+  }
   emitJsonDoc(doc);
 }
 
@@ -2481,7 +3094,11 @@ void notifyRegion(const char* code, float freq, int power, int channel, uint32_t
   JsonDocument doc;
   doc["evt"] = "region";
   if (cmdId != 0) doc["cmdId"] = cmdId;
-  doc["region"] = code ? code : "";
+  char codeBuf[16];
+  strncpy(codeBuf, code ? code : "", sizeof(codeBuf) - 1);
+  codeBuf[sizeof(codeBuf) - 1] = '\0';
+  sanitizeBleJsonCStringInPlace(codeBuf);
+  doc["region"] = codeBuf;
   doc["freq"] = freq;
   doc["power"] = power;
   if (channel >= 0) doc["channel"] = channel;
@@ -2580,10 +3197,18 @@ void notifyVoice(const uint8_t* from, const uint8_t* data, size_t dataLen, uint3
 
 void notifyError(const char* code, const char* msg) {
   if (!s_connected || Bluefruit.connected() == 0 || !code || !msg) return;
+  char codeBuf[96];
+  char msgBuf[256];
+  strncpy(codeBuf, code, sizeof(codeBuf) - 1);
+  codeBuf[sizeof(codeBuf) - 1] = '\0';
+  strncpy(msgBuf, msg, sizeof(msgBuf) - 1);
+  msgBuf[sizeof(msgBuf) - 1] = '\0';
+  sanitizeBleJsonCStringInPlace(codeBuf);
+  sanitizeBleJsonCStringInPlace(msgBuf);
   JsonDocument doc;
   doc["evt"] = "error";
-  doc["code"] = code;
-  doc["msg"] = msg;
+  doc["code"] = codeBuf;
+  doc["msg"] = msgBuf;
   if (s_activeCmdId != 0) doc["cmdId"] = s_activeCmdId;
   emitJsonDoc(doc);
 }
