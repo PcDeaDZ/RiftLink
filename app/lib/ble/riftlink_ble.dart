@@ -589,7 +589,9 @@ class RiftLinkBle {
     final rx = _rxChar!;
 
     if (!kIsWeb) {
-      await Future<void>.delayed(const Duration(milliseconds: 120));
+      // Android 12+: даём GATT стеку время на стабилизацию после discovery
+      // Без задержки setNotifyValue может вернуть GATT_ERROR или notify не включится
+      await Future<void>.delayed(const Duration(milliseconds: 500));
     }
 
     // Подписка до setNotifyValue: иначе первые notify после включения CCCD могут прийти до listen().
@@ -1302,14 +1304,18 @@ class RiftLinkBle {
       }
       if (b == 0x0D) {
         if (i + 1 < raw.length && raw[i + 1] == 0x0A) {
+          _trace('stage=app_rx action=newline_found pos=$i type=CR LF raw_len=${raw.length}');
           return (i, i + 2);
         }
+        _trace('stage=app_rx action=newline_found pos=$i type=CR raw_len=${raw.length}');
         return (i, i + 1);
       }
       if (b == 0x0A) {
+        _trace('stage=app_rx action=newline_found pos=$i type=LF raw_len=${raw.length}');
         return (i, i + 1);
       }
     }
+    _trace('stage=app_rx action=newline_not_found start=$start raw_len=${raw.length}');
     return null;
   }
 

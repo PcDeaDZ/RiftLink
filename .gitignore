@@ -53,5 +53,5 @@ secrets/
 docs/plans/
 docs/RADIO_INVENTORY.md
 docs/HELLO_RADIO_WORKAROUNDS_AND_DEBT.md
-.qwen/settings.json.orig
-.qwen/settings.json
+QWEN.md
+.qwen/

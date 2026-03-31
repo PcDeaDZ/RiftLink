@@ -6,6 +6,7 @@
 
 #include "gps/gps.h"
 #include "kv.h"
+#include "nrf_wdt_feed.h"
 
 #include <Arduino.h>
 #include <cctype>
@@ -308,10 +309,18 @@ void init() {
 void update() {
 #if defined(RIFTLINK_BOARD_HELTEC_T114)
   if (!s_enabled || s_pinRx < 0 || s_pinTx < 0) return;
-  while (Serial1.available() > 0) {
+  
+  // Ограничиваем количество обрабатываемых байт за один вызов — иначе watchdog reset
+  // при длинном потоке NMEA (например, при подключении GPS после простоя)
+  constexpr uint8_t kMaxBytesPerUpdate = 64;
+  uint8_t count = 0;
+  while (Serial1.available() > 0 && count < kMaxBytesPerUpdate) {
     const char c = static_cast<char>(Serial1.read());
     feedNmeaLine(c);
     (void)s_gps.encode(c);
+    count++;
+    // Feed watchdog каждые 16 байт — иначе reset при длинном потоке
+    if ((count & 0xFu) == 0) riftlink_wdt_feed();
   }
 #endif
 }

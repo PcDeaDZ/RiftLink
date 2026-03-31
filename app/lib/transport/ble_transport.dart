@@ -120,7 +120,7 @@ class BleTransport implements RiftLinkTransport {
       _onRxData(event.value);
     });
 
-    await Future<void>.delayed(const Duration(milliseconds: 120));
+    await Future<void>.delayed(const Duration(milliseconds: 500));
     try {
       await _rxChar!.setNotifyValue(true);
     } catch (e) {
@@ -130,22 +130,40 @@ class BleTransport implements RiftLinkTransport {
 
   void _onRxData(List<int> bytes) {
     if (bytes.isEmpty) return;
+    
+    // Лог для отладки — покажем что пришло
+    final hexBytes = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+    print('[BLE_TRANSPORT] RX bytes=[${bytes.join(',')}] hex=[$hexBytes] accum_before=${_rxAccum.length}');
+    
     _rxAccum.addAll(bytes);
 
     // Try to extract complete JSON objects from accumulator
     final s = utf8.decode(_rxAccum, allowMalformed: true);
+    
+    // Лог для отладки — покажем что декодировалось
+    print('[BLE_TRANSPORT] Decoded string (${s.length} chars): ${s.length > 100 ? s.substring(0, 100) + '...' : s}');
 
     // NDJSON: split by newlines
     final lines = s.split('\n');
+    print('[BLE_TRANSPORT] Split into ${lines.length} lines');
+    
     if (lines.length > 1) {
       _rxAccum.clear();
       for (int i = 0; i < lines.length; i++) {
         final line = lines[i].trim();
+        print('[BLE_TRANSPORT] Line $i: (${line.length} chars) endsWithBrace=${line.endsWith('}')}');
         if (line.isEmpty) continue;
-        if (i == lines.length - 1) {
-          // Last segment may be incomplete
+
+        // Проверяем содержит ли сегмент полный JSON (закрывается на })
+        final hasCompleteJson = line.contains('{') && line.endsWith('}');
+
+        if (i == lines.length - 1 && !hasCompleteJson) {
+          // Last segment may be incomplete - keep in accumulator
+          print('[BLE_TRANSPORT] Keeping incomplete line in accumulator');
           _rxAccum.addAll(utf8.encode(line));
         } else {
+          // Complete JSON line - emit immediately
+          print('[BLE_TRANSPORT] Emitting complete JSON line');
           _jsonController.add(line);
         }
       }
@@ -193,6 +211,7 @@ class BleTransport implements RiftLinkTransport {
 
     // Overflow protection
     if (_rxAccum.length > 4096) {
+      print('[BLE_TRANSPORT] RX overflow, clearing accumulator');
       _rxAccum.clear();
     }
   }

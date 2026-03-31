@@ -127,8 +127,21 @@ static bool enqueueIncomingCmd(const uint8_t* data, uint16_t len) {
   memcpy(s_inCmdQ[s_inCmdQHead].data, data, len);
   s_inCmdQ[s_inCmdQHead].len = len;
   s_inCmdQHead = (uint8_t)((s_inCmdQHead + 1) % kInCmdQDepth);
-  s_inCmdQCount.fetch_add(1, std::memory_order_relaxed);
-  
+  // seq_cst гарантирует видимость между IRQ и main loop!
+  s_inCmdQCount.fetch_add(1, std::memory_order_seq_cst);
+
+  // Лог успешного enqueue для отладки (только с флагом RX)
+  #if defined(RIFTLINK_BLE_DEBUG_RX)
+  {
+    char cmdPreview[32];
+    size_t previewLen = (len < 31) ? len : 31;
+    memcpy(cmdPreview, data, previewLen);
+    cmdPreview[previewLen] = '\0';
+    RIFTLINK_DIAG("BLE", "event=RX_CMD_ENQUEUE_OK len=%u head=%u count=%u cmd=%.30s",
+        (unsigned)len, (unsigned)s_inCmdQHead, (unsigned)s_inCmdQCount.load(std::memory_order_seq_cst), cmdPreview);
+  }
+  #endif
+
   if (!irq_flags) __enable_irq();
   return true;
 }
@@ -187,8 +200,48 @@ static void resetBleOutQueueOnDisconnect() {
   s_outCount = 0;
 }
 
-static bool s_inited = false;
-static bool s_connected = false;
+static volatile bool s_inited = false;
+static volatile bool s_connected = false;
+
+// Forward declarations
+static void resetInfoWaveOnDisconnect();
+static void resetBleOutQueueOnDisconnect();
+static void resetIncomingCmdQueue();
+
+/**
+ * Проверка что BLE подключение действительно активно.
+ * Вызывается ТОЛЬКО если Bluefruit.connected() > 0.
+ * Проверяем что connHandle валиден И notifyEnabled активен.
+ * Если notify не разрешён более 60 секунд после подключения — считаем линк мёртвым.
+ * Android 12+ может медленно включать CCCD из-за разрешений.
+ */
+static inline bool bleConnectionReallyActive() {
+  // s_connected уже проверен в syncBleConnectionAtUpdateEntry()
+  const uint16_t hdl = Bluefruit.connHandle();
+  if (hdl == BLE_CONN_HANDLE_INVALID) {
+    RIFTLINK_DIAG("BLE", "event=CONN_CHECK_FAIL reason=conn_handle_invalid hdl=%u", (unsigned)hdl);
+    return false;
+  }
+  
+  // Дополнительная проверка: если notify не разрешён более 60 секунд — считаем линк мёртвым
+  static uint32_t s_lastGoodNotifyMs = 0;
+  const uint32_t now = millis();
+  if (s_riftNusTxd.notifyEnabled(hdl)) {
+    s_lastGoodNotifyMs = now;
+    return true;
+  }
+  // notifyEnabled=false более 60с = телефон не включил notify (баг приложения или Android 12+)
+  if ((uint32_t)(now - s_lastGoodNotifyMs) > 60000UL) {
+    RIFTLINK_DIAG("BLE", "event=FORCE_DISCONNECT reason=notify_disabled_too_long elapsed=%lu", (unsigned long)(now - s_lastGoodNotifyMs));
+    s_connected = false;  // Принудительный disconnect
+    resetInfoWaveOnDisconnect();
+    resetBleOutQueueOnDisconnect();
+    resetIncomingCmdQueue();
+    Bluefruit.disconnect(hdl);  // Явно разрываем
+    return false;
+  }
+  return true;
+}
 
 static inline bool bleLinkUpForNus() {
   if (!s_connected) return false;
@@ -198,29 +251,63 @@ static inline bool bleLinkUpForNus() {
   return true;
 }
 
+/**
+ * Проверка включённого notify (CCCD).
+ * Важно: s_riftNusTxd.notifyEnabled() может блокироваться при проблемах SoftDevice.
+ * Возвращает false без блокировки если линк не активен.
+ */
 static inline bool nusNotifyEnabled() {
   if (!bleLinkUpForNus()) return false;
+  // notifyEnabled() может вернуть false если телефон не включил CCCD
   return s_riftNusTxd.notifyEnabled(Bluefruit.connHandle());
 }
 
 /**
  * Отправка notify с retry при временной ошибке SoftDevice.
  * Экспоненциальная задержка между попытками для восстановления ресурсов.
+ * Критично: не более 1 retry — иначе блокировка loop.
+ * ВАЖНО: проверка bleLinkUpForNus() на КАЖДОЙ итерации — иначе deadlock при disconnect.
  */
 static bool nusNotifyBytesWithRetry(const uint8_t* p, uint16_t len, uint8_t maxRetries = 3) {
   if (len == 0) return true;
+  
+  // ПРОВЕРКА ПЕРЕД началом — если линк мёртв, не пытаемся отправить
   if (!bleLinkUpForNus()) return false;
   
+  const uint16_t connHandle = Bluefruit.connHandle();  // Сохраняем handle СЕЙЧАС
+  if (connHandle == BLE_CONN_HANDLE_INVALID) return false;
+
   for (uint8_t attempt = 0; attempt < maxRetries; attempt++) {
-    if (s_riftNusTxd.notify(Bluefruit.connHandle(), p, len)) {
+    // Критично: проверяем линк ПЕРЕД каждым notify — иначе deadlock!
+    if (!bleLinkUpForNus()) {
+      RIFTLINK_DIAG("BLE", "event=TX_RETRY_ABORT reason=link_lost_before_notify attempt=%u", (unsigned)attempt);
+      return false;
+    }
+    
+    // Проверяем что handle всё ещё валиден
+    if (Bluefruit.connHandle() != connHandle) {
+      RIFTLINK_DIAG("BLE", "event=TX_RETRY_ABORT reason=conn_handle_changed attempt=%u", (unsigned)attempt);
+      return false;
+    }
+    
+    if (s_riftNusTxd.notify(connHandle, p, len)) {
       return true;
     }
-    // Пауза для восстановления SoftDevice: 2ms, 4ms, 6ms
+    
+    // Проверка ПОСЛЕ неудачного notify — вдруг disconnect пока мы ждали
+    if (!bleLinkUpForNus()) {
+      RIFTLINK_DIAG("BLE", "event=TX_RETRY_ABORT reason=link_lost_after_notify attempt=%u", (unsigned)attempt);
+      return false;
+    }
+    
+    // Пауза для восстановления SoftDevice: 1ms, 2ms
     yield();
-    delay(2 + attempt * 2);
+    delay(1 + attempt);
   }
-  
-  RIFTLINK_DIAG("BLE", "event=TX_FAIL reason=nus_notify_retry_exhausted len=%u", (unsigned)len);
+
+  // Все retry провалены — сброс очереди чтобы не зависнуть
+  RIFTLINK_DIAG("BLE", "event=TX_FAIL reason=nus_notify_retry_exhausted len=%u dropping_queue", (unsigned)len);
+  resetBleOutQueueOnDisconnect();
   return false;
 }
 
@@ -866,11 +953,17 @@ static void notifyGroupsWithSeq(uint32_t seq, uint32_t cmdId) {
 /** Запрос волны info (node→neighbors→routes→groups); выполнение по одному кадру на вызов `ble::update()`. */
 static void emitInfoWaveRequest(uint32_t cmdId) {
   if (s_infoWavePhase != InfoWavePhase::Idle || s_infoWavePending) {
-    RIFTLINK_DIAG("BLE", "event=INFO_WAVE_SKIP reason=busy");
+    #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+    RIFTLINK_DIAG("BLE", "event=INFO_WAVE_SKIP reason=busy phase=%u pending=%u",
+        (unsigned)s_infoWavePhase, (unsigned)s_infoWavePending);
+    #endif
     return;
   }
   s_infoWavePending = true;
   s_infoWavePendingCmdId = cmdId;
+  #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+  RIFTLINK_DIAG("BLE", "event=INFO_WAVE_REQUEST cmdId=%lu", (unsigned long)cmdId);
+  #endif
 }
 
 static void processInfoWaveStep() {
@@ -879,10 +972,24 @@ static void processInfoWaveStep() {
     /* T114: если линк мёртв, но chunked heap остался — это баг, сбрасываем принудительно */
     if (s_infoWaveNodeChunkHeap) {
       RIFTLINK_DIAG("BLE", "event=INFO_WAVE_FORCE_RESET reason=link_down_heap_stuck");
+      free(s_infoWaveNodeChunkHeap);
       s_infoWaveNodeChunkHeap = nullptr;
       s_infoWavePhase = InfoWavePhase::Idle;
       s_infoWavePending = false;
     }
+    return;
+  }
+  
+  /* Проверка: если notify не включён (CCCD), не пытаемся отправлять — иначе блокировка */
+  if (!nusNotifyEnabled()) {
+    /* Сбрасываем волну чтобы не застрять */
+    if (s_infoWaveNodeChunkHeap) {
+      RIFTLINK_DIAG("BLE", "event=INFO_WAVE_ABORT reason=cccd_not_enabled");
+      free(s_infoWaveNodeChunkHeap);
+      s_infoWaveNodeChunkHeap = nullptr;
+    }
+    s_infoWavePhase = InfoWavePhase::Idle;
+    s_infoWavePending = false;
     return;
   }
 
@@ -895,6 +1002,9 @@ static void processInfoWaveStep() {
     s_infoWaveNeighborsEmitted = false;
     s_infoWaveRoutesEmitted = false;
     s_infoWaveGroupsEmitted = false;
+    #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+    RIFTLINK_DIAG("BLE", "event=INFO_WAVE_START seq=%lu cmdId=%lu", (unsigned long)s_infoWaveSeq, (unsigned long)s_infoWaveCmdId);
+    #endif
     return;
   }
   if (s_infoWavePhase == InfoWavePhase::Idle) return;
@@ -904,6 +1014,9 @@ static void processInfoWaveStep() {
       if (!s_infoWaveNodeEmitted) {
         emitNodeSnapshotForWave(s_infoWaveSeq, s_infoWaveCmdId);
         s_infoWaveNodeEmitted = true;
+        #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+        RIFTLINK_DIAG("BLE", "event=INFO_WAVE_EMIT_NODE seq=%lu", (unsigned long)s_infoWaveSeq);
+        #endif
       }
       /* Длинный evt:node — ждём, пока chunked NDJSON не уйдёт из FIFO целиком. */
       if (s_infoWaveNodeChunkHeap) {
@@ -911,16 +1024,25 @@ static void processInfoWaveStep() {
       }
       s_infoWaveNodeEmitted = false;
       s_infoWavePhase = InfoWavePhase::EmitNeighbors;
+      #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+      RIFTLINK_DIAG("BLE", "event=INFO_WAVE_PHASE neighbors");
+      #endif
       break;
     case InfoWavePhase::EmitNeighbors:
       if (s_infoWaveNodeChunkHeap) break;
       if (!s_infoWaveNeighborsEmitted) {
         notifyNeighborsWithSeq(s_infoWaveSeq, s_infoWaveCmdId);
         s_infoWaveNeighborsEmitted = true;
+        #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+        RIFTLINK_DIAG("BLE", "event=INFO_WAVE_EMIT_NEIGHBORS seq=%lu", (unsigned long)s_infoWaveSeq);
+        #endif
       }
       if (s_infoWaveNodeChunkHeap) break;
       s_infoWaveNeighborsEmitted = false;
       s_infoWavePhase = InfoWavePhase::EmitRoutes;
+      #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+      RIFTLINK_DIAG("BLE", "event=INFO_WAVE_PHASE routes");
+      #endif
       break;
     case InfoWavePhase::EmitRoutes:
       if (s_infoWaveNodeChunkHeap) break;
@@ -950,7 +1072,16 @@ static void processInfoWaveStep() {
 
 /** Волна cmd:info (node→…→groups) или chunked evt:node в FIFO — нельзя вставлять отдельный evt:neighbors из mesh (flushPendingBleOutbound). */
 static bool infoWavePipelineBusy() {
-  return s_infoWavePending || s_infoWavePhase != InfoWavePhase::Idle || s_infoWaveNodeChunkHeap != nullptr;
+  // Проверяем что очередь отправки пуста — иначе \n от предыдущего события не отправлен
+  const bool txBusy = (s_outCount > 0);
+  const bool waveBusy = s_infoWavePending || s_infoWavePhase != InfoWavePhase::Idle || s_infoWaveNodeChunkHeap != nullptr;
+  #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+  if (txBusy && waveBusy) {
+    RIFTLINK_DIAG("BLE", "event=PIPELINE_BUSY outCount=%u heap=%p phase=%u", 
+        (unsigned)s_outCount, (void*)s_infoWaveNodeChunkHeap, (unsigned)s_infoWavePhase);
+  }
+  #endif
+  return txBusy || waveBusy;
 }
 
 static const char* groupRoleToStr(groups::GroupRole role) {
@@ -1036,13 +1167,52 @@ static bool serializeDocToHeapForChunkedLine(JsonDocument& doc, char** heapOut, 
 /**
  * Единый drain FIFO: хвост очереди — короткая строка или chunked NDJSON; порядок байт в одной «трубе» не нарушается.
  * maxLineLines — лимит коротких строк за вызов; maxChunkBytes — бюджет payload chunked (чанки по 32 B).
+ * Критично: выход из внешнего while при chunkBudget == 0 но chunk не завершён — иначе бесконечный цикл!
  */
 static void pumpBleTx(size_t maxChunkBytes, unsigned maxLineLines) {
+  #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+  // Лог только если outCount изменился с прошлого раза — меньше спама
+  static unsigned s_lastLoggedOutCount = 0;
+  if (s_outCount != s_lastLoggedOutCount) {
+    RIFTLINK_DIAG("BLE", "event=PUMP_TX_START outCount=%u (was %u) chunkBudget=%u", 
+        (unsigned)s_outCount, (unsigned)s_lastLoggedOutCount, (unsigned)maxChunkBytes);
+    s_lastLoggedOutCount = s_outCount;
+  }
+  // Флаг чтобы не спамить при disconnect
+  static bool s_loggedDisconnect = false;
+  #endif
+  
   if (!s_connected || Bluefruit.connected() == 0) {
+    #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+    if (!s_loggedDisconnect) {
+      RIFTLINK_DIAG("BLE", "event=PUMP_TX_ABORT reason=not_connected s_connected=%d bluefruit=%d", 
+          (int)s_connected, (int)Bluefruit.connected());
+      s_loggedDisconnect = true;
+    }
+    #endif
     resetBleOutQueueOnDisconnect();
     return;
   }
-  if (!nusNotifyEnabled()) return;
+  #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+  // Сброс флага после подключения
+  s_loggedDisconnect = false;
+  #endif
+  
+  if (!nusNotifyEnabled()) {
+    // CCCD не включён — телефон не разрешил notify. Сбрасываем очередь чтобы не зависнуть.
+    // Важно: сброс только если очередь не пуста, иначе спам логами
+    if (s_outCount > 0) {
+      #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+      RIFTLINK_DIAG("BLE", "event=PUMP_TX_ABORT reason=nus_notify_not_enabled outCount=%u dropping", (unsigned)s_outCount);
+      #endif
+      resetBleOutQueueOnDisconnect();
+    }
+    return;
+  }
+  
+  #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+  RIFTLINK_DIAG("BLE", "event=PUMP_TX_PROCEED outCount=%u", (unsigned)s_outCount);
+  #endif
 
   size_t chunkBudget = maxChunkBytes;
   unsigned lineBurst = 0;
@@ -1054,6 +1224,12 @@ static void pumpBleTx(size_t maxChunkBytes, unsigned maxLineLines) {
       resetBleOutQueueOnDisconnect();
       return;
     }
+    // Проверка: если notify вдруг отключили во время pump — сброс очереди
+    if (!nusNotifyEnabled()) {
+      RIFTLINK_DIAG("BLE", "event=PUMP_TX_ABORT reason=nus_notify_disabled_mid_pump outCount=%u dropping", (unsigned)s_outCount);
+      resetBleOutQueueOnDisconnect();
+      return;
+    }
     BleOutSlot& slot = s_outQ[s_outTail];
     if (slot.kind == BleOutSlot::K_LINE) {
       if (lineBurst >= maxLineLines) return;
@@ -1061,18 +1237,33 @@ static void pumpBleTx(size_t maxChunkBytes, unsigned maxLineLines) {
       size_t L = strlen(line);
       if (L > 0) {
         if (L > 65535u) L = 65535u;
+        #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+        RIFTLINK_DIAG("BLE", "event=TX_LINE_SEND len=%u", (unsigned)L);
+        #endif
         // Retry для надёжной отправки коротких JSON-строк
         if (!nusNotifyBytesWithRetry((const uint8_t*)line, (uint16_t)L)) {
+          #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+          RIFTLINK_DIAG("BLE", "event=TX_LINE_FAIL len=%u", (unsigned)L);
+          #endif
           if (Bluefruit.connected() == 0) resetBleOutQueueOnDisconnect();
           return;
         }
         if (!nusNotifyBytesWithRetry(&kNlByte, 1)) {
+          #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+          RIFTLINK_DIAG("BLE", "event=TX_NEWLINE_FAIL");
+          #endif
           if (Bluefruit.connected() == 0) resetBleOutQueueOnDisconnect();
           return;
         }
+        #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+        RIFTLINK_DIAG("BLE", "event=TX_LINE_OK len=%u", (unsigned)L);
+        #endif
       }
       s_outTail = (uint8_t)((s_outTail + 1) % kOutQDepth);
       s_outCount--;
+      #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+      RIFTLINK_DIAG("BLE", "event=TX_SLOT_FREED remaining=%u", (unsigned)s_outCount);
+      #endif
       lineBurst++;
       if (s_outCount > 0 && lineBurst < maxLineLines) {
         BleOutSlot& next = s_outQ[s_outTail];
@@ -1085,7 +1276,6 @@ static void pumpBleTx(size_t maxChunkBytes, unsigned maxLineLines) {
     }
 
     constexpr size_t kChunk = 32;
-    unsigned chunkInPump = 0;
     while (slot.ch.off < slot.ch.len && chunkBudget > 0) {
       if (!s_connected || Bluefruit.connected() == 0) {
         resetBleOutQueueOnDisconnect();
@@ -1102,19 +1292,47 @@ static void pumpBleTx(size_t maxChunkBytes, unsigned maxLineLines) {
       slot.ch.off += n;
       chunkBudget -= n;
       yield();
-      if ((++chunkInPump & 7u) == 0) riftlink_wdt_feed();
     }
     if (slot.ch.off >= slot.ch.len) {
-      if (!nusNotifyBytesWithRetry(&kNlByte, 1)) {
+      // Критично: отправляем \n СРАЗУ после последнего чанка
+      #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+      RIFTLINK_DIAG("BLE", "event=TX_CHUNKED_DONE len=%u SENDING_NEWLINE", (unsigned)slot.ch.len);
+      #endif
+      
+      // Проверяем что \n действительно отправлен
+      const bool nlOk = nusNotifyBytesWithRetry(&kNlByte, 1);
+      if (!nlOk) {
+        #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+        RIFTLINK_DIAG("BLE", "event=TX_NEWLINE_FAIL connected=%d", (int)Bluefruit.connected());
+        #endif
         if (Bluefruit.connected() == 0) resetBleOutQueueOnDisconnect();
         return;
       }
+      #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+      RIFTLINK_DIAG("BLE", "event=TX_NEWLINE_OK sent");
+      #endif
+      
       if (slot.ch.heap == s_infoWaveNodeChunkHeap) s_infoWaveNodeChunkHeap = nullptr;
       free(slot.ch.heap);
       s_outTail = (uint8_t)((s_outTail + 1) % kOutQDepth);
       s_outCount--;
-      continue;
+      #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+      RIFTLINK_DIAG("BLE", "event=TX_SLOT_FREED remaining=%u", (unsigned)s_outCount);
+      #endif
+      
+      // Задержка между событиями чтобы Bluetooth стек успел отправить
+      if (s_outCount > 0) {
+        #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+        RIFTLINK_DIAG("BLE", "event=TX_INTER_EVENT_DELAY starting");
+        #endif
+        yield();
+        delay(2);  // 2мс между chunked событиями
+        #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+        RIFTLINK_DIAG("BLE", "event=TX_INTER_EVENT_DELAY done");
+        #endif
+      }
     }
+    // chunkBudget исчерпан но chunk не завершён — выход для восстановления бюджета в следующем вызове
     return;
   }
 }
@@ -1221,24 +1439,27 @@ static void onRiftNusRxdWrite(uint16_t conn_hdl, BLECharacteristic* chr, uint8_t
   if (Bluefruit.connected() == 0) return;
   if (len == 0 || data == nullptr) return;
   
-  // Диагностика переполнения
-  if (len > (uint16_t)kRxLineMax) {
-    notifyPayloadTooLong(len);
-    RIFTLINK_DIAG("BLE", "event=RX_DROP reason=payload_too_long len=%u max=%u", 
-        (unsigned)len, (unsigned)kRxLineMax);
-    return;
-  }
-  
   // Обрезка CR/LF с конца
   uint16_t trim = len;
   while (trim > 0 && (data[trim - 1] == '\n' || data[trim - 1] == '\r')) trim--;
   if (trim == 0) return;
   
+  // Логирование входящей команды для отладки (только с флагом)
+  #if defined(RIFTLINK_BLE_DEBUG_RX)
+  char cmdPreview[32];
+  size_t previewLen = (trim < 31) ? trim : 31;
+  memcpy(cmdPreview, data, previewLen);
+  cmdPreview[previewLen] = '\0';
+  RIFTLINK_DIAG("BLE", "event=RX_CMD len=%u cmd=%.30s", (unsigned)trim, cmdPreview);
+  #endif
+  
   // Попытка постановки в очередь
   if (!enqueueIncomingCmd(data, trim)) {
     s_inCmdDroppedQueueFull++;
+    #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
     RIFTLINK_DIAG("BLE", "event=RX_CMD_DROP reason=in_queue_full count=%u", 
         (unsigned)s_inCmdDroppedQueueFull);
+    #endif
     
     // Backpressure: уведомление телефона о перегрузке
     JsonDocument doc;
@@ -2608,7 +2829,13 @@ void deinit() {
  * (processInfoWaveStep / pending notify при отсутствии линка).
  */
 static void syncBleConnectionAtUpdateEntry() {
-  const bool conn = (Bluefruit.connected() > 0);
+  // Сначала проверяем физическое подключение через SoftDevice
+  const bool physicalConn = (Bluefruit.connected() > 0);
+  
+  // Если физически подключено — используем полную проверку
+  // Если нет — сразу false
+  const bool conn = physicalConn ? bleConnectionReallyActive() : false;
+  
   if (conn && !s_bleConnPrevForDiag) {
     /* Сначала окно трассы, потом строка CONNECTED — иначе postConnTraceIf отсекает до arm. */
     s_postConnTraceUntilMs = millis() + 20000;
@@ -2649,24 +2876,34 @@ static void syncBleConnectionAtUpdateEntry() {
     resetBleOutQueueOnDisconnect();
     /* 3. Очистка RX-очереди */
     resetIncomingCmdQueue();
-    /* 4. Отдача времени SoftDevice — только один короткий delay, иначе блокировка loop на 300мс!
-     * SoftDevice требует ~10-20мс на завершение, не 100мс. */
+    /* 4. Отдача времени SoftDevice — один короткий delay */
     yield();
-    delay(10);  // Один короткий delay вместо 5×20мс
+    delay(10);
   }
 }
 
 static void consumeIncomingCmdQueue() {
   if (!s_connected) return;
-  for (uint8_t i = 0; i < kInCmdConsumePerUpdate && s_inCmdQCount.load(std::memory_order_relaxed) > 0; i++) {
+  
+  // seq_cst гарантирует видимость между IRQ и main loop!
+  for (uint8_t i = 0; i < kInCmdConsumePerUpdate && s_inCmdQCount.load(std::memory_order_seq_cst) > 0; i++) {
     NrfBleInCmdItem& it = s_inCmdQ[s_inCmdQTail];
     s_inCmdQTail = (uint8_t)((s_inCmdQTail + 1) % kInCmdQDepth);
-    s_inCmdQCount.fetch_sub(1, std::memory_order_relaxed);
+    s_inCmdQCount.fetch_sub(1, std::memory_order_seq_cst);
+    
     postConnTraceIf("u03b_before_handle_json");
-    riftlink_wdt_feed();
+    
+    // Лог что команда извлечена из очереди (только с флагом RX)
+    #if defined(RIFTLINK_BLE_DEBUG_RX)
+    char cmdPreview[32];
+    size_t previewLen = (it.len < 31) ? it.len : 31;
+    memcpy(cmdPreview, it.data, previewLen);
+    cmdPreview[previewLen] = '\0';
+    RIFTLINK_DIAG("BLE", "event=RX_CMD_CONSUME len=%u cmd=%.30s", (unsigned)it.len, cmdPreview);
+    #endif
+    
     yield();
     handleJsonCommand((const char*)it.data, it.len);
-    riftlink_wdt_feed();
     yield();
     postConnTraceIf("u03c_after_handle_json");
   }
@@ -2676,55 +2913,92 @@ void update() {
   if (!s_inited) return;
 
   riftlink_wdt_feed();
-  
-  /* T114: отладка — лог каждого вызова update() */
-#if defined(RIFTLINK_BOARD_HELTEC_T114) && defined(RIFTLINK_BLE_DEBUG_UPDATE)
-  {
-    static uint32_t s_lastUpdateLogMs = 0;
-    if ((uint32_t)(millis() - s_lastUpdateLogMs) >= 1000) {
-      char b[128];
-      snprintf(b, sizeof(b), "[RiftLink] BLE_UPDATE t=%lu conn=%d inited=%d outCount=%u",
-          (unsigned long)millis(), (int)Bluefruit.connected(), (int)s_inited, (unsigned)s_outCount);
-      Serial1.println(b);
-      s_lastUpdateLogMs = millis();
+
+  /* T114: ЯВНАЯ проверка что отладка включена — вывод в USB Serial (не Serial1!) */
+#if defined(RIFTLINK_BOARD_HELTEC_T114)
+  #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+    /* Первый лог при первом вызове — проверка что макросы работают */
+    static bool s_debugInitDone = false;
+    if (!s_debugInitDone) {
+      s_debugInitDone = true;
+      Serial.println("[RiftLink] BLE_DEBUG: ENABLED (macros OK)");  // USB Serial, не Serial1!
     }
-  }
+  #endif
 #endif
+
+  /* T114: ПОШАГОВАЯ отладка — лог КАЖДОГО шага update() */
+#if defined(RIFTLINK_BOARD_HELTEC_T114) && defined(RIFTLINK_BLE_DEBUG_UPDATE)
+  #define BLE_STEP_LOG(step) do { \
+    static uint32_t s_lastStepLogMs = 0; \
+    static int s_lastConn = -1; \
+    static unsigned s_lastOutCount = (unsigned)-1; \
+    static void* s_lastHeap = (void*)-1; \
+    const int curConn = (int)Bluefruit.connected(); \
+    const unsigned curOutCount = (unsigned)s_outCount; \
+    void* curHeap = (void*)s_infoWaveNodeChunkHeap; \
+    /* Выводим только если что-то изменилось или прошло 1000мс */ \
+    const bool changed = (curConn != s_lastConn || curOutCount != s_lastOutCount || curHeap != s_lastHeap); \
+    const bool timeout = ((uint32_t)(millis() - s_lastStepLogMs) >= 1000); \
+    if (changed || timeout) { \
+      char b[128]; \
+      snprintf(b, sizeof(b), "[RiftLink] BLE_STEP %s t=%lu conn=%d%s outCount=%u%s heap=%p%s", \
+          step, (unsigned long)millis(), \
+          curConn, changed && (curConn != s_lastConn) ? "*" : "", \
+          curOutCount, changed && (curOutCount != s_lastOutCount) ? "*" : "", \
+          curHeap, changed && (curHeap != s_lastHeap) ? "*" : ""); \
+      Serial1.println(b); \
+      s_lastStepLogMs = millis(); \
+      s_lastConn = curConn; \
+      s_lastOutCount = curOutCount; \
+      s_lastHeap = curHeap; \
+    } \
+  } while(0)
+#else
+  #define BLE_STEP_LOG(step)
+#endif
+
+  BLE_STEP_LOG("u0_start");
   
   syncBleConnectionAtUpdateEntry();
-  postConnTraceIf("u01_after_sync");
+  BLE_STEP_LOG("u1_after_sync");
+  
   /* Как ESP ble.cpp: очередь команд из GATT до pump TX (порядок обработки входящих). */
-  postConnTraceIf("u03_rx_queue_enter");
   consumeIncomingCmdQueue();
-  postConnTraceIf("u04_rx_queue_exit");
+  BLE_STEP_LOG("u2_after_consume");
+  
   pumpBleTx(kBleNdjsonTxBudgetBytes, kBleOutLinesPerUpdateFlush);
-  postConnTraceIf("u02_after_pump_tx_a");
+  BLE_STEP_LOG("u3_after_pump1");
 
   pumpBleTx(kBleNdjsonTxBudgetBytes, kBleOutLinesPerUpdateFlush);
-  postConnTraceIf("u05_after_pump_tx_b");
+  BLE_STEP_LOG("u4_after_pump2");
 
-  postConnTraceIf("u06_before_info_wave");
   processInfoWaveStep();
-  postConnTraceIf("u07_after_info_wave");
+  BLE_STEP_LOG("u5_after_info_wave");
 
   pingRetryTick();
-  postConnTraceIf("u08_after_ping_retry");
+  BLE_STEP_LOG("u6_after_ping");
 
   flushPendingBleOutbound();
-  postConnTraceIf("u09_after_flush_pending");
+  BLE_STEP_LOG("u7_after_flush");
 
   pumpBleTx(kBleNdjsonTxBudgetBytes, kBleOutLinesPerUpdateFlush);
-  postConnTraceIf("u10_after_pump_tx_c");
+  BLE_STEP_LOG("u8_after_pump3");
+  
   pumpBleTx(kBleNdjsonTxBudgetBytes, kBleOutLinesPerUpdateFlush);
-  postConnTraceIf("u11_update_end");
+  BLE_STEP_LOG("u9_end");
+
   if (s_postConnBleDetailPassesLeft > 0) s_postConnBleDetailPassesLeft--;
 
-  /* Сброс TX-очереди только на нисходящем фронте линка (после flush), не при любом connected()==0:
-   * иначе кратковременный «ещё не connected» при установлении связи или между двумя ble::update() в loop
-   * мог снести очередь между enqueue волны info и отправкой — обрыв/рестарт сразу после connect. */
+  /* Сброс TX-очереди только на нисходящем фронте линка (после flush), не при любом connected()==0 */
   {
     const bool connEnd = (Bluefruit.connected() > 0);
-    if (s_bleConnAtPrevUpdateEnd && !connEnd && s_outCount > 0) resetBleOutQueueOnDisconnect();
+    if (s_bleConnAtPrevUpdateEnd && !connEnd && s_outCount > 0) {
+      #if defined(RIFTLINK_BLE_DEBUG_UPDATE)
+      RIFTLINK_DIAG("BLE", "event=UPDATE_END_RESET reason=conn_drop s_bleConnAtPrevUpdateEnd=1 connEnd=0 outCount=%u", 
+          (unsigned)s_outCount);
+      #endif
+      resetBleOutQueueOnDisconnect();
+    }
     s_bleConnAtPrevUpdateEnd = connEnd;
   }
 }
@@ -3034,6 +3308,9 @@ static void tryFlushPendingPong() {
 static void flushPendingBleOutbound() {
   if (!s_inited) return;
   if (!s_connected || Bluefruit.connected() == 0) return;
+  /* Критично: если CCCD notify не включён — не пытаемся отправлять, иначе блокировка */
+  if (!nusNotifyEnabled()) return;
+  
   tryFlushPendingPong();
   if (s_pendingMsg) {
     const bool sent = emitMsgEvt(s_pendingMsgFrom, s_pendingMsgText, s_pendingMsgId, s_pendingMsgRssi, s_pendingMsgTtl,

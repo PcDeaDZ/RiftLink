@@ -476,9 +476,27 @@ void setup() {
 
 void loop() {
   riftlink_wdt_feed();
+  
+#if defined(RIFTLINK_BOARD_HELTEC_T114) && defined(RIFTLINK_BLE_DEBUG_UPDATE)
+  /* T114: лог вызова ble::update() из main loop — USB Serial (не Serial1!) */
+  static bool s_mainDebugInit = false;
+  if (!s_mainDebugInit) {
+    s_mainDebugInit = true;
+    Serial.println("[RiftLink] MAIN_DEBUG: ENABLED (macros OK)");
+  }
+  static uint32_t s_lastMainLogMs = 0;
+  if ((uint32_t)(millis() - s_lastMainLogMs) >= 1000) {
+    char b[128];
+    snprintf(b, sizeof(b), "[RiftLink] MAIN_LOOP t=%lu calling_ble_update", (unsigned long)millis());
+    Serial.println(b);
+    s_lastMainLogMs = millis();
+  }
+#endif
+  
   /* BLE раньше тяжёлой работы итерации: на T114/nRF меньше «окна» без pumping SoftDevice/NUS. */
   ble::update();
   ble::postConnectTrace("main_after_ble1");
+  riftlink_wdt_feed();  // Критично: watchdog после ble::update()
 #if defined(RIFTLINK_BOARD_HELTEC_T114)
   /* Два pump подряд до SPI: иначе полный кадр ST7789 между ble1 и ble2 голодал SoftDevice → обрывы/«виснет». */
   ble::update();
@@ -486,11 +504,13 @@ void loop() {
   riftlink_wdt_feed();
   /* Отложенная перерисовка после cmd:lang — не из RX-пути (SPI + SoftDevice). */
   menu_nrf_flush_pending_locale_redraw();
+  riftlink_wdt_feed();  // Критично: watchdog после SPI/дисплея
   ble::postConnectTrace("main_after_locale_redraw");
   riftlink_wdt_feed();
   /* Третий pump после SPI — chunked evt:node / NUS не залипают за кадром. */
   ble::update();
   ble::postConnectTrace("main_after_ble3");
+  riftlink_wdt_feed();  // Критично: watchdog после 3-го ble::update()
 #endif
 
   {

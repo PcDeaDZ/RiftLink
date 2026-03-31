@@ -12,6 +12,7 @@
 #include "protocol/packet.h"
 #include "radio/radio.h"
 #include "x25519_keys/x25519_keys.h"
+#include "nrf_wdt_feed.h"
 
 #include <Arduino.h>
 #include <atomic>
@@ -314,4 +315,7 @@ void mesh_hello_nrf_loop() {
     lastPoll = millis();
   }
 #endif
+  
+  // Feed watchdog в конце цикла — иначе reset при длительных операциях
+  riftlink_wdt_feed();
 }
